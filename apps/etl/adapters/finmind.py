@@ -28,7 +28,13 @@ from apps.etl.ratelimit import RateLimiter, ThrottledError
 from apps.etl.upsert import insert_missing, upsert
 from apps.market.adjust import refresh_adj_factor, refresh_where_later_events
 from apps.market.calendar import TradingDays
-from apps.market.models import DailyPrice, DailyValuation, DividendEvent, SharesOutstanding
+from apps.market.models import (
+    DailyPrice,
+    DailyValuation,
+    DividendEvent,
+    ShareChangeReason,
+    SharesOutstanding,
+)
 
 logger = logging.getLogger(__name__)
 DATA_PATH = "/api/v4/data"
@@ -152,6 +158,7 @@ USING (
 WHERE s.stock_id = %(stock)s
   AND s.effective_date = ordered.effective_date
   AND ordered.shares = ordered.previous
+  AND s.reason = %(unknown)s
 """
 
 
@@ -228,7 +235,10 @@ class FinmindAdapter(BaseAdapter):
         if dataset == "shares_outstanding":
             rows = insert_missing(SharesOutstanding, frame, ("stock_id", "effective_date"))
             with connection.cursor() as cursor:
-                cursor.execute(DROP_REPEATED_COUNTS_SQL, {"stock": stock_id})
+                cursor.execute(
+                    DROP_REPEATED_COUNTS_SQL,
+                    {"stock": stock_id, "unknown": ShareChangeReason.UNKNOWN},
+                )
             return rows
         with_factor = frame["adj_factor"].notna()
         rows = upsert(

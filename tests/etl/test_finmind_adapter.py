@@ -1,3 +1,4 @@
+import logging
 from collections.abc import Callable
 from datetime import date, timedelta
 from decimal import Decimal
@@ -11,7 +12,7 @@ from responses import matchers
 
 from apps.etl.adapters import ADAPTERS
 from apps.etl.adapters.finmind import FinmindAdapter
-from apps.etl.models import RawFinmind
+from apps.etl.models import EtlRun, RawFinmind
 from apps.market.adjust import refresh_adj_factor
 from apps.market.calendar import TradingDays
 from apps.market.models import (
@@ -19,6 +20,7 @@ from apps.market.models import (
     DailyValuation,
     DividendEvent,
     Market,
+    ShareChangeReason,
     SharesOutstanding,
     StockMaster,
 )
@@ -204,6 +206,7 @@ def test_finmind_does_not_overwrite_rows_from_the_primary_source(
     _backfill("daily_price", "2884", AUGUST)
     assert DailyPrice.objects.get(date=date(2013, 8, 14)).close == Decimal("99")
     assert DailyPrice.objects.count() == 21
+    assert EtlRun.objects.get(dataset="daily_price").rows == 20
 
 
 @responses.activate
@@ -220,19 +223,34 @@ def test_nulls_from_finmind_become_blank_values(
 
 
 @responses.activate
+@pytest.mark.parametrize(
+    ("dataset", "finmind_dataset", "name", "model"),
+    [
+        ("daily_price", "TaiwanStockPrice", "price_2884_201308", DailyPrice),
+        ("daily_valuation", "TaiwanStockPER", "per_2330_202610", DailyValuation),
+        (
+            "shares_outstanding",
+            "TaiwanStockShareholding",
+            "shareholding_2884_2013q3",
+            SharesOutstanding,
+        ),
+    ],
+)
 def test_dates_missing_from_the_calendar_reject_the_batch(
-    mock: Callable[..., None], load_fixture: Callable[[str], Any]
+    mock: Callable[..., None],
+    load_fixture: Callable[[str], Any],
+    dataset: str,
+    finmind_dataset: str,
+    name: str,
+    model: type[Any],
 ) -> None:
-    rows = load_fixture("finmind/price_2884_201308.json")["data"]
-    mock(
-        "TaiwanStockPrice",
-        "price_2884_201308",
-        "2884",
-        AUGUST,
-        data=[*rows, {**rows[0], "date": "2013-08-17"}],
-    )
+    rows = load_fixture(f"finmind/{name}.json")["data"]
+    stock = rows[0]["stock_id"]
+    odd = [*rows, {**rows[-1], "date": "2013-08-17", "NumberOfSharesIssued": 1}]
+    mock(finmind_dataset, name, stock, AUGUST, data=odd)
     with pytest.raises(CommandError, match="2013-08-17 is not a trading day"):
-        _backfill("daily_price", "2884", AUGUST)
+        _backfill(dataset, stock, AUGUST)
+    assert model.objects.count() == 0
     assert DailyPrice.objects.count() == 0
 
 
@@ -268,3 +286,29 @@ def test_an_ex_date_on_a_typhoon_closure_is_kept(
     _mock_dividends(mock, span)
     _backfill("dividend_event", "2884", span)
     assert DividendEvent.objects.get().ex_date == closed
+
+
+@responses.activate
+def test_shares_rows_with_a_known_reason_are_never_dropped(mock: Callable[..., None]) -> None:
+    SharesOutstanding.objects.create(
+        stock_id="2884",
+        effective_date=date(2013, 9, 10),
+        shares=5_524_300_000,
+        reason=ShareChangeReason.CAPITAL_INCREASE,
+    )
+    span = ("2013-08-01", "2013-10-31")
+    mock("TaiwanStockShareholding", "shareholding_2884_2013q3", "2884", span)
+    _backfill("shares_outstanding", "2884", span)
+    kept = SharesOutstanding.objects.get(effective_date=date(2013, 9, 10))
+    assert kept.reason == ShareChangeReason.CAPITAL_INCREASE
+
+
+@responses.activate
+def test_events_without_a_factor_are_logged(
+    mock: Callable[..., None], caplog: pytest.LogCaptureFixture
+) -> None:
+    _mock_dividends(mock, data=[])
+    with caplog.at_level(logging.WARNING, logger="apps.etl.adapters.finmind_datasets"):
+        _backfill("dividend_event", "2884", AUGUST)
+    assert "2884 2013-08-15" in caplog.text
+    assert "no ex-right result" in caplog.text

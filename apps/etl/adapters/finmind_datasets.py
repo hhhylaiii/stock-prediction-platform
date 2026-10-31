@@ -120,10 +120,7 @@ def dividend_events(
     start: date = date.min,
     end: date = date.max,
 ) -> pd.DataFrame:
-    """One dividend_event per ex-date in range: amounts from the policy, factor from the result.
-
-    announce_date stays empty: FinMind's AnnouncementDate is sometimes the board date.
-    """
+    """One dividend_event per ex-date in range: amounts from the policy, factor from the result."""
     events: dict[date, dict[str, Any]] = {}
 
     def event(day: date) -> dict[str, Any]:
@@ -141,6 +138,8 @@ def dividend_events(
     records = []
     for ex_date in sorted(day for day in events if start <= day <= end):
         found = events[ex_date]
+        if found["factor"] is None:
+            logger.warning("%s %s: no ex-right result, adj_factor left empty", stock_id, ex_date)
         records.append(
             {
                 "ex_date": ex_date,
