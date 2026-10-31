@@ -361,3 +361,25 @@ def test_stored_payload_rebuilds_the_same_rows(
     fetched = adapter.fetch("daily_price", TRADING_DAY, TRADING_DAY)
     rebuilt = quotes_frame(RawTwse.objects.get().payload, TRADING_DAY)
     pd.testing.assert_frame_equal(rebuilt, fetched)
+
+
+@pytest.mark.parametrize(
+    ("change", "error"),
+    [
+        ({"date": "20261027"}, SourceNotReadyError),
+        ({"date": "2026102"}, SchemaChangedError),
+        ({"stat": "查詢日期大於今日，請重新查詢!"}, SchemaChangedError),
+    ],
+)
+def test_rerun_from_raw_rechecks_the_answer(
+    payload: dict[str, Any], change: dict[str, str], error: type[Exception]
+) -> None:
+    with pytest.raises(error):
+        quotes_frame({**payload, **change}, TRADING_DAY)
+
+
+def test_empty_quotes_table_is_a_schema_change(payload: dict[str, Any]) -> None:
+    changed = copy.deepcopy(payload)
+    _quotes_table(changed)["data"] = []
+    with pytest.raises(SchemaChangedError, match="no rows"):
+        quotes_frame(changed, TRADING_DAY)

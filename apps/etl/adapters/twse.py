@@ -71,8 +71,23 @@ def find_table(payload: dict[str, Any], title_part: str) -> dict[str, Any]:
     raise SchemaChangedError(f"no table titled *{title_part}* in TWSE response")
 
 
+def check_answer(payload: dict[str, Any], day: date) -> None:
+    """The payload must be a successful answer for the requested day itself."""
+    stat = str(payload.get("stat", ""))
+    if stat != "OK":
+        raise SchemaChangedError(f"TWSE answered with unexpected stat {stat!r}")
+    requested = day.strftime("%Y%m%d")
+    answered = str(payload.get("date", ""))
+    if answered == requested:
+        return
+    if len(answered) == len(requested) and answered.isdigit() and answered < requested:
+        raise SourceNotReadyError(f"TWSE still serves {answered} when asked for {day}")
+    raise SchemaChangedError(f"TWSE answered for {answered!r} instead of {requested}")
+
+
 def quotes_frame(payload: dict[str, Any], day: date) -> pd.DataFrame:
     """Rows of the daily quotes table in a stored MI_INDEX payload, for fetch or a rerun."""
+    check_answer(payload, day)
     table = find_table(payload, DAILY_QUOTES_TITLE)
     if table.get("hints") != DAILY_QUOTES_UNIT_HINT:
         raise SchemaChangedError(f"TWSE daily quotes units changed: {table.get('hints')!r}")
@@ -80,6 +95,8 @@ def quotes_frame(payload: dict[str, Any], day: date) -> pd.DataFrame:
         frame = pd.DataFrame(table["data"], columns=table["fields"])
     except (KeyError, ValueError) as exc:
         raise SchemaChangedError(f"TWSE daily quotes table is malformed: {exc}") from None
+    if frame.empty:
+        raise SchemaChangedError(f"TWSE daily quotes table for {day} has no rows")
     return frame.assign(date=day)
 
 
@@ -142,13 +159,6 @@ class TwseAdapter(BaseAdapter):
         if NO_DATA_STAT in stat:
             raise SourceNotReadyError(f"TWSE daily quotes for {day} not available: {stat}")
         self.save_raw("daily_price", params, payload)
-        if stat != "OK":
-            raise SchemaChangedError(f"TWSE answered with unexpected stat {stat!r}")
-        answered = str(payload.get("date", ""))
-        if answered != params["date"]:
-            if answered.isdigit() and answered < params["date"]:
-                raise SourceNotReadyError(f"TWSE still serves {answered} when asked for {day}")
-            raise SchemaChangedError(f"TWSE answered for {answered!r} instead of {params['date']}")
         return quotes_frame(payload, day)
 
     def _get_json(self, path: str, params: dict[str, str]) -> dict[str, Any]:
