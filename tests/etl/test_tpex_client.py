@@ -6,8 +6,8 @@ import responses
 from django.core.exceptions import ImproperlyConfigured
 from responses import matchers
 
-from apps.etl.adapters.base import SchemaChangedError, SourceRequestError
 from apps.etl.adapters.tpex import TpexClient
+from apps.etl.errors import SchemaChangedError, SourceRequestError
 from apps.etl.models import RawTpex
 from apps.etl.ratelimit import RateLimit, RateLimiter
 

@@ -11,8 +11,8 @@ from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 from django.utils import timezone
 
-from apps.etl.adapters.base import SchemaChangedError, SourceRequestError
 from apps.etl.client import SourceClient
+from apps.etl.errors import SchemaChangedError, SourceRequestError
 from apps.etl.models import RawFinmind
 from apps.etl.ratelimit import RateLimiter, ThrottledError
 

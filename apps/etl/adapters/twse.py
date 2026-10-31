@@ -9,8 +9,9 @@ import pandas as pd
 import requests
 from django.conf import settings
 
-from apps.etl.adapters.base import BaseAdapter, SchemaChangedError, SourceNotReadyError
+from apps.etl.adapters.base import BaseAdapter
 from apps.etl.client import SourceClient
+from apps.etl.errors import SchemaChangedError, SourceNotReadyError
 from apps.etl.models import RawTwse
 from apps.etl.ratelimit import RateLimiter
 from apps.etl.upsert import upsert

@@ -1,7 +1,5 @@
 """Adapter contract: fetch to raw, normalize to the standard schema, upsert (SPEC §5)."""
 
-import hashlib
-import json
 from abc import ABC, abstractmethod
 from collections.abc import Iterator, Mapping, Sequence
 from datetime import date
@@ -12,41 +10,9 @@ from django.utils import timezone
 
 from apps.etl.models import EtlRun, RawRecord
 from apps.etl.ratelimit import RateLimiter
+from apps.etl.raw import store_raw
 from apps.etl.runs import tracked_run
 from apps.market.calendar import CalendarError, NotATradingDayError, TradingDays
-
-
-class SourceError(Exception):
-    """A source answered, but not with usable data."""
-
-
-class SourceNotReadyError(SourceError):
-    """The source has not published data for a trading day yet; retry later."""
-
-
-class SchemaChangedError(SourceError):
-    """The source response no longer matches the expected layout; raw data is kept."""
-
-
-class SourceRequestError(SourceError):
-    """The source refused the request (a 4xx other than 429); retrying will not help."""
-
-
-def payload_hash(payload: Any) -> str:
-    canonical = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-
-def store_raw(
-    raw_model: type[RawRecord], dataset: str, params: Mapping[str, Any], payload: Any
-) -> RawRecord:
-    """Keep one row per distinct response; refetching the same payload adds nothing."""
-    record, _ = raw_model._default_manager.get_or_create(
-        dataset=dataset,
-        source_hash=payload_hash(payload),
-        defaults={"request_params": dict(params), "payload": payload},
-    )
-    return record
 
 
 class BaseAdapter(ABC):

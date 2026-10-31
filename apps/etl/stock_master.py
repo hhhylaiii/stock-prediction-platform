@@ -6,7 +6,7 @@ from typing import Any
 
 import pandas as pd
 
-from apps.etl.adapters.base import SchemaChangedError
+from apps.etl.errors import SchemaChangedError
 from apps.etl.roc import parse_roc_date
 from apps.market.models import Market
 

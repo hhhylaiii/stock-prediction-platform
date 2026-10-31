@@ -5,7 +5,7 @@ from typing import Any
 import pandas as pd
 import pytest
 
-from apps.etl.adapters.base import SchemaChangedError
+from apps.etl.errors import SchemaChangedError
 from apps.etl.roc import parse_roc_date
 from apps.etl.stock_master import build_stock_master, tpex_delistings, twse_delistings
 from apps.market.models import Market

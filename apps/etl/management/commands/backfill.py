@@ -9,7 +9,7 @@ from django.db.models import Q
 from django.utils import timezone
 
 from apps.etl.adapters import build_adapter
-from apps.etl.adapters.base import SourceError
+from apps.etl.errors import SourceError
 from apps.etl.management.options import as_date, required_date
 from apps.etl.models import EtlRun
 from apps.etl.ratelimit import RetryableError

@@ -12,8 +12,8 @@ from django.db.models import Max, Min
 from django.utils import timezone
 
 from apps.etl.adapters import limiter_for
-from apps.etl.adapters.base import SourceError
 from apps.etl.adapters.twse import TwseClient
+from apps.etl.errors import SourceError
 from apps.etl.management.options import required_date
 from apps.etl.ratelimit import RetryableError
 from apps.etl.runs import tracked_run

@@ -5,8 +5,8 @@ from typing import Any
 import requests
 from django.conf import settings
 
-from apps.etl.adapters.base import SchemaChangedError
 from apps.etl.client import SourceClient
+from apps.etl.errors import SchemaChangedError
 from apps.etl.models import RawTpex
 from apps.etl.ratelimit import RateLimiter
 

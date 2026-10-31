@@ -4,7 +4,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from datetime import date, timedelta
 from typing import Any
 
-from apps.etl.adapters.base import SchemaChangedError
+from apps.etl.errors import SchemaChangedError
 from apps.etl.roc import parse_roc_date
 from apps.market.calendar import TradingDays
 

@@ -9,8 +9,8 @@ from django.core.exceptions import ImproperlyConfigured
 from responses import matchers
 
 from apps.etl.adapters import limiter_for
-from apps.etl.adapters.base import SchemaChangedError, SourceRequestError
 from apps.etl.adapters.finmind import FinmindClient, maintenance_wait
+from apps.etl.errors import SchemaChangedError, SourceRequestError
 from apps.etl.models import RawFinmind
 from apps.etl.ratelimit import RateLimit, RateLimiter, ThrottledError
 from tests.etl.test_ratelimit import FakeClock

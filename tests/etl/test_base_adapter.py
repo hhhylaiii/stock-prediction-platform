@@ -4,9 +4,10 @@ from typing import ClassVar
 import pandas as pd
 import pytest
 
-from apps.etl.adapters.base import BaseAdapter, payload_hash
+from apps.etl.adapters.base import BaseAdapter
 from apps.etl.models import EtlRun, RawRecord, RawTwse
 from apps.etl.ratelimit import RateLimiter
+from apps.etl.raw import payload_hash
 from apps.etl.upsert import upsert
 from apps.market.calendar import CalendarError, NotATradingDayError, TradingDays
 from apps.market.models import DailyPrice

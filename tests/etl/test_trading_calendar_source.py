@@ -4,7 +4,7 @@ from typing import Any
 
 import pytest
 
-from apps.etl.adapters.base import SchemaChangedError
+from apps.etl.errors import SchemaChangedError
 from apps.etl.trading_calendar import build_calendar, schedule_days, traded_days
 
 

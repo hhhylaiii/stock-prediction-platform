@@ -11,8 +11,8 @@ import requests
 import responses
 from django.core.exceptions import ImproperlyConfigured
 
-from apps.etl.adapters.base import SchemaChangedError, SourceNotReadyError, SourceRequestError
 from apps.etl.adapters.twse import TwseAdapter, is_foreign_currency_etf, quotes_frame
+from apps.etl.errors import SchemaChangedError, SourceNotReadyError, SourceRequestError
 from apps.etl.models import RawTwse
 from apps.etl.ratelimit import RateLimit, RateLimiter, RetryableError
 from apps.market.calendar import NotATradingDayError, TradingDays

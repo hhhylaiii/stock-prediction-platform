@@ -7,13 +7,10 @@ import requests
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 
-from apps.etl.adapters.base import (
-    SchemaChangedError,
-    SourceRequestError,
-    store_raw,
-)
+from apps.etl.errors import SchemaChangedError, SourceRequestError
 from apps.etl.models import RawRecord
 from apps.etl.ratelimit import RateLimiter, RetryableError, ThrottledError
+from apps.etl.raw import store_raw
 
 
 class SourceClient:

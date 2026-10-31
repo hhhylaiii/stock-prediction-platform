@@ -7,7 +7,8 @@ from django.core.management import call_command
 from django.core.management.base import CommandError
 
 from apps.etl.adapters import ADAPTERS
-from apps.etl.adapters.base import BaseAdapter, SourceRequestError
+from apps.etl.adapters.base import BaseAdapter
+from apps.etl.errors import SourceRequestError
 from apps.etl.models import EtlRun, RawRecord, RawTwse
 from apps.etl.upsert import upsert
 from apps.market.calendar import TradingDays

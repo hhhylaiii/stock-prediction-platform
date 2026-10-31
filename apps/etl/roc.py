@@ -3,7 +3,7 @@
 import re
 from datetime import date
 
-from apps.etl.adapters.base import SchemaChangedError
+from apps.etl.errors import SchemaChangedError
 
 ROC_YEAR_OFFSET = 1911
 ROC_DATE = re.compile(r"(\d{2,3})[/-](\d{1,2})[/-](\d{1,2})")
