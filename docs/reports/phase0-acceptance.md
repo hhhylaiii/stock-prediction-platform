@@ -4,9 +4,10 @@ Phase 0 於 2026-11-01 通過：四支 PR 合併進 `develop`，規格 §9 的�
 
 ## 驗收條件
 
-| 條件（規格 §9、plan §6 S0） | 結果 | 證據 |
+| 條件（規格 §9 Phase 0、plan §6 S0） | 結果 | 證據 |
 | --- | --- | --- |
-| `docker compose up` 起得來，`/healthz` 回 200 | 通過 | PR #1；develop CI 的 docker job（`docker compose build` 加 `manage.py check`） |
+| 測試框架可跑 | 通過，develop 上 266 條測試，coverage 100% | develop CI 的 test job；PR #4 說明的本機 `pytest --cov` |
+| Docker Compose 可建置 | 通過 | develop CI 的 docker job（`docker compose build` 加 `manage.py check`）；`/healthz` 由 `tests/test_healthz.py` 驗 |
 | CI 設好 | 通過，5 個 job：lint、typecheck、test、spec8、docker；第 6 個 e2e 依 plan 從 PR 5.4 起 | develop CI run 41218735721（`ccae21f`）全綠 |
 | `manage.py fetch --source twse --dataset daily_price --date 2026-10-28` 寫入 raw 與 standard | 通過 | 見下節 |
 
