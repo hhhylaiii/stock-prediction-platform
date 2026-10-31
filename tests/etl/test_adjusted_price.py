@@ -92,3 +92,11 @@ def test_refreshing_one_stock_leaves_others_alone() -> None:
     )
     refresh_adj_factor("2884")
     assert DailyPrice.objects.get(stock_id="2330").adj_factor == 1.0
+
+
+@pytest.mark.usefixtures("esun")
+def test_refreshing_from_a_date_leaves_earlier_rows_alone() -> None:
+    DailyPrice.objects.update(adj_factor=1.0)
+    refresh_adj_factor("2884", since=date(2013, 8, 15))
+    assert DailyPrice.objects.get(stock_id="2884", date=date(2013, 8, 14)).adj_factor == 1.0
+    assert DailyPrice.objects.get(stock_id="2884", date=date(2013, 8, 15)).adj_factor < 1.0

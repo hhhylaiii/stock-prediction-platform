@@ -16,7 +16,7 @@ WITH factors AS (
     FROM daily_price p
     LEFT JOIN dividend_event e
         ON e.stock_id = p.stock_id AND e.ex_date > p.date AND e.adj_factor IS NOT NULL
-    WHERE p.stock_id = %(stock)s
+    WHERE p.stock_id = %(stock)s AND p.date >= %(since)s
     GROUP BY p.date
 )
 UPDATE daily_price p
@@ -41,10 +41,10 @@ def adjust_prices(frame: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def refresh_adj_factor(stock_id: str) -> int:
-    """Set each day's adj_factor to the product of later ex-date factors; returns rows changed."""
+def refresh_adj_factor(stock_id: str, since: date = date.min) -> int:
+    """Set adj_factor from since on to the product of later ex-date factors; returns changes."""
     with connection.cursor() as cursor:
-        cursor.execute(REFRESH_SQL, {"stock": stock_id})
+        cursor.execute(REFRESH_SQL, {"stock": stock_id, "since": since})
         return int(cursor.rowcount)
 
 
@@ -57,4 +57,4 @@ def refresh_where_later_events(stock_ids: Iterable[str], since: date) -> int:
         .values_list("stock_id", flat=True)
         .distinct()
     )
-    return sum(refresh_adj_factor(stock_id) for stock_id in stocks)
+    return sum(refresh_adj_factor(stock_id, since) for stock_id in stocks)
