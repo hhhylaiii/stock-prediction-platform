@@ -3,7 +3,7 @@
 import hashlib
 import json
 from abc import ABC, abstractmethod
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from datetime import date
 from typing import Any, ClassVar
 
@@ -107,5 +107,28 @@ class BaseAdapter(ABC):
                 raw = self.fetch(dataset, day, day, stock_id)
                 run.rows += self.upsert(dataset, self.normalize(dataset, raw))
                 run.checkpoint = {"last_date": day.isoformat()}
+                run.save(update_fields=["rows", "checkpoint"])
+        return run
+
+    def backfill(
+        self,
+        dataset: str,
+        stock_ids: Sequence[str],
+        start: date,
+        end: date,
+        resume_after: str | None = None,
+    ) -> EtlRun:
+        """Fetch, normalize and upsert stock by stock; the checkpoint is the last finished stock."""
+        self.require_dataset(dataset)
+        pending = [
+            code for code in sorted(set(stock_ids)) if resume_after is None or code > resume_after
+        ]
+        with tracked_run(self.source, dataset, start, end) as run:
+            if resume_after is not None:
+                run.checkpoint = {"last_stock_id": resume_after}
+            for stock_id in pending:
+                raw = self.fetch(dataset, start, end, stock_id)
+                run.rows += self.upsert(dataset, self.normalize(dataset, raw))
+                run.checkpoint = {"last_stock_id": stock_id}
                 run.save(update_fields=["rows", "checkpoint"])
         return run
