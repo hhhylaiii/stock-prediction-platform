@@ -88,6 +88,7 @@ def test_dividend_keeps_eight_decimal_places() -> None:
         {"adj_factor": 0.0},
         {"adj_factor": float("nan")},
         {"adj_factor": float("inf")},
+        {"announce_date": date(2026, 9, 17)},
     ],
 )
 def test_dividend_check_constraints(overrides: dict[str, object]) -> None:
@@ -96,13 +97,47 @@ def test_dividend_check_constraints(overrides: dict[str, object]) -> None:
 
 
 @pytest.mark.django_db
-def test_daily_chip_rows_can_arrive_one_source_at_a_time() -> None:
-    DailyChip.objects.create(stock_id="2330", date=DAY, fi_net=-3_500_000, it_net=120_000)
+def test_dividend_announced_on_or_before_ex_date() -> None:
+    _dividend(announce_date=date(2026, 6, 10)).save()
+    _dividend(ex_date=date(2027, 3, 18), announce_date=date(2027, 3, 18)).save()
+    assert DividendEvent.objects.filter(announce_date__isnull=False).count() == 2
+
+
+@pytest.mark.django_db
+def test_daily_chip_sources_upsert_their_own_columns() -> None:
+    keys = ("stock_id", "date")
+    flows = pd.DataFrame(
+        [{"stock_id": "2330", "date": DAY, "fi_net": -3_500_000, "it_net": -120_000}]
+    )
+    margin = pd.DataFrame([{"stock_id": "2330", "date": DAY, "margin_balance": 25_000_000}])
+    upsert(DailyChip, flows, keys, ("fi_net", "it_net"))
+    upsert(DailyChip, margin, keys, ("margin_balance",))
     row = DailyChip.objects.get(pk=("2330", DAY))
-    assert row.margin_balance is None
+    assert (row.fi_net, row.it_net, row.margin_balance) == (-3_500_000, -120_000, 25_000_000)
     assert row.day_trade_volume is None
-    DailyChip.objects.filter(pk=("2330", DAY)).update(margin_balance=25_000_000)
-    assert DailyChip.objects.get(pk=("2330", DAY)).fi_net == -3_500_000
+
+
+@pytest.mark.django_db
+def test_daily_chip_flows_may_be_negative() -> None:
+    DailyChip.objects.create(
+        stock_id="2330",
+        date=DAY,
+        fi_net=-1,
+        it_net=-2,
+        dealer_self_net=-3,
+        dealer_hedge_net=-4,
+        margin_balance=0,
+        sbl_short_balance=0,
+    )
+    row = DailyChip.objects.get(pk=("2330", DAY))
+    assert (row.dealer_self_net, row.dealer_hedge_net) == (-3, -4)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("pct", [0.0, 72.35, 100.0])
+def test_daily_chip_fi_holding_pct_is_a_percent(pct: float) -> None:
+    DailyChip.objects.create(stock_id="2330", date=DAY, fi_holding_pct=pct)
+    assert DailyChip.objects.get(pk=("2330", DAY)).fi_holding_pct == pct
 
 
 def test_daily_chip_share_columns_are_labelled_in_shares() -> None:
@@ -160,6 +195,8 @@ def test_weekly_holding_publish_date_is_required() -> None:
         {"pct": -0.1},
         {"pct": float("nan")},
         {"level": 16, "pct": float("nan")},
+        {"level": 16, "pct": float("-inf")},
+        {"level": 17, "shares": -1},
     ],
 )
 def test_weekly_holding_check_constraints(overrides: dict[str, object]) -> None:
@@ -171,7 +208,8 @@ def test_weekly_holding_check_constraints(overrides: dict[str, object]) -> None:
 def test_weekly_holding_adjustment_level_may_be_negative() -> None:
     _holding(level=16, holders=0, shares=-12_345, pct=-0.01).save()
     _holding(level=17, holders=1_200_000, shares=25_930_000_000, pct=100.0).save()
-    assert WeeklyHolding.objects.count() == 2
+    _holding(level=1, holders=0, shares=0, pct=0.0).save()
+    assert WeeklyHolding.objects.count() == 3
 
 
 @pytest.mark.django_db

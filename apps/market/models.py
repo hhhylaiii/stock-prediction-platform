@@ -105,6 +105,7 @@ class DividendEvent(models.Model):
         max_digits=16, decimal_places=8, default=0, verbose_name="股票股利（元／股，面額 10 元）"
     )
     adj_factor = models.FloatField(null=True, blank=True)
+    announce_date = models.DateField(null=True, blank=True)
 
     class Meta:
         db_table = "dividend_event"
@@ -117,6 +118,11 @@ class DividendEvent(models.Model):
                 condition=models.Q(adj_factor__isnull=True)
                 | models.Q(adj_factor__gt=0, adj_factor__lt=INF),
                 name="dividend_event_adj_factor_finite_positive",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(announce_date__isnull=True)
+                | models.Q(announce_date__lte=models.F("ex_date")),
+                name="dividend_event_announced_by_ex_date",
             ),
         ]
 
@@ -180,7 +186,7 @@ class WeeklyHolding(models.Model):
     stock_id = models.CharField(max_length=10)
     data_date = models.DateField()
     level = models.PositiveSmallIntegerField()
-    holders = models.BigIntegerField(verbose_name="人數")
+    holders = models.IntegerField(verbose_name="人數")
     shares = models.BigIntegerField(verbose_name="股數（股）")
     pct = models.FloatField(verbose_name="占集保庫存比例（%）")
     publish_date = models.DateField()
@@ -238,7 +244,7 @@ class FinType(models.TextChoices):
 
 
 class FinancialStatement(models.Model):
-    """Single-quarter figures in TWD (Q4 = annual minus Q1–Q3); ratios are fractions."""
+    """Quarterly TWD figures: flows single-quarter (Q4 = annual minus Q1–Q3), ratios fractions."""
 
     pk = models.CompositePrimaryKey("stock_id", "period", "fin_type")
     stock_id = models.CharField(max_length=10)
@@ -298,7 +304,9 @@ class IndexDaily(models.Model):
     index_id = models.CharField(max_length=16, choices=IndexId.choices)
     date = models.DateField()
     close = models.DecimalField(max_digits=16, decimal_places=4)
-    volume = models.BigIntegerField(null=True, blank=True)
+    volume = models.BigIntegerField(
+        null=True, blank=True, verbose_name="成交量（台股指數：股；TSM_ADR：ADR 數；其餘留空）"
+    )
 
     class Meta:
         db_table = "index_daily"
@@ -390,7 +398,8 @@ class DailyValuation(models.Model):
         indexes = [models.Index(fields=["date"], name="daily_valuation_date_idx")]
         constraints = [
             models.CheckConstraint(
-                condition=models.Q(pe__gt=0, pb__gt=0) & non_negative("dividend_yield"),
+                condition=models.Q(pe__gt=0, pb__gt=0, dividend_yield__lt=1)
+                & non_negative("dividend_yield"),
                 name="daily_valuation_ranges",
             ),
             models.CheckConstraint(

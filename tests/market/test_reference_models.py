@@ -2,7 +2,7 @@ from datetime import date
 from decimal import Decimal
 
 import pytest
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, models, transaction
 
 from apps.market.models import (
     DailyValuation,
@@ -51,6 +51,13 @@ def test_index_ids_cover_the_spec_series() -> None:
     assert set(IndexId.values) == {"TAIEX", "TPEX", "SOX", "TSM_ADR", "USDTWD"}
 
 
+def test_index_volume_states_its_units() -> None:
+    field = IndexDaily._meta.get_field("volume")
+    assert isinstance(field, models.Field)
+    assert "股" in str(field.verbose_name)
+    assert "ADR" in str(field.verbose_name)
+
+
 @pytest.mark.django_db
 def test_index_daily_keeps_fx_without_volume() -> None:
     IndexDaily.objects.create(index_id=IndexId.USDTWD, date=DAY, close=Decimal("32.1450"))
@@ -91,7 +98,13 @@ def test_macro_indicator_round_trip_and_required_announce_date() -> None:
 @pytest.mark.django_db
 @pytest.mark.parametrize(
     ("period", "value"),
-    [("2026-13", 1.0), ("202609", 1.0), ("2026-Q3", 1.0), ("2026-09", float("nan"))],
+    [
+        ("2026-13", 1.0),
+        ("202609", 1.0),
+        ("2026-Q3", 1.0),
+        ("2026-09", float("nan")),
+        ("2026-09", float("-inf")),
+    ],
 )
 def test_macro_indicator_check_constraints(period: str, value: float) -> None:
     with pytest.raises(IntegrityError), transaction.atomic():
@@ -135,9 +148,24 @@ def test_daily_valuation_allows_blank_pe_for_loss_makers() -> None:
 
 
 @pytest.mark.django_db
+def test_daily_valuation_accepts_a_zero_yield() -> None:
+    DailyValuation.objects.create(stock_id="2330", date=DAY, pe=25.0, pb=6.1, dividend_yield=0.0)
+    assert DailyValuation.objects.get(pk=("2330", DAY)).dividend_yield == 0.0
+
+
+@pytest.mark.django_db
 @pytest.mark.parametrize(
     "values",
-    [{"pe": 0.0}, {"pb": -1.0}, {"dividend_yield": -0.01}, {"pb": float("nan")}],
+    [
+        {"pe": 0.0},
+        {"pb": -1.0},
+        {"dividend_yield": -0.01},
+        {"dividend_yield": 1.0},
+        {"dividend_yield": 2.15},
+        {"pb": float("nan")},
+        {"pe": float("nan")},
+        {"dividend_yield": float("inf")},
+    ],
 )
 def test_daily_valuation_check_constraints(values: dict[str, object]) -> None:
     with pytest.raises(IntegrityError), transaction.atomic():
@@ -153,6 +181,14 @@ def test_disposition_event_types_share_a_start_date() -> None:
     attention = DispositionEvent.objects.get(pk=("6488", DAY, DispositionType.ATTENTION))
     assert attention.end_date == date(2026, 11, 10)
     assert DispositionEvent.objects.count() == 2
+
+
+@pytest.mark.django_db
+def test_disposition_event_may_last_a_single_day() -> None:
+    DispositionEvent.objects.create(
+        stock_id="6488", start_date=DAY, type=DispositionType.ATTENTION, end_date=DAY
+    )
+    assert DispositionEvent.objects.get().end_date == DAY
 
 
 @pytest.mark.django_db
