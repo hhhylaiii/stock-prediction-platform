@@ -399,3 +399,10 @@ def test_upsert_refreshes_factors_of_stocks_with_later_events(
     assert {code: f for code, f in factors.items() if code != "2330"} == dict.fromkeys(
         set(factors) - {"2330"}, 1.0
     )
+
+
+@responses.activate
+def test_non_standard_json_numbers_are_a_schema_change(adapter: TwseAdapter) -> None:
+    responses.get(URL, body='{"stat": "OK", "value": NaN}', content_type="application/json")
+    with pytest.raises(SchemaChangedError, match="NaN"):
+        adapter.fetch("daily_price", TRADING_DAY, TRADING_DAY)

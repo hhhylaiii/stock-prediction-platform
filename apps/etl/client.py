@@ -13,6 +13,11 @@ from apps.etl.ratelimit import RateLimiter, RetryableError, ThrottledError
 from apps.etl.raw import store_raw
 
 
+def _reject_constant(token: str) -> Any:
+    """NaN and Infinity are not JSON; letting them through would fail later in the raw table."""
+    raise SchemaChangedError(f"source sent the non-JSON number {token}")
+
+
 class SourceClient:
     """One source behind its rate limiter; every response must be a JSON object."""
 
@@ -72,7 +77,7 @@ class SourceClient:
         if status >= 400:
             raise SourceRequestError(f"{self.label} refused the request with {status}")
         try:
-            payload = response.json()
+            payload = response.json(parse_constant=_reject_constant)
         except ValueError:
             raise SchemaChangedError(
                 f"{self.label} returned non-JSON: {response.text[:200]!r}"
