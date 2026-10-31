@@ -1,0 +1,34 @@
+{
+ "msg": "success",
+ "status": 200,
+ "data": [
+  {
+   "date": "2026-10-27",
+   "stock_id": "2330",
+   "dividend_yield": 0.92,
+   "PER": 27.82,
+   "PBR": 9.68
+  },
+  {
+   "date": "2026-10-28",
+   "stock_id": "2330",
+   "dividend_yield": 0.91,
+   "PER": 28.11,
+   "PBR": 9.78
+  },
+  {
+   "date": "2026-10-29",
+   "stock_id": "2330",
+   "dividend_yield": 0.91,
+   "PER": 27.99,
+   "PBR": 9.74
+  },
+  {
+   "date": "2026-10-30",
+   "stock_id": "2330",
+   "dividend_yield": 0.93,
+   "PER": 27.47,
+   "PBR": 9.55
+  }
+ ]
+}
