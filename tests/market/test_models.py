@@ -17,10 +17,10 @@ def _price(**overrides: object) -> DailyPrice:
     values: dict[str, object] = {
         "stock_id": "2330",
         "date": date(2026, 10, 28),
-        "open": Decimal("1000"),
-        "high": Decimal("1010"),
-        "low": Decimal("995"),
-        "close": Decimal("1005"),
+        "open": Decimal("1000.5"),
+        "high": Decimal("1010.25"),
+        "low": Decimal("995.125"),
+        "close": Decimal("1005.4567"),
         "volume": 25_000_000,
         "turnover": 25_100_000_000,
     }
@@ -37,6 +37,10 @@ def test_daily_price_primary_key_is_stock_and_date() -> None:
     assert ["date"] in _index_columns("daily_price").values()
 
 
+def test_daily_price_composite_pk_fields() -> None:
+    assert [f.name for f in DailyPrice._meta.pk_fields] == ["stock_id", "date"]
+
+
 @pytest.mark.django_db
 def test_daily_price_rejects_duplicate_stock_date() -> None:
     _price().save()
@@ -48,8 +52,36 @@ def test_daily_price_rejects_duplicate_stock_date() -> None:
 def test_daily_price_round_trips_by_composite_pk() -> None:
     _price().save()
     row = DailyPrice.objects.get(pk=("2330", date(2026, 10, 28)))
-    assert row.close == Decimal("1005")
+    assert (row.open, row.high, row.low, row.close) == (
+        Decimal("1000.5"),
+        Decimal("1010.25"),
+        Decimal("995.125"),
+        Decimal("1005.4567"),
+    )
     assert row.adj_factor == 1.0
+
+
+@pytest.mark.django_db
+def test_daily_price_keeps_fractional_adj_factor() -> None:
+    _price(adj_factor=0.912345678).save()
+    row = DailyPrice.objects.get(pk=("2330", date(2026, 10, 28)))
+    assert row.adj_factor == pytest.approx(0.912345678, rel=1e-12)
+
+
+@pytest.mark.django_db
+def test_daily_price_upserts_on_the_composite_key() -> None:
+    _price().save()
+    updated = _price(close=Decimal("1010.5"), volume=30_000_000)
+    added = _price(stock_id="2317", close=Decimal("251.5"))
+    DailyPrice.objects.bulk_create(
+        [updated, added],
+        update_conflicts=True,
+        unique_fields=["stock_id", "date"],
+        update_fields=["close", "volume"],
+    )
+    assert DailyPrice.objects.count() == 2
+    row = DailyPrice.objects.get(pk=("2330", date(2026, 10, 28)))
+    assert (row.close, row.volume) == (Decimal("1010.5"), 30_000_000)
 
 
 @pytest.mark.django_db
@@ -69,7 +101,15 @@ def test_daily_price_allows_missing_prices_on_no_trade_days() -> None:
 
 @pytest.mark.django_db
 @pytest.mark.parametrize(
-    "overrides", [{"volume": -1}, {"turnover": -1}, {"adj_factor": 0.0}, {"adj_factor": -0.5}]
+    "overrides",
+    [
+        {"volume": -1},
+        {"turnover": -1},
+        {"adj_factor": 0.0},
+        {"adj_factor": -0.5},
+        {"adj_factor": float("nan")},
+        {"adj_factor": float("inf")},
+    ],
 )
 def test_daily_price_check_constraints(overrides: dict[str, object]) -> None:
     with pytest.raises(IntegrityError), transaction.atomic():

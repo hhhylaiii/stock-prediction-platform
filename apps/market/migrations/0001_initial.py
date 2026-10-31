@@ -8,6 +8,23 @@ class Migration(migrations.Migration):
 
     operations = [
         migrations.CreateModel(
+            name="StockMaster",
+            fields=[
+                ("stock_id", models.CharField(max_length=10, primary_key=True, serialize=False)),
+                ("name", models.CharField(max_length=64)),
+                (
+                    "market",
+                    models.CharField(choices=[("TWSE", "上市"), ("TPEx", "上櫃")], max_length=4),
+                ),
+                ("industry", models.CharField(blank=True, default="", max_length=64)),
+                ("list_date", models.DateField(blank=True, null=True)),
+                ("delist_date", models.DateField(blank=True, null=True)),
+            ],
+            options={
+                "db_table": "stock_master",
+            },
+        ),
+        migrations.CreateModel(
             name="TradingCalendar",
             fields=[
                 ("date", models.DateField(primary_key=True, serialize=False)),
@@ -65,28 +82,10 @@ class Migration(migrations.Migration):
                         condition=models.Q(("turnover__gte", 0)), name="daily_price_turnover_gte_0"
                     ),
                     models.CheckConstraint(
-                        condition=models.Q(("adj_factor__gt", 0)),
-                        name="daily_price_adj_factor_gt_0",
+                        condition=models.Q(("adj_factor__gt", 0), ("adj_factor__lt", float("inf"))),
+                        name="daily_price_adj_factor_finite_positive",
                     ),
                 ],
-            },
-        ),
-        migrations.CreateModel(
-            name="StockMaster",
-            fields=[
-                ("stock_id", models.CharField(max_length=10, primary_key=True, serialize=False)),
-                ("name", models.CharField(max_length=64)),
-                (
-                    "market",
-                    models.CharField(choices=[("TWSE", "上市"), ("TPEx", "上櫃")], max_length=4),
-                ),
-                ("industry", models.CharField(blank=True, default="", max_length=64)),
-                ("list_date", models.DateField(blank=True, null=True)),
-                ("delist_date", models.DateField(blank=True, null=True)),
-            ],
-            options={
-                "db_table": "stock_master",
-                "indexes": [models.Index(fields=["market"], name="stock_master_market_idx")],
             },
         ),
     ]

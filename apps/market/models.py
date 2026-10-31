@@ -20,7 +20,6 @@ class StockMaster(models.Model):
 
     class Meta:
         db_table = "stock_master"
-        indexes = [models.Index(fields=["market"], name="stock_master_market_idx")]
 
     def __str__(self) -> str:
         return f"{self.stock_id} {self.name}"
@@ -65,7 +64,8 @@ class DailyPrice(models.Model):
                 condition=models.Q(turnover__gte=0), name="daily_price_turnover_gte_0"
             ),
             models.CheckConstraint(
-                condition=models.Q(adj_factor__gt=0), name="daily_price_adj_factor_gt_0"
+                condition=models.Q(adj_factor__gt=0, adj_factor__lt=float("inf")),
+                name="daily_price_adj_factor_finite_positive",
             ),
         ]
 
