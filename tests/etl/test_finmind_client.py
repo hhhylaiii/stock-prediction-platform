@@ -8,6 +8,7 @@ from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 from responses import matchers
 
+from apps.etl.adapters import limiter_for
 from apps.etl.adapters.base import SchemaChangedError, SourceRequestError
 from apps.etl.adapters.finmind import FinmindClient, maintenance_wait
 from apps.etl.models import RawFinmind
@@ -59,9 +60,9 @@ def test_interval_must_fit_the_hourly_quota(key: str, interval: float, allowed: 
         FinmindClient(limiter, "https://api.finmindtrade.com", 30.0, key)
 
 
-def test_default_settings_fit_the_token_quota() -> None:
-    interval = settings.ETL_RATE_LIMITS["finmind"]["min_interval"]
-    assert interval * 600 >= 3600
+def test_configured_client_fits_its_quota() -> None:
+    client = FinmindClient.build(limiter_for("finmind"))
+    assert client.token == settings.FINMIND_API_TOKEN == ""
 
 
 @responses.activate

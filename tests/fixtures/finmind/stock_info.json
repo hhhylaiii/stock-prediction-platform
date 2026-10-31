@@ -1,0 +1,251 @@
+{
+ "msg": "success",
+ "status": 200,
+ "data": [
+  {
+   "industry_category": "電腦及週邊設備業",
+   "stock_id": "5450",
+   "stock_name": "寶聯通",
+   "type": "tpex",
+   "date": "2020-06-03"
+  },
+  {
+   "industry_category": "所有證券",
+   "stock_id": "710566",
+   "stock_name": "碩禾元大9B購01",
+   "type": "tpex",
+   "date": "2020-11-15"
+  },
+  {
+   "industry_category": "生技醫療業",
+   "stock_id": "6446",
+   "stock_name": "藥華藥",
+   "type": "tpex",
+   "date": "2024-01-27"
+  },
+  {
+   "industry_category": "半導體業",
+   "stock_id": "6423",
+   "stock_name": "億而得",
+   "type": "emerging",
+   "date": "2024-05-14"
+  },
+  {
+   "industry_category": "存託憑證",
+   "stock_id": "9105",
+   "stock_name": "泰金寶-DR",
+   "type": "twse",
+   "date": "2024-12-04"
+  },
+  {
+   "industry_category": "金融保險",
+   "stock_id": "2891A",
+   "stock_name": "中信特",
+   "type": "twse",
+   "date": "2024-12-04"
+  },
+  {
+   "industry_category": "創新版股票",
+   "stock_id": "6423",
+   "stock_name": "億而得-創",
+   "type": "twse",
+   "date": "2024-12-04"
+  },
+  {
+   "industry_category": "上櫃指數股票型基金(ETF)",
+   "stock_id": "006201",
+   "stock_name": "元大富櫃50",
+   "type": "tpex",
+   "date": "2024-12-30"
+  },
+  {
+   "industry_category": "上櫃指數股票型基金(ETF)",
+   "stock_id": "00679B",
+   "stock_name": "元大美債20年",
+   "type": "tpex",
+   "date": "2024-12-30"
+  },
+  {
+   "industry_category": "電子工業",
+   "stock_id": "6423",
+   "stock_name": "億而得-創",
+   "type": "twse",
+   "date": "2026-01-22"
+  },
+  {
+   "industry_category": "創新板股票",
+   "stock_id": "6423",
+   "stock_name": "億而得-創",
+   "type": "twse",
+   "date": "2026-01-22"
+  },
+  {
+   "industry_category": "半導體業",
+   "stock_id": "6423",
+   "stock_name": "億而得-創",
+   "type": "twse",
+   "date": "2026-01-22"
+  },
+  {
+   "industry_category": "光電業",
+   "stock_id": "3454",
+   "stock_name": "晶睿",
+   "type": "twse",
+   "date": "2026-06-13"
+  },
+  {
+   "industry_category": "金融保險",
+   "stock_id": "2888",
+   "stock_name": "新光金",
+   "type": "twse",
+   "date": "2026-07-03"
+  },
+  {
+   "industry_category": "電子工業",
+   "stock_id": "3454",
+   "stock_name": "晶睿",
+   "type": "twse",
+   "date": "2026-07-12"
+  },
+  {
+   "industry_category": "金融保險",
+   "stock_id": "2867",
+   "stock_name": "三商壽",
+   "type": "twse",
+   "date": "2026-08-20"
+  },
+  {
+   "industry_category": "油電燃氣業",
+   "stock_id": "8908",
+   "stock_name": "欣雄",
+   "type": "tpex",
+   "date": "2026-10-18"
+  },
+  {
+   "industry_category": "半導體業",
+   "stock_id": "6423",
+   "stock_name": "億而得",
+   "type": "tpex",
+   "date": "2026-11-01"
+  },
+  {
+   "industry_category": "半導體業",
+   "stock_id": "6488",
+   "stock_name": "環球晶",
+   "type": "tpex",
+   "date": "2026-11-01"
+  },
+  {
+   "industry_category": "化學生技醫療",
+   "stock_id": "6446",
+   "stock_name": "藥華藥",
+   "type": "twse",
+   "date": "2026-11-01"
+  },
+  {
+   "industry_category": "生技醫療業",
+   "stock_id": "6446",
+   "stock_name": "藥華藥",
+   "type": "twse",
+   "date": "2026-11-01"
+  },
+  {
+   "industry_category": "其他",
+   "stock_id": "5450",
+   "stock_name": "南良",
+   "type": "tpex",
+   "date": "2026-11-01"
+  },
+  {
+   "industry_category": "油電燃氣業",
+   "stock_id": "8908",
+   "stock_name": "欣雄",
+   "type": "twse",
+   "date": "2026-11-01"
+  },
+  {
+   "industry_category": "半導體業",
+   "stock_id": "8299",
+   "stock_name": "群聯",
+   "type": "tpex",
+   "date": "2026-11-01"
+  },
+  {
+   "industry_category": "半導體業",
+   "stock_id": "2330",
+   "stock_name": "台積電",
+   "type": "twse",
+   "date": "2026-11-01"
+  },
+  {
+   "industry_category": "電子工業",
+   "stock_id": "2330",
+   "stock_name": "台積電",
+   "type": "twse",
+   "date": "2026-11-01"
+  },
+  {
+   "industry_category": "上櫃ETF",
+   "stock_id": "006201",
+   "stock_name": "元大富櫃50",
+   "type": "tpex",
+   "date": "2026-11-01"
+  },
+  {
+   "industry_category": "ETF",
+   "stock_id": "0050",
+   "stock_name": "元大台灣50",
+   "type": "twse",
+   "date": "2026-11-01"
+  },
+  {
+   "industry_category": "上櫃ETF",
+   "stock_id": "00679B",
+   "stock_name": "元大美債20年",
+   "type": "tpex",
+   "date": "2026-11-01"
+  },
+  {
+   "industry_category": "水泥工業",
+   "stock_id": "1101",
+   "stock_name": "台泥",
+   "type": "twse",
+   "date": "2026-11-01"
+  },
+  {
+   "industry_category": "受益證券",
+   "stock_id": "01001T",
+   "stock_name": "土銀富邦R1",
+   "type": "twse",
+   "date": "2026-11-01"
+  },
+  {
+   "industry_category": "ETN",
+   "stock_id": "020000",
+   "stock_name": "富邦特選蘋果N",
+   "type": "twse",
+   "date": "2026-11-01"
+  },
+  {
+   "industry_category": "大盤",
+   "stock_id": "TAIEX",
+   "stock_name": "加權指數",
+   "type": "twse",
+   "date": "None"
+  },
+  {
+   "industry_category": "化學生技醫療",
+   "stock_id": "1752",
+   "stock_name": "南光",
+   "type": "twse",
+   "date": "2026-11-01"
+  },
+  {
+   "industry_category": "生技醫療業",
+   "stock_id": "1752",
+   "stock_name": "南光",
+   "type": "twse",
+   "date": "2026-11-01"
+  }
+ ]
+}

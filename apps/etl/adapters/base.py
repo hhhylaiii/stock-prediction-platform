@@ -12,9 +12,8 @@ from django.utils import timezone
 
 from apps.etl.models import EtlRun, RawRecord
 from apps.etl.ratelimit import RateLimiter
+from apps.etl.runs import tracked_run
 from apps.market.calendar import CalendarError, NotATradingDayError, TradingDays
-
-ERROR_TEXT_LIMIT = 4000
 
 
 class SourceError(Exception):
@@ -103,22 +102,10 @@ class BaseAdapter(ABC):
         """Fetch, normalize and upsert day by day, recording progress in one etl_run row."""
         self.require_dataset(dataset)
         days = list(self.units(start, end))
-        run = EtlRun.objects.create(
-            source=self.source, dataset=dataset, start_date=start, end_date=end
-        )
-        try:
+        with tracked_run(self.source, dataset, start, end) as run:
             for day in days:
                 raw = self.fetch(dataset, day, day, stock_id)
                 run.rows += self.upsert(dataset, self.normalize(dataset, raw))
                 run.checkpoint = {"last_date": day.isoformat()}
                 run.save(update_fields=["rows", "checkpoint"])
-        except BaseException as exc:
-            run.status = EtlRun.Status.FAILED
-            run.error = f"{type(exc).__name__}: {exc}"[:ERROR_TEXT_LIMIT]
-            run.finished_at = timezone.now()
-            run.save(update_fields=["status", "error", "finished_at"])
-            raise
-        run.status = EtlRun.Status.SUCCESS
-        run.finished_at = timezone.now()
-        run.save(update_fields=["status", "finished_at"])
         return run

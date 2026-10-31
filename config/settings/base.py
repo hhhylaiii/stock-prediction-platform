@@ -113,7 +113,9 @@ ETL_RATE_LIMITS: dict[str, dict[str, float]] = {
         "cooldown": env.float("TPEX_COOLDOWN", default=900.0),
     },
     "finmind": {
-        "min_interval": env.float("FINMIND_MIN_INTERVAL", default=6.5),
+        "min_interval": env.float(
+            "FINMIND_MIN_INTERVAL", default=6.5 if FINMIND_API_TOKEN else 13.0
+        ),
         "max_retries": env.int("FINMIND_MAX_RETRIES", default=4),
         "backoff_base": env.float("FINMIND_BACKOFF_BASE", default=10.0),
         "backoff_max": env.float("FINMIND_BACKOFF_MAX", default=300.0),
