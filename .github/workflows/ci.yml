@@ -1,0 +1,127 @@
+name: ci
+
+on:
+  pull_request:
+    branches: [develop, main]
+  push:
+    branches: [develop, main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  TZ: Asia/Taipei
+  UV_FROZEN: "1"
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - name: no hash comments on added lines
+        if: github.event_name == 'pull_request'
+        run: uv run python scripts/check_no_hash_comments.py "origin/${{ github.base_ref }}"
+
+  typecheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+      - run: uv run mypy
+
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: twp
+          POSTGRES_PASSWORD: twp
+          POSTGRES_DB: twp
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U twp -d twp"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://twp:twp@localhost:5432/twp
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+      - run: uv run python manage.py makemigrations --check --dry-run
+        env:
+          DJANGO_SETTINGS_MODULE: config.settings.test
+      - run: uv run pytest -m "not slow and not e2e and not live" --cov=apps --cov=config --cov-report=term --cov-fail-under=80
+
+  spec8:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: twp
+          POSTGRES_PASSWORD: twp
+          POSTGRES_DB: twp
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U twp -d twp"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://twp:twp@localhost:5432/twp
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+      - name: manifest matches collected spec8 tests
+        run: uv run python scripts/check_spec8_manifest.py
+      - name: run spec8 tests
+        run: |
+          set +e
+          uv run pytest -m spec8
+          status=$?
+          if [ "$status" -eq 5 ] && ! grep -q '[^[:space:]]' tests/spec8_manifest.txt; then
+            echo "manifest is empty and no spec8 tests exist yet"
+            exit 0
+          fi
+          exit "$status"
+
+  docker:
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/develop') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - run: docker compose build
+      - run: docker compose run --rm web python manage.py check
+      - if: always()
+        run: docker compose down -v
