@@ -1,13 +1,17 @@
-"""trading_calendar rows from traded dates plus the TWSE holiday schedule (SPEC §5, §8.7)."""
+"""trading_calendar rows from TWSE's monthly trading days plus its holiday schedule (SPEC §8.7)."""
 
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import date, timedelta
 from typing import Any
 
 from apps.etl.adapters.base import SchemaChangedError
+from apps.etl.roc import parse_roc_date
 from apps.market.calendar import TradingDays
 
 SCHEDULE_FIELDS = ["日期", "名稱", "說明"]
+MONTHLY_DATE_FIELD = "日期"
+MONTHLY_OK = "OK"
+MONTHLY_EMPTY = "很抱歉，沒有符合條件的資料!"
 NO_TRADING = "無交易"
 TRADING_REMINDER = "交易日"
 NOTE_LIMIT = 64
@@ -49,16 +53,21 @@ def schedule_days(payload: Mapping[str, Any]) -> dict[date, ScheduledDay]:
     return days
 
 
-def _traded_dates(rows: Iterable[Mapping[str, Any]], start: date) -> set[date]:
-    traded = set()
-    for row in rows:
-        if "date" not in row:
-            raise SchemaChangedError("FinMind trading date rows have no date")
-        traded.add(_iso_date(row["date"], "FinMind TaiwanStockTradingDate"))
-    traded = {day for day in traded if day >= start}
-    if not traded:
-        raise SchemaChangedError(f"FinMind returned no trading dates since {start}")
-    return traded
+def traded_days(payload: Mapping[str, Any], month: date, allow_empty: bool = False) -> set[date]:
+    """Days listed in TWSE's FMTQIK table for one month; only a month in progress may be empty."""
+    if payload.get("stat") == MONTHLY_EMPTY and allow_empty:
+        return set()
+    if payload.get("stat") != MONTHLY_OK:
+        raise SchemaChangedError(
+            f"TWSE monthly trading table for {month:%Y-%m} stat is {payload.get('stat')!r}"
+        )
+    fields = payload.get("fields") or []
+    if not fields or fields[0] != MONTHLY_DATE_FIELD:
+        raise SchemaChangedError(f"TWSE monthly trading table fields changed: {fields}")
+    days = {parse_roc_date(row[0]) for row in payload.get("data") or []}
+    if not days or any((day.year, day.month) != (month.year, month.month) for day in days):
+        raise SchemaChangedError(f"TWSE monthly trading table for {month:%Y-%m} has wrong dates")
+    return days
 
 
 def _schedule_through(
@@ -78,21 +87,21 @@ def _schedule_through(
 
 
 def build_calendar(
-    traded_rows: Iterable[Mapping[str, Any]],
+    traded: Iterable[date],
+    through: date,
     schedules: Sequence[Mapping[str, Any]],
     start: date,
 ) -> tuple[TradingDays, dict[str, str]]:
-    """Days up to the last traded date follow the traded dates; later days follow the schedule."""
-    traded = _traded_dates(traded_rows, start)
-    last_traded = max(traded)
-    end, scheduled = _schedule_through(last_traded, schedules)
+    """Days up to through follow the traded days; later days follow the holiday schedule."""
+    trading_set = set(traded)
+    end, scheduled = _schedule_through(through, schedules)
     trading: list[date] = []
     notes: dict[str, str] = {}
     day = start
     while day <= end:
         listed = scheduled.get(day)
-        if day <= last_traded:
-            is_open = day in traded
+        if day <= through:
+            is_open = day in trading_set
         else:
             is_open = listed[0] if listed is not None else day.weekday() < 5
         if is_open:

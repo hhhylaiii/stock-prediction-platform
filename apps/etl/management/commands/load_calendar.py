@@ -1,4 +1,4 @@
-"""Load trading_calendar from a calendar file, or rebuild it from FinMind and TWSE (SPEC §5)."""
+"""Load trading_calendar from a calendar file, or rebuild it from TWSE (SPEC §5, §8.7)."""
 
 import json
 from argparse import ArgumentParser
@@ -13,12 +13,11 @@ from django.utils import timezone
 
 from apps.etl.adapters import limiter_for
 from apps.etl.adapters.base import SourceError
-from apps.etl.adapters.finmind import FinmindClient
 from apps.etl.adapters.twse import TwseClient
 from apps.etl.management.options import required_date
 from apps.etl.ratelimit import RetryableError
 from apps.etl.runs import tracked_run
-from apps.etl.trading_calendar import build_calendar
+from apps.etl.trading_calendar import build_calendar, traded_days
 from apps.etl.upsert import upsert
 from apps.market.calendar import CalendarError, TradingDays
 from apps.market.models import TradingCalendar
@@ -39,7 +38,7 @@ def read_calendar_file(path: Path) -> tuple[TradingDays, dict[str, str]]:
 
 
 class Command(BaseCommand):
-    help = "Upsert trading_calendar from a calendar file or from FinMind plus the TWSE schedule."
+    help = "Upsert trading_calendar from a calendar file or from TWSE trading days and schedule."
 
     def add_arguments(self, parser: ArgumentParser) -> None:
         group = parser.add_mutually_exclusive_group(required=True)
@@ -72,20 +71,22 @@ class Command(BaseCommand):
 
     @staticmethod
     def _from_sources(start: date, today: date) -> tuple[TradingDays, dict[str, str]]:
-        """Traded dates up to yesterday from FinMind; today onwards from TWSE's schedule."""
-        traded = FinmindClient.build(limiter_for("finmind")).data(
-            "trading_date",
-            "TaiwanStockTradingDate",
-            start_date=start.isoformat(),
-            end_date=(today - timedelta(days=1)).isoformat(),
-        )
+        """Traded days through yesterday from FMTQIK; today onwards from the holiday schedule."""
         twse = TwseClient.build(limiter_for("twse"))
+        yesterday = today - timedelta(days=1)
+        current = today.replace(day=1)
+        traded: set[date] = set()
+        month = start.replace(day=1)
+        while month <= yesterday:
+            payload = twse.monthly_trading(month)
+            traded |= traded_days(payload, month, allow_empty=month == current)
+            month = (month + timedelta(days=32)).replace(day=1)
         schedules = []
         for year in range(today.year, today.year + SCHEDULE_YEARS_AHEAD + 1):
             schedules.append(twse.holiday_schedule(year))
             if not schedules[-1].get("data"):
                 break
-        return build_calendar(traded, schedules, start)
+        return build_calendar(traded, yesterday, schedules, start)
 
     def _write(self, calendar: TradingDays, notes: dict[str, str]) -> int:
         self._require_contiguous(calendar)

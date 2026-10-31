@@ -21,6 +21,7 @@ TWSE_MIN_INTERVAL = 3.0
 DAILY_QUOTES_PATH = "/rwd/zh/afterTrading/MI_INDEX"
 SUSPEND_LISTING_PATH = "/rwd/zh/company/suspendListing"
 HOLIDAY_SCHEDULE_PATH = "/rwd/zh/holidaySchedule/holidaySchedule"
+MONTHLY_TRADING_PATH = "/rwd/zh/afterTrading/FMTQIK"
 DAILY_QUOTES_TITLE = "每日收盤行情"
 DAILY_QUOTES_UNIT_HINT = "單位：元、股"
 DAILY_QUOTES_COLUMNS = {
@@ -112,6 +113,13 @@ class TwseClient(SourceClient):
         params = {"date": f"{year}0101", "response": "json"}
         payload = self.get_json(HOLIDAY_SCHEDULE_PATH, params)
         self.save_raw("holiday_schedule", params, payload)
+        return payload
+
+    def monthly_trading(self, month: date) -> dict[str, Any]:
+        """The FMTQIK market totals of one month, one row per trading day."""
+        params = {"date": f"{month:%Y%m}01", "response": "json"}
+        payload = self.get_json(MONTHLY_TRADING_PATH, params)
+        self.save_raw("trading_days", params, payload)
         return payload
 
     def suspend_listing(self) -> dict[str, Any]:
