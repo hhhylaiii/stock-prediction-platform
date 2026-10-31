@@ -1,6 +1,6 @@
 # 台股預測平台 開發規格書
 
-> 匯出自 claude.ai 規格書《台股預測平台 開發規格書》rev 109（2026-10-31 匯出），原文：https://claude.ai/artifact/Nw8QAWMeFz5mB4SNVq8Twp 。規格以原文為準；原文改版時重新匯出覆蓋本檔。圖未保留，以表格與文字為準。
+> 匯出自 claude.ai 規格書《台股預測平台 開發規格書》rev 112（2026-11-01 匯出），原文：https://claude.ai/artifact/Nw8QAWMeFz5mB4SNVq8Twp 。規格以原文為準；原文改版時重新匯出覆蓋本檔。圖未保留，以表格與文字為準。
 
 Oct 29, 2026 · @Owen Lai
 
@@ -50,7 +50,7 @@ Oct 29, 2026 · @Owen Lai
 | 資料擷取 | requests、FinMind SDK、官方 OpenAPI | 每個來源一個 adapter，輸出相同的 standard schema |
 | 建模 | scikit-learn（Ridge）、LightGBM、XGBoost | 模型工件以版本號存檔，參數寫入 `model_run` |
 | 回測與評估 | 自寫 walk-forward 框架（pandas、scipy） | 輸出 rank IC、ICIR、十分位組合報酬 |
-| 容器 | Docker Compose（web、worker、db） | 本機開發與部署同一份設定 |
+| 容器 | Docker Compose（web、worker、db、redis） | 本機開發與部署同一份設定 |
 | 執行環境 | 個人 Mac（macOS）+ Docker Desktop | 第一版不用雲端主機；ETL 時段用 caffeinate 防休眠、螢幕可關（見第 5 節執行環境） |
 
 [圖：系統架構 · 三層、九個元件、資料單向流動（匯出未保留）]
@@ -86,8 +86,8 @@ Oct 29, 2026 · @Owen Lai
 
 **raw 層**
 
-- 表名 `raw_<source>_<dataset>`，例如 `raw_twse_stock_day`、`raw_finmind_institutional`。
-- 欄位與來源回應相同，外加 `fetched_at`、`request_params`、`source_hash`；不做任何清洗。
+- 每個來源一張表 `raw_<source>`，例如 `raw_twse`、`raw_finmind`；以 `dataset` 欄區分資料集，唯一鍵 `(dataset, source_hash)`。
+- `payload` 欄原樣存來源回應（JSON），外加 `dataset`、`fetched_at`、`request_params`、`source_hash`；不做任何清洗。
 - 保留 raw 層的目的：來源改格式時可以重跑 normalize，不必重抓。
 
 **standard 層核心表**
@@ -123,6 +123,8 @@ Oct 29, 2026 · @Owen Lai
 **規則**
 
 - 成交量統一為「股」，金額統一為「元」；來源若為張（1 張 = 1,000 股）在 normalize 時轉換。
+- 成交量與成交金額含一般、零股、盤後定價、鉅額交易，與證交所 `MI_INDEX`、`STOCK_DAY` 相同；開高低收只反映一般交易，所以判斷當日有無成交看收盤價是否為空，不看成交量。
+- 價量表照收來源的整張表（含 ETF、ETN、特別股、TDR），只研究普通股由 universe 篩選；外幣計價的證券（雙幣 ETF 的外幣櫃位，代號第 6 碼為 K、M、S、C）不進 standard 表。
 - 時間戳一律 `Asia/Taipei`，日期欄位用 `DATE` 型別。
 - `daily_price` 存原始價與 `adj_factor`，還原價在查詢時相乘，不另存一份。
 - 索引：所有 `(stock_id, date)` 表建複合索引，`prediction` 再加 `(date, horizon, rank)`。
@@ -135,8 +137,8 @@ Oct 29, 2026 · @Owen Lai
 **Adapter 介面**
 
 - `fetch(dataset, start, end, stock_id=None) -> DataFrame`：呼叫來源，原樣寫入 raw 層。
-- `normalize(raw_df) -> DataFrame`：轉成 standard schema，統一欄名、單位、日期。
-- `upsert(df)`：以主鍵 upsert 進 standard 表。
+- `normalize(dataset, raw_df) -> DataFrame`：轉成 standard schema，統一欄名、單位、日期。
+- `upsert(dataset, df)`：以主鍵 upsert 進 standard 表。
 - 每個 adapter 內建 sleep 與指數退避，速率上限寫在設定檔，不寫死在程式。
 - 每次執行寫一列 `etl_run`，含 checkpoint（最後成功的 stock\_id 或日期），中斷後可續跑。
 
@@ -179,7 +181,7 @@ Oct 29, 2026 · @Owen Lai
 
 **執行環境（第一版）**
 
-- 排程機器是個人 Mac：Docker Desktop 跑 Compose 的 web、worker、db 三個容器，Celery beat 在 worker 容器內觸發所有排程；第一版不用雲端主機。
+- 排程機器是個人 Mac：Docker Desktop 跑 Compose 的 web、worker、db、redis 四個容器（redis 是 Celery 的 broker），Celery beat 在 worker 容器內觸發所有排程；第一版不用雲端主機。
 - 防休眠：ETL 時段（15:30 到 23:30，以及隔日 05:30 到 06:30）要讓 Mac 保持醒著。螢幕可以關，但不要合蓋，MacBook 合蓋會直接睡眠。指令：`caffeinate -i -t 30600`（防止閒置睡眠 8.5 小時，顯示器仍可自行熄滅）；接電源時可改用 `caffeinate -s`。
 - 自動化：用 launchd 在每個交易日 15:00 與 05:15 各執行一次 caffeinate 指令，清晨那次用 -t 5400，或在系統設定的能源選項開啟「顯示器關閉時避免自動進入睡眠」（接電源時有效）。
 - 漏跑處理：Mac 當天睡著或沒開機時，隔日 ETL 先補抓缺的日期再跑當日（見失敗處理）；補抓那天的執行時間會加倍，排程之間要留餘裕。
@@ -380,7 +382,7 @@ Oct 29, 2026 · @Owen Lai
 - 資料表一律走 Django ORM migration；大量寫入用 `bulk_create` 或 `COPY`，以主鍵 upsert。
 - 研究層以 Django management command 入口（`manage.py build_features`、`manage.py train --model lightgbm`），內部用 pandas，不依賴 request 生命週期。
 - 設定（API key、速率上限、排程時間）全部放環境變數或 `settings`，不寫死。
-- 每個 PR 必須附帶測試；第 8 節的七個自動化測試在 CI 內必跑。
+- 每個 PR 必須附帶測試；第 8 節的九個自動化測試在 CI 內必跑。
 
 **待決事項**
 
