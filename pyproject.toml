@@ -71,6 +71,12 @@ DJANGO_SETTINGS_MODULE = "config.settings.test"
 pythonpath = ["."]
 testpaths = ["tests"]
 addopts = "--strict-markers --strict-config -ra"
+markers = [
+    "spec8: one of the nine mandatory SPEC section 8 tests; must be listed in tests/spec8_manifest.txt",
+    "slow: walk-forward or backfill runs on real data; local only",
+    "e2e: Playwright browser tests against a live server",
+    "live: calls real external APIs; never runs in CI",
+]
 
 [tool.coverage.run]
 source = ["apps", "config"]
