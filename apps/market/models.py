@@ -281,3 +281,156 @@ class FinancialStatement(models.Model):
 
     def __str__(self) -> str:
         return f"{self.stock_id} {self.period} {self.fin_type}"
+
+
+class IndexId(models.TextChoices):
+    TAIEX = "TAIEX", "加權指數"
+    TPEX = "TPEX", "櫃買指數"
+    SOX = "SOX", "費城半導體指數"
+    TSM_ADR = "TSM_ADR", "台積電 ADR"
+    USDTWD = "USDTWD", "美元兌台幣"
+
+
+class IndexDaily(models.Model):
+    """Daily close of market series; US series keep their own US trading date (SPEC §6)."""
+
+    pk = models.CompositePrimaryKey("index_id", "date")
+    index_id = models.CharField(max_length=16, choices=IndexId.choices)
+    date = models.DateField()
+    close = models.DecimalField(max_digits=16, decimal_places=4)
+    volume = models.BigIntegerField(null=True, blank=True)
+
+    class Meta:
+        db_table = "index_daily"
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(index_id__in=IndexId.values), name="index_daily_index_id_valid"
+            ),
+            models.CheckConstraint(
+                condition=models.Q(close__gt=0), name="index_daily_close_positive"
+            ),
+            models.CheckConstraint(
+                condition=non_negative("volume"), name="index_daily_volume_gte_0"
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.index_id} {self.date}"
+
+
+class MacroIndicator(models.Model):
+    """Monthly macro series such as the business-cycle signal, visible from announce_date."""
+
+    pk = models.CompositePrimaryKey("indicator_id", "period")
+    indicator_id = models.CharField(max_length=32)
+    period = models.CharField(max_length=7, verbose_name="期間（YYYY-MM）")
+    value = models.FloatField()
+    announce_date = models.DateField()
+
+    class Meta:
+        db_table = "macro_indicator"
+        indexes = [models.Index(fields=["announce_date"], name="macro_indicator_announce_idx")]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(period__regex=MONTH_PERIOD), name="macro_indicator_period_format"
+            ),
+            models.CheckConstraint(condition=finite("value"), name="macro_indicator_value_finite"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.indicator_id} {self.period}"
+
+
+class ShareChangeReason(models.TextChoices):
+    UNKNOWN = "unknown", "未知"
+    CAPITAL_INCREASE = "capital_increase", "增資"
+    CAPITAL_REDUCTION = "capital_reduction", "減資"
+    TREASURY_CANCELLATION = "treasury_cancellation", "庫藏股註銷"
+
+
+class SharesOutstanding(models.Model):
+    """Shares outstanding from effective_date until the next row for the same stock."""
+
+    pk = models.CompositePrimaryKey("stock_id", "effective_date")
+    stock_id = models.CharField(max_length=10)
+    effective_date = models.DateField()
+    shares = models.BigIntegerField(verbose_name="流通股數（股）")
+    reason = models.CharField(
+        max_length=32, choices=ShareChangeReason.choices, default=ShareChangeReason.UNKNOWN
+    )
+
+    class Meta:
+        db_table = "shares_outstanding"
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(shares__gt=0), name="shares_outstanding_shares_positive"
+            ),
+            models.CheckConstraint(
+                condition=models.Q(reason__in=ShareChangeReason.values),
+                name="shares_outstanding_reason_valid",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.stock_id} from {self.effective_date}"
+
+
+class DailyValuation(models.Model):
+    """Exchange-published P/E, P/B and dividend yield (a fraction); P/E is blank for losses."""
+
+    pk = models.CompositePrimaryKey("stock_id", "date")
+    stock_id = models.CharField(max_length=10)
+    date = models.DateField()
+    pe = models.FloatField(null=True, blank=True)
+    pb = models.FloatField(null=True, blank=True)
+    dividend_yield = models.FloatField(null=True, blank=True)
+
+    class Meta:
+        db_table = "daily_valuation"
+        indexes = [models.Index(fields=["date"], name="daily_valuation_date_idx")]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(pe__gt=0, pb__gt=0) & non_negative("dividend_yield"),
+                name="daily_valuation_ranges",
+            ),
+            models.CheckConstraint(
+                condition=finite("pe", "pb", "dividend_yield"), name="daily_valuation_finite"
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.stock_id} {self.date}"
+
+
+class DispositionType(models.TextChoices):
+    ATTENTION = "attention", "注意"
+    DISPOSITION = "disposition", "處置"
+    FULL_DELIVERY = "full_delivery", "全額交割"
+
+
+class DispositionEvent(models.Model):
+    """Attention, disposition or full-delivery period; end_date is blank while still open."""
+
+    pk = models.CompositePrimaryKey("stock_id", "start_date", "type")
+    stock_id = models.CharField(max_length=10)
+    start_date = models.DateField()
+    type = models.CharField(max_length=16, choices=DispositionType.choices)
+    end_date = models.DateField(null=True, blank=True)
+
+    class Meta:
+        db_table = "disposition_event"
+        indexes = [models.Index(fields=["start_date"], name="disposition_start_idx")]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(type__in=DispositionType.values),
+                name="disposition_event_type_valid",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(end_date__isnull=True)
+                | models.Q(end_date__gte=models.F("start_date")),
+                name="disposition_event_end_after_start",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.stock_id} {self.type} from {self.start_date}"
