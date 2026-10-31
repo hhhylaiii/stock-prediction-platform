@@ -5,11 +5,15 @@ from functools import cache
 from django.conf import settings
 
 from apps.etl.adapters.base import BaseAdapter
+from apps.etl.adapters.finmind import FinmindAdapter
 from apps.etl.adapters.twse import TwseAdapter
 from apps.etl.ratelimit import RateLimit, RateLimiter
 from apps.market.calendar import TradingDays
 
-ADAPTERS: dict[str, type[BaseAdapter]] = {TwseAdapter.source: TwseAdapter}
+ADAPTERS: dict[str, type[BaseAdapter]] = {
+    TwseAdapter.source: TwseAdapter,
+    FinmindAdapter.source: FinmindAdapter,
+}
 
 
 @cache
