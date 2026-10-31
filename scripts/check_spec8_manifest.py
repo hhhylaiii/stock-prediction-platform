@@ -1,6 +1,7 @@
 """Fail when tests marked `spec8` and the node ids in the spec8 manifest disagree."""
 
 import argparse
+import re
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -8,6 +9,7 @@ from pathlib import Path
 
 DEFAULT_MANIFEST = Path("tests/spec8_manifest.txt")
 NO_TESTS_COLLECTED = 5
+NODE_ID_RE = re.compile(r"^[^\s:]+\.py::\S")
 
 
 class CollectionError(RuntimeError):
@@ -40,7 +42,18 @@ def collect_spec8(pytest_args: Sequence[str]) -> set[str]:
     proc = subprocess.run(command, capture_output=True, text=True, check=False)
     if proc.returncode not in (0, NO_TESTS_COLLECTED):
         raise CollectionError(proc.stdout + proc.stderr)
-    return {base_node_id(line.strip()) for line in proc.stdout.splitlines() if "::" in line}
+    return parse_node_ids(proc.stdout)
+
+
+def parse_node_ids(output: str) -> set[str]:
+    """Node ids from `--collect-only -q`, which lists them before the first blank line."""
+    node_ids: set[str] = set()
+    for line in output.splitlines():
+        if not line.strip():
+            break
+        if NODE_ID_RE.match(line):
+            node_ids.add(base_node_id(line.strip()))
+    return node_ids
 
 
 def compare(manifest: set[str], collected: set[str]) -> list[str]:

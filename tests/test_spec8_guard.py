@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pytest
 
+from tests import spec8_guard
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PYTEST_INI = "[pytest]\nmarkers =\n    spec8: mandatory spec section 8 test\n"
 CONFTEST = (
@@ -65,3 +67,8 @@ def test_passing_spec8_and_skipped_ordinary_tests_pass(tmp_path: Path) -> None:
     result = _run_suite(tmp_path, module)
     assert result.returncode == 0, result.stdout
     assert "1 passed, 1 skipped" in result.stdout
+
+
+def test_repo_conftest_registers_the_guard(pytestconfig: pytest.Config) -> None:
+    impls = pytestconfig.pluginmanager.hook.pytest_runtest_makereport.get_hookimpls()
+    assert any(impl.function is spec8_guard.pytest_runtest_makereport for impl in impls)

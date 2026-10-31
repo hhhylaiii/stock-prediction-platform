@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.check_spec8_manifest import base_node_id, compare, read_manifest
+from scripts.check_spec8_manifest import base_node_id, compare, parse_node_ids, read_manifest
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "check_spec8_manifest.py"
 PYTEST_INI = "[pytest]\nmarkers =\n    spec8: mandatory spec section 8 test\n"
@@ -106,3 +106,23 @@ def test_collection_error_exits_2(tmp_path: Path) -> None:
     result = _run(tmp_path, [])
     assert result.returncode == 2
     assert "could not run" in result.stderr
+
+
+def test_parse_node_ids_ignores_warning_summary_lines() -> None:
+    output = (
+        "test_a.py::test_listed\n"
+        "test_a.py::test_param[1]\n"
+        "\n"
+        "=============== warnings summary ===============\n"
+        "test_a.py:5: UserWarning: module level :: warning\n"
+        "  warnings.warn('module level :: warning')\n"
+    )
+    assert parse_node_ids(output) == {"test_a.py::test_listed", "test_a.py::test_param"}
+
+
+def test_collection_warnings_with_double_colon_do_not_fail(suite: Path) -> None:
+    module = (suite / "test_a.py").read_text(encoding="utf-8")
+    warned = "import warnings\n\nwarnings.warn('module level :: warning')\n" + module
+    (suite / "test_a.py").write_text(warned, encoding="utf-8")
+    result = _run(suite, ["test_a.py::test_listed", "test_a.py::test_param"])
+    assert result.returncode == 0, result.stdout + result.stderr

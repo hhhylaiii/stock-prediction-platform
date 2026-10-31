@@ -15,8 +15,9 @@ ALLOWED_DIRECTIVES = (
     re.compile(r"# pragma: no (cover|branch)"),
     re.compile(r"# fmt: (off|on|skip)"),
 )
-ALLOWED_HELP = ", ".join(
-    ("#! on line 1", "# noqa[: codes]", "# type: ignore[codes]", "# pragma: no cover", "# fmt: off")
+ALLOWED_HELP = (
+    "#! on line 1, # noqa[: codes], # type: ignore[codes], "
+    "# pragma: no cover|branch, # fmt: off|on|skip, each alone on its comment"
 )
 CHECKED_SUFFIXES = (".py", ".toml", ".yml", ".yaml", ".sh")
 HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
@@ -120,14 +121,30 @@ def git(repo: Path, *args: str) -> str:
     ).stdout.decode("utf-8", errors="replace")
 
 
-def changed_files(base: str, repo: Path) -> list[str]:
-    output = git(repo, "diff", "--name-only", "-z", "--diff-filter=ACMR", f"{base}...HEAD")
-    return sorted(path for path in output.split("\0") if path and is_checked(path))
+def changed_files(base: str, repo: Path) -> list[tuple[str, tuple[str, ...]]]:
+    """Checked files changed since base, each with the pathspec that diffs it rename-aware."""
+    fields = git(
+        repo, "diff", "--name-status", "-z", "-M", "--diff-filter=ACMR", f"{base}...HEAD"
+    ).split("\0")
+    entries: list[tuple[str, tuple[str, ...]]] = []
+    index = 0
+    while index < len(fields) and fields[index]:
+        status = fields[index]
+        pathspec: tuple[str, ...]
+        if status[0] in "RC":
+            pathspec = (fields[index + 1], fields[index + 2])
+            index += 3
+        else:
+            pathspec = (fields[index + 1],)
+            index += 2
+        if is_checked(pathspec[-1]):
+            entries.append((pathspec[-1], pathspec))
+    return sorted(entries)
 
 
 def find_violations(base: str, repo: Path) -> list[Violation]:
     violations: list[Violation] = []
-    for path in changed_files(base, repo):
+    for path, pathspec in changed_files(base, repo):
         diff = git(
             repo,
             "diff",
@@ -135,9 +152,10 @@ def find_violations(base: str, repo: Path) -> list[Violation]:
             "--no-color",
             "--no-ext-diff",
             "--no-textconv",
+            "-M",
             f"{base}...HEAD",
             "--",
-            path,
+            *pathspec,
         )
         lines = added_lines(diff)
         source = git(repo, "show", f"HEAD:{path}")

@@ -228,12 +228,30 @@ def test_unusual_paths_and_configs_are_still_checked(tmp_path: Path) -> None:
     ]
 
 
-def test_non_utf8_files_in_the_diff_do_not_crash(tmp_path: Path) -> None:
+def test_non_utf8_checked_file_reports_instead_of_crashing(tmp_path: Path) -> None:
     repo = _repo_with_change(tmp_path, base={"a.py": "x = 1\n"}, head={"a.py": "x = 2\n"})
-    sample = repo / "tests" / "fixtures" / "sample.csv"
+    sample = repo / "tests" / "fixtures" / "sample.yml"
     sample.parent.mkdir(parents=True)
-    sample.write_bytes("代號,名稱\n2330,台積電 # 註\n".encode("big5"))
+    sample.write_bytes("name: 台積電 # 註\n".encode("big5"))
     _git(repo, "add", "-A")
     _git(repo, "commit", "-q", "--no-gpg-sign", "-m", "big5")
     result = _run(repo)
-    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.returncode == 1, result.stderr
+    assert len(result.stdout.splitlines()) == 1
+    assert result.stdout.startswith("tests/fixtures/sample.yml:1: #")
+    assert "Traceback" not in result.stderr
+
+
+def test_renamed_file_only_checks_lines_added_in_the_change(tmp_path: Path) -> None:
+    repo = _repo_with_change(
+        tmp_path,
+        base={"old.py": "# legacy\nx = 1\n"},
+        head={"other.py": "z = 0\n"},
+    )
+    _git(repo, "mv", "old.py", "new.py")
+    (repo / "new.py").write_text("# legacy\nx = 1\ny = 2  # added\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "--no-gpg-sign", "-m", "rename")
+    result = _run(repo)
+    assert result.returncode == 1, result.stderr
+    assert result.stdout.splitlines() == ["new.py:3: # added"]
