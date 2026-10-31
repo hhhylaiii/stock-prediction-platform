@@ -10,7 +10,7 @@ env = environ.Env()
 environ.Env.read_env(env.str("DJANGO_ENV_FILE", default=str(BASE_DIR / ".env")))
 
 SECRET_KEY = env.str("DJANGO_SECRET_KEY", default="")
-DEBUG = env.bool("DJANGO_DEBUG", default=False)
+DEBUG = False
 ALLOWED_HOSTS: list[str] = env.list("DJANGO_ALLOWED_HOSTS", default=[])
 
 INSTALLED_APPS = [
@@ -83,7 +83,6 @@ STATIC_ROOT = BASE_DIR / "staticfiles"
 CELERY_BROKER_URL = env.str("CELERY_BROKER_URL", default="redis://localhost:6379/0")
 CELERY_RESULT_BACKEND = env.str("CELERY_RESULT_BACKEND", default="")
 CELERY_TIMEZONE = TIME_ZONE
-CELERY_ENABLE_UTC = False
 CELERY_TASK_ACKS_LATE = True
 CELERY_WORKER_PREFETCH_MULTIPLIER = 1
 CELERY_BEAT_SCHEDULE: dict[str, dict[str, object]] = {}

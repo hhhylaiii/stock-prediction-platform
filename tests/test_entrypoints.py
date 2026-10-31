@@ -17,6 +17,6 @@ def test_asgi_application_is_callable() -> None:
 
 def test_celery_reads_django_settings() -> None:
     assert str(celery_app.conf.timezone) == "Asia/Taipei"
-    assert celery_app.conf.enable_utc is False
     assert celery_app.conf.broker_url == settings.CELERY_BROKER_URL
-    assert celery_app.conf.beat_schedule == settings.CELERY_BEAT_SCHEDULE
+    assert celery_app.conf.task_acks_late is True
+    assert celery_app.conf.worker_prefetch_multiplier == 1

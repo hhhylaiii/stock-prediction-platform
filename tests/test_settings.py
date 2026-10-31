@@ -52,8 +52,7 @@ def test_database_is_reachable_postgres() -> None:
 
 
 @pytest.mark.usefixtures("isolated_env")
-def test_dev_settings_enable_debug(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("DJANGO_DEBUG", raising=False)
+def test_dev_settings_enable_debug() -> None:
     module = _fresh_import("config.settings.dev")
     assert module.DEBUG is True
     assert module.TIME_ZONE == "Asia/Taipei"
