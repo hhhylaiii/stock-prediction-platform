@@ -39,7 +39,7 @@ class RateLimit:
 
 
 class RateLimiter:
-    """Spaces calls at least min_interval apart and retries retryable failures."""
+    """Keeps min_interval between one request ending and the next starting; retries failures."""
 
     def __init__(
         self,
@@ -50,24 +50,31 @@ class RateLimiter:
         self.limit = limit
         self._clock = clock if clock is not None else time.monotonic
         self._sleep = sleep if sleep is not None else time.sleep
-        self._last_call: float | None = None
+        self._last_finished: float | None = None
 
     def wait(self) -> None:
-        if self._last_call is not None:
-            remaining = self.limit.min_interval - (self._clock() - self._last_call)
+        """Sleep until min_interval has passed since the previous request finished."""
+        if self._last_finished is not None:
+            remaining = self.limit.min_interval - (self._clock() - self._last_finished)
             if remaining > 0:
                 self._sleep(remaining)
-        self._last_call = self._clock()
 
     def call(self, fn: Callable[[], T]) -> T:
         attempt = 0
         while True:
             self.wait()
             try:
-                return fn()
+                result = fn()
             except RetryableError as exc:
+                self._last_finished = self._clock()
                 if attempt >= self.limit.max_retries:
                     raise
                 throttled = isinstance(exc, ThrottledError)
                 self._sleep(self.limit.cooldown if throttled else self.limit.backoff(attempt))
                 attempt += 1
+                continue
+            except BaseException:
+                self._last_finished = self._clock()
+                raise
+            self._last_finished = self._clock()
+            return result

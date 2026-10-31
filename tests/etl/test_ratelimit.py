@@ -105,3 +105,30 @@ def test_from_settings_reads_every_field() -> None:
     )
     assert limit == RateLimit(3.0, 2, 1.0, 8.0, 60.0)
     assert [limit.backoff(n) for n in range(5)] == [1.0, 2.0, 4.0, 8.0, 8.0]
+
+
+def test_interval_counts_from_when_the_previous_request_finished() -> None:
+    clock = FakeClock()
+    limiter = _limiter(clock)
+
+    def slow() -> int:
+        clock.now += 5.0
+        return 1
+
+    limiter.call(slow)
+    limiter.call(lambda: 2)
+    assert clock.sleeps == [pytest.approx(3.0)]
+
+
+def test_failed_request_also_starts_the_interval() -> None:
+    clock = FakeClock()
+    limiter = _limiter(clock)
+
+    def broken() -> int:
+        clock.now += 5.0
+        raise ValueError("bad payload")
+
+    with pytest.raises(ValueError, match="bad payload"):
+        limiter.call(broken)
+    limiter.call(lambda: 2)
+    assert clock.sleeps == [pytest.approx(3.0)]
