@@ -251,3 +251,20 @@ def test_an_earlier_range_loaded_later_leaves_no_repeated_count(
         "effective_date", "shares"
     )
     assert list(stored) == [(date(2013, 8, 1), 5_010_700_000), (date(2013, 9, 6), 5_524_300_000)]
+
+
+@responses.activate
+def test_an_ex_date_on_a_typhoon_closure_is_kept(
+    mock: Callable[..., None], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    closed = date(2024, 7, 25)
+    calendar = TradingDays(
+        (day for day in WEEKDAYS.between(WEEKDAYS.start, WEEKDAYS.end) if day != closed),
+        WEEKDAYS.start,
+        WEEKDAYS.end,
+    )
+    monkeypatch.setattr("apps.etl.adapters.TradingDays.from_db", lambda: calendar)
+    span = ("2024-07-01", "2024-07-31")
+    _mock_dividends(mock, span)
+    _backfill("dividend_event", "2884", span)
+    assert DividendEvent.objects.get().ex_date == closed

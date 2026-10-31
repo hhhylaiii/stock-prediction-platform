@@ -133,9 +133,8 @@ RAW_NAMES = {
     "TaiwanStockDividend": "dividend_policy",
     "TaiwanStockDividendResult": "dividend_result",
 }
-DATE_COLUMNS = {
+TRADING_DATE_COLUMNS = {
     "daily_price": "date",
-    "dividend_event": "ex_date",
     "daily_valuation": "date",
     "shares_outstanding": "effective_date",
 }
@@ -212,7 +211,8 @@ class FinmindAdapter(BaseAdapter):
                 "shares_outstanding": share_counts,
             }[dataset]
             frame = normalizer(parts[FINMIND_DATASETS[dataset][0]], stock_id)
-        self._require_trading_days(frame[DATE_COLUMNS[dataset]], dataset, stock_id)
+        if dataset in TRADING_DATE_COLUMNS:
+            self._require_trading_days(frame[TRADING_DATE_COLUMNS[dataset]], dataset, stock_id)
         return frame
 
     def upsert(self, dataset: str, frame: pd.DataFrame) -> int:
@@ -242,7 +242,7 @@ class FinmindAdapter(BaseAdapter):
         return rows
 
     def _require_trading_days(self, days: pd.Series, dataset: str, stock_id: str) -> None:
-        """SPEC §5: a batch with a date outside trading_calendar is rejected whole."""
+        """SPEC §5 rejects a batch dated off the calendar; ex-dates may fall on closures."""
         for day in sorted(set(days)):
             if not self.calendar.is_trading_day(day):
                 raise SchemaChangedError(
