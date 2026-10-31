@@ -1,5 +1,6 @@
 from collections.abc import Callable
 from datetime import date
+from io import StringIO
 from typing import Any
 
 import pytest
@@ -45,6 +46,7 @@ def test_command_writes_listed_and_delisted_stocks() -> None:
         "success",
         20,
     )
+    assert run.checkpoint == {"listed": 14, "delisted": 6, "unlisted_without_delisting": 0}
     assert RawFinmind.objects.filter(dataset="stock_info").count() == 1
     assert RawTwse.objects.filter(dataset="delisted").count() == 1
     assert RawTpex.objects.filter(dataset="delisted").count() == 1
@@ -106,3 +108,32 @@ def test_schema_change_is_a_command_error(load_fixture: Callable[[str], Any]) ->
     with pytest.raises(CommandError, match="SchemaChangedError"):
         call_command("load_stock_master")
     assert StockMaster.objects.count() == 0
+
+
+@responses.activate
+@pytest.mark.django_db
+@pytest.mark.usefixtures("sources")
+def test_a_much_shorter_listing_than_last_time_is_refused() -> None:
+    EtlRun.objects.create(
+        source="stock_master",
+        dataset="stock_master",
+        start_date=date(2026, 10, 31),
+        end_date=date(2026, 10, 31),
+        status=EtlRun.Status.SUCCESS,
+        checkpoint={"listed": 100, "delisted": 6, "unlisted_without_delisting": 0},
+    )
+    with pytest.raises(CommandError, match="down from 100"):
+        call_command("load_stock_master")
+    assert StockMaster.objects.count() == 0
+
+
+@responses.activate
+@pytest.mark.django_db
+@pytest.mark.usefixtures("sources")
+def test_codes_that_vanish_without_a_delisting_are_reported() -> None:
+    StockMaster.objects.create(stock_id="0061", name="寶滬深", market=Market.TWSE)
+    out = StringIO()
+    call_command("load_stock_master", stdout=out)
+    assert "1 codes no longer listed and on no delisting list: 0061" in out.getvalue()
+    assert StockMaster.objects.get(stock_id="0061").delist_date is None
+    assert EtlRun.objects.get().checkpoint["unlisted_without_delisting"] == 1

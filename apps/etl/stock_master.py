@@ -6,6 +6,7 @@ from typing import Any
 
 import pandas as pd
 
+from apps.etl.adapters.twse import is_foreign_currency_etf
 from apps.etl.errors import SchemaChangedError
 from apps.etl.roc import parse_roc_date
 from apps.market.models import Market
@@ -19,6 +20,8 @@ AGGREGATE_INDUSTRIES = frozenset({"電子工業", "化學生技醫療", "創新�
 STOCK_CODE = re.compile(r"[0-9A-Z]{4,6}")
 DELISTING_COLUMNS = ["stock_id", "name", "market", "delist_date"]
 MASTER_COLUMNS = ["stock_id", "name", "market", "industry", "delist_date"]
+COMPANY_SUFFIX = "股份有限公司"
+LISTED_DROP_LIMIT = 0.05
 
 
 def stock_code(text: Any) -> str:
@@ -26,6 +29,12 @@ def stock_code(text: Any) -> str:
     if STOCK_CODE.fullmatch(code) is None:
         raise SchemaChangedError(f"unexpected stock code {text!r}")
     return code
+
+
+def check_listed_count(listed: int, previous: int | None) -> None:
+    """A snapshot listing far fewer stocks than the last load is taken as incomplete."""
+    if previous and listed < previous * (1 - LISTED_DROP_LIMIT):
+        raise SchemaChangedError(f"TaiwanStockInfo lists {listed} stocks, down from {previous}")
 
 
 def pick_industry(categories: Sequence[str]) -> str:
@@ -41,7 +50,7 @@ def _delistings(
     records = [
         {
             "stock_id": stock_code(row[code_at]),
-            "name": str(row[name_at]).strip(),
+            "name": str(row[name_at]).strip().removesuffix(COMPANY_SUFFIX),
             "market": market,
             "delist_date": parse_roc_date(row[date_at]),
         }
@@ -73,6 +82,7 @@ def _listed_info(info_rows: Sequence[dict[str, Any]]) -> pd.DataFrame:
         info["type"].isin(list(INFO_MARKETS))
         & ~info["industry_category"].isin(list(EXCLUDED_INDUSTRIES))
         & (info["date"] != "None")
+        & ~info["stock_id"].astype(str).str.strip().map(is_foreign_currency_etf)
     )
     return info.loc[keep].sort_values(["stock_id", "date"], ascending=[True, False])
 

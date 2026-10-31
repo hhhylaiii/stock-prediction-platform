@@ -7,7 +7,12 @@ import pytest
 
 from apps.etl.errors import SchemaChangedError
 from apps.etl.roc import parse_roc_date
-from apps.etl.stock_master import build_stock_master, tpex_delistings, twse_delistings
+from apps.etl.stock_master import (
+    build_stock_master,
+    check_listed_count,
+    tpex_delistings,
+    twse_delistings,
+)
 from apps.market.models import Market
 
 
@@ -92,9 +97,9 @@ def test_reused_code_belongs_to_the_current_company(master: pd.DataFrame) -> Non
         ("3454", Market.TWSE, date(2026, 3, 27), "晶睿", "光電業"),
         ("2867", Market.TWSE, date(2026, 9, 1), "三商壽", "金融保險"),
         ("2888", Market.TWSE, date(2025, 7, 24), "新光金", "金融保險"),
-        ("4801", Market.TPEX, date(2013, 4, 30), "高盛電子科技股份有限公司", ""),
+        ("4801", Market.TPEX, date(2013, 4, 30), "高盛電子科技", ""),
         ("5901", Market.TPEX, date(2006, 12, 26), "中友百貨", ""),
-        ("3126", Market.TPEX, date(2016, 4, 6), "信億科技股份有限公司", ""),
+        ("3126", Market.TPEX, date(2016, 4, 6), "信億科技", ""),
     ],
 )
 def test_delisted_stocks_keep_their_last_listing(
@@ -185,3 +190,41 @@ def test_a_snapshot_missing_a_market_is_a_schema_change(
     ]
     with pytest.raises(SchemaChangedError, match=f"no current {market}"):
         build_stock_master(info, twse_delistings_empty(), tpex_delistings_empty())
+
+
+def _today(code: str, industry: str, market: str = "twse") -> dict[str, str]:
+    return {
+        "industry_category": industry,
+        "stock_id": code,
+        "stock_name": code,
+        "type": market,
+        "date": "2026-11-01",
+    }
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        _today("IX0001", "Index"),
+        _today("IX0002", "所有證券"),
+        _today("TPEx", "大盤", "tpex"),
+        _today("00636K", "ETF"),
+    ],
+    ids=["index", "all-securities", "market-aggregate", "foreign-currency"],
+)
+def test_indices_and_foreign_currency_counters_listed_today_are_left_out(
+    load_fixture: Callable[[str], Any], row: dict[str, str]
+) -> None:
+    info = [*load_fixture("finmind/stock_info.json")["data"], row]
+    master = build_stock_master(info, twse_delistings_empty(), tpex_delistings_empty())
+    assert row["stock_id"] not in set(master["stock_id"])
+
+
+@pytest.mark.parametrize(("listed", "previous"), [(95, 100), (100, None), (120, 100)])
+def test_listed_count_close_to_the_last_load_is_accepted(listed: int, previous: int | None) -> None:
+    check_listed_count(listed, previous)
+
+
+def test_listed_count_far_below_the_last_load_is_a_schema_change() -> None:
+    with pytest.raises(SchemaChangedError, match="lists 94 stocks, down from 100"):
+        check_listed_count(94, 100)
