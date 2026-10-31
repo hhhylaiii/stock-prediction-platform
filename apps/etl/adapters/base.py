@@ -38,6 +38,18 @@ def payload_hash(payload: Any) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def store_raw(
+    raw_model: type[RawRecord], dataset: str, params: Mapping[str, Any], payload: Any
+) -> RawRecord:
+    """Keep one row per distinct response; refetching the same payload adds nothing."""
+    record, _ = raw_model._default_manager.get_or_create(
+        dataset=dataset,
+        source_hash=payload_hash(payload),
+        defaults={"request_params": dict(params), "payload": payload},
+    )
+    return record
+
+
 class BaseAdapter(ABC):
     """One adapter per source; each dataset maps to one standard table."""
 
@@ -64,12 +76,7 @@ class BaseAdapter(ABC):
         """Write standard rows by primary key and return how many were written."""
 
     def save_raw(self, dataset: str, params: Mapping[str, Any], payload: Any) -> RawRecord:
-        record, _ = self.raw_model._default_manager.get_or_create(
-            dataset=dataset,
-            source_hash=payload_hash(payload),
-            defaults={"request_params": dict(params), "payload": payload},
-        )
-        return record
+        return store_raw(self.raw_model, dataset, params, payload)
 
     def require_dataset(self, dataset: str) -> None:
         if dataset not in self.datasets:
