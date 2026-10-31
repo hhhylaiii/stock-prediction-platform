@@ -4,10 +4,12 @@ from typing import Any
 
 import pytest
 import responses
+from django.conf import settings
 from django.core.management import call_command
 from django.core.management.base import CommandError
 from responses import matchers
 
+from apps.etl.adapters import build_adapter
 from apps.etl.models import EtlRun, RawTwse
 from apps.market.calendar import TradingDays
 from apps.market.models import DailyPrice
@@ -134,3 +136,37 @@ def test_refused_request_is_a_command_error() -> None:
     with pytest.raises(CommandError, match="SourceRequestError"):
         call_command("fetch", source="twse", dataset="daily_price", date="2026-10-28")
     assert EtlRun.objects.get().status == "failed"
+
+
+@responses.activate
+@pytest.mark.usefixtures("october_2026_in_db")
+def test_exhausted_retries_are_a_command_error() -> None:
+    responses.get(URL, status=503)
+    with pytest.raises(CommandError, match="RetryableError"):
+        call_command("fetch", source="twse", dataset="daily_price", date="2026-10-28")
+    assert EtlRun.objects.get().status == "failed"
+    assert len(responses.calls) == settings.ETL_RATE_LIMITS["twse"]["max_retries"] + 1
+
+
+@responses.activate
+@pytest.mark.usefixtures("october_2026_in_db")
+def test_future_date_is_refused_before_any_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("apps.etl.adapters.base.timezone.localdate", lambda: date(2026, 10, 27))
+    with pytest.raises(CommandError, match="after today"):
+        call_command("fetch", source="twse", dataset="daily_price", date="2026-10-28")
+    assert len(responses.calls) == 0
+    assert EtlRun.objects.count() == 0
+
+
+def test_adapters_of_one_source_share_a_limiter(
+    october_2026: TradingDays, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    slept: list[float] = []
+    monkeypatch.setattr("apps.etl.ratelimit.time.sleep", slept.append)
+    first = build_adapter("twse", october_2026)
+    second = build_adapter("twse", october_2026)
+    assert first.limiter is second.limiter
+    first.limiter.call(lambda: 1)
+    second.limiter.call(lambda: 2)
+    assert len(slept) == 1
+    assert slept[0] > settings.ETL_RATE_LIMITS["twse"]["min_interval"] - 1.0

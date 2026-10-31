@@ -38,6 +38,14 @@ class RateLimit:
         return float(min(self.backoff_max, self.backoff_base * 2.0**attempt))
 
 
+def _monotonic() -> float:
+    return time.monotonic()
+
+
+def _sleep(seconds: float) -> None:
+    time.sleep(seconds)
+
+
 class RateLimiter:
     """Keeps min_interval between one request ending and the next starting; retries failures."""
 
@@ -48,8 +56,8 @@ class RateLimiter:
         sleep: Callable[[float], None] | None = None,
     ) -> None:
         self.limit = limit
-        self._clock = clock if clock is not None else time.monotonic
-        self._sleep = sleep if sleep is not None else time.sleep
+        self._clock = clock if clock is not None else _monotonic
+        self._sleep = sleep if sleep is not None else _sleep
         self._last_finished: float | None = None
 
     def wait(self) -> None:

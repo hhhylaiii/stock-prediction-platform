@@ -1,10 +1,11 @@
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from apps.etl.adapters import limiter_for
 from apps.etl.ratelimit import RateLimit, RateLimiter
 from apps.market.calendar import TradingDays
 from apps.market.models import TradingCalendar
@@ -23,6 +24,13 @@ class RecordingSleep:
 
     def __call__(self, seconds: float) -> None:
         self.calls.append(seconds)
+
+
+@pytest.fixture(autouse=True)
+def fresh_shared_limiters() -> Iterator[None]:
+    limiter_for.cache_clear()
+    yield
+    limiter_for.cache_clear()
 
 
 @pytest.fixture

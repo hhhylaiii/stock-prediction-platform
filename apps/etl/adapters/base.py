@@ -79,6 +79,9 @@ class BaseAdapter(ABC):
 
     def trading_days(self, start: date, end: date) -> tuple[date, ...]:
         """Trading days to process; a single requested date must itself be a trading day."""
+        today = timezone.localdate()
+        if end > today:
+            raise CalendarError(f"{end} is after today ({today}); nothing has been published")
         if start == end and not self.calendar.is_trading_day(start):
             raise NotATradingDayError(f"{start} is not a trading day")
         days = self.calendar.between(start, end)
