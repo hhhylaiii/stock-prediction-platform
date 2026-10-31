@@ -87,6 +87,21 @@ CELERY_TASK_ACKS_LATE = True
 CELERY_WORKER_PREFETCH_MULTIPLIER = 1
 CELERY_BEAT_SCHEDULE: dict[str, dict[str, object]] = {}
 
+TWSE_BASE_URL = env.str("TWSE_BASE_URL", default="https://www.twse.com.tw")
+TWSE_TIMEOUT = env.float("TWSE_TIMEOUT", default=30.0)
+ETL_USER_AGENT = env.str(
+    "ETL_USER_AGENT", default="stock-prediction-platform/0.1 (personal research)"
+)
+ETL_RATE_LIMITS: dict[str, dict[str, float]] = {
+    "twse": {
+        "min_interval": env.float("TWSE_MIN_INTERVAL", default=3.5),
+        "max_retries": env.int("TWSE_MAX_RETRIES", default=4),
+        "backoff_base": env.float("TWSE_BACKOFF_BASE", default=5.0),
+        "backoff_max": env.float("TWSE_BACKOFF_MAX", default=120.0),
+        "cooldown": env.float("TWSE_COOLDOWN", default=900.0),
+    },
+}
+
 LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,
