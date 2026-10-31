@@ -23,7 +23,6 @@ POLICY_KEYS = (
     "CashEarningsDistribution",
     "CashStatutorySurplus",
     "CashExDividendTradingDate",
-    "AnnouncementDate",
 )
 RESULT_KEYS = ("date", "stock_id", "before_price", "after_price")
 EVENT_COLUMNS = [
@@ -32,7 +31,6 @@ EVENT_COLUMNS = [
     "cash_dividend",
     "stock_dividend",
     "adj_factor",
-    "announce_date",
 ]
 VALUATION_KEYS = ("date", "stock_id", "PER", "PBR", "dividend_yield")
 VALUATION_COLUMNS = ["stock_id", "date", "pe", "pb", "dividend_yield"]
@@ -115,31 +113,34 @@ def _ex_factor(row: Row, stock_id: str) -> float | None:
     return None
 
 
-def dividend_events(policy: Iterable[Row], results: Iterable[Row], stock_id: str) -> pd.DataFrame:
-    """One dividend_event per ex-date: amounts from the policy, adj_factor from the result."""
+def dividend_events(
+    policy: Iterable[Row],
+    results: Iterable[Row],
+    stock_id: str,
+    start: date = date.min,
+    end: date = date.max,
+) -> pd.DataFrame:
+    """One dividend_event per ex-date in range: amounts from the policy, factor from the result.
+
+    announce_date stays empty: FinMind's AnnouncementDate is sometimes the board date.
+    """
     events: dict[date, dict[str, Any]] = {}
 
     def event(day: date) -> dict[str, Any]:
-        return events.setdefault(
-            day, {"cash": Decimal(0), "stock": Decimal(0), "factor": None, "announced": []}
-        )
+        return events.setdefault(day, {"cash": Decimal(0), "stock": Decimal(0), "factor": None})
 
     for row in _checked(policy, POLICY_KEYS, "TaiwanStockDividend", stock_id):
-        announced = _optional_day(row["AnnouncementDate"], "TaiwanStockDividend")
         for kind, ex_key, keys in DIVIDEND_PARTS:
             ex_date = _optional_day(row[ex_key], "TaiwanStockDividend")
             if ex_date is None:
                 continue
             target = event(ex_date)
             target[kind] += sum(_decimal(row[key], "TaiwanStockDividend") for key in keys)
-            if announced is not None:
-                target["announced"].append(announced)
     for row in _checked(results, RESULT_KEYS, "TaiwanStockDividendResult", stock_id):
         event(_day(row["date"], "TaiwanStockDividendResult"))["factor"] = _ex_factor(row, stock_id)
     records = []
-    for ex_date in sorted(events):
+    for ex_date in sorted(day for day in events if start <= day <= end):
         found = events[ex_date]
-        announced = min(found["announced"], default=None)
         records.append(
             {
                 "ex_date": ex_date,
@@ -147,33 +148,35 @@ def dividend_events(policy: Iterable[Row], results: Iterable[Row], stock_id: str
                 "cash_dividend": found["cash"].quantize(DIVIDEND_PLACES).normalize(),
                 "stock_dividend": found["stock"].quantize(DIVIDEND_PLACES).normalize(),
                 "adj_factor": found["factor"],
-                "announce_date": announced if announced and announced <= ex_date else None,
             }
         )
     return pd.DataFrame(records, columns=EVENT_COLUMNS, dtype=object)
 
 
-def _positive(value: Any) -> float | None:
-    if isinstance(value, bool) or not isinstance(value, int | float):
+def _number(value: Any, label: str) -> float | None:
+    if value is None:
         return None
-    number = float(value)
-    return number if 0 < number < float("inf") else None
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise SchemaChangedError(f"FinMind {label} has a bad number {value!r}")
+    return float(value)
+
+
+def _positive(value: float | None) -> float | None:
+    return value if value is not None and 0 < value < float("inf") else None
 
 
 def valuations(rows: Iterable[Row], stock_id: str) -> pd.DataFrame:
     """TaiwanStockPER → daily_valuation; 0 means not published (losses), yield % → fraction."""
     records = []
     for row in _checked(rows, VALUATION_KEYS, "TaiwanStockPER", stock_id):
-        dividend_yield = row["dividend_yield"]
-        fraction = (
-            float(dividend_yield) / PERCENT if isinstance(dividend_yield, int | float) else None
-        )
+        dividend_yield = _number(row["dividend_yield"], "TaiwanStockPER")
+        fraction = dividend_yield / PERCENT if dividend_yield is not None else None
         records.append(
             {
                 "stock_id": stock_id,
                 "date": _day(row["date"], "TaiwanStockPER"),
-                "pe": _positive(row["PER"]),
-                "pb": _positive(row["PBR"]),
+                "pe": _positive(_number(row["PER"], "TaiwanStockPER")),
+                "pb": _positive(_number(row["PBR"], "TaiwanStockPER")),
                 "dividend_yield": fraction if fraction is not None and 0 <= fraction < 1 else None,
             }
         )
@@ -186,7 +189,11 @@ def share_counts(rows: Iterable[Row], stock_id: str) -> pd.DataFrame:
     records: list[dict[str, Any]] = []
     for row in sorted(checked, key=lambda item: str(item["date"])):
         shares = row["NumberOfSharesIssued"]
-        if not isinstance(shares, int) or shares <= 0:
+        if shares is None:
+            continue
+        if isinstance(shares, bool) or not isinstance(shares, int):
+            raise SchemaChangedError(f"FinMind TaiwanStockShareholding has a bad count {shares!r}")
+        if shares <= 0:
             continue
         if records and records[-1]["shares"] == shares:
             continue

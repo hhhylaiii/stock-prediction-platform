@@ -1,5 +1,6 @@
 from collections.abc import Callable
-from datetime import date
+from datetime import date, timedelta
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -26,8 +27,20 @@ URL = "https://api.finmindtrade.com/api/v4/data"
 AUGUST = ("2013-08-01", "2013-08-31")
 
 
+WEEKDAYS = TradingDays(
+    (
+        date.fromordinal(day)
+        for day in range(date(2010, 1, 1).toordinal(), date(2026, 12, 31).toordinal() + 1)
+        if date.fromordinal(day).weekday() < 5
+    ),
+    date(2010, 1, 1),
+    date(2026, 12, 31),
+)
+
+
 @pytest.fixture(autouse=True)
-def quiet(monkeypatch: pytest.MonkeyPatch, october_2026_in_db: TradingDays) -> None:
+def quiet(monkeypatch: pytest.MonkeyPatch, db: None) -> None:
+    monkeypatch.setattr("apps.etl.adapters.TradingDays.from_db", lambda: WEEKDAYS)
     monkeypatch.setattr("apps.etl.ratelimit.time.sleep", lambda seconds: None)
     monkeypatch.setattr("apps.etl.adapters.finmind.time.sleep", lambda seconds: None)
     for code in ("2330", "2884"):
@@ -69,9 +82,12 @@ def _factors(stock: str) -> dict[date, float]:
     return dict(rows)
 
 
-def _mock_dividends(mock: Callable[..., None]) -> None:
-    mock("TaiwanStockDividend", "dividend_2884", "2884", AUGUST)
-    mock("TaiwanStockDividendResult", "dividend_result_2884", "2884", AUGUST)
+def _mock_dividends(
+    mock: Callable[..., None], span: tuple[str, str] = AUGUST, **result: Any
+) -> None:
+    policy_end = (date.fromisoformat(span[1]) + timedelta(days=30)).isoformat()
+    mock("TaiwanStockDividend", "dividend_2884", "2884", (span[0], policy_end))
+    mock("TaiwanStockDividendResult", "dividend_result_2884", "2884", span, **result)
 
 
 def test_finmind_is_registered() -> None:
@@ -87,13 +103,8 @@ def test_prices_then_dividends_set_the_adjusted_factor(mock: Callable[..., None]
     _mock_dividends(mock)
     _backfill("dividend_event", "2884", AUGUST)
     factors = _factors("2884")
-    later = DividendEvent.objects.filter(ex_date__gt=date(2013, 8, 15))
-    expected_after = 1.0
-    for event in later:
-        assert event.adj_factor is not None
-        expected_after *= event.adj_factor
-    assert DividendEvent.objects.count() == 21
-    assert factors[date(2013, 8, 15)] == pytest.approx(expected_after)
+    assert DividendEvent.objects.count() == 1
+    assert factors[date(2013, 8, 15)] == 1.0
     assert factors[date(2013, 8, 14)] / factors[date(2013, 8, 15)] == pytest.approx(17.86 / 19.95)
     assert (
         RawFinmind.objects.filter(dataset__in=["dividend_policy", "dividend_result"]).count() == 2
@@ -157,3 +168,86 @@ def test_unknown_datasets_are_refused(october_2026: TradingDays) -> None:
     )
     with pytest.raises(ValueError, match="no dataset"):
         adapter.fetch("weekly_holding", date(2026, 10, 1), date(2026, 10, 2), "2330")
+
+
+@responses.activate
+def test_an_ex_date_near_the_range_end_keeps_its_amounts(mock: Callable[..., None]) -> None:
+    span = ("2013-08-01", "2013-08-20")
+    _mock_dividends(mock, span)
+    _backfill("dividend_event", "2884", span)
+    event = DividendEvent.objects.get()
+    assert (event.ex_date, event.cash_dividend, event.stock_dividend) == (
+        date(2013, 8, 15),
+        Decimal("0.3"),
+        Decimal("1.0"),
+    )
+    assert event.announce_date is None
+
+
+@responses.activate
+def test_a_rerun_without_the_result_keeps_the_stored_factor(mock: Callable[..., None]) -> None:
+    _mock_dividends(mock)
+    _backfill("dividend_event", "2884", AUGUST)
+    _mock_dividends(mock, data=[])
+    _backfill("dividend_event", "2884", AUGUST)
+    assert DividendEvent.objects.get().adj_factor == pytest.approx(17.86 / 19.95)
+
+
+@responses.activate
+def test_finmind_does_not_overwrite_rows_from_the_primary_source(
+    mock: Callable[..., None],
+) -> None:
+    DailyPrice.objects.create(
+        stock_id="2884", date=date(2013, 8, 14), close=Decimal("99"), volume=1, turnover=99
+    )
+    mock("TaiwanStockPrice", "price_2884_201308", "2884", AUGUST)
+    _backfill("daily_price", "2884", AUGUST)
+    assert DailyPrice.objects.get(date=date(2013, 8, 14)).close == Decimal("99")
+    assert DailyPrice.objects.count() == 21
+
+
+@responses.activate
+def test_nulls_from_finmind_become_blank_values(
+    mock: Callable[..., None], load_fixture: Callable[[str], Any]
+) -> None:
+    span = ("2026-10-27", "2026-10-30")
+    rows = load_fixture("finmind/per_2330_202610.json")["data"]
+    nulled = [{**rows[0], "PER": None}, *rows[1:]]
+    mock("TaiwanStockPER", "per_2330_202610", "2330", span, data=nulled)
+    _backfill("daily_valuation", "2330", span)
+    assert DailyValuation.objects.get(date=date(2026, 10, 27)).pe is None
+    assert DailyValuation.objects.count() == 4
+
+
+@responses.activate
+def test_dates_missing_from_the_calendar_reject_the_batch(
+    mock: Callable[..., None], load_fixture: Callable[[str], Any]
+) -> None:
+    rows = load_fixture("finmind/price_2884_201308.json")["data"]
+    mock(
+        "TaiwanStockPrice",
+        "price_2884_201308",
+        "2884",
+        AUGUST,
+        data=[*rows, {**rows[0], "date": "2013-08-17"}],
+    )
+    with pytest.raises(CommandError, match="2013-08-17 is not a trading day"):
+        _backfill("daily_price", "2884", AUGUST)
+    assert DailyPrice.objects.count() == 0
+
+
+@responses.activate
+def test_an_earlier_range_loaded_later_leaves_no_repeated_count(
+    mock: Callable[..., None], load_fixture: Callable[[str], Any]
+) -> None:
+    rows = load_fixture("finmind/shareholding_2884_2013q3.json")["data"]
+    later = ("2013-08-02", "2013-10-31")
+    mock("TaiwanStockShareholding", "shareholding_2884_2013q3", "2884", later, data=rows[1:])
+    _backfill("shares_outstanding", "2884", later)
+    first = ("2013-08-01", "2013-10-31")
+    mock("TaiwanStockShareholding", "shareholding_2884_2013q3", "2884", first)
+    _backfill("shares_outstanding", "2884", first)
+    stored = SharesOutstanding.objects.order_by("effective_date").values_list(
+        "effective_date", "shares"
+    )
+    assert list(stored) == [(date(2013, 8, 1), 5_010_700_000), (date(2013, 9, 6), 5_524_300_000)]

@@ -11,6 +11,7 @@ import pandas as pd
 import requests
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
+from django.db import connection
 from django.utils import timezone
 
 from apps.etl.adapters.base import BaseAdapter
@@ -24,8 +25,8 @@ from apps.etl.client import SourceClient
 from apps.etl.errors import SchemaChangedError, SourceRequestError
 from apps.etl.models import RawFinmind
 from apps.etl.ratelimit import RateLimiter, ThrottledError
-from apps.etl.upsert import upsert
-from apps.market.adjust import refresh_adj_factor
+from apps.etl.upsert import insert_missing, upsert
+from apps.market.adjust import refresh_adj_factor, refresh_where_later_events
 from apps.market.calendar import TradingDays
 from apps.market.models import DailyPrice, DailyValuation, DividendEvent, SharesOutstanding
 
@@ -132,12 +133,31 @@ RAW_NAMES = {
     "TaiwanStockDividend": "dividend_policy",
     "TaiwanStockDividendResult": "dividend_result",
 }
-PRICE_FIELDS = ("open", "high", "low", "close", "volume", "turnover")
-EVENT_FIELDS = ("cash_dividend", "stock_dividend", "adj_factor", "announce_date")
+DATE_COLUMNS = {
+    "daily_price": "date",
+    "dividend_event": "ex_date",
+    "daily_valuation": "date",
+    "shares_outstanding": "effective_date",
+}
+RECORD_DATE_LOOKAHEAD = timedelta(days=30)
+EVENT_FIELDS = ("cash_dividend", "stock_dividend")
+FROM_COLUMN = "_finmind_dataset"
+DROP_REPEATED_COUNTS_SQL = """
+DELETE FROM shares_outstanding s
+USING (
+    SELECT effective_date, shares,
+           LAG(shares) OVER (ORDER BY effective_date) AS previous
+    FROM shares_outstanding
+    WHERE stock_id = %(stock)s
+) ordered
+WHERE s.stock_id = %(stock)s
+  AND s.effective_date = ordered.effective_date
+  AND ordered.shares = ordered.previous
+"""
 
 
 class FinmindAdapter(BaseAdapter):
-    """Per-stock history backfill; the raw frame keeps which FinMind dataset each row came from."""
+    """Per-stock history backfill; FinMind is secondary for prices, so it never overwrites them."""
 
     source = "finmind"
     raw_model = RawFinmind
@@ -159,79 +179,87 @@ class FinmindAdapter(BaseAdapter):
         self.require_dataset(dataset)
         if stock_id is None:
             raise ValueError("FinMind datasets are fetched one stock at a time")
-        params = {"data_id": stock_id, "start_date": start.isoformat(), "end_date": end.isoformat()}
         rows = []
         for finmind_dataset in FINMIND_DATASETS[dataset]:
+            last = end + RECORD_DATE_LOOKAHEAD if finmind_dataset == "TaiwanStockDividend" else end
+            params = {
+                "data_id": stock_id,
+                "start_date": start.isoformat(),
+                "end_date": last.isoformat(),
+            }
             raw_name = RAW_NAMES.get(finmind_dataset, dataset)
             for row in self.client.data(raw_name, finmind_dataset, **params):
                 rows.append({**row, FROM_COLUMN: finmind_dataset})
-        frame = pd.DataFrame(rows)
-        frame.attrs["stock_id"] = stock_id
+        frame = pd.DataFrame(rows, dtype=object)
+        frame.attrs.update(stock_id=stock_id, start=start, end=end)
         return frame
 
     def normalize(self, dataset: str, raw_df: pd.DataFrame) -> pd.DataFrame:
         stock_id = str(raw_df.attrs["stock_id"])
         parts = {name: _rows_from(raw_df, name) for name in FINMIND_DATASETS[dataset]}
         if dataset == "dividend_event":
-            return dividend_events(
-                parts["TaiwanStockDividend"], parts["TaiwanStockDividendResult"], stock_id
+            frame = dividend_events(
+                parts["TaiwanStockDividend"],
+                parts["TaiwanStockDividendResult"],
+                stock_id,
+                start=raw_df.attrs["start"],
+                end=raw_df.attrs["end"],
             )
-        normalizer = {
-            "daily_price": price_bars,
-            "daily_valuation": valuations,
-            "shares_outstanding": share_counts,
-        }[dataset]
-        return normalizer(parts[FINMIND_DATASETS[dataset][0]], stock_id)
+        else:
+            normalizer = {
+                "daily_price": price_bars,
+                "daily_valuation": valuations,
+                "shares_outstanding": share_counts,
+            }[dataset]
+            frame = normalizer(parts[FINMIND_DATASETS[dataset][0]], stock_id)
+        self._require_trading_days(frame[DATE_COLUMNS[dataset]], dataset, stock_id)
+        return frame
 
     def upsert(self, dataset: str, frame: pd.DataFrame) -> int:
         if frame.empty:
             return 0
+        stock_id = str(frame["stock_id"].iloc[0])
         if dataset == "daily_price":
-            rows = upsert(DailyPrice, frame, ("stock_id", "date"), PRICE_FIELDS)
-        elif dataset == "dividend_event":
-            rows = upsert(DividendEvent, frame, ("stock_id", "ex_date"), EVENT_FIELDS)
-        elif dataset == "daily_valuation":
-            return upsert(
-                DailyValuation, frame, ("stock_id", "date"), ("pe", "pb", "dividend_yield")
-            )
-        else:
-            return upsert(
-                SharesOutstanding,
-                _without_repeat_of_stored(frame),
-                ("stock_id", "effective_date"),
-                ("shares", "reason"),
-            )
-        for stock_id in frame["stock_id"].unique():
-            refresh_adj_factor(str(stock_id))
+            rows = insert_missing(DailyPrice, frame, ("stock_id", "date"))
+            refresh_where_later_events([stock_id], frame["date"].min())
+            return rows
+        if dataset == "daily_valuation":
+            return insert_missing(DailyValuation, frame, ("stock_id", "date"))
+        if dataset == "shares_outstanding":
+            rows = insert_missing(SharesOutstanding, frame, ("stock_id", "effective_date"))
+            with connection.cursor() as cursor:
+                cursor.execute(DROP_REPEATED_COUNTS_SQL, {"stock": stock_id})
+            return rows
+        with_factor = frame["adj_factor"].notna()
+        rows = upsert(
+            DividendEvent,
+            frame[with_factor],
+            ("stock_id", "ex_date"),
+            (*EVENT_FIELDS, "adj_factor"),
+        )
+        rows += upsert(DividendEvent, frame[~with_factor], ("stock_id", "ex_date"), EVENT_FIELDS)
+        refresh_adj_factor(stock_id)
         return rows
 
-
-FROM_COLUMN = "_finmind_dataset"
+    def _require_trading_days(self, days: pd.Series, dataset: str, stock_id: str) -> None:
+        """SPEC §5: a batch with a date outside trading_calendar is rejected whole."""
+        for day in sorted(set(days)):
+            if not self.calendar.is_trading_day(day):
+                raise SchemaChangedError(
+                    f"FinMind {dataset} for {stock_id}: {day} is not a trading day"
+                )
 
 
 def _rows_from(raw_df: pd.DataFrame, finmind_dataset: str) -> list[dict[str, Any]]:
+    """Rows of one FinMind dataset; cells a row never had come back as None, not NaN."""
     if raw_df.empty:
         return []
     picked = raw_df.loc[raw_df[FROM_COLUMN] == finmind_dataset].drop(columns=FROM_COLUMN)
     return [
-        {str(key): value for key, value in row.items() if not _is_missing(value)}
+        {str(key): None if _is_missing(value) else value for key, value in row.items()}
         for row in picked.to_dict("records")
     ]
 
 
 def _is_missing(value: Any) -> bool:
     return isinstance(value, float) and value != value
-
-
-def _without_repeat_of_stored(frame: pd.DataFrame) -> pd.DataFrame:
-    """Drop a leading row that only repeats the count already stored before it."""
-    first = frame.iloc[0]
-    stored = (
-        SharesOutstanding.objects.filter(
-            stock_id=first["stock_id"], effective_date__lt=first["effective_date"]
-        )
-        .order_by("-effective_date")
-        .values_list("shares", flat=True)
-        .first()
-    )
-    return frame.iloc[1:] if stored == first["shares"] else frame

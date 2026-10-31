@@ -100,7 +100,6 @@ def test_every_ex_date_becomes_one_event(esun: pd.DataFrame) -> None:
         "cash_dividend",
         "stock_dividend",
         "adj_factor",
-        "announce_date",
     ]
 
 
@@ -108,14 +107,12 @@ def test_stock_and_cash_on_one_ex_date_are_merged(esun: pd.DataFrame) -> None:
     event = esun.loc[date(2013, 8, 15)]
     assert (event["cash_dividend"], event["stock_dividend"]) == (Decimal("0.3"), Decimal("1.0"))
     assert event["adj_factor"] == pytest.approx(17.86 / 19.95)
-    assert event["announce_date"] == date(2013, 7, 31)
 
 
 def test_rights_issues_adjust_without_dividends(esun: pd.DataFrame) -> None:
     event = esun.loc[date(2011, 8, 17)]
     assert (event["cash_dividend"], event["stock_dividend"]) == (Decimal("0"), Decimal("0"))
     assert event["adj_factor"] == pytest.approx(18.09 / 18.5)
-    assert event["announce_date"] == date(2011, 8, 11)
 
 
 def test_cash_only_event(esun: pd.DataFrame) -> None:
@@ -129,7 +126,6 @@ def test_quarterly_cash_dividends(rows: Callable[[str], Rows]) -> None:
     first = events.set_index("ex_date").loc[date(2024, 3, 18)]
     assert len(events) == 11
     assert first["cash_dividend"] == Decimal("3.49978969")
-    assert first["announce_date"] == date(2024, 3, 1)
     assert first["adj_factor"] == pytest.approx(749.5 / 753.0)
 
 
@@ -141,6 +137,7 @@ def test_an_announced_event_without_a_result_has_no_factor(rows: Callable[[str],
         "AnnouncementDate": "2026-12-01",
     }
     events = dividend_events([future], [], "2330")
+    assert "announce_date" not in events.columns
     assert events.iloc[0]["ex_date"] == date(2026, 12, 16)
     assert events.iloc[0]["adj_factor"] is None
 
@@ -152,12 +149,6 @@ def test_unusable_reference_prices_leave_the_factor_empty(
     result = [{**rows("dividend_result_2330")[0], **change}]
     events = dividend_events([], result, "2330")
     assert events.iloc[0]["adj_factor"] is None
-
-
-def test_announcements_after_the_ex_date_are_dropped(rows: Callable[[str], Rows]) -> None:
-    late = {**rows("dividend_2330")[0], "AnnouncementDate": "2024-03-20"}
-    events = dividend_events([late], rows("dividend_result_2330")[:1], "2330")
-    assert events.iloc[0]["announce_date"] is None
 
 
 @pytest.mark.parametrize(
@@ -226,3 +217,38 @@ def test_missing_valuations_become_blank(rows: Callable[[str], Rows]) -> None:
         [{**rows("per_2330_202610")[0], "PER": None, "dividend_yield": None}], "2330"
     )
     assert (frame.iloc[0]["pe"], frame.iloc[0]["dividend_yield"]) == (None, None)
+
+
+def test_events_outside_the_requested_range_are_left_out(rows: Callable[[str], Rows]) -> None:
+    events = dividend_events(
+        rows("dividend_2884"),
+        rows("dividend_result_2884"),
+        "2884",
+        start=date(2013, 1, 1),
+        end=date(2013, 12, 31),
+    )
+    assert events["ex_date"].tolist() == [date(2013, 8, 15)]
+
+
+@pytest.mark.parametrize(
+    ("name", "change"),
+    [
+        ("per_2330_202610", {"PER": "27.82"}),
+        ("per_2330_202610", {"dividend_yield": True}),
+        ("shareholding_2884_2013q3", {"NumberOfSharesIssued": 5010700000.0}),
+        ("shareholding_2884_2013q3", {"NumberOfSharesIssued": "5010700000"}),
+    ],
+)
+def test_values_of_the_wrong_type_are_schema_changes(
+    rows: Callable[[str], Rows], name: str, change: dict[str, Any]
+) -> None:
+    broken = [{**rows(name)[0], **change}]
+    normalize = valuations if name.startswith("per") else share_counts
+    with pytest.raises(SchemaChangedError, match="bad"):
+        normalize(broken, "2884" if name.startswith("share") else "2330")
+
+
+def test_missing_share_counts_are_skipped(rows: Callable[[str], Rows]) -> None:
+    data = rows("shareholding_2884_2013q3")
+    frame = share_counts([{**data[0], "NumberOfSharesIssued": None}, *data[1:]], "2884")
+    assert frame.iloc[0]["effective_date"] == date(2013, 8, 2)

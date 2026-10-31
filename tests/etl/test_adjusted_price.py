@@ -1,5 +1,6 @@
 from collections.abc import Callable
 from datetime import date
+from decimal import Decimal
 from io import StringIO
 from typing import Any
 
@@ -12,7 +13,7 @@ from apps.market.adjust import adjusted, refresh_adj_factor
 from apps.market.models import DailyPrice, DividendEvent
 
 PRICE_FIELDS = ("open", "high", "low", "close", "volume", "turnover")
-EVENT_FIELDS = ("cash_dividend", "stock_dividend", "adj_factor", "announce_date")
+EVENT_FIELDS = ("cash_dividend", "stock_dividend", "adj_factor")
 
 
 @pytest.fixture
@@ -82,3 +83,12 @@ def test_recompute_command_refreshes_every_or_chosen_stock() -> None:
     DailyPrice.objects.update(adj_factor=1.0)
     call_command("recompute_adj_factor", stdout=StringIO())
     assert DailyPrice.objects.filter(adj_factor__lt=1.0).exists()
+
+
+@pytest.mark.usefixtures("esun")
+def test_refreshing_one_stock_leaves_others_alone() -> None:
+    DailyPrice.objects.create(
+        stock_id="2330", date=date(2013, 8, 14), close=Decimal("100"), volume=1, turnover=100
+    )
+    refresh_adj_factor("2884")
+    assert DailyPrice.objects.get(stock_id="2330").adj_factor == 1.0
