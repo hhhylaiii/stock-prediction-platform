@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -184,7 +185,7 @@ def test_maintenance_window_is_sunday_midnight_to_seven(moment: datetime, wait: 
 
 @responses.activate
 @pytest.mark.django_db
-def test_requests_wait_out_the_maintenance_window() -> None:
+def test_requests_wait_out_the_maintenance_window(caplog: pytest.LogCaptureFixture) -> None:
     responses.get(URL, json=_ok([]))
     clock = FakeClock()
     limiter = RateLimiter(_limit(), clock=clock, sleep=clock.sleep)
@@ -196,8 +197,11 @@ def test_requests_wait_out_the_maintenance_window() -> None:
         now=lambda: datetime(2026, 11, 1, 5, 0, tzinfo=TAIPEI),
         sleep=clock.sleep,
     )
-    client.data("stock_info", "TaiwanStockInfo")
+    with caplog.at_level(logging.INFO, logger="apps.etl.adapters.finmind"):
+        client.data("stock_info", "TaiwanStockInfo")
     assert clock.sleeps[0] == pytest.approx(2 * 3600.0)
+    assert "maintenance" in caplog.text
+    assert "7200" in caplog.text
 
 
 @responses.activate

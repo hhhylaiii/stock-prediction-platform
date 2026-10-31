@@ -1,5 +1,6 @@
 """FinMind REST client for the one-off history backfill (SPEC §3, §5)."""
 
+import logging
 import time
 from collections.abc import Callable
 from datetime import datetime, timedelta
@@ -16,6 +17,7 @@ from apps.etl.errors import SchemaChangedError, SourceRequestError
 from apps.etl.models import RawFinmind
 from apps.etl.ratelimit import RateLimiter, ThrottledError
 
+logger = logging.getLogger(__name__)
 DATA_PATH = "/api/v4/data"
 HOURLY_QUOTA_WITH_TOKEN = 600
 HOURLY_QUOTA_ANONYMOUS = 300
@@ -90,6 +92,7 @@ class FinmindClient(SourceClient):
         """Every attempt, retries included, first waits out the Sunday maintenance window."""
         wait = maintenance_wait(self._now())
         if wait > 0:
+            logger.info("FinMind maintenance until 07:00 Taipei; waiting %.0f s", wait)
             self._sleep(wait)
         return super()._send(method, path, **kwargs)
 

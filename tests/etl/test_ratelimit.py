@@ -1,3 +1,5 @@
+import logging
+
 import pytest
 
 from apps.etl.ratelimit import RateLimit, RateLimiter, RetryableError, ThrottledError
@@ -132,3 +134,20 @@ def test_failed_request_also_starts_the_interval() -> None:
         limiter.call(broken)
     limiter.call(lambda: 2)
     assert clock.sleeps == [pytest.approx(3.0)]
+
+
+def test_retries_are_logged(caplog: pytest.LogCaptureFixture) -> None:
+    clock = FakeClock()
+    limiter = _limiter(clock)
+    outcomes: list[Exception | int] = [ThrottledError("busy"), 7]
+
+    def flaky() -> int:
+        outcome = outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    with caplog.at_level(logging.WARNING, logger="apps.etl.ratelimit"):
+        assert limiter.call(flaky) == 7
+    assert "busy" in caplog.text
+    assert "retrying in" in caplog.text
