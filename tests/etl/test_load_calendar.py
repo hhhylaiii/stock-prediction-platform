@@ -46,6 +46,8 @@ def test_reloading_updates_in_place(fixture_path: Callable[[str], Path], tmp_pat
         '{"start": "2026-10-01", "trading_days": []}',
         '{"start": "2026-10-10", "end": "2026-10-31", "trading_days": ["2026-10-01"]}',
         '{"start": "2026-10-01", "end": "2026-10-31", "trading_days": ["2026/10/01"]}',
+        "[]",
+        '{"start": "2026-10-01", "end": "2026-10-31", "trading_days": null}',
     ],
 )
 def test_bad_files_are_command_errors(tmp_path: Path, content: str) -> None:

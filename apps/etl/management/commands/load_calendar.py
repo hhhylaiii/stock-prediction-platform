@@ -36,7 +36,7 @@ class Command(BaseCommand):
     def handle(self, *args: Any, **options: Any) -> None:
         try:
             calendar, notes = read_calendar_file(Path(options["file"]))
-        except (OSError, KeyError, ValueError, CalendarError) as exc:
+        except (OSError, KeyError, TypeError, ValueError, CalendarError) as exc:
             raise CommandError(f"cannot read calendar file: {type(exc).__name__}: {exc}") from exc
         self._require_contiguous(calendar)
         frame = pd.DataFrame(
