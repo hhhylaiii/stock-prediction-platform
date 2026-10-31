@@ -1,9 +1,13 @@
 """Adjusted prices are raw price × adj_factor, computed on read and never stored (SPEC §4, §8.2)."""
 
+from collections.abc import Iterable
+from datetime import date
 from decimal import Decimal
 
 import pandas as pd
 from django.db import connection
+
+from apps.market.models import DividendEvent
 
 PRICE_COLUMNS = ("open", "high", "low", "close")
 REFRESH_SQL = """
@@ -42,3 +46,15 @@ def refresh_adj_factor(stock_id: str) -> int:
     with connection.cursor() as cursor:
         cursor.execute(REFRESH_SQL, {"stock": stock_id})
         return int(cursor.rowcount)
+
+
+def refresh_where_later_events(stock_ids: Iterable[str], since: date) -> int:
+    """Refresh only stocks whose events after since carry a factor, e.g. after new prices."""
+    stocks = (
+        DividendEvent.objects.filter(
+            stock_id__in=list(stock_ids), ex_date__gt=since, adj_factor__isnull=False
+        )
+        .values_list("stock_id", flat=True)
+        .distinct()
+    )
+    return sum(refresh_adj_factor(stock_id) for stock_id in stocks)

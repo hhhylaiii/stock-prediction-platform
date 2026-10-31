@@ -15,6 +15,7 @@ from apps.etl.errors import SchemaChangedError, SourceNotReadyError
 from apps.etl.models import RawTwse
 from apps.etl.ratelimit import RateLimiter
 from apps.etl.upsert import upsert
+from apps.market.adjust import refresh_where_later_events
 from apps.market.calendar import TradingDays
 from apps.market.models import DailyPrice
 
@@ -172,12 +173,15 @@ class TwseAdapter(BaseAdapter):
 
     def upsert(self, dataset: str, frame: pd.DataFrame) -> int:
         self.require_dataset(dataset)
-        return upsert(
+        rows = upsert(
             DailyPrice,
             frame,
             unique_fields=("stock_id", "date"),
             update_fields=(*PRICE_COLUMNS, *COUNT_COLUMNS),
         )
+        if not frame.empty:
+            refresh_where_later_events(frame["stock_id"].unique(), frame["date"].min())
+        return rows
 
     def _fetch_daily_quotes(self, day: date) -> pd.DataFrame:
         params = {"date": day.strftime("%Y%m%d"), "type": "ALLBUT0999", "response": "json"}
