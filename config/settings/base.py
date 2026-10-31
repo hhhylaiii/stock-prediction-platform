@@ -92,6 +92,11 @@ TWSE_TIMEOUT = env.float("TWSE_TIMEOUT", default=30.0)
 ETL_USER_AGENT = env.str(
     "ETL_USER_AGENT", default="stock-prediction-platform/0.1 (personal research)"
 )
+TPEX_BASE_URL = env.str("TPEX_BASE_URL", default="https://www.tpex.org.tw")
+TPEX_TIMEOUT = env.float("TPEX_TIMEOUT", default=30.0)
+FINMIND_BASE_URL = env.str("FINMIND_BASE_URL", default="https://api.finmindtrade.com")
+FINMIND_TIMEOUT = env.float("FINMIND_TIMEOUT", default=60.0)
+FINMIND_API_TOKEN = env.str("FINMIND_API_TOKEN", default="")
 ETL_RATE_LIMITS: dict[str, dict[str, float]] = {
     "twse": {
         "min_interval": env.float("TWSE_MIN_INTERVAL", default=3.5),
@@ -99,6 +104,20 @@ ETL_RATE_LIMITS: dict[str, dict[str, float]] = {
         "backoff_base": env.float("TWSE_BACKOFF_BASE", default=5.0),
         "backoff_max": env.float("TWSE_BACKOFF_MAX", default=120.0),
         "cooldown": env.float("TWSE_COOLDOWN", default=900.0),
+    },
+    "tpex": {
+        "min_interval": env.float("TPEX_MIN_INTERVAL", default=3.5),
+        "max_retries": env.int("TPEX_MAX_RETRIES", default=4),
+        "backoff_base": env.float("TPEX_BACKOFF_BASE", default=5.0),
+        "backoff_max": env.float("TPEX_BACKOFF_MAX", default=120.0),
+        "cooldown": env.float("TPEX_COOLDOWN", default=900.0),
+    },
+    "finmind": {
+        "min_interval": env.float("FINMIND_MIN_INTERVAL", default=6.5),
+        "max_retries": env.int("FINMIND_MAX_RETRIES", default=4),
+        "backoff_base": env.float("FINMIND_BACKOFF_BASE", default=10.0),
+        "backoff_max": env.float("FINMIND_BACKOFF_MAX", default=300.0),
+        "cooldown": env.float("FINMIND_COOLDOWN", default=3700.0),
     },
 }
 
