@@ -113,3 +113,14 @@ jobs:
             exit 0
           fi
           exit "$status"
+
+  docker:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - run: docker compose build
+      - run: docker compose run --rm web python manage.py check
+      - if: always()
+        run: docker compose down -v
