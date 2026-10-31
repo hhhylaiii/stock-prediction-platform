@@ -1,0 +1,76 @@
+x-app: &app
+  build:
+    context: .
+    dockerfile: ops/Dockerfile
+  image: stock-prediction-platform:local
+  env_file:
+    - path: .env
+      required: false
+  environment:
+    DJANGO_SETTINGS_MODULE: ${DJANGO_SETTINGS_MODULE:-config.settings.dev}
+    DATABASE_URL: postgres://${POSTGRES_USER:-twp}:${POSTGRES_PASSWORD:-twp}@db:5432/${POSTGRES_DB:-twp}
+    CELERY_BROKER_URL: redis://redis:6379/0
+    TZ: Asia/Taipei
+  depends_on:
+    db:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+  restart: unless-stopped
+
+services:
+  web:
+    <<: *app
+    ports:
+      - "127.0.0.1:${WEB_PORT:-8000}:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  worker:
+    <<: *app
+    command: ["celery", "-A", "config", "worker", "--beat", "--loglevel=${LOG_LEVEL:-INFO}", "--schedule=/tmp/celerybeat-schedule"]
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A config inspect ping -d celery@$$HOSTNAME --timeout 5"]
+      interval: 30s
+      timeout: 15s
+      retries: 5
+      start_period: 30s
+
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-twp}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-twp}
+      POSTGRES_DB: ${POSTGRES_DB:-twp}
+      TZ: Asia/Taipei
+      PGTZ: Asia/Taipei
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    environment:
+      TZ: Asia/Taipei
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  pgdata:
