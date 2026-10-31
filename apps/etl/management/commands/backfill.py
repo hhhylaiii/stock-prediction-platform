@@ -4,6 +4,7 @@ import signal
 from argparse import ArgumentParser
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import date, timedelta
 from types import FrameType
 from typing import Any
@@ -13,6 +14,7 @@ from django.db.models import Q
 from django.utils import timezone
 
 from apps.etl.adapters import build_adapter
+from apps.etl.adapters.base import stock_list_digest
 from apps.etl.errors import SourceError
 from apps.etl.management.options import as_date, required_date
 from apps.etl.models import EtlRun
@@ -37,31 +39,55 @@ def stocks_alive_in(start: date, chosen: list[str] | None) -> list[str]:
     return sorted(set(chosen))
 
 
+@dataclass(frozen=True)
+class ResumePoint:
+    run_id: int
+    end: date
+    after: str | None
+    stocks: int | None
+    digest: str | None
+
+
 def resume_point(
-    source: str, dataset: str, start: date, end: date, selection: str | list[str]
-) -> str | None:
-    """Checkpoint of the latest backfill with the same arguments, if it failed part way."""
-    latest = (
-        EtlRun.objects.filter(
-            source=source,
-            dataset=dataset,
-            start_date=start,
-            end_date=end,
-            checkpoint__kind="backfill",
-            checkpoint__selection=selection,
-        )
-        .order_by("-run_id")
-        .first()
+    source: str, dataset: str, start: date, end: date | None, selection: str | list[str]
+) -> ResumePoint:
+    """The latest backfill with the same start and selection, if it failed part way."""
+    runs = EtlRun.objects.filter(
+        source=source,
+        dataset=dataset,
+        start_date=start,
+        checkpoint__kind="backfill",
+        checkpoint__selection=selection,
     )
+    if end is not None:
+        runs = runs.filter(end_date=end)
+    latest = runs.order_by("-run_id").first()
+    span = f"{start}..{end}" if end is not None else f"from {start}"
     if latest is None or latest.status == EtlRun.Status.SUCCESS:
-        raise CommandError(f"no unfinished backfill of {source}/{dataset} {start}..{end} to resume")
+        raise CommandError(f"no unfinished backfill of {source}/{dataset} {span} to resume")
     if latest.status == EtlRun.Status.RUNNING:
         raise CommandError(
             f"etl_run {latest.run_id} is still marked running; stop that process first, "
             "or set its status to failed if it died"
         )
-    checkpoint = latest.checkpoint.get("last_stock_id")
-    return str(checkpoint) if checkpoint is not None else None
+    checkpoint = latest.checkpoint
+    after = checkpoint.get("last_stock_id")
+    return ResumePoint(
+        run_id=latest.run_id,
+        end=latest.end_date,
+        after=str(after) if after is not None else None,
+        stocks=checkpoint.get("stocks"),
+        digest=checkpoint.get("digest"),
+    )
+
+
+def require_same_stocks(point: ResumePoint, stocks: list[str]) -> None:
+    """A different stock list would silently skip codes added before the checkpoint."""
+    if point.digest != stock_list_digest(stocks):
+        raise CommandError(
+            f"stock list changed since etl_run {point.run_id} started, from {point.stocks} "
+            f"to {len(stocks)} stocks; rerun without --resume, or back up the rest with --stock"
+        )
 
 
 def _terminate(signum: int, frame: FrameType | None) -> None:
@@ -92,18 +118,21 @@ class Command(BaseCommand):
 
     def handle(self, *args: Any, **options: Any) -> None:
         start = required_date(options["start"], "--from")
-        end = as_date(options["end"], "--to") or timezone.localdate() - timedelta(days=1)
-        if start > end:
-            raise CommandError(f"--from {start} is after --to {end}")
+        explicit_end = as_date(options["end"], "--to")
         source, dataset = options["source"], options["dataset"]
         try:
             adapter = build_adapter(source)
             adapter.require_dataset(dataset)
             stocks = stocks_alive_in(start, options["stocks"])
             selection: str | list[str] = stocks if options["stocks"] else "all"
-            after = (
-                resume_point(source, dataset, start, end, selection) if options["resume"] else None
-            )
+            after = None
+            end = explicit_end or timezone.localdate() - timedelta(days=1)
+            if options["resume"]:
+                point = resume_point(source, dataset, start, explicit_end, selection)
+                require_same_stocks(point, stocks)
+                end, after = point.end, point.after
+            if start > end:
+                raise CommandError(f"--from {start} is after --to {end}")
             with failing_on_termination():
                 run = adapter.backfill(
                     dataset, stocks, start, end, resume_after=after, selection=selection

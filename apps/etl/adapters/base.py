@@ -1,7 +1,8 @@
 """Adapter contract: fetch to raw, normalize to the standard schema, upsert (SPEC §5)."""
 
+import hashlib
 from abc import ABC, abstractmethod
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from datetime import date
 from typing import Any, ClassVar
 
@@ -13,6 +14,10 @@ from apps.etl.ratelimit import RateLimiter
 from apps.etl.raw import store_raw
 from apps.etl.runs import tracked_run
 from apps.market.calendar import CalendarError, NotATradingDayError, TradingDays
+
+
+def stock_list_digest(stock_ids: Iterable[str]) -> str:
+    return hashlib.sha256(",".join(sorted(set(stock_ids))).encode()).hexdigest()
 
 
 class BaseAdapter(ABC):
@@ -94,7 +99,13 @@ class BaseAdapter(ABC):
             code for code in sorted(set(stock_ids)) if resume_after is None or code > resume_after
         ]
         with tracked_run(self.source, dataset, start, end) as run:
-            checkpoint = {"kind": "backfill", "selection": selection, "last_stock_id": resume_after}
+            checkpoint = {
+                "kind": "backfill",
+                "selection": selection,
+                "stocks": len(set(stock_ids)),
+                "digest": stock_list_digest(stock_ids),
+                "last_stock_id": resume_after,
+            }
             run.checkpoint = checkpoint
             run.save(update_fields=["checkpoint"])
             for stock_id in pending:

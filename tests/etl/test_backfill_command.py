@@ -113,7 +113,9 @@ def test_backfill_walks_every_stock_alive_in_the_range() -> None:
     assert DailyPrice.objects.count() == 4
     run = EtlRun.objects.get()
     assert (run.source, run.dataset, run.status, run.rows) == ("echo", "daily_price", "success", 4)
-    assert run.checkpoint == {"kind": "backfill", "selection": "all", "last_stock_id": "3454"}
+    assert run.checkpoint["kind"] == "backfill"
+    assert run.checkpoint["selection"] == "all"
+    assert (run.checkpoint["stocks"], run.checkpoint["last_stock_id"]) == (4, "3454")
     assert (run.start_date, run.end_date) == (START, END)
 
 
@@ -273,7 +275,13 @@ def test_a_run_still_marked_running_is_not_resumed() -> None:
         dataset="daily_price",
         start_date=START,
         end_date=END,
-        checkpoint={"kind": "backfill", "selection": "all", "last_stock_id": "1101"},
+        checkpoint={
+            "kind": "backfill",
+            "selection": "all",
+            "stocks": 4,
+            "digest": "x",
+            "last_stock_id": "1101",
+        },
     )
     with pytest.raises(CommandError, match="still marked running"):
         _backfill("--resume")
@@ -314,3 +322,38 @@ def test_adapters_that_fetch_whole_market_days_cannot_backfill() -> None:
         call_command(
             "backfill", "--source", "twse", "--dataset", "daily_price", "--from", "2010-01-04"
         )
+
+
+def _run_on(monkeypatch: pytest.MonkeyPatch, today: date, *extra: str) -> None:
+    monkeypatch.setattr("apps.etl.management.commands.backfill.timezone.localdate", lambda: today)
+    call_command(
+        "backfill", "--source", "echo", "--dataset", "daily_price", "--from", "2026-10-01", *extra
+    )
+
+
+@pytest.mark.usefixtures("stocks")
+def test_resume_without_to_continues_the_run_started_on_an_earlier_day(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    StockEchoAdapter.fail_on = "2317"
+    with pytest.raises(CommandError):
+        _run_on(monkeypatch, date(2026, 11, 2))
+    StockEchoAdapter.fail_on = None
+    StockEchoAdapter.calls.clear()
+    _run_on(monkeypatch, date(2026, 11, 3), "--resume")
+    assert StockEchoAdapter.calls == [
+        (code, date(2026, 10, 1), date(2026, 11, 1)) for code in ("2317", "2330")
+    ]
+
+
+@pytest.mark.usefixtures("stocks")
+def test_resume_refuses_when_the_stock_list_changed() -> None:
+    StockEchoAdapter.fail_on = "2317"
+    with pytest.raises(CommandError):
+        _backfill()
+    StockMaster.objects.create(stock_id="2000", name="2000", market=Market.TWSE)
+    StockEchoAdapter.fail_on = None
+    StockEchoAdapter.calls.clear()
+    with pytest.raises(CommandError, match="from 4 to 5 stocks"):
+        _backfill("--resume")
+    assert StockEchoAdapter.calls == []
