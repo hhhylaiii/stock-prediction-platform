@@ -15,6 +15,8 @@
 | Lint 與格式 | `uv run ruff check . && uv run ruff format --check .` |
 | 型別 | `uv run mypy` |
 | Django 檢查 | `uv run python manage.py check` |
+| `#` 註解檢查 | `uv run python scripts/check_no_hash_comments.py origin/develop` |
+| spec8 manifest | `uv run python scripts/check_spec8_manifest.py`（第 8 節的九個測試標 `@pytest.mark.spec8` 並列入 `tests/spec8_manifest.txt`） |
 
 ## 目錄
 

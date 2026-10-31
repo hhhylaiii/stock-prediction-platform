@@ -42,13 +42,14 @@ select = ["E", "W", "F", "I", "B", "UP", "N", "S", "SIM", "C4", "DTZ", "DJ", "PT
 ignore = ["RUF001", "RUF002", "RUF003"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101", "S105", "S106", "S603"]
+"tests/**" = ["S101", "S105", "S106", "S603", "S607"]
+"scripts/**" = ["S603", "S607"]
 "config/settings/test.py" = ["S105"]
 "**/migrations/**" = ["E501", "RUF012"]
 
 [tool.mypy]
 python_version = "3.12"
-files = ["apps", "config", "tests", "manage.py"]
+files = ["apps", "config", "scripts", "tests", "manage.py"]
 exclude = ["/migrations/"]
 plugins = ["mypy_django_plugin.main", "mypy_drf_plugin.main"]
 disallow_untyped_defs = true
