@@ -60,11 +60,12 @@ def test_index_volume_states_its_units() -> None:
 
 @pytest.mark.django_db
 def test_index_daily_keeps_fx_without_volume() -> None:
-    IndexDaily.objects.create(index_id=IndexId.USDTWD, date=DAY, close=Decimal("32.1450"))
+    IndexDaily.objects.create(index_id=IndexId.USDTWD, date=DAY, close=Decimal("32.1453"))
     IndexDaily.objects.create(
         index_id=IndexId.TAIEX, date=DAY, close=Decimal("27850.12"), volume=8_200_000_000
     )
-    assert IndexDaily.objects.get(pk=(IndexId.USDTWD, DAY)).volume is None
+    usdtwd = IndexDaily.objects.get(pk=(IndexId.USDTWD, DAY))
+    assert (usdtwd.close, usdtwd.volume) == (Decimal("32.1453"), None)
     assert IndexDaily.objects.get(pk=(IndexId.TAIEX, DAY)).close == Decimal("27850.1200")
 
 
@@ -104,6 +105,7 @@ def test_macro_indicator_round_trip_and_required_announce_date() -> None:
         ("2026-Q3", 1.0),
         ("2026-09", float("nan")),
         ("2026-09", float("-inf")),
+        ("2026-10", 1.0),
     ],
 )
 def test_macro_indicator_check_constraints(period: str, value: float) -> None:
@@ -158,6 +160,7 @@ def test_daily_valuation_accepts_a_zero_yield() -> None:
     "values",
     [
         {"pe": 0.0},
+        {"pb": 0.0},
         {"pb": -1.0},
         {"dividend_yield": -0.01},
         {"dividend_yield": 1.0},

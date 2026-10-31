@@ -97,6 +97,18 @@ def test_dividend_check_constraints(overrides: dict[str, object]) -> None:
 
 
 @pytest.mark.django_db
+def test_dividend_keeps_a_real_adjustment_factor() -> None:
+    _dividend(adj_factor=0.9708).save()
+    assert DividendEvent.objects.get(pk=("2330", date(2026, 9, 16))).adj_factor == 0.9708
+
+
+def test_dividend_announce_date_means_when_ex_date_became_public() -> None:
+    field = DividendEvent._meta.get_field("announce_date")
+    assert isinstance(field, models.Field)
+    assert "首次公開" in str(field.verbose_name)
+
+
+@pytest.mark.django_db
 def test_dividend_announced_on_or_before_ex_date() -> None:
     _dividend(announce_date=date(2026, 6, 10)).save()
     _dividend(ex_date=date(2027, 3, 18), announce_date=date(2027, 3, 18)).save()
@@ -197,6 +209,8 @@ def test_weekly_holding_publish_date_is_required() -> None:
         {"level": 16, "pct": float("nan")},
         {"level": 16, "pct": float("-inf")},
         {"level": 17, "shares": -1},
+        {"pct": 100.01},
+        {"level": 17, "pct": 8471.0},
     ],
 )
 def test_weekly_holding_check_constraints(overrides: dict[str, object]) -> None:

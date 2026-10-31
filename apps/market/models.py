@@ -15,6 +15,17 @@ def finite(*fields: str) -> models.Q:
     return condition
 
 
+def announced_after_period(period_format: str) -> models.Q:
+    """announce_date falls in a later period than the one reported (SPEC §8.1)."""
+    announced_period = models.Func(
+        models.F("announce_date"),
+        models.Value(period_format),
+        function="to_char",
+        output_field=models.CharField(),
+    )
+    return models.Q(period__lt=announced_period)
+
+
 def non_negative(*fields: str) -> models.Q:
     condition = models.Q()
     for field in fields:
@@ -105,7 +116,9 @@ class DividendEvent(models.Model):
         max_digits=16, decimal_places=8, default=0, verbose_name="股票股利（元／股，面額 10 元）"
     )
     adj_factor = models.FloatField(null=True, blank=True)
-    announce_date = models.DateField(null=True, blank=True)
+    announce_date = models.DateField(
+        null=True, blank=True, verbose_name="除權息日公告日（ex_date 首次公開的日期）"
+    )
 
     class Meta:
         db_table = "dividend_event"
@@ -203,8 +216,9 @@ class WeeklyHolding(models.Model):
                 name="weekly_holding_published_after_data_date",
             ),
             models.CheckConstraint(
-                condition=models.Q(level=16) | non_negative("holders", "shares", "pct"),
-                name="weekly_holding_counts_gte_0",
+                condition=models.Q(level=16)
+                | (non_negative("holders", "shares", "pct") & models.Q(pct__lte=100)),
+                name="weekly_holding_counts_in_range",
             ),
             models.CheckConstraint(condition=finite("pct"), name="weekly_holding_pct_finite"),
         ]
@@ -232,6 +246,10 @@ class MonthlyRevenue(models.Model):
                 condition=models.Q(period__regex=MONTH_PERIOD), name="monthly_revenue_period_format"
             ),
             models.CheckConstraint(condition=finite("yoy", "mom"), name="monthly_revenue_finite"),
+            models.CheckConstraint(
+                condition=announced_after_period("YYYY-MM"),
+                name="monthly_revenue_announced_after_period",
+            ),
         ]
 
     def __str__(self) -> str:
@@ -282,6 +300,10 @@ class FinancialStatement(models.Model):
             ),
             models.CheckConstraint(
                 condition=non_negative("debt_ratio"), name="financial_statement_debt_ratio_gte_0"
+            ),
+            models.CheckConstraint(
+                condition=announced_after_period('YYYY-"Q"Q'),
+                name="financial_statement_announced_after_period",
             ),
         ]
 
@@ -343,6 +365,10 @@ class MacroIndicator(models.Model):
                 condition=models.Q(period__regex=MONTH_PERIOD), name="macro_indicator_period_format"
             ),
             models.CheckConstraint(condition=finite("value"), name="macro_indicator_value_finite"),
+            models.CheckConstraint(
+                condition=announced_after_period("YYYY-MM"),
+                name="macro_indicator_announced_after_period",
+            ),
         ]
 
     def __str__(self) -> str:

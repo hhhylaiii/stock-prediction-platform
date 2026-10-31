@@ -77,6 +77,30 @@ def test_monthly_revenue_round_trip() -> None:
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("factory", "period", "announced"),
+    [
+        ("revenue", "2026-09", date(2026, 9, 30)),
+        ("statement", "2026-Q3", date(2026, 9, 30)),
+        ("statement", "2026-Q4", date(2026, 12, 31)),
+    ],
+)
+def test_announce_date_must_follow_the_period(factory: str, period: str, announced: date) -> None:
+    build = _revenue if factory == "revenue" else _statement
+    with pytest.raises(IntegrityError), transaction.atomic():
+        build(period=period, announce_date=announced).save()
+
+
+@pytest.mark.django_db
+def test_first_day_after_the_period_is_a_valid_announce_date() -> None:
+    _revenue(announce_date=date(2026, 10, 1)).save()
+    _statement(period="2026-Q4", announce_date=date(2027, 3, 31)).save()
+    _statement(announce_date=date(2026, 10, 1), fin_type=FinType.INDIVIDUAL).save()
+    assert MonthlyRevenue.objects.count() == 1
+    assert FinancialStatement.objects.count() == 2
+
+
+@pytest.mark.django_db
 def test_monthly_revenue_ratios_may_be_missing() -> None:
     _revenue(yoy=None, mom=None).save()
     assert MonthlyRevenue.objects.get(pk=("2330", "2026-09")).yoy is None
@@ -120,9 +144,28 @@ def test_financial_statement_allows_missing_line_items() -> None:
 
 @pytest.mark.django_db
 def test_financial_statement_allows_losses() -> None:
-    _statement(eps=Decimal("-1.2300"), net_income=-5_000_000, roe=-0.02).save()
+    _statement(
+        eps=Decimal("-1.2300"),
+        net_income=-5_000_000,
+        roe=-0.02,
+        op_margin=-0.15,
+        gross_margin=-0.03,
+        debt_ratio=1.12,
+    ).save()
     row = FinancialStatement.objects.get(pk=("2330", "2026-Q3", FinType.CONSOLIDATED))
-    assert row.eps == Decimal("-1.2300")
+    assert (row.eps, row.op_margin, row.gross_margin, row.debt_ratio) == (
+        Decimal("-1.2300"),
+        -0.15,
+        -0.03,
+        1.12,
+    )
+
+
+@pytest.mark.django_db
+def test_financial_statement_allows_a_bank_without_revenue_lines() -> None:
+    _statement(revenue=None, gross_margin=None, eps=None, net_income=None, roe=None).save()
+    row = FinancialStatement.objects.get(pk=("2330", "2026-Q3", FinType.CONSOLIDATED))
+    assert (row.revenue, row.eps, row.roe) == (None, None, None)
 
 
 @pytest.mark.django_db
@@ -164,5 +207,20 @@ def test_an_infinite_ratio_rejects_the_whole_upsert_batch() -> None:
         ]
     ).assign(announce_date=date(2026, 10, 10))
     with pytest.raises(IntegrityError):
-        upsert(MonthlyRevenue, frame, ("stock_id", "period"), ("revenue", "mom", "announce_date"))
+        upsert(
+            MonthlyRevenue,
+            frame,
+            ("stock_id", "period"),
+            ("revenue", "mom", "announce_date"),
+            batch_size=1,
+        )
     assert MonthlyRevenue.objects.count() == 0
+
+
+@pytest.mark.django_db
+def test_upsert_stores_a_nan_ratio_as_missing() -> None:
+    frame = pd.DataFrame(
+        [{"stock_id": "2330", "period": "2026-09", "revenue": 1, "yoy": float("nan")}]
+    ).assign(announce_date=date(2026, 10, 10))
+    upsert(MonthlyRevenue, frame, ("stock_id", "period"), ("revenue", "yoy", "announce_date"))
+    assert MonthlyRevenue.objects.get(pk=("2330", "2026-09")).yoy is None
