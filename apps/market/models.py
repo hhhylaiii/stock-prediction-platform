@@ -205,3 +205,79 @@ class WeeklyHolding(models.Model):
 
     def __str__(self) -> str:
         return f"{self.stock_id} {self.data_date} L{self.level}"
+
+
+class MonthlyRevenue(models.Model):
+    """Monthly revenue in TWD; yoy and mom are fractions (0.1 = 10%), visible from announce_date."""
+
+    pk = models.CompositePrimaryKey("stock_id", "period")
+    stock_id = models.CharField(max_length=10)
+    period = models.CharField(max_length=7, verbose_name="期間（YYYY-MM）")
+    revenue = models.BigIntegerField(verbose_name="營收（元）")
+    yoy = models.FloatField(null=True, blank=True)
+    mom = models.FloatField(null=True, blank=True)
+    announce_date = models.DateField()
+
+    class Meta:
+        db_table = "monthly_revenue"
+        indexes = [models.Index(fields=["announce_date"], name="monthly_revenue_announce_idx")]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(period__regex=MONTH_PERIOD), name="monthly_revenue_period_format"
+            ),
+            models.CheckConstraint(condition=finite("yoy", "mom"), name="monthly_revenue_finite"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.stock_id} {self.period}"
+
+
+class FinType(models.TextChoices):
+    CONSOLIDATED = "consolidated", "合併"
+    INDIVIDUAL = "individual", "個體"
+
+
+class FinancialStatement(models.Model):
+    """Single-quarter figures in TWD (Q4 = annual minus Q1–Q3); ratios are fractions."""
+
+    pk = models.CompositePrimaryKey("stock_id", "period", "fin_type")
+    stock_id = models.CharField(max_length=10)
+    period = models.CharField(max_length=7, verbose_name="期間（YYYY-Qn）")
+    fin_type = models.CharField(
+        max_length=16, choices=FinType.choices, default=FinType.CONSOLIDATED
+    )
+    eps = models.DecimalField(
+        max_digits=12, decimal_places=4, null=True, blank=True, verbose_name="EPS（元）"
+    )
+    revenue = models.BigIntegerField(null=True, blank=True, verbose_name="營收（元）")
+    gross_margin = models.FloatField(null=True, blank=True)
+    op_margin = models.FloatField(null=True, blank=True)
+    net_income = models.BigIntegerField(null=True, blank=True, verbose_name="淨利（元）")
+    roe = models.FloatField(null=True, blank=True)
+    debt_ratio = models.FloatField(null=True, blank=True)
+    operating_cf = models.BigIntegerField(null=True, blank=True, verbose_name="營業現金流（元）")
+    announce_date = models.DateField()
+
+    class Meta:
+        db_table = "financial_statement"
+        indexes = [models.Index(fields=["announce_date"], name="financial_stmt_announce_idx")]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(period__regex=QUARTER_PERIOD),
+                name="financial_statement_period_format",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(fin_type__in=FinType.values),
+                name="financial_statement_fin_type_valid",
+            ),
+            models.CheckConstraint(
+                condition=finite("gross_margin", "op_margin", "roe", "debt_ratio"),
+                name="financial_statement_finite",
+            ),
+            models.CheckConstraint(
+                condition=non_negative("debt_ratio"), name="financial_statement_debt_ratio_gte_0"
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.stock_id} {self.period} {self.fin_type}"
