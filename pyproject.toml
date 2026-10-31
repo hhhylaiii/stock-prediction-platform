@@ -13,6 +13,7 @@ dependencies = [
     "pandas>=2.2,<3",
     "psycopg[binary]>=3.2",
     "pyarrow>=17",
+    "requests>=2.32",
 ]
 
 [dependency-groups]
@@ -28,6 +29,7 @@ dev = [
     "responses>=0.25",
     "ruff>=0.7",
     "time-machine>=2.15",
+    "types-requests>=2.32",
 ]
 
 [tool.uv]
