@@ -3,8 +3,23 @@
 from decimal import Decimal
 
 import pandas as pd
+from django.db import connection
 
 PRICE_COLUMNS = ("open", "high", "low", "close")
+REFRESH_SQL = """
+WITH factors AS (
+    SELECT p.date, COALESCE(EXP(SUM(LN(e.adj_factor))), 1.0) AS adj
+    FROM daily_price p
+    LEFT JOIN dividend_event e
+        ON e.stock_id = p.stock_id AND e.ex_date > p.date AND e.adj_factor IS NOT NULL
+    WHERE p.stock_id = %(stock)s
+    GROUP BY p.date
+)
+UPDATE daily_price p
+SET adj_factor = factors.adj
+FROM factors
+WHERE p.stock_id = %(stock)s AND p.date = factors.date AND p.adj_factor <> factors.adj
+"""
 
 
 def adjusted(price: Decimal | float | None, adj_factor: float) -> float | None:
@@ -20,3 +35,10 @@ def adjust_prices(frame: pd.DataFrame) -> pd.DataFrame:
         {f"adj_{col}": frame[col].astype(float) * factor for col in PRICE_COLUMNS if col in frame},
         index=frame.index,
     )
+
+
+def refresh_adj_factor(stock_id: str) -> int:
+    """Set each day's adj_factor to the product of later ex-date factors; returns rows changed."""
+    with connection.cursor() as cursor:
+        cursor.execute(REFRESH_SQL, {"stock": stock_id})
+        return int(cursor.rowcount)
