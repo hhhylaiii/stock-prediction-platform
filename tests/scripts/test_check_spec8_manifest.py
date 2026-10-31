@@ -98,3 +98,11 @@ def test_missing_manifest_file_exits_2(tmp_path: Path) -> None:
     )
     assert result.returncode == 2
     assert "could not run" in result.stderr
+
+
+def test_collection_error_exits_2(tmp_path: Path) -> None:
+    (tmp_path / "pytest.ini").write_text(PYTEST_INI, encoding="utf-8")
+    (tmp_path / "test_broken.py").write_text("import not_a_real_module\n", encoding="utf-8")
+    result = _run(tmp_path, [])
+    assert result.returncode == 2
+    assert "could not run" in result.stderr
