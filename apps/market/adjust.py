@@ -12,11 +12,11 @@ def adjusted(price: Decimal | float | None, adj_factor: float) -> float | None:
 
 
 def adjust_prices(frame: pd.DataFrame) -> pd.DataFrame:
-    """Return a copy with adj_<col> = <col> × adj_factor for every OHLC column present."""
+    """New frame on the same index holding adj_<col> = <col> × adj_factor for each OHLC column."""
     if "adj_factor" not in frame.columns:
         raise KeyError("adj_factor column is required")
     factor = frame["adj_factor"].astype(float)
-    adjusted_columns = {
-        f"adj_{col}": frame[col].astype(float) * factor for col in PRICE_COLUMNS if col in frame
-    }
-    return frame.assign(**adjusted_columns)
+    return pd.DataFrame(
+        {f"adj_{col}": frame[col].astype(float) * factor for col in PRICE_COLUMNS if col in frame},
+        index=frame.index,
+    )
