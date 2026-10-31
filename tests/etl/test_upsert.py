@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from apps.etl.upsert import upsert
+from apps.etl.upsert import insert_missing, upsert
 from apps.market.models import DailyPrice
 
 KEY = ("stock_id", "date")
@@ -79,3 +79,22 @@ def test_batches_cover_every_row() -> None:
     )
     assert upsert(DailyPrice, frame, KEY, ("volume", "turnover"), batch_size=2) == 5
     assert DailyPrice.objects.count() == 5
+
+
+@pytest.mark.django_db
+def test_insert_missing_keeps_existing_rows_and_adds_new_ones() -> None:
+    upsert(DailyPrice, _frame("10").iloc[:1], KEY, UPDATE)
+    assert insert_missing(DailyPrice, _frame("99"), KEY) == 2
+    assert DailyPrice.objects.get(stock_id="2330").close == Decimal("10")
+    assert DailyPrice.objects.count() == 2
+
+
+@pytest.mark.django_db
+def test_insert_missing_with_nothing_to_insert() -> None:
+    assert insert_missing(DailyPrice, _frame("1").iloc[0:0], KEY) == 0
+
+
+def test_insert_missing_refuses_duplicate_keys() -> None:
+    frame = pd.concat([_frame("1"), _frame("2")])
+    with pytest.raises(ValueError, match="duplicate keys"):
+        insert_missing(DailyPrice, frame, KEY)
