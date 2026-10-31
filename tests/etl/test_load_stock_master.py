@@ -46,7 +46,7 @@ def test_command_writes_listed_and_delisted_stocks() -> None:
         "success",
         20,
     )
-    assert run.checkpoint == {"listed": 14, "delisted": 6, "unlisted_without_delisting": 0}
+    assert run.checkpoint == {"listed": 14, "delisted": 6, "unlisted_without_delisting": 2}
     assert RawFinmind.objects.filter(dataset="stock_info").count() == 1
     assert RawTwse.objects.filter(dataset="delisted").count() == 1
     assert RawTpex.objects.filter(dataset="delisted").count() == 1
@@ -134,6 +134,6 @@ def test_codes_that_vanish_without_a_delisting_are_reported() -> None:
     StockMaster.objects.create(stock_id="0061", name="寶滬深", market=Market.TWSE)
     out = StringIO()
     call_command("load_stock_master", stdout=out)
-    assert "1 codes no longer listed and on no delisting list: 0061" in out.getvalue()
+    assert "3 codes no longer listed and on no delisting list: 0061, 2891A, 9105" in out.getvalue()
     assert StockMaster.objects.get(stock_id="0061").delist_date is None
-    assert EtlRun.objects.get().checkpoint["unlisted_without_delisting"] == 1
+    assert EtlRun.objects.get().checkpoint["unlisted_without_delisting"] == 3

@@ -56,8 +56,12 @@ class TpexClient(SourceClient):
                 raise SchemaChangedError(f"TPEx delisting list totalCount is {total!r}")
             page = table.get("data") or []
             rows.extend(page)
-            if not page or len(rows) >= total:
+            if len(rows) >= total:
                 return {**table, "data": rows}
+            if not page:
+                raise SchemaChangedError(
+                    f"TPEx delisting list ended at {len(rows)} of {total} rows"
+                )
 
     @staticmethod
     def _first_table(payload: dict[str, Any]) -> dict[str, Any]:

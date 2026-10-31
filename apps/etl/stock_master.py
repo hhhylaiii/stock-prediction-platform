@@ -1,7 +1,7 @@
 """stock_master rows from current listings plus the official delisting lists (SPEC §5, §8.3)."""
 
 import re
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
 from typing import Any
 
 import pandas as pd
@@ -45,8 +45,10 @@ def pick_industry(categories: Sequence[str]) -> str:
 
 
 def _delistings(
-    rows: Iterable[Sequence[Any]], market: str, code_at: int, name_at: int, date_at: int
+    rows: Any, label: str, market: str, code_at: int, name_at: int, date_at: int
 ) -> pd.DataFrame:
+    if not isinstance(rows, list) or not rows:
+        raise SchemaChangedError(f"{label} delisting list has no rows")
     records = [
         {
             "stock_id": stock_code(row[code_at]),
@@ -64,13 +66,13 @@ def twse_delistings(payload: dict[str, Any]) -> pd.DataFrame:
         raise SchemaChangedError(f"TWSE delisting list status is {payload.get('status')!r}")
     if payload.get("fields") != TWSE_DELISTING_FIELDS:
         raise SchemaChangedError(f"TWSE delisting list fields changed: {payload.get('fields')}")
-    return _delistings(payload.get("data") or [], Market.TWSE, code_at=2, name_at=1, date_at=0)
+    return _delistings(payload.get("data"), "TWSE", Market.TWSE, code_at=2, name_at=1, date_at=0)
 
 
 def tpex_delistings(table: dict[str, Any]) -> pd.DataFrame:
     if table.get("fields") != TPEX_DELISTING_FIELDS:
         raise SchemaChangedError(f"TPEx delisting list fields changed: {table.get('fields')}")
-    return _delistings(table.get("data") or [], Market.TPEX, code_at=0, name_at=1, date_at=2)
+    return _delistings(table.get("data"), "TPEx", Market.TPEX, code_at=0, name_at=1, date_at=2)
 
 
 def _listed_info(info_rows: Sequence[dict[str, Any]]) -> pd.DataFrame:
@@ -131,6 +133,12 @@ def _delisted(info: pd.DataFrame, delistings: pd.DataFrame, current: set[str]) -
             }
         )
     return pd.DataFrame(records, columns=MASTER_COLUMNS)
+
+
+def unlisted_codes(info_rows: Sequence[dict[str, Any]], master: pd.DataFrame) -> list[str]:
+    """Codes FinMind once listed that are neither listed today nor on a delisting list."""
+    history = set(_listed_info(info_rows)["stock_id"].astype(str).str.strip())
+    return sorted(history - set(master["stock_id"]))
 
 
 def build_stock_master(

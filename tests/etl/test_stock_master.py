@@ -8,10 +8,12 @@ import pytest
 from apps.etl.errors import SchemaChangedError
 from apps.etl.roc import parse_roc_date
 from apps.etl.stock_master import (
+    DELISTING_COLUMNS,
     build_stock_master,
     check_listed_count,
     tpex_delistings,
     twse_delistings,
+    unlisted_codes,
 )
 from apps.market.models import Market
 
@@ -160,14 +162,11 @@ def test_info_rows_without_expected_keys_are_a_schema_change() -> None:
 
 
 def twse_delistings_empty() -> pd.DataFrame:
-    return twse_delistings(
-        {"status": "ok", "fields": ["終止上市日期", "公司名稱", "上市編號"], "data": []}
-    )
+    return pd.DataFrame(columns=DELISTING_COLUMNS)
 
 
 def tpex_delistings_empty() -> pd.DataFrame:
-    fields = ["股票代號", "公司名稱", "終止上櫃日期", "終止上櫃原因", "公司資料網址"]
-    return tpex_delistings({"fields": fields, "data": []})
+    return pd.DataFrame(columns=DELISTING_COLUMNS)
 
 
 def test_a_code_on_both_markets_at_once_is_a_schema_change() -> None:
@@ -228,3 +227,28 @@ def test_listed_count_close_to_the_last_load_is_accepted(listed: int, previous: 
 def test_listed_count_far_below_the_last_load_is_a_schema_change() -> None:
     with pytest.raises(SchemaChangedError, match="lists 94 stocks, down from 100"):
         check_listed_count(94, 100)
+
+
+@pytest.mark.parametrize("data", [[], None])
+def test_an_empty_or_missing_twse_list_is_a_schema_change(
+    load_fixture: Callable[[str], Any], data: object
+) -> None:
+    payload = {**load_fixture("twse/reference/suspend_listing.json"), "data": data}
+    with pytest.raises(SchemaChangedError, match="TWSE delisting list"):
+        twse_delistings(payload)
+
+
+@pytest.mark.parametrize("data", [[], None])
+def test_an_empty_or_missing_tpex_list_is_a_schema_change(
+    load_fixture: Callable[[str], Any], data: object
+) -> None:
+    table = {**load_fixture("tpex/delisted.json")["tables"][0], "data": data}
+    with pytest.raises(SchemaChangedError, match="TPEx delisting list"):
+        tpex_delistings(table)
+
+
+def test_codes_in_finmind_history_but_nowhere_else_are_listed(
+    load_fixture: Callable[[str], Any], master: pd.DataFrame
+) -> None:
+    info = load_fixture("finmind/stock_info.json")["data"]
+    assert unlisted_codes(info, master.reset_index()) == ["2891A", "9105"]

@@ -18,6 +18,7 @@ from apps.etl.stock_master import (
     check_listed_count,
     tpex_delistings,
     twse_delistings,
+    unlisted_codes,
 )
 from apps.etl.upsert import upsert
 from apps.market.models import StockMaster
@@ -42,7 +43,9 @@ class Command(BaseCommand):
                 listed = master.loc[master["delist_date"].isna(), "stock_id"].tolist()
                 check_listed_count(len(listed), self._last_listed_count())
                 run.rows = upsert(StockMaster, master, ("stock_id",), UPDATED_FIELDS)
-                unlisted = self._unlisted_without_delisting(listed)
+                unlisted = sorted(
+                    set(unlisted_codes(info, master)) | set(self._vanished_from_db(listed))
+                )
                 run.checkpoint = {
                     "listed": len(listed),
                     "delisted": len(master) - len(listed),
@@ -71,7 +74,7 @@ class Command(BaseCommand):
         return int(count) if count is not None else None
 
     @staticmethod
-    def _unlisted_without_delisting(listed: list[str]) -> list[str]:
+    def _vanished_from_db(listed: list[str]) -> list[str]:
         """Codes once loaded as listed that vanished without an official delisting date."""
         rows = StockMaster.objects.filter(delist_date__isnull=True).exclude(stock_id__in=listed)
         return sorted(rows.values_list("stock_id", flat=True))

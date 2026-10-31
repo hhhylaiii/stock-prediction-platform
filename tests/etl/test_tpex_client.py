@@ -62,12 +62,14 @@ def test_delisted_pages_until_every_row_is_read(load_fixture: Callable[[str], An
 
 @responses.activate
 @pytest.mark.django_db
-def test_an_empty_page_stops_paging(load_fixture: Callable[[str], Any]) -> None:
+def test_an_empty_page_before_the_total_is_a_schema_change(
+    load_fixture: Callable[[str], Any],
+) -> None:
     payload = load_fixture("tpex/delisted.json")
     responses.post(URL, json=_page(payload, 0, 5))
     responses.post(URL, json=_page(payload, 0, 0))
-    assert len(_client(page_size=5).delisted()["data"]) == 5
-    assert len(responses.calls) == 2
+    with pytest.raises(SchemaChangedError, match="5 of 8"):
+        _client(page_size=5).delisted()
 
 
 @responses.activate
