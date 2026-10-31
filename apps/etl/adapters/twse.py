@@ -8,22 +8,21 @@ from typing import Any
 import pandas as pd
 import requests
 from django.conf import settings
-from django.core.exceptions import ImproperlyConfigured
 
-from apps.etl.adapters.base import (
-    BaseAdapter,
-    SchemaChangedError,
-    SourceNotReadyError,
-    SourceRequestError,
-)
+from apps.etl.adapters.base import BaseAdapter
+from apps.etl.client import SourceClient
+from apps.etl.errors import SchemaChangedError, SourceNotReadyError
 from apps.etl.models import RawTwse
-from apps.etl.ratelimit import RateLimiter, RetryableError, ThrottledError
+from apps.etl.ratelimit import RateLimiter
 from apps.etl.upsert import upsert
 from apps.market.calendar import TradingDays
 from apps.market.models import DailyPrice
 
 TWSE_MIN_INTERVAL = 3.0
 DAILY_QUOTES_PATH = "/rwd/zh/afterTrading/MI_INDEX"
+SUSPEND_LISTING_PATH = "/rwd/zh/company/suspendListing"
+HOLIDAY_SCHEDULE_PATH = "/rwd/zh/holidaySchedule/holidaySchedule"
+MONTHLY_TRADING_PATH = "/rwd/zh/afterTrading/FMTQIK"
 DAILY_QUOTES_TITLE = "每日收盤行情"
 DAILY_QUOTES_UNIT_HINT = "單位：元、股"
 DAILY_QUOTES_COLUMNS = {
@@ -100,6 +99,38 @@ def quotes_frame(payload: dict[str, Any], day: date) -> pd.DataFrame:
     return frame.assign(date=day)
 
 
+class TwseClient(SourceClient):
+    source = "twse"
+    label = "TWSE"
+    raw_model = RawTwse
+    min_interval = TWSE_MIN_INTERVAL
+
+    @classmethod
+    def build(cls, limiter: RateLimiter, session: requests.Session | None = None) -> "TwseClient":
+        return cls(limiter, str(settings.TWSE_BASE_URL), float(settings.TWSE_TIMEOUT), session)
+
+    def holiday_schedule(self, year: int) -> dict[str, Any]:
+        """The 市場開休市日期 table of one year (2021 onwards); empty until TWSE publishes it."""
+        params = {"date": f"{year}0101", "response": "json"}
+        payload = self.get_json(HOLIDAY_SCHEDULE_PATH, params)
+        self.save_raw("holiday_schedule", params, payload)
+        return payload
+
+    def monthly_trading(self, month: date) -> dict[str, Any]:
+        """The FMTQIK market totals of one month, one row per trading day."""
+        params = {"date": f"{month:%Y%m}01", "response": "json"}
+        payload = self.get_json(MONTHLY_TRADING_PATH, params)
+        self.save_raw("trading_days", params, payload)
+        return payload
+
+    def suspend_listing(self) -> dict[str, Any]:
+        """The 終止上市公司 list (2001 onwards); kept raw as dataset 'delisted'."""
+        params = {"response": "json"}
+        payload = self.get_json(SUSPEND_LISTING_PATH, params)
+        self.save_raw("delisted", params, payload)
+        return payload
+
+
 class TwseAdapter(BaseAdapter):
     source = "twse"
     raw_model = RawTwse
@@ -111,12 +142,8 @@ class TwseAdapter(BaseAdapter):
         limiter: RateLimiter,
         session: requests.Session | None = None,
     ) -> None:
-        if limiter.limit.min_interval < TWSE_MIN_INTERVAL:
-            raise ImproperlyConfigured("TWSE requests must be at least 3 seconds apart (SPEC §3)")
         super().__init__(calendar, limiter)
-        self.session = session if session is not None else requests.Session()
-        self.base_url = str(settings.TWSE_BASE_URL).rstrip("/")
-        self.timeout = float(settings.TWSE_TIMEOUT)
+        self.client = TwseClient.build(limiter, session)
 
     def fetch(
         self, dataset: str, start: date, end: date, stock_id: str | None = None
@@ -154,33 +181,9 @@ class TwseAdapter(BaseAdapter):
 
     def _fetch_daily_quotes(self, day: date) -> pd.DataFrame:
         params = {"date": day.strftime("%Y%m%d"), "type": "ALLBUT0999", "response": "json"}
-        payload = self.limiter.call(lambda: self._get_json(DAILY_QUOTES_PATH, params))
+        payload = self.client.get_json(DAILY_QUOTES_PATH, params)
         stat = str(payload.get("stat", ""))
         if NO_DATA_STAT in stat:
             raise SourceNotReadyError(f"TWSE daily quotes for {day} not available: {stat}")
         self.save_raw("daily_price", params, payload)
         return quotes_frame(payload, day)
-
-    def _get_json(self, path: str, params: dict[str, str]) -> dict[str, Any]:
-        try:
-            response = self.session.get(
-                f"{self.base_url}{path}",
-                params=params,
-                timeout=self.timeout,
-                headers={"User-Agent": settings.ETL_USER_AGENT},
-            )
-        except requests.RequestException as exc:
-            raise RetryableError(f"TWSE request failed: {exc}") from exc
-        if response.status_code == 429:
-            raise ThrottledError("TWSE returned 429")
-        if response.status_code >= 500:
-            raise RetryableError(f"TWSE returned {response.status_code}")
-        if response.status_code >= 400:
-            raise SourceRequestError(f"TWSE refused the request with {response.status_code}")
-        try:
-            data = response.json()
-        except ValueError:
-            raise SchemaChangedError(f"TWSE returned non-JSON: {response.text[:200]!r}") from None
-        if not isinstance(data, dict):
-            raise SchemaChangedError("TWSE returned JSON that is not an object")
-        return data

@@ -3,11 +3,15 @@ from collections.abc import Callable
 from datetime import date
 from io import StringIO
 from pathlib import Path
+from typing import Any
 
 import pytest
+import responses
 from django.core.management import call_command
 from django.core.management.base import CommandError
+from responses import matchers
 
+from apps.etl.models import EtlRun, RawTwse
 from apps.market.calendar import TradingDays
 from apps.market.models import TradingCalendar
 
@@ -94,3 +98,107 @@ def test_file_touching_the_loaded_range_extends_it(
     calendar = TradingDays.from_db()
     assert (calendar.start, calendar.end) == (date(2026, 9, 29), date(2026, 11, 2))
     assert calendar.shift(date(2026, 10, 30), 1) == date(2026, 11, 2)
+
+
+FMTQIK_URL = "https://www.twse.com.tw/rwd/zh/afterTrading/FMTQIK"
+SCHEDULE_URL = "https://www.twse.com.tw/rwd/zh/holidaySchedule/holidaySchedule"
+TODAY = date(2026, 11, 2)
+
+
+@pytest.fixture
+def frozen_today(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "apps.etl.management.commands.load_calendar.timezone.localdate", lambda: TODAY
+    )
+    monkeypatch.setattr("apps.etl.ratelimit.time.sleep", lambda seconds: None)
+
+
+def _month(load_fixture: Callable[[str], Any], month: str) -> None:
+    responses.get(
+        FMTQIK_URL,
+        json=load_fixture(f"twse/reference/fmtqik_{month}.json"),
+        match=[matchers.query_param_matcher({"date": f"{month}01", "response": "json"})],
+    )
+
+
+@pytest.fixture
+def october_sources(load_fixture: Callable[[str], Any]) -> None:
+    _month(load_fixture, "202610")
+    _month(load_fixture, "202611")
+    for year in (2026, 2027):
+        responses.get(
+            SCHEDULE_URL,
+            json=load_fixture(f"twse/reference/holiday_schedule_{year}.json"),
+            match=[matchers.query_param_matcher({"date": f"{year}0101", "response": "json"})],
+        )
+
+
+@responses.activate
+@pytest.mark.django_db
+@pytest.mark.usefixtures("frozen_today", "october_sources")
+def test_from_rebuilds_past_and_scheduled_days() -> None:
+    out = StringIO()
+    call_command("load_calendar", "--from", "2026-10-01", stdout=out)
+    assert TradingCalendar.objects.count() == 92
+    calendar = TradingDays.from_db()
+    assert (calendar.start, calendar.end) == (date(2026, 10, 1), date(2026, 12, 31))
+    assert len(calendar.between(date(2026, 10, 1), date(2026, 10, 31))) == 19
+    assert not calendar.is_trading_day(date(2026, 10, 23))
+    assert len(calendar.between(date(2026, 11, 1), date(2026, 11, 30))) == 21
+    assert len(calendar.between(date(2026, 12, 1), date(2026, 12, 31))) == 22
+    assert TradingCalendar.objects.get(date=date(2026, 12, 25)).note == "行憲紀念日"
+    assert TradingCalendar.objects.get(date=date(2026, 10, 23)).note == "非交易日（原因未標註）"
+    assert TradingCalendar.objects.get(date=date(2026, 10, 9)).note == "國慶日"
+    run = EtlRun.objects.get()
+    assert (run.status, run.rows, run.end_date) == ("success", 92, date(2026, 12, 31))
+    assert RawTwse.objects.filter(dataset="trading_days").count() == 2
+    assert RawTwse.objects.filter(dataset="holiday_schedule").count() == 2
+    assert "92 days 2026-10-01..2026-12-31" in out.getvalue()
+
+
+@responses.activate
+@pytest.mark.django_db
+@pytest.mark.usefixtures("frozen_today", "october_sources")
+def test_from_twice_is_idempotent() -> None:
+    call_command("load_calendar", "--from", "2026-10-01")
+    call_command("load_calendar", "--from", "2026-10-01")
+    assert TradingCalendar.objects.count() == 92
+    assert EtlRun.objects.filter(status="success").count() == 2
+
+
+@pytest.mark.django_db
+@pytest.mark.usefixtures("frozen_today")
+@pytest.mark.parametrize(
+    ("args", "message"),
+    [
+        (["--from", "2026-11-02"], "before today"),
+        (["--from", "2026/10/01"], "ISO date"),
+        (["--from", "2026-10-01", "--file", "x.json"], "not allowed with"),
+        ([], "one of the arguments"),
+    ],
+)
+def test_bad_arguments_are_command_errors(args: list[str], message: str) -> None:
+    with pytest.raises(CommandError, match=message):
+        call_command("load_calendar", *args)
+
+
+@responses.activate
+@pytest.mark.django_db
+@pytest.mark.usefixtures("frozen_today")
+def test_source_failure_leaves_the_calendar_alone(fixture_path: Callable[[str], Path]) -> None:
+    call_command("load_calendar", file=str(fixture_path("calendar/twse_2026_10.json")))
+    responses.get(FMTQIK_URL, status=403)
+    with pytest.raises(CommandError, match="SourceRequestError"):
+        call_command("load_calendar", "--from", "2026-10-01")
+    assert TradingCalendar.objects.count() == 31
+    assert EtlRun.objects.get().status == "failed"
+
+
+@responses.activate
+@pytest.mark.django_db
+@pytest.mark.usefixtures("frozen_today")
+def test_an_empty_past_month_is_refused(load_fixture: Callable[[str], Any]) -> None:
+    responses.get(FMTQIK_URL, json=load_fixture("twse/reference/fmtqik_202611.json"))
+    with pytest.raises(CommandError, match="SchemaChangedError"):
+        call_command("load_calendar", "--from", "2026-10-01")
+    assert TradingCalendar.objects.count() == 0

@@ -1,9 +1,8 @@
 """Adapter contract: fetch to raw, normalize to the standard schema, upsert (SPEC §5)."""
 
 import hashlib
-import json
 from abc import ABC, abstractmethod
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from datetime import date
 from typing import Any, ClassVar
 
@@ -12,30 +11,13 @@ from django.utils import timezone
 
 from apps.etl.models import EtlRun, RawRecord
 from apps.etl.ratelimit import RateLimiter
+from apps.etl.raw import store_raw
+from apps.etl.runs import tracked_run
 from apps.market.calendar import CalendarError, NotATradingDayError, TradingDays
 
-ERROR_TEXT_LIMIT = 4000
 
-
-class SourceError(Exception):
-    """A source answered, but not with usable data."""
-
-
-class SourceNotReadyError(SourceError):
-    """The source has not published data for a trading day yet; retry later."""
-
-
-class SchemaChangedError(SourceError):
-    """The source response no longer matches the expected layout; raw data is kept."""
-
-
-class SourceRequestError(SourceError):
-    """The source refused the request (a 4xx other than 429); retrying will not help."""
-
-
-def payload_hash(payload: Any) -> str:
-    canonical = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+def stock_list_digest(stock_ids: Iterable[str]) -> str:
+    return hashlib.sha256(",".join(sorted(set(stock_ids))).encode()).hexdigest()
 
 
 class BaseAdapter(ABC):
@@ -44,6 +26,7 @@ class BaseAdapter(ABC):
     source: ClassVar[str]
     raw_model: ClassVar[type[RawRecord]]
     datasets: ClassVar[frozenset[str]]
+    per_stock: ClassVar[bool] = False
 
     def __init__(self, calendar: TradingDays, limiter: RateLimiter) -> None:
         self.calendar = calendar
@@ -64,12 +47,7 @@ class BaseAdapter(ABC):
         """Write standard rows by primary key and return how many were written."""
 
     def save_raw(self, dataset: str, params: Mapping[str, Any], payload: Any) -> RawRecord:
-        record, _ = self.raw_model._default_manager.get_or_create(
-            dataset=dataset,
-            source_hash=payload_hash(payload),
-            defaults={"request_params": dict(params), "payload": payload},
-        )
-        return record
+        return store_raw(self.raw_model, dataset, params, payload)
 
     def require_dataset(self, dataset: str) -> None:
         if dataset not in self.datasets:
@@ -96,22 +74,43 @@ class BaseAdapter(ABC):
         """Fetch, normalize and upsert day by day, recording progress in one etl_run row."""
         self.require_dataset(dataset)
         days = list(self.units(start, end))
-        run = EtlRun.objects.create(
-            source=self.source, dataset=dataset, start_date=start, end_date=end
-        )
-        try:
+        with tracked_run(self.source, dataset, start, end) as run:
             for day in days:
                 raw = self.fetch(dataset, day, day, stock_id)
                 run.rows += self.upsert(dataset, self.normalize(dataset, raw))
                 run.checkpoint = {"last_date": day.isoformat()}
                 run.save(update_fields=["rows", "checkpoint"])
-        except BaseException as exc:
-            run.status = EtlRun.Status.FAILED
-            run.error = f"{type(exc).__name__}: {exc}"[:ERROR_TEXT_LIMIT]
-            run.finished_at = timezone.now()
-            run.save(update_fields=["status", "error", "finished_at"])
-            raise
-        run.status = EtlRun.Status.SUCCESS
-        run.finished_at = timezone.now()
-        run.save(update_fields=["status", "finished_at"])
+        return run
+
+    def backfill(
+        self,
+        dataset: str,
+        stock_ids: Sequence[str],
+        start: date,
+        end: date,
+        resume_after: str | None = None,
+        selection: str | list[str] = "all",
+    ) -> EtlRun:
+        """Fetch, normalize and upsert stock by stock; the checkpoint is the last finished stock."""
+        self.require_dataset(dataset)
+        if not self.per_stock:
+            raise ValueError(f"{self.source} cannot fetch one stock at a time")
+        pending = [
+            code for code in sorted(set(stock_ids)) if resume_after is None or code > resume_after
+        ]
+        with tracked_run(self.source, dataset, start, end) as run:
+            checkpoint = {
+                "kind": "backfill",
+                "selection": selection,
+                "stocks": len(set(stock_ids)),
+                "digest": stock_list_digest(stock_ids),
+                "last_stock_id": resume_after,
+            }
+            run.checkpoint = checkpoint
+            run.save(update_fields=["checkpoint"])
+            for stock_id in pending:
+                raw = self.fetch(dataset, start, end, stock_id)
+                run.rows += self.upsert(dataset, self.normalize(dataset, raw))
+                run.checkpoint = {**checkpoint, "last_stock_id": stock_id}
+                run.save(update_fields=["rows", "checkpoint"])
         return run

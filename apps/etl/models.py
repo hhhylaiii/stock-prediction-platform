@@ -33,6 +33,32 @@ class RawTwse(RawRecord):
         ]
 
 
+class RawFinmind(RawRecord):
+    class Meta:
+        db_table = "raw_finmind"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["dataset", "source_hash"], name="raw_finmind_dataset_hash_uniq"
+            )
+        ]
+        indexes = [
+            models.Index(fields=["dataset", "fetched_at"], name="raw_finmind_ds_fetched_idx")
+        ]
+
+
+class RawTpex(RawRecord):
+    class Meta:
+        db_table = "raw_tpex"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["dataset", "source_hash"], name="raw_tpex_dataset_hash_uniq"
+            )
+        ]
+        indexes = [
+            models.Index(fields=["dataset", "fetched_at"], name="raw_tpex_dataset_fetched_idx")
+        ]
+
+
 class EtlRun(models.Model):
     """One ETL execution with its outcome and a checkpoint for resuming."""
 
