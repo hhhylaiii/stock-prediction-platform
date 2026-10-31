@@ -21,6 +21,7 @@ class BaseAdapter(ABC):
     source: ClassVar[str]
     raw_model: ClassVar[type[RawRecord]]
     datasets: ClassVar[frozenset[str]]
+    per_stock: ClassVar[bool] = False
 
     def __init__(self, calendar: TradingDays, limiter: RateLimiter) -> None:
         self.calendar = calendar
@@ -83,18 +84,22 @@ class BaseAdapter(ABC):
         start: date,
         end: date,
         resume_after: str | None = None,
+        selection: str | list[str] = "all",
     ) -> EtlRun:
         """Fetch, normalize and upsert stock by stock; the checkpoint is the last finished stock."""
         self.require_dataset(dataset)
+        if not self.per_stock:
+            raise ValueError(f"{self.source} cannot fetch one stock at a time")
         pending = [
             code for code in sorted(set(stock_ids)) if resume_after is None or code > resume_after
         ]
         with tracked_run(self.source, dataset, start, end) as run:
-            if resume_after is not None:
-                run.checkpoint = {"last_stock_id": resume_after}
+            checkpoint = {"kind": "backfill", "selection": selection, "last_stock_id": resume_after}
+            run.checkpoint = checkpoint
+            run.save(update_fields=["checkpoint"])
             for stock_id in pending:
                 raw = self.fetch(dataset, start, end, stock_id)
                 run.rows += self.upsert(dataset, self.normalize(dataset, raw))
-                run.checkpoint = {"last_stock_id": stock_id}
+                run.checkpoint = {**checkpoint, "last_stock_id": stock_id}
                 run.save(update_fields=["rows", "checkpoint"])
         return run

@@ -1,3 +1,5 @@
+import os
+import signal
 from datetime import date
 from typing import Any, ClassVar
 
@@ -24,8 +26,10 @@ class StockEchoAdapter(BaseAdapter):
     source = "echo"
     raw_model: ClassVar[type[RawRecord]] = RawTwse
     datasets = frozenset({"daily_price"})
+    per_stock = True
     fail_on: ClassVar[str | None] = None
     interrupt_on: ClassVar[str | None] = None
+    terminate_on: ClassVar[str | None] = None
     calls: ClassVar[list[tuple[str, date, date]]] = []
 
     def fetch(
@@ -37,6 +41,8 @@ class StockEchoAdapter(BaseAdapter):
             raise SourceRequestError(f"boom on {stock_id}")
         if stock_id == self.interrupt_on:
             raise KeyboardInterrupt
+        if stock_id == self.terminate_on:
+            os.kill(os.getpid(), signal.SIGTERM)
         return pd.DataFrame([{"stock_id": stock_id, "date": start, "volume": 1, "turnover": 1}])
 
     def normalize(self, dataset: str, raw_df: pd.DataFrame) -> pd.DataFrame:
@@ -62,6 +68,7 @@ def echo_adapter(monkeypatch: pytest.MonkeyPatch, october_2026: TradingDays, set
     monkeypatch.setattr(StockEchoAdapter, "calls", [])
     monkeypatch.setattr(StockEchoAdapter, "fail_on", None)
     monkeypatch.setattr(StockEchoAdapter, "interrupt_on", None)
+    monkeypatch.setattr(StockEchoAdapter, "terminate_on", None)
     monkeypatch.setattr("apps.etl.adapters.TradingDays.from_db", lambda: october_2026)
 
 
@@ -106,7 +113,7 @@ def test_backfill_walks_every_stock_alive_in_the_range() -> None:
     assert DailyPrice.objects.count() == 4
     run = EtlRun.objects.get()
     assert (run.source, run.dataset, run.status, run.rows) == ("echo", "daily_price", "success", 4)
-    assert run.checkpoint == {"last_stock_id": "3454"}
+    assert run.checkpoint == {"kind": "backfill", "selection": "all", "last_stock_id": "3454"}
     assert (run.start_date, run.end_date) == (START, END)
 
 
@@ -116,7 +123,7 @@ def test_failure_keeps_the_last_finished_stock() -> None:
     with pytest.raises(CommandError, match="boom on 2317"):
         _backfill()
     run = EtlRun.objects.get()
-    assert (run.status, run.checkpoint, run.rows) == ("failed", {"last_stock_id": "1101"}, 1)
+    assert (run.status, run.checkpoint["last_stock_id"], run.rows) == ("failed", "1101", 1)
     assert list(DailyPrice.objects.values_list("stock_id", flat=True)) == ["1101"]
 
 
@@ -131,7 +138,7 @@ def test_resume_continues_after_the_checkpoint() -> None:
     assert _fetched() == ["2317", "2330", "3454"]
     resumed = EtlRun.objects.order_by("run_id").last()
     assert resumed is not None
-    assert (resumed.status, resumed.checkpoint) == ("success", {"last_stock_id": "3454"})
+    assert (resumed.status, resumed.checkpoint["last_stock_id"]) == ("success", "3454")
     assert DailyPrice.objects.count() == 4
 
 
@@ -140,7 +147,7 @@ def test_interrupted_run_can_be_resumed() -> None:
     StockEchoAdapter.interrupt_on = "2330"
     with pytest.raises(KeyboardInterrupt):
         _backfill()
-    assert EtlRun.objects.get().checkpoint == {"last_stock_id": "2317"}
+    assert EtlRun.objects.get().checkpoint["last_stock_id"] == "2317"
     StockEchoAdapter.interrupt_on = None
     StockEchoAdapter.calls.clear()
     _backfill("--resume")
@@ -218,3 +225,92 @@ def test_bad_arguments_are_command_errors(args: list[str], message: str, stocks:
 def test_unknown_source_is_a_command_error() -> None:
     with pytest.raises(CommandError, match="unknown source"):
         call_command("backfill", "--source", "nope", "--dataset", "x", "--from", "2010-01-01")
+
+
+@pytest.mark.usefixtures("stocks")
+def test_a_subset_run_does_not_steal_the_resume_point() -> None:
+    StockEchoAdapter.fail_on = "2317"
+    with pytest.raises(CommandError):
+        _backfill()
+    StockEchoAdapter.fail_on = "3454"
+    with pytest.raises(CommandError):
+        _backfill("--stock", "2330", "--stock", "3454")
+    StockEchoAdapter.fail_on = None
+    StockEchoAdapter.calls.clear()
+    _backfill("--resume")
+    assert _fetched() == ["2317", "2330", "3454"]
+
+
+@pytest.mark.usefixtures("stocks")
+def test_a_subset_run_resumes_its_own_selection() -> None:
+    StockEchoAdapter.fail_on = "3454"
+    with pytest.raises(CommandError):
+        _backfill("--stock", "3454", "--stock", "2330")
+    StockEchoAdapter.fail_on = None
+    StockEchoAdapter.calls.clear()
+    _backfill("--stock", "2330", "--stock", "3454", "--resume")
+    assert _fetched() == ["3454"]
+
+
+@pytest.mark.usefixtures("stocks")
+def test_fetch_runs_with_the_same_range_are_not_resumed() -> None:
+    EtlRun.objects.create(
+        source="echo",
+        dataset="daily_price",
+        start_date=START,
+        end_date=END,
+        status=EtlRun.Status.FAILED,
+        checkpoint={"last_date": "2010-06-30"},
+    )
+    with pytest.raises(CommandError, match="no unfinished"):
+        _backfill("--resume")
+
+
+@pytest.mark.usefixtures("stocks")
+def test_a_run_still_marked_running_is_not_resumed() -> None:
+    EtlRun.objects.create(
+        source="echo",
+        dataset="daily_price",
+        start_date=START,
+        end_date=END,
+        checkpoint={"kind": "backfill", "selection": "all", "last_stock_id": "1101"},
+    )
+    with pytest.raises(CommandError, match="still marked running"):
+        _backfill("--resume")
+    assert StockEchoAdapter.calls == []
+
+
+@pytest.mark.usefixtures("stocks")
+def test_a_resume_that_fails_at_once_keeps_the_original_checkpoint() -> None:
+    StockEchoAdapter.fail_on = "2317"
+    with pytest.raises(CommandError):
+        _backfill()
+    with pytest.raises(CommandError):
+        _backfill("--resume")
+    StockEchoAdapter.fail_on = None
+    StockEchoAdapter.calls.clear()
+    _backfill("--resume")
+    assert _fetched() == ["2317", "2330", "3454"]
+
+
+@pytest.mark.usefixtures("stocks")
+def test_termination_marks_the_run_failed_so_it_can_resume() -> None:
+    previous = signal.getsignal(signal.SIGTERM)
+    StockEchoAdapter.terminate_on = "2330"
+    with pytest.raises(SystemExit):
+        _backfill()
+    run = EtlRun.objects.get()
+    assert (run.status, run.checkpoint["last_stock_id"]) == ("failed", "2317")
+    assert signal.getsignal(signal.SIGTERM) == previous
+    StockEchoAdapter.terminate_on = None
+    StockEchoAdapter.calls.clear()
+    _backfill("--resume")
+    assert _fetched() == ["2330", "3454"]
+
+
+@pytest.mark.usefixtures("stocks")
+def test_adapters_that_fetch_whole_market_days_cannot_backfill() -> None:
+    with pytest.raises(CommandError, match="one stock at a time"):
+        call_command(
+            "backfill", "--source", "twse", "--dataset", "daily_price", "--from", "2010-01-04"
+        )

@@ -1,7 +1,11 @@
 """Backfill a source dataset stock by stock with a resumable checkpoint (SPEC §5 Phase 1)."""
 
+import signal
 from argparse import ArgumentParser
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import date, timedelta
+from types import FrameType
 from typing import Any
 
 from django.core.management.base import BaseCommand, CommandError
@@ -15,6 +19,8 @@ from apps.etl.models import EtlRun
 from apps.etl.ratelimit import RetryableError
 from apps.market.calendar import CalendarError
 from apps.market.models import StockMaster
+
+STOP_SIGNALS = (signal.SIGTERM, signal.SIGHUP)
 
 
 def stocks_alive_in(start: date, chosen: list[str] | None) -> list[str]:
@@ -31,17 +37,46 @@ def stocks_alive_in(start: date, chosen: list[str] | None) -> list[str]:
     return sorted(set(chosen))
 
 
-def resume_point(source: str, dataset: str, start: date, end: date) -> str | None:
-    """Checkpoint of the latest run with the same arguments, if that run did not finish."""
+def resume_point(
+    source: str, dataset: str, start: date, end: date, selection: str | list[str]
+) -> str | None:
+    """Checkpoint of the latest backfill with the same arguments, if it failed part way."""
     latest = (
-        EtlRun.objects.filter(source=source, dataset=dataset, start_date=start, end_date=end)
+        EtlRun.objects.filter(
+            source=source,
+            dataset=dataset,
+            start_date=start,
+            end_date=end,
+            checkpoint__kind="backfill",
+            checkpoint__selection=selection,
+        )
         .order_by("-run_id")
         .first()
     )
     if latest is None or latest.status == EtlRun.Status.SUCCESS:
         raise CommandError(f"no unfinished backfill of {source}/{dataset} {start}..{end} to resume")
+    if latest.status == EtlRun.Status.RUNNING:
+        raise CommandError(
+            f"etl_run {latest.run_id} is still marked running; stop that process first, "
+            "or set its status to failed if it died"
+        )
     checkpoint = latest.checkpoint.get("last_stock_id")
     return str(checkpoint) if checkpoint is not None else None
+
+
+def _terminate(signum: int, frame: FrameType | None) -> None:
+    """SIGTERM and SIGHUP end the run as failed, keeping its checkpoint for --resume."""
+    raise SystemExit(128 + signum)
+
+
+@contextmanager
+def failing_on_termination() -> Iterator[None]:
+    previous = {signum: signal.signal(signum, _terminate) for signum in STOP_SIGNALS}
+    try:
+        yield
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
 
 
 class Command(BaseCommand):
@@ -65,8 +100,14 @@ class Command(BaseCommand):
             adapter = build_adapter(source)
             adapter.require_dataset(dataset)
             stocks = stocks_alive_in(start, options["stocks"])
-            after = resume_point(source, dataset, start, end) if options["resume"] else None
-            run = adapter.backfill(dataset, stocks, start, end, resume_after=after)
+            selection: str | list[str] = stocks if options["stocks"] else "all"
+            after = (
+                resume_point(source, dataset, start, end, selection) if options["resume"] else None
+            )
+            with failing_on_termination():
+                run = adapter.backfill(
+                    dataset, stocks, start, end, resume_after=after, selection=selection
+                )
         except (ValueError, CalendarError, SourceError, RetryableError) as exc:
             raise CommandError(f"{type(exc).__name__}: {exc}") from exc
         self.stdout.write(
