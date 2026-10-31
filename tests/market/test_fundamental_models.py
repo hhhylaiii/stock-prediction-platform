@@ -2,9 +2,11 @@ from collections.abc import Callable
 from datetime import date
 from decimal import Decimal
 
+import pandas as pd
 import pytest
 from django.db import IntegrityError, transaction
 
+from apps.etl.upsert import upsert
 from apps.market.models import FinancialStatement, FinType, MonthlyRevenue
 from tests.market.schema import index_columns, primary_key_columns
 
@@ -89,6 +91,9 @@ def test_monthly_revenue_ratios_may_be_missing() -> None:
         {"period": "202609"},
         {"period": "2026-9"},
         {"yoy": float("nan")},
+        {"yoy": float("-inf")},
+        {"mom": float("nan")},
+        {"mom": float("inf")},
     ],
 )
 def test_monthly_revenue_check_constraints(overrides: dict[str, object]) -> None:
@@ -131,6 +136,9 @@ def test_financial_statement_allows_losses() -> None:
         {"fin_type": "annual"},
         {"debt_ratio": -0.1},
         {"roe": float("inf")},
+        {"gross_margin": float("nan")},
+        {"op_margin": float("-inf")},
+        {"debt_ratio": float("nan")},
     ],
 )
 def test_financial_statement_check_constraints(overrides: dict[str, object]) -> None:
@@ -145,3 +153,16 @@ def test_fin_type_choices() -> None:
 def test_string_representations() -> None:
     assert str(_revenue()) == "2330 2026-09"
     assert str(_statement()) == "2330 2026-Q3 consolidated"
+
+
+@pytest.mark.django_db
+def test_an_infinite_ratio_rejects_the_whole_upsert_batch() -> None:
+    frame = pd.DataFrame(
+        [
+            {"stock_id": "2330", "period": "2026-08", "revenue": 1, "mom": 0.1},
+            {"stock_id": "2330", "period": "2026-09", "revenue": 2, "mom": float("inf")},
+        ]
+    ).assign(announce_date=date(2026, 10, 10))
+    with pytest.raises(IntegrityError):
+        upsert(MonthlyRevenue, frame, ("stock_id", "period"), ("revenue", "mom", "announce_date"))
+    assert MonthlyRevenue.objects.count() == 0
