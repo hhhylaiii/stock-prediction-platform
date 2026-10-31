@@ -56,6 +56,8 @@ class TradingDays:
         return cls((day for day, is_open in rows if is_open), start, end)
 
     def _require_covered(self, day: date) -> None:
+        if type(day) is not date:
+            raise TypeError(f"expected datetime.date, got {type(day).__name__}")
         if not self.start <= day <= self.end:
             raise OutsideCalendarError(f"{day} is outside {self.start}..{self.end}")
 

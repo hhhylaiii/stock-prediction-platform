@@ -1,9 +1,12 @@
 import json
 import re
 from collections.abc import Callable
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
+import numpy as np
+import pandas as pd
 import pytest
 
 from apps.market.calendar import (
@@ -16,10 +19,14 @@ from apps.market.models import TradingCalendar
 from tests.conftest import FIXTURES
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+TAIPEI = ZoneInfo("Asia/Taipei")
 BANNED_CALENDAR_CALLS = re.compile(
-    r"bdate_range|\bBDay\b|\bCDay\b|BusinessDay|CustomBusinessDay|busday_offset|busday_count"
-    r"|is_busday|busdaycalendar|freq\s*=\s*[\"']C?B?[\"']|\.(resample|asfreq)\(\s*[\"']C?B?[\"']"
+    r"bdate_range|Business|\bC?BDay\b|\bCDay\b|\bB(Month|Quarter|Year)(Begin|End)\b"
+    r"|busday|busdaycalendar"
+    r"|freq\s*=\s*[\"']\d*(C|C?B[A-Z]*)[\"']"
+    r"|\.(resample|asfreq)\(\s*[\"']\d*(C|C?B[A-Z]*)[\"']"
 )
+GUARD_EXEMPT = Path(__file__).resolve()
 
 
 def d(text: str) -> date:
@@ -126,6 +133,24 @@ def test_constructor_rejects_days_outside_range() -> None:
         TradingDays([], d("2015-02-28"), d("2015-02-01"))
 
 
+def test_trading_days_on_the_range_edges() -> None:
+    calendar = TradingDays([d("2015-01-05"), d("2015-01-06")], d("2015-01-05"), d("2015-01-06"))
+    assert calendar.shift(d("2015-01-06"), -1) == d("2015-01-05")
+    assert calendar.shift(d("2015-01-05"), 1) == d("2015-01-06")
+    assert calendar.between(d("2015-01-05"), d("2015-01-05")) == (d("2015-01-05"),)
+    assert calendar.latest_on_or_before(d("2015-01-05")) == d("2015-01-05")
+
+
+@pytest.mark.parametrize(
+    "value",
+    [np.datetime64("2015-09-30"), pd.Timestamp("2015-09-30"), datetime(2015, 9, 30, tzinfo=TAIPEI)],
+    ids=["datetime64", "Timestamp", "datetime"],
+)
+def test_non_date_inputs_are_rejected(twse_calendar: TradingDays, value: object) -> None:
+    with pytest.raises(TypeError, match=r"expected datetime\.date"):
+        twse_calendar.is_trading_day(value)  # type: ignore[arg-type]
+
+
 def test_constructor_sorts_and_deduplicates() -> None:
     days = [d("2015-01-07"), d("2015-01-05"), d("2015-01-05"), d("2015-01-06")]
     calendar = TradingDays(days, d("2015-01-01"), d("2015-01-31"))
@@ -176,24 +201,43 @@ def test_from_db_rejects_empty_table() -> None:
         "pd.bdate_range(a, b)",
         "pd.date_range(a, b, freq='B')",
         'pd.date_range(a, b, freq="C")',
+        'pd.date_range(a, b, freq="2B")',
+        'pd.date_range(a, b, freq="BME")',
+        'pd.date_range(a, b, freq="BMS")',
+        'pd.date_range(a, b, freq="CBME")',
         'df.resample("B").last()',
+        'df.resample("BME").last()',
         "s.asfreq('CB')",
+        "d + BDay(3)",
+        "pd.offsets.BusinessDay()",
+        "CustomBusinessDay(holidays=h)",
+        "pd.offsets.BMonthEnd()",
+        "pd.offsets.BQuarterBegin()",
         "pd.offsets.CDay()",
         "np.is_busday(d)",
         "np.busday_offset(d, 1)",
+        "np.busday_count(a, b)",
+        "np.busdaycalendar()",
     ],
 )
 def test_guard_pattern_catches_business_day_shortcuts(line: str) -> None:
     assert BANNED_CALENDAR_CALLS.search(line)
 
 
-def test_guard_pattern_allows_calendar_day_ranges() -> None:
-    assert not BANNED_CALENDAR_CALLS.search('pd.date_range(a, b, freq="D")')
+@pytest.mark.parametrize(
+    "line",
+    ['pd.date_range(a, b, freq="D")', "df.resample('ME').last()", "s.asfreq('W')", "BigDecimal"],
+)
+def test_guard_pattern_allows_calendar_day_frequencies(line: str) -> None:
+    assert not BANNED_CALENDAR_CALLS.search(line)
 
 
-def test_no_business_day_helpers_outside_tests() -> None:
+def test_no_business_day_helpers_anywhere_in_the_repo() -> None:
     paths = [REPO_ROOT / "manage.py"] + [
-        path for top in ("apps", "config", "scripts") for path in (REPO_ROOT / top).rglob("*.py")
+        path
+        for top in ("apps", "config", "scripts", "tests")
+        for path in (REPO_ROOT / top).rglob("*.py")
+        if path.resolve() != GUARD_EXEMPT
     ]
     offenders = [
         f"{path.relative_to(REPO_ROOT)}:{lineno}"
