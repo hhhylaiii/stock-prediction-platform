@@ -20,6 +20,8 @@ class OutsideCalendarError(CalendarError):
 class TradingDays:
     """Immutable sorted trading days plus the [start, end] range the calendar covers."""
 
+    __slots__ = ("_days", "_end", "_lookup", "_start")
+
     def __init__(self, days: Iterable[date], start: date, end: date) -> None:
         ordered = tuple(sorted(set(days)))
         if start > end:
@@ -28,8 +30,16 @@ class TradingDays:
             raise CalendarError("trading days fall outside the calendar range")
         self._days = ordered
         self._lookup = frozenset(ordered)
-        self.start = start
-        self.end = end
+        self._start = start
+        self._end = end
+
+    @property
+    def start(self) -> date:
+        return self._start
+
+    @property
+    def end(self) -> date:
+        return self._end
 
     @classmethod
     def from_db(cls) -> "TradingDays":

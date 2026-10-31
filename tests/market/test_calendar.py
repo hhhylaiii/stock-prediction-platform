@@ -1,5 +1,6 @@
 import json
 import re
+from collections.abc import Callable
 from datetime import date
 from pathlib import Path
 
@@ -16,7 +17,8 @@ from tests.conftest import FIXTURES
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BANNED_CALENDAR_CALLS = re.compile(
-    r"bdate_range|\bBDay\b|BusinessDay|CustomBusinessDay|busday_offset|busday_count"
+    r"bdate_range|\bBDay\b|\bCDay\b|BusinessDay|CustomBusinessDay|busday_offset|busday_count"
+    r"|is_busday|busdaycalendar|freq\s*=\s*[\"']C?B?[\"']|\.(resample|asfreq)\(\s*[\"']C?B?[\"']"
 )
 
 
@@ -62,11 +64,22 @@ def test_shift_past_either_end_is_rejected(twse_calendar: TradingDays) -> None:
         twse_calendar.shift(d("2014-01-02"), -1)
 
 
-def test_dates_outside_range_are_rejected(twse_calendar: TradingDays) -> None:
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda cal: cal.is_trading_day(d("2017-01-03")),
+        lambda cal: cal.between(d("2013-12-31"), d("2014-01-10")),
+        lambda cal: cal.between(d("2016-12-28"), d("2017-01-31")),
+        lambda cal: cal.latest_on_or_before(d("2017-03-01")),
+        lambda cal: cal.latest_on_or_before(d("2013-12-31")),
+    ],
+    ids=["is_trading_day", "between-start", "between-end", "latest-after", "latest-before"],
+)
+def test_dates_outside_range_are_rejected(
+    twse_calendar: TradingDays, call: Callable[[TradingDays], object]
+) -> None:
     with pytest.raises(OutsideCalendarError):
-        twse_calendar.is_trading_day(d("2017-01-03"))
-    with pytest.raises(OutsideCalendarError):
-        twse_calendar.between(d("2013-12-31"), d("2014-01-10"))
+        call(twse_calendar)
 
 
 def test_is_trading_day_flags(twse_calendar: TradingDays) -> None:
@@ -108,7 +121,24 @@ def test_constructor_rejects_days_outside_range() -> None:
     with pytest.raises(CalendarError):
         TradingDays([d("2015-01-05")], d("2015-02-01"), d("2015-02-28"))
     with pytest.raises(CalendarError):
+        TradingDays([d("2015-03-02")], d("2015-02-01"), d("2015-02-28"))
+    with pytest.raises(CalendarError):
         TradingDays([], d("2015-02-28"), d("2015-02-01"))
+
+
+def test_constructor_sorts_and_deduplicates() -> None:
+    days = [d("2015-01-07"), d("2015-01-05"), d("2015-01-05"), d("2015-01-06")]
+    calendar = TradingDays(days, d("2015-01-01"), d("2015-01-31"))
+    assert calendar.shift(d("2015-01-05"), 1) == d("2015-01-06")
+    assert calendar.shift(d("2015-01-05"), 2) == d("2015-01-07")
+    assert len(calendar.between(d("2015-01-01"), d("2015-01-31"))) == 3
+
+
+def test_calendar_range_cannot_be_reassigned(twse_calendar: TradingDays) -> None:
+    with pytest.raises(AttributeError):
+        twse_calendar.start = d("2015-01-01")  # type: ignore[misc]
+    with pytest.raises(AttributeError):
+        twse_calendar.extra = 1  # type: ignore[attr-defined]
 
 
 @pytest.mark.django_db
@@ -140,12 +170,36 @@ def test_from_db_rejects_empty_table() -> None:
         TradingDays.from_db()
 
 
+@pytest.mark.parametrize(
+    "line",
+    [
+        "pd.bdate_range(a, b)",
+        "pd.date_range(a, b, freq='B')",
+        'pd.date_range(a, b, freq="C")',
+        'df.resample("B").last()',
+        "s.asfreq('CB')",
+        "pd.offsets.CDay()",
+        "np.is_busday(d)",
+        "np.busday_offset(d, 1)",
+    ],
+)
+def test_guard_pattern_catches_business_day_shortcuts(line: str) -> None:
+    assert BANNED_CALENDAR_CALLS.search(line)
+
+
+def test_guard_pattern_allows_calendar_day_ranges() -> None:
+    assert not BANNED_CALENDAR_CALLS.search('pd.date_range(a, b, freq="D")')
+
+
 def test_no_business_day_helpers_outside_tests() -> None:
+    paths = [REPO_ROOT / "manage.py"] + [
+        path for top in ("apps", "config", "scripts") for path in (REPO_ROOT / top).rglob("*.py")
+    ]
     offenders = [
         f"{path.relative_to(REPO_ROOT)}:{lineno}"
-        for top in ("apps", "config", "scripts")
-        for path in (REPO_ROOT / top).rglob("*.py")
+        for path in paths
         for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1)
         if BANNED_CALENDAR_CALLS.search(line)
     ]
+    assert len(paths) > 10
     assert offenders == []
