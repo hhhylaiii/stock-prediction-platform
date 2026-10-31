@@ -46,6 +46,7 @@ ignore = ["RUF001", "RUF002", "RUF003"]
 "scripts/**" = ["S603", "S607"]
 "config/settings/test.py" = ["S105"]
 "**/migrations/**" = ["E501", "RUF012"]
+"**/models.py" = ["RUF012"]
 
 [tool.mypy]
 python_version = "3.12"
