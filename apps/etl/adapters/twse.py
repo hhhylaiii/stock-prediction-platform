@@ -20,6 +20,7 @@ from apps.market.models import DailyPrice
 TWSE_MIN_INTERVAL = 3.0
 DAILY_QUOTES_PATH = "/rwd/zh/afterTrading/MI_INDEX"
 SUSPEND_LISTING_PATH = "/rwd/zh/company/suspendListing"
+HOLIDAY_SCHEDULE_PATH = "/rwd/zh/holidaySchedule/holidaySchedule"
 DAILY_QUOTES_TITLE = "每日收盤行情"
 DAILY_QUOTES_UNIT_HINT = "單位：元、股"
 DAILY_QUOTES_COLUMNS = {
@@ -105,6 +106,13 @@ class TwseClient(SourceClient):
     @classmethod
     def build(cls, limiter: RateLimiter, session: requests.Session | None = None) -> "TwseClient":
         return cls(limiter, str(settings.TWSE_BASE_URL), float(settings.TWSE_TIMEOUT), session)
+
+    def holiday_schedule(self, year: int) -> dict[str, Any]:
+        """The 市場開休市日期 table of one year (2021 onwards); empty until TWSE publishes it."""
+        params = {"date": f"{year}0101", "response": "json"}
+        payload = self.get_json(HOLIDAY_SCHEDULE_PATH, params)
+        self.save_raw("holiday_schedule", params, payload)
+        return payload
 
     def suspend_listing(self) -> dict[str, Any]:
         """The 終止上市公司 list (2001 onwards); kept raw as dataset 'delisted'."""

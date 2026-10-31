@@ -21,8 +21,8 @@ def tracked_run(source: str, dataset: str, start: date, end: date) -> Iterator[E
         run.status = EtlRun.Status.FAILED
         run.error = f"{type(exc).__name__}: {exc}"[:ERROR_TEXT_LIMIT]
         run.finished_at = timezone.now()
-        run.save(update_fields=["status", "error", "rows", "checkpoint", "finished_at"])
+        run.save(update_fields=["status", "error", "rows", "checkpoint", "end_date", "finished_at"])
         raise
     run.status = EtlRun.Status.SUCCESS
     run.finished_at = timezone.now()
-    run.save(update_fields=["status", "rows", "checkpoint", "finished_at"])
+    run.save(update_fields=["status", "rows", "checkpoint", "end_date", "finished_at"])

@@ -8,18 +8,9 @@ from django.core.management.base import BaseCommand, CommandError
 
 from apps.etl.adapters import build_adapter
 from apps.etl.adapters.base import SourceError
+from apps.etl.management.options import as_date
 from apps.etl.ratelimit import RetryableError
 from apps.market.calendar import CalendarError
-
-
-def as_date(value: date | str | None, flag: str) -> date | None:
-    """Accept a date or an ISO string; call_command passes non-required options unparsed."""
-    if value is None or isinstance(value, date):
-        return value
-    try:
-        return date.fromisoformat(value)
-    except ValueError:
-        raise CommandError(f"{flag} must be an ISO date like 2026-10-28, got {value!r}") from None
 
 
 class Command(BaseCommand):
