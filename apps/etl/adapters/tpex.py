@@ -51,9 +51,12 @@ class TpexClient(SourceClient):
             payload = self.post_json(DELISTED_PATH, form)
             self.save_raw("delisted", form, payload)
             table = self._first_table(payload)
+            total = table.get("totalCount")
+            if not isinstance(total, int):
+                raise SchemaChangedError(f"TPEx delisting list totalCount is {total!r}")
             page = table.get("data") or []
             rows.extend(page)
-            if not page or len(rows) >= int(table.get("totalCount", 0)):
+            if not page or len(rows) >= total:
                 return {**table, "data": rows}
 
     @staticmethod

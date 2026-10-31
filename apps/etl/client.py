@@ -54,7 +54,7 @@ class SourceClient:
         return {"User-Agent": str(settings.ETL_USER_AGENT)}
 
     def check_payload(self, payload: dict[str, Any]) -> None:
-        """Hook for sources that report errors inside a 200 response."""
+        return None
 
     def _send(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
         try:

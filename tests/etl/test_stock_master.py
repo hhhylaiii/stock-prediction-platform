@@ -173,3 +173,15 @@ def test_a_code_on_both_markets_at_once_is_a_schema_change() -> None:
     ]
     with pytest.raises(SchemaChangedError, match="both markets"):
         build_stock_master(rows, twse_delistings_empty(), tpex_delistings_empty())
+
+
+@pytest.mark.parametrize("market", ["twse", "tpex"])
+def test_a_snapshot_missing_a_market_is_a_schema_change(
+    load_fixture: Callable[[str], Any], market: str
+) -> None:
+    info = [
+        {**row, "type": row["type"].upper()} if row["type"] == market else row
+        for row in load_fixture("finmind/stock_info.json")["data"]
+    ]
+    with pytest.raises(SchemaChangedError, match=f"no current {market}"):
+        build_stock_master(info, twse_delistings_empty(), tpex_delistings_empty())

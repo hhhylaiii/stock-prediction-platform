@@ -99,3 +99,13 @@ def test_interval_below_three_seconds_is_refused() -> None:
     )
     with pytest.raises(ImproperlyConfigured, match="3 seconds"):
         TpexClient(RateLimiter(fast), "https://www.tpex.org.tw", 30.0)
+
+
+@responses.activate
+@pytest.mark.django_db
+def test_missing_total_count_is_a_schema_change(load_fixture: Callable[[str], Any]) -> None:
+    payload = load_fixture("tpex/delisted.json")
+    table = {k: v for k, v in payload["tables"][0].items() if k != "totalCount"}
+    responses.post(URL, json={**payload, "tables": [table]})
+    with pytest.raises(SchemaChangedError, match="totalCount"):
+        _client().delisted()

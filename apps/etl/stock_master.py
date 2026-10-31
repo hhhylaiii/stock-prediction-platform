@@ -93,7 +93,11 @@ def _current(info: pd.DataFrame) -> pd.DataFrame:
                 "delist_date": None,
             }
         )
-    return pd.DataFrame(records, columns=MASTER_COLUMNS)
+    current = pd.DataFrame(records, columns=MASTER_COLUMNS)
+    for source, market in INFO_MARKETS.items():
+        if not (current["market"] == market).any():
+            raise SchemaChangedError(f"TaiwanStockInfo has no current {source} listings")
+    return current
 
 
 def _delisted(info: pd.DataFrame, delistings: pd.DataFrame, current: set[str]) -> pd.DataFrame:

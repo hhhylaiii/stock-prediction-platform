@@ -78,16 +78,20 @@ class FinmindClient(SourceClient):
 
     def data(self, dataset: str, finmind_dataset: str, **params: str) -> list[dict[str, Any]]:
         """Rows of one FinMind dataset; the whole response is kept in raw_finmind."""
-        wait = maintenance_wait(self._now())
-        if wait > 0:
-            self._sleep(wait)
         query = {"dataset": finmind_dataset, **params}
         payload = self.get_json(DATA_PATH, query)
+        self.save_raw(dataset, query, payload)
         rows = payload.get("data")
         if not isinstance(rows, list):
             raise SchemaChangedError(f"FinMind {finmind_dataset} data is not a list")
-        self.save_raw(dataset, query, payload)
         return rows
+
+    def _send(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
+        """Every attempt, retries included, first waits out the Sunday maintenance window."""
+        wait = maintenance_wait(self._now())
+        if wait > 0:
+            self._sleep(wait)
+        return super()._send(method, path, **kwargs)
 
     def headers(self) -> dict[str, str]:
         headers = super().headers()

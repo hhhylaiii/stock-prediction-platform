@@ -101,11 +101,14 @@ def test_prod_settings_load_from_environment(monkeypatch: pytest.MonkeyPatch) ->
 
 
 @pytest.mark.usefixtures("isolated_env")
-@pytest.mark.parametrize(("token", "interval"), [("abc", 6.5), ("", 13.0)])
+@pytest.mark.parametrize(
+    ("token", "configured", "interval"),
+    [("abc", "", 6.5), ("", "", 13.0), ("abc", "10", 10.0)],
+)
 def test_finmind_interval_follows_the_quota_of_the_token(
-    monkeypatch: pytest.MonkeyPatch, token: str, interval: float
+    monkeypatch: pytest.MonkeyPatch, token: str, configured: str, interval: float
 ) -> None:
     monkeypatch.setenv("FINMIND_API_TOKEN", token)
-    monkeypatch.delenv("FINMIND_MIN_INTERVAL", raising=False)
+    monkeypatch.setenv("FINMIND_MIN_INTERVAL", configured)
     module = _fresh_import("config.settings.dev")
     assert module.ETL_RATE_LIMITS["finmind"]["min_interval"] == interval

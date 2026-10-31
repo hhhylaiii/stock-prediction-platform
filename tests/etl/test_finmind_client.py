@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -164,6 +164,7 @@ def test_data_that_is_not_a_list_is_a_schema_change() -> None:
     responses.get(URL, json={"msg": "success", "status": 200, "data": {"date": "2010-01-04"}})
     with pytest.raises(SchemaChangedError, match="list"):
         _client(FakeClock()).data("trading_date", "TaiwanStockTradingDate")
+    assert RawFinmind.objects.filter(dataset="trading_date").count() == 1
 
 
 @pytest.mark.parametrize(
@@ -197,3 +198,25 @@ def test_requests_wait_out_the_maintenance_window() -> None:
     )
     client.data("stock_info", "TaiwanStockInfo")
     assert clock.sleeps[0] == pytest.approx(2 * 3600.0)
+
+
+@responses.activate
+@pytest.mark.django_db
+def test_retries_after_a_cooldown_also_wait_out_maintenance() -> None:
+    responses.get(URL, status=402)
+    responses.get(URL, json=_ok([]))
+    clock = FakeClock()
+    late_saturday = datetime(2026, 10, 31, 23, 50, tzinfo=TAIPEI)
+    limiter = RateLimiter(_limit(), clock=clock, sleep=clock.sleep)
+    client = FinmindClient(
+        limiter,
+        "https://api.finmindtrade.com",
+        30.0,
+        FAKE_KEY,
+        now=lambda: late_saturday + timedelta(seconds=clock.now - 1000.0),
+        sleep=clock.sleep,
+    )
+    client.data("stock_info", "TaiwanStockInfo")
+    assert len(responses.calls) == 2
+    assert clock.sleeps[0] == pytest.approx(3700.0)
+    assert clock.sleeps[1] == pytest.approx(6 * 3600 + 8 * 60 + 20)
