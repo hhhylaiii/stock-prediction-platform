@@ -158,6 +158,8 @@ def test_weekly_holding_publish_date_is_required() -> None:
         {"holders": -1},
         {"shares": -1},
         {"pct": -0.1},
+        {"pct": float("nan")},
+        {"level": 16, "pct": float("nan")},
     ],
 )
 def test_weekly_holding_check_constraints(overrides: dict[str, object]) -> None:

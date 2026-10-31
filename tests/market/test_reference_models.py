@@ -89,11 +89,14 @@ def test_macro_indicator_round_trip_and_required_announce_date() -> None:
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize("period", ["2026-13", "202609", "2026-Q3"])
-def test_macro_indicator_period_format(period: str) -> None:
+@pytest.mark.parametrize(
+    ("period", "value"),
+    [("2026-13", 1.0), ("202609", 1.0), ("2026-Q3", 1.0), ("2026-09", float("nan"))],
+)
+def test_macro_indicator_check_constraints(period: str, value: float) -> None:
     with pytest.raises(IntegrityError), transaction.atomic():
         MacroIndicator.objects.create(
-            indicator_id="business_signal", period=period, value=1.0, announce_date=DAY
+            indicator_id="business_signal", period=period, value=value, announce_date=DAY
         )
 
 
