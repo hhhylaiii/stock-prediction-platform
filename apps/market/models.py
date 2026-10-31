@@ -40,7 +40,11 @@ class TradingCalendar(models.Model):
 
 
 class DailyPrice(models.Model):
-    """Unadjusted daily bar; adjusted price = price × adj_factor at read time (SPEC §4)."""
+    """Unadjusted daily bar; adjusted price = price × adj_factor at read time (SPEC §4).
+
+    OHLC come from the regular session; volume and turnover also count odd-lot, after-hours
+    fixed-price and block trades, as in TWSE MI_INDEX and STOCK_DAY.
+    """
 
     pk = models.CompositePrimaryKey("stock_id", "date")
     stock_id = models.CharField(max_length=10)
