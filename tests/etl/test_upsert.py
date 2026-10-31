@@ -84,7 +84,7 @@ def test_batches_cover_every_row() -> None:
 @pytest.mark.django_db
 def test_insert_missing_keeps_existing_rows_and_adds_new_ones() -> None:
     upsert(DailyPrice, _frame("10").iloc[:1], KEY, UPDATE)
-    assert insert_missing(DailyPrice, _frame("99"), KEY) == 2
+    assert insert_missing(DailyPrice, _frame("99"), KEY) == 1
     assert DailyPrice.objects.get(stock_id="2330").close == Decimal("10")
     assert DailyPrice.objects.count() == 2
 

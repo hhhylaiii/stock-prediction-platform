@@ -32,9 +32,15 @@ def insert_missing(
     if frame.empty:
         return 0
     objects = _objects(model, frame, unique_fields)
+    keys = list(unique_fields)
+    candidates = model._default_manager.filter(
+        **{f"{key}__in": frame[key].unique().tolist() for key in keys}
+    )
+    existing = set(candidates.values_list(*keys))
+    new = [obj for obj in objects if tuple(getattr(obj, key) for key in keys) not in existing]
     with transaction.atomic():
-        model._default_manager.bulk_create(objects, batch_size=batch_size, ignore_conflicts=True)
-    return len(objects)
+        model._default_manager.bulk_create(new, batch_size=batch_size, ignore_conflicts=True)
+    return len(new)
 
 
 def upsert(
