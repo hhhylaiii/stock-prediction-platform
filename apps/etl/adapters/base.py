@@ -1,0 +1,106 @@
+"""Adapter contract: fetch to raw, normalize to the standard schema, upsert (SPEC §5)."""
+
+import hashlib
+import json
+from abc import ABC, abstractmethod
+from collections.abc import Iterator, Mapping
+from datetime import date
+from typing import Any, ClassVar
+
+import pandas as pd
+from django.utils import timezone
+
+from apps.etl.models import EtlRun, RawRecord
+from apps.etl.ratelimit import RateLimiter
+from apps.market.calendar import CalendarError, NotATradingDayError, TradingDays
+
+ERROR_TEXT_LIMIT = 4000
+
+
+class SourceNotReadyError(Exception):
+    """The source has not published data for a trading day yet; retry later."""
+
+
+class SchemaChangedError(Exception):
+    """The source response no longer matches the expected layout; raw data is kept."""
+
+
+def payload_hash(payload: Any) -> str:
+    canonical = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+class BaseAdapter(ABC):
+    """One adapter per source; each dataset maps to one standard table."""
+
+    source: ClassVar[str]
+    raw_model: ClassVar[type[RawRecord]]
+    datasets: ClassVar[frozenset[str]]
+
+    def __init__(self, calendar: TradingDays, limiter: RateLimiter) -> None:
+        self.calendar = calendar
+        self.limiter = limiter
+
+    @abstractmethod
+    def fetch(
+        self, dataset: str, start: date, end: date, stock_id: str | None = None
+    ) -> pd.DataFrame:
+        """Call the source, store each response in the raw table and return it as rows."""
+
+    @abstractmethod
+    def normalize(self, dataset: str, raw_df: pd.DataFrame) -> pd.DataFrame:
+        """Convert raw rows to the standard schema: column names, units and dates."""
+
+    @abstractmethod
+    def upsert(self, dataset: str, frame: pd.DataFrame) -> int:
+        """Write standard rows by primary key and return how many were written."""
+
+    def save_raw(self, dataset: str, params: Mapping[str, Any], payload: Any) -> RawRecord:
+        record, _ = self.raw_model._default_manager.get_or_create(
+            dataset=dataset,
+            source_hash=payload_hash(payload),
+            defaults={"request_params": dict(params), "payload": payload},
+        )
+        return record
+
+    def require_dataset(self, dataset: str) -> None:
+        if dataset not in self.datasets:
+            raise ValueError(
+                f"{self.source} has no dataset {dataset!r}; choose from {sorted(self.datasets)}"
+            )
+
+    def trading_days(self, start: date, end: date) -> tuple[date, ...]:
+        """Trading days to process; a single requested date must itself be a trading day."""
+        if start == end and not self.calendar.is_trading_day(start):
+            raise NotATradingDayError(f"{start} is not a trading day")
+        days = self.calendar.between(start, end)
+        if not days:
+            raise CalendarError(f"no trading days between {start} and {end}")
+        return days
+
+    def units(self, start: date, end: date) -> Iterator[date]:
+        yield from self.trading_days(start, end)
+
+    def run(self, dataset: str, start: date, end: date, stock_id: str | None = None) -> EtlRun:
+        """Fetch, normalize and upsert day by day, recording progress in one etl_run row."""
+        self.require_dataset(dataset)
+        days = list(self.units(start, end))
+        run = EtlRun.objects.create(
+            source=self.source, dataset=dataset, start_date=start, end_date=end
+        )
+        try:
+            for day in days:
+                raw = self.fetch(dataset, day, day, stock_id)
+                run.rows += self.upsert(dataset, self.normalize(dataset, raw))
+                run.checkpoint = {"last_date": day.isoformat()}
+                run.save(update_fields=["rows", "checkpoint"])
+        except Exception as exc:
+            run.status = EtlRun.Status.FAILED
+            run.error = f"{type(exc).__name__}: {exc}"[:ERROR_TEXT_LIMIT]
+            run.finished_at = timezone.now()
+            run.save(update_fields=["status", "error", "finished_at"])
+            raise
+        run.status = EtlRun.Status.SUCCESS
+        run.finished_at = timezone.now()
+        run.save(update_fields=["status", "finished_at"])
+        return run
