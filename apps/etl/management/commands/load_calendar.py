@@ -17,12 +17,10 @@ from apps.etl.errors import SourceError
 from apps.etl.management.options import required_date
 from apps.etl.ratelimit import RetryableError
 from apps.etl.runs import tracked_run
-from apps.etl.trading_calendar import build_calendar, traded_days
+from apps.etl.trading_calendar import build_calendar, schedule_years, traded_days
 from apps.etl.upsert import upsert
 from apps.market.calendar import CalendarError, TradingDays
 from apps.market.models import TradingCalendar
-
-SCHEDULE_YEARS_AHEAD = 1
 
 
 def read_calendar_file(path: Path) -> tuple[TradingDays, dict[str, str]]:
@@ -82,7 +80,7 @@ class Command(BaseCommand):
             traded |= traded_days(payload, month, allow_empty=month == current)
             month = (month + timedelta(days=32)).replace(day=1)
         schedules = []
-        for year in range(today.year, today.year + SCHEDULE_YEARS_AHEAD + 1):
+        for year in schedule_years(start, today):
             schedules.append(twse.holiday_schedule(year))
             if not schedules[-1].get("data"):
                 break

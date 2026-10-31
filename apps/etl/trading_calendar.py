@@ -12,6 +12,10 @@ SCHEDULE_FIELDS = ["日期", "名稱", "說明"]
 MONTHLY_DATE_FIELD = "日期"
 MONTHLY_OK = "OK"
 MONTHLY_EMPTY = "很抱歉，沒有符合條件的資料!"
+FIRST_SCHEDULE_YEAR = 2021
+SCHEDULE_YEARS_AHEAD = 1
+UNLABELLED_CLOSURE = "非交易日（原因未標註）"
+WEEKEND_TRADING = "週末補行交易日"
 NO_TRADING = "無交易"
 TRADING_REMINDER = "交易日"
 NOTE_LIMIT = 64
@@ -30,6 +34,12 @@ def schedule_year(payload: Mapping[str, Any]) -> int:
     if not isinstance(year, int):
         raise SchemaChangedError(f"TWSE holiday schedule has no queryYear: {year!r}")
     return year
+
+
+def schedule_years(start: date, today: date) -> range:
+    """Published schedules that can label the range, through next year."""
+    first = max(start.year, FIRST_SCHEDULE_YEAR)
+    return range(first, today.year + SCHEDULE_YEARS_AHEAD + 1)
 
 
 def schedule_days(payload: Mapping[str, Any]) -> dict[date, ScheduledDay]:
@@ -78,12 +88,23 @@ def _schedule_through(
     for payload in sorted(schedules, key=schedule_year):
         year, days = schedule_year(payload), schedule_days(payload)
         if not days:
+            if year <= covered.year:
+                raise SchemaChangedError(f"TWSE holiday schedule for {year} is empty")
             break
         if date(year, 1, 1) > covered + timedelta(days=1):
             raise SchemaChangedError(f"no TWSE holiday schedule for {covered.year + 1}")
         scheduled.update(days)
         covered = max(covered, date(year, 12, 31))
     return covered, scheduled
+
+
+def _note(day: date, is_open: bool, listed: ScheduledDay | None) -> str:
+    weekend = day.weekday() >= 5
+    if is_open:
+        return WEEKEND_TRADING if weekend else ""
+    if listed is not None and not listed[0]:
+        return listed[1]
+    return "" if weekend else UNLABELLED_CLOSURE
 
 
 def build_calendar(
@@ -106,7 +127,8 @@ def build_calendar(
             is_open = listed[0] if listed is not None else day.weekday() < 5
         if is_open:
             trading.append(day)
-        elif listed is not None and not listed[0]:
-            notes[day.isoformat()] = listed[1]
+        note = _note(day, is_open, listed)
+        if note:
+            notes[day.isoformat()] = note
         day += timedelta(days=1)
     return TradingDays(trading, start, end), notes

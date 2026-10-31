@@ -5,7 +5,14 @@ from typing import Any
 import pytest
 
 from apps.etl.errors import SchemaChangedError
-from apps.etl.trading_calendar import build_calendar, schedule_days, traded_days
+from apps.etl.trading_calendar import (
+    UNLABELLED_CLOSURE,
+    WEEKEND_TRADING,
+    build_calendar,
+    schedule_days,
+    schedule_years,
+    traded_days,
+)
 
 
 @pytest.fixture
@@ -57,7 +64,7 @@ def test_past_days_follow_the_traded_days(february_2010: set[date]) -> None:
     assert len(calendar.between(date(2010, 2, 1), date(2010, 2, 28))) == 14
     assert calendar.is_trading_day(date(2010, 2, 6))
     assert not calendar.is_trading_day(date(2010, 2, 12))
-    assert notes == {}
+    assert notes["2010-02-12"] == UNLABELLED_CLOSURE
 
 
 @pytest.mark.parametrize(
@@ -163,3 +170,44 @@ def test_schedule_without_a_year_is_a_schema_change(schedule_2026: dict[str, Any
     broken = {key: value for key, value in schedule_2026.items() if key != "queryYear"}
     with pytest.raises(SchemaChangedError, match="queryYear"):
         build_calendar({date(2025, 12, 31)}, date(2025, 12, 31), [broken], start=date(2025, 12, 31))
+
+
+def test_past_closures_take_schedule_notes_or_an_unlabelled_note(
+    schedule_2026: dict[str, Any], load_fixture: Callable[[str], Any]
+) -> None:
+    october = traded_days(load_fixture("twse/reference/fmtqik_202610.json"), date(2026, 10, 1))
+    calendar, notes = build_calendar(
+        october, date(2026, 10, 31), [schedule_2026], start=date(2026, 10, 1)
+    )
+    assert notes["2026-10-09"] == "國慶日"
+    assert notes["2026-10-23"] == UNLABELLED_CLOSURE
+    assert "2026-10-24" not in notes
+    assert calendar.end == date(2026, 12, 31)
+
+
+def test_weekend_trading_days_are_noted(february_2010: set[date]) -> None:
+    _, notes = build_calendar(february_2010, date(2010, 2, 28), [], start=date(2010, 2, 1))
+    assert notes["2010-02-06"] == WEEKEND_TRADING
+    assert notes["2010-02-11"] == UNLABELLED_CLOSURE
+
+
+@pytest.mark.parametrize(
+    ("start", "today", "years"),
+    [
+        (date(2010, 1, 1), date(2026, 11, 2), list(range(2021, 2028))),
+        (date(2026, 10, 1), date(2026, 11, 2), [2026, 2027]),
+        (date(2026, 12, 30), date(2027, 1, 1), [2026, 2027, 2028]),
+    ],
+)
+def test_schedules_cover_the_noted_years_and_next_year(
+    start: date, today: date, years: list[int]
+) -> None:
+    assert list(schedule_years(start, today)) == years
+
+
+def test_an_empty_schedule_for_a_covered_year_is_a_schema_change(
+    load_fixture: Callable[[str], Any],
+) -> None:
+    empty = {**load_fixture("twse/reference/holiday_schedule_2027.json"), "queryYear": 2026}
+    with pytest.raises(SchemaChangedError, match="2026"):
+        build_calendar({date(2026, 10, 30)}, date(2026, 10, 31), [empty], start=date(2026, 10, 30))

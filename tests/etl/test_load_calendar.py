@@ -147,6 +147,8 @@ def test_from_rebuilds_past_and_scheduled_days() -> None:
     assert len(calendar.between(date(2026, 11, 1), date(2026, 11, 30))) == 21
     assert len(calendar.between(date(2026, 12, 1), date(2026, 12, 31))) == 22
     assert TradingCalendar.objects.get(date=date(2026, 12, 25)).note == "行憲紀念日"
+    assert TradingCalendar.objects.get(date=date(2026, 10, 23)).note == "非交易日（原因未標註）"
+    assert TradingCalendar.objects.get(date=date(2026, 10, 9)).note == "國慶日"
     run = EtlRun.objects.get()
     assert (run.status, run.rows, run.end_date) == ("success", 92, date(2026, 12, 31))
     assert RawTwse.objects.filter(dataset="trading_days").count() == 2
