@@ -99,7 +99,7 @@ def test_settlement_only_days_are_closed_even_when_named_a_trading_day(
 ) -> None:
     days = schedule_days(load_fixture("twse/reference/holiday_schedule_2021.json"))
     assert days[date(2021, 2, 5)] == (True, "")
-    assert days[date(2021, 2, 8)] == (False, "農曆春節前最後交易日")
+    assert days[date(2021, 2, 8)] == (False, "市場無交易，僅辦理結算交割作業")
     assert days[date(2021, 2, 9)][0] is False
     assert days[date(2021, 1, 4)] == (True, "")
 

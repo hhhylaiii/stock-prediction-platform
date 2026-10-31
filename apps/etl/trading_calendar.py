@@ -1,5 +1,6 @@
 """trading_calendar rows from TWSE's monthly trading days plus its holiday schedule (SPEC §8.7)."""
 
+import re
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import date, timedelta
 from typing import Any
@@ -19,6 +20,7 @@ WEEKEND_TRADING = "週末補行交易日"
 NO_TRADING = "無交易"
 TRADING_REMINDER = "交易日"
 NOTE_LIMIT = 64
+LEADING_DATE = re.compile(r"^\d{1,2}月\d{1,2}日")
 ScheduledDay = tuple[bool, str]
 
 
@@ -42,6 +44,14 @@ def schedule_years(start: date, today: date) -> range:
     return range(first, today.year + SCHEDULE_YEARS_AHEAD + 1)
 
 
+def _no_trading_note(name: str, detail: str) -> str:
+    """The clause saying the market does not trade, without a leading date like '2月8日'."""
+    for text in (name, *detail.split("。")):
+        if NO_TRADING in text:
+            return LEADING_DATE.sub("", text).strip()
+    return ""
+
+
 def schedule_days(payload: Mapping[str, Any]) -> dict[date, ScheduledDay]:
     """Each listed date as (is_trading_day, note); 無交易 anywhere in a row means closed."""
     if payload.get("stat") != "ok":
@@ -54,8 +64,9 @@ def schedule_days(payload: Mapping[str, Any]) -> dict[date, ScheduledDay]:
         grouped.setdefault(day, []).append((str(row[1]).strip(), " ".join(str(row[2]).split())))
     days: dict[date, ScheduledDay] = {}
     for day, rows in grouped.items():
-        if any(NO_TRADING in name + detail for name, detail in rows):
-            days[day] = (False, rows[0][0][:NOTE_LIMIT])
+        no_trading = [_no_trading_note(name, detail) for name, detail in rows]
+        if any(no_trading):
+            days[day] = (False, next(note for note in no_trading if note)[:NOTE_LIMIT])
         elif any(TRADING_REMINDER in name for name, _ in rows):
             days[day] = (True, "")
         else:
