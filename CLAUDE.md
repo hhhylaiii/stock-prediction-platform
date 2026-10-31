@@ -30,7 +30,7 @@
 ## 慣例
 
 - Python 3.12、Django 5.x；所有函式寫型別註記，mypy `disallow_untyped_defs`。
-- 不寫 `#` 註解；只放行 `#!`、`# noqa`、`# type:`、`# pragma:`、`# fmt:`。需要說明時寫一行 docstring，推理寫進 PR 說明。
+- 不寫 `#` 註解；只放行第 1 行的 `#!`、`# noqa[: 代碼]`、`# type: ignore[代碼]`、`# pragma: no cover|branch`、`# fmt: off|on|skip`，且指令後面不能接說明（以 `scripts/check_no_hash_comments.py` 的 `ALLOWED_DIRECTIVES` 為準）。需要說明時寫一行 docstring，推理寫進 PR 說明。
 - 時間一律 `Asia/Taipei`；日期運算一律走交易日曆模組，不用 `pandas.bdate_range`。
 - 成交量存「股」、金額存「元」；寫入 standard 表一律 upsert，重跑冪等。
 - 設定（API key、速率上限、排程時間）放環境變數或 settings，不寫死；範本見 `.env.example`。
