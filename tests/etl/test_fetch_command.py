@@ -125,3 +125,12 @@ def test_october_fixture_matches_twse(october_2026: TradingDays) -> None:
     assert len(october_2026.between(date(2026, 10, 1), date(2026, 10, 31))) == 19
     assert not october_2026.is_trading_day(date(2026, 10, 9))
     assert not october_2026.is_trading_day(date(2026, 10, 26))
+
+
+@responses.activate
+@pytest.mark.usefixtures("october_2026_in_db")
+def test_refused_request_is_a_command_error() -> None:
+    responses.get(URL, status=403)
+    with pytest.raises(CommandError, match="SourceRequestError"):
+        call_command("fetch", source="twse", dataset="daily_price", date="2026-10-28")
+    assert EtlRun.objects.get().status == "failed"

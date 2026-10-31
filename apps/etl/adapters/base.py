@@ -17,12 +17,20 @@ from apps.market.calendar import CalendarError, NotATradingDayError, TradingDays
 ERROR_TEXT_LIMIT = 4000
 
 
-class SourceNotReadyError(Exception):
+class SourceError(Exception):
+    """A source answered, but not with usable data."""
+
+
+class SourceNotReadyError(SourceError):
     """The source has not published data for a trading day yet; retry later."""
 
 
-class SchemaChangedError(Exception):
+class SchemaChangedError(SourceError):
     """The source response no longer matches the expected layout; raw data is kept."""
+
+
+class SourceRequestError(SourceError):
+    """The source refused the request (a 4xx other than 429); retrying will not help."""
 
 
 def payload_hash(payload: Any) -> str:
@@ -94,7 +102,7 @@ class BaseAdapter(ABC):
                 run.rows += self.upsert(dataset, self.normalize(dataset, raw))
                 run.checkpoint = {"last_date": day.isoformat()}
                 run.save(update_fields=["rows", "checkpoint"])
-        except Exception as exc:
+        except BaseException as exc:
             run.status = EtlRun.Status.FAILED
             run.error = f"{type(exc).__name__}: {exc}"[:ERROR_TEXT_LIMIT]
             run.finished_at = timezone.now()

@@ -19,15 +19,22 @@ class EchoAdapter(BaseAdapter):
     raw_model: ClassVar[type[RawRecord]] = RawTwse
     datasets = frozenset({"daily_price"})
 
-    def __init__(self, calendar: TradingDays, limiter: RateLimiter, fail_on: date | None = None):
+    def __init__(
+        self,
+        calendar: TradingDays,
+        limiter: RateLimiter,
+        fail_on: date | None = None,
+        failure: type[BaseException] = RuntimeError,
+    ):
         super().__init__(calendar, limiter)
         self.fail_on = fail_on
+        self.failure = failure
 
     def fetch(
         self, dataset: str, start: date, end: date, stock_id: str | None = None
     ) -> pd.DataFrame:
         if start == self.fail_on:
-            raise RuntimeError(f"boom on {start}")
+            raise self.failure(f"boom on {start}")
         payload = {"day": start.isoformat(), "rows": [["2330", "1,000"]]}
         self.save_raw(dataset, {"date": start.isoformat()}, payload)
         return pd.DataFrame(payload["rows"], columns=["code", "shares"]).assign(date=start)
@@ -88,6 +95,21 @@ def test_failure_marks_the_run_failed_and_keeps_the_last_checkpoint(
     assert run.error == "RuntimeError: boom on 2026-10-28"
     assert run.checkpoint == {"last_date": "2026-10-27"}
     assert run.rows == 1
+
+
+@pytest.mark.django_db
+def test_interrupt_still_marks_the_run_failed(
+    october_2026_in_db: TradingDays, twse_limiter: RateLimiter
+) -> None:
+    adapter = EchoAdapter(
+        october_2026_in_db, twse_limiter, fail_on=date(2026, 10, 28), failure=KeyboardInterrupt
+    )
+    with pytest.raises(KeyboardInterrupt):
+        adapter.run("daily_price", date(2026, 10, 27), date(2026, 10, 29))
+    run = EtlRun.objects.get()
+    assert run.status == EtlRun.Status.FAILED
+    assert run.finished_at is not None
+    assert run.checkpoint == {"last_date": "2026-10-27"}
 
 
 @pytest.mark.django_db

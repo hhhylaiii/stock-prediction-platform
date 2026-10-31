@@ -5,13 +5,14 @@ from decimal import Decimal
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+import pandas as pd
 import pytest
 import requests
 import responses
 from django.core.exceptions import ImproperlyConfigured
 
-from apps.etl.adapters.base import SchemaChangedError, SourceNotReadyError
-from apps.etl.adapters.twse import TwseAdapter
+from apps.etl.adapters.base import SchemaChangedError, SourceNotReadyError, SourceRequestError
+from apps.etl.adapters.twse import TwseAdapter, is_foreign_currency_etf, quotes_frame
 from apps.etl.models import RawTwse
 from apps.etl.ratelimit import RateLimit, RateLimiter, RetryableError
 from apps.market.calendar import NotATradingDayError, TradingDays
@@ -47,7 +48,7 @@ def test_fetch_stores_raw_and_returns_source_rows(
 ) -> None:
     responses.get(URL, json=payload)
     raw = adapter.fetch("daily_price", TRADING_DAY, TRADING_DAY)
-    assert len(raw) == 6
+    assert len(raw) == 7
     assert set(raw["date"]) == {TRADING_DAY}
     stored = RawTwse.objects.get()
     assert stored.dataset == "daily_price"
@@ -128,10 +129,36 @@ def test_non_trading_day_is_rejected_before_any_request(adapter: TwseAdapter) ->
 
 @responses.activate
 @pytest.mark.django_db
-def test_answer_for_another_date_is_rejected(adapter: TwseAdapter, payload: dict[str, Any]) -> None:
+def test_previous_day_answer_means_not_published_yet(
+    adapter: TwseAdapter, payload: dict[str, Any]
+) -> None:
     responses.get(URL, json={**payload, "date": "20261027"})
+    with pytest.raises(SourceNotReadyError, match="still serves 20261027"):
+        adapter.fetch("daily_price", TRADING_DAY, TRADING_DAY)
+    assert RawTwse.objects.count() == 1
+
+
+@responses.activate
+@pytest.mark.django_db
+@pytest.mark.parametrize("answered", ["20261029", "2026-10-28", ""])
+def test_unexpected_answer_date_is_a_schema_change_and_keeps_raw(
+    adapter: TwseAdapter, payload: dict[str, Any], answered: str
+) -> None:
+    responses.get(URL, json={**payload, "date": answered})
     with pytest.raises(SchemaChangedError, match="instead of"):
         adapter.fetch("daily_price", TRADING_DAY, TRADING_DAY)
+    assert RawTwse.objects.count() == 1
+
+
+@responses.activate
+@pytest.mark.django_db
+def test_unexpected_stat_is_a_schema_change_and_keeps_raw(
+    adapter: TwseAdapter, payload: dict[str, Any]
+) -> None:
+    responses.get(URL, json={**payload, "stat": "ok"})
+    with pytest.raises(SchemaChangedError, match="unexpected stat"):
+        adapter.fetch("daily_price", TRADING_DAY, TRADING_DAY)
+    assert RawTwse.objects.count() == 1
 
 
 @responses.activate
@@ -181,7 +208,7 @@ def test_throttle_then_success_waits_for_cooldown(
     adapter = TwseAdapter(october_2026, RateLimiter(limit, sleep=fake_sleep))
     responses.get(URL, status=429)
     responses.get(URL, json=payload)
-    assert len(adapter.fetch("daily_price", TRADING_DAY, TRADING_DAY)) == 6
+    assert len(adapter.fetch("daily_price", TRADING_DAY, TRADING_DAY)) == 7
     assert 7.0 in fake_sleep.calls
 
 
@@ -200,6 +227,24 @@ def test_connection_errors_are_retryable(adapter: TwseAdapter) -> None:
         responses.get(URL, body=requests.ConnectionError("reset"))
     with pytest.raises(RetryableError):
         adapter.fetch("daily_price", TRADING_DAY, TRADING_DAY)
+
+
+@responses.activate
+def test_other_request_failures_are_retryable(adapter: TwseAdapter) -> None:
+    for _ in range(3):
+        responses.get(URL, body=requests.exceptions.ChunkedEncodingError("cut"))
+    with pytest.raises(RetryableError):
+        adapter.fetch("daily_price", TRADING_DAY, TRADING_DAY)
+    assert len(responses.calls) == 3
+
+
+@responses.activate
+@pytest.mark.parametrize("status", [403, 404])
+def test_client_errors_are_not_retried(adapter: TwseAdapter, status: int) -> None:
+    responses.get(URL, status=status)
+    with pytest.raises(SourceRequestError, match=str(status)):
+        adapter.fetch("daily_price", TRADING_DAY, TRADING_DAY)
+    assert len(responses.calls) == 1
 
 
 @responses.activate
@@ -247,3 +292,72 @@ def test_json_that_is_not_an_object_is_a_schema_change(adapter: TwseAdapter) -> 
     responses.get(URL, json=[1, 2, 3])
     with pytest.raises(SchemaChangedError, match="not an object"):
         adapter.fetch("daily_price", TRADING_DAY, TRADING_DAY)
+
+
+@responses.activate
+@pytest.mark.django_db
+@pytest.mark.parametrize("missing", ["data", "fields"])
+def test_malformed_quotes_table_is_a_schema_change(
+    adapter: TwseAdapter, payload: dict[str, Any], missing: str
+) -> None:
+    changed = copy.deepcopy(payload)
+    del _quotes_table(changed)[missing]
+    responses.get(URL, json=changed)
+    with pytest.raises(SchemaChangedError, match="malformed"):
+        adapter.fetch("daily_price", TRADING_DAY, TRADING_DAY)
+    assert RawTwse.objects.count() == 1
+
+
+@responses.activate
+@pytest.mark.django_db
+def test_foreign_currency_counters_are_dropped(
+    adapter: TwseAdapter, payload: dict[str, Any]
+) -> None:
+    responses.get(URL, json=payload)
+    raw = adapter.fetch("daily_price", TRADING_DAY, TRADING_DAY)
+    assert "00636K" in set(raw["證券代號"])
+    frame = adapter.normalize("daily_price", raw)
+    assert "00636K" not in set(frame["stock_id"])
+    assert len(frame) == 6
+
+
+@pytest.mark.parametrize(
+    ("code", "foreign"),
+    [
+        ("00636K", True),
+        ("00625K", True),
+        ("00999M", True),
+        ("00999S", True),
+        ("00999C", True),
+        ("0050", False),
+        ("00647L", False),
+        ("00682U", False),
+        ("2887Z1", False),
+        ("2330", False),
+    ],
+)
+def test_foreign_currency_etf_codes(code: str, foreign: bool) -> None:
+    assert is_foreign_currency_etf(code) is foreign
+
+
+@responses.activate
+@pytest.mark.django_db
+def test_refetch_keeps_adj_factor(adapter: TwseAdapter, payload: dict[str, Any]) -> None:
+    responses.get(URL, json=payload)
+    raw = adapter.fetch("daily_price", TRADING_DAY, TRADING_DAY)
+    adapter.upsert("daily_price", adapter.normalize("daily_price", raw))
+    DailyPrice.objects.filter(stock_id="2330").update(adj_factor=0.5)
+    raw = adapter.fetch("daily_price", TRADING_DAY, TRADING_DAY)
+    adapter.upsert("daily_price", adapter.normalize("daily_price", raw))
+    assert DailyPrice.objects.get(stock_id="2330").adj_factor == 0.5
+
+
+@responses.activate
+@pytest.mark.django_db
+def test_stored_payload_rebuilds_the_same_rows(
+    adapter: TwseAdapter, payload: dict[str, Any]
+) -> None:
+    responses.get(URL, json=payload)
+    fetched = adapter.fetch("daily_price", TRADING_DAY, TRADING_DAY)
+    rebuilt = quotes_frame(RawTwse.objects.get().payload, TRADING_DAY)
+    pd.testing.assert_frame_equal(rebuilt, fetched)

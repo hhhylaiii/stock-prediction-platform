@@ -7,7 +7,7 @@ from typing import Any
 from django.core.management.base import BaseCommand, CommandError
 
 from apps.etl.adapters import build_adapter
-from apps.etl.adapters.base import SchemaChangedError, SourceNotReadyError
+from apps.etl.adapters.base import SourceError
 from apps.etl.ratelimit import RetryableError
 from apps.market.calendar import CalendarError
 
@@ -41,13 +41,7 @@ class Command(BaseCommand):
         try:
             adapter = build_adapter(options["source"])
             run = adapter.run(options["dataset"], start, end)
-        except (
-            ValueError,
-            CalendarError,
-            SourceNotReadyError,
-            SchemaChangedError,
-            RetryableError,
-        ) as exc:
+        except (ValueError, CalendarError, SourceError, RetryableError) as exc:
             raise CommandError(f"{type(exc).__name__}: {exc}") from exc
         self.stdout.write(
             f"etl_run {run.run_id} {run.status}: {run.rows} rows "

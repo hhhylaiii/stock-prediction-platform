@@ -10,7 +10,12 @@ import requests
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 
-from apps.etl.adapters.base import BaseAdapter, SchemaChangedError, SourceNotReadyError
+from apps.etl.adapters.base import (
+    BaseAdapter,
+    SchemaChangedError,
+    SourceNotReadyError,
+    SourceRequestError,
+)
 from apps.etl.models import RawTwse
 from apps.etl.ratelimit import RateLimiter, RetryableError, ThrottledError
 from apps.etl.upsert import upsert
@@ -33,6 +38,13 @@ DAILY_QUOTES_COLUMNS = {
 PRICE_COLUMNS = ("open", "high", "low", "close")
 COUNT_COLUMNS = ("volume", "turnover")
 NO_TRADE_MARKERS = frozenset({"--", "---", ""})
+NO_DATA_STAT = "沒有符合條件的資料"
+FOREIGN_CURRENCY_CODE_SUFFIXES = frozenset("KMSC")
+
+
+def is_foreign_currency_etf(code: str) -> bool:
+    """TWSE: an ETF code whose sixth character is K, M, S or C trades in a foreign currency."""
+    return len(code) == 6 and code.startswith("00") and code[5] in FOREIGN_CURRENCY_CODE_SUFFIXES
 
 
 def parse_price(text: str) -> Decimal | None:
@@ -57,6 +69,18 @@ def find_table(payload: dict[str, Any], title_part: str) -> dict[str, Any]:
         if title_part in (table.get("title") or ""):
             return dict(table)
     raise SchemaChangedError(f"no table titled *{title_part}* in TWSE response")
+
+
+def quotes_frame(payload: dict[str, Any], day: date) -> pd.DataFrame:
+    """Rows of the daily quotes table in a stored MI_INDEX payload, for fetch or a rerun."""
+    table = find_table(payload, DAILY_QUOTES_TITLE)
+    if table.get("hints") != DAILY_QUOTES_UNIT_HINT:
+        raise SchemaChangedError(f"TWSE daily quotes units changed: {table.get('hints')!r}")
+    try:
+        frame = pd.DataFrame(table["data"], columns=table["fields"])
+    except (KeyError, ValueError) as exc:
+        raise SchemaChangedError(f"TWSE daily quotes table is malformed: {exc}") from None
+    return frame.assign(date=day)
 
 
 class TwseAdapter(BaseAdapter):
@@ -89,14 +113,16 @@ class TwseAdapter(BaseAdapter):
         missing = set(DAILY_QUOTES_COLUMNS) - set(raw_df.columns)
         if missing:
             raise SchemaChangedError(f"TWSE daily quotes lost columns {sorted(missing)}")
-        frame = raw_df[list(DAILY_QUOTES_COLUMNS)].rename(columns=DAILY_QUOTES_COLUMNS)
+        codes = raw_df["證券代號"].astype(str).str.strip()
+        local = raw_df.loc[~codes.map(is_foreign_currency_etf)]
+        frame = local[list(DAILY_QUOTES_COLUMNS)].rename(columns=DAILY_QUOTES_COLUMNS)
         converters: dict[str, Callable[[str], object]] = {
             **dict.fromkeys(PRICE_COLUMNS, parse_price),
             **dict.fromkeys(COUNT_COLUMNS, parse_count),
         }
         return frame.assign(
             stock_id=frame["stock_id"].astype(str).str.strip(),
-            date=raw_df["date"],
+            date=local["date"],
             **{col: frame[col].map(convert) for col, convert in converters.items()},
         )
 
@@ -112,19 +138,18 @@ class TwseAdapter(BaseAdapter):
     def _fetch_daily_quotes(self, day: date) -> pd.DataFrame:
         params = {"date": day.strftime("%Y%m%d"), "type": "ALLBUT0999", "response": "json"}
         payload = self.limiter.call(lambda: self._get_json(DAILY_QUOTES_PATH, params))
-        if payload.get("stat") != "OK":
-            raise SourceNotReadyError(
-                f"TWSE daily quotes for {day} not available: {payload.get('stat')}"
-            )
-        if payload.get("date") != params["date"]:
-            raise SchemaChangedError(
-                f"TWSE answered for {payload.get('date')} instead of {params['date']}"
-            )
+        stat = str(payload.get("stat", ""))
+        if NO_DATA_STAT in stat:
+            raise SourceNotReadyError(f"TWSE daily quotes for {day} not available: {stat}")
         self.save_raw("daily_price", params, payload)
-        table = find_table(payload, DAILY_QUOTES_TITLE)
-        if table.get("hints") != DAILY_QUOTES_UNIT_HINT:
-            raise SchemaChangedError(f"TWSE daily quotes units changed: {table.get('hints')!r}")
-        return pd.DataFrame(table["data"], columns=table["fields"]).assign(date=day)
+        if stat != "OK":
+            raise SchemaChangedError(f"TWSE answered with unexpected stat {stat!r}")
+        answered = str(payload.get("date", ""))
+        if answered != params["date"]:
+            if answered.isdigit() and answered < params["date"]:
+                raise SourceNotReadyError(f"TWSE still serves {answered} when asked for {day}")
+            raise SchemaChangedError(f"TWSE answered for {answered!r} instead of {params['date']}")
+        return quotes_frame(payload, day)
 
     def _get_json(self, path: str, params: dict[str, str]) -> dict[str, Any]:
         try:
@@ -134,13 +159,14 @@ class TwseAdapter(BaseAdapter):
                 timeout=self.timeout,
                 headers={"User-Agent": settings.ETL_USER_AGENT},
             )
-        except (requests.ConnectionError, requests.Timeout) as exc:
+        except requests.RequestException as exc:
             raise RetryableError(f"TWSE request failed: {exc}") from exc
         if response.status_code == 429:
             raise ThrottledError("TWSE returned 429")
         if response.status_code >= 500:
             raise RetryableError(f"TWSE returned {response.status_code}")
-        response.raise_for_status()
+        if response.status_code >= 400:
+            raise SourceRequestError(f"TWSE refused the request with {response.status_code}")
         try:
             data = response.json()
         except ValueError:
