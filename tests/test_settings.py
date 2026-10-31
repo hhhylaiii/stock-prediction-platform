@@ -58,27 +58,43 @@ def test_dev_settings_enable_debug() -> None:
     assert module.TIME_ZONE == "Asia/Taipei"
 
 
+PROD_ENV = {
+    "DJANGO_SECRET_KEY": "x" * 50,
+    "DJANGO_ALLOWED_HOSTS": "example.test",
+    "DATABASE_URL": "postgres://u:p@dbhost:5433/prod",
+}
+
+
+def _set_prod_env(monkeypatch: pytest.MonkeyPatch, **overrides: str | None) -> None:
+    for key, value in {**PROD_ENV, **overrides}.items():
+        if value is None:
+            monkeypatch.delenv(key, raising=False)
+        else:
+            monkeypatch.setenv(key, value)
+
+
 @pytest.mark.usefixtures("isolated_env")
-def test_prod_settings_require_secret_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("DJANGO_SECRET_KEY", raising=False)
-    monkeypatch.setenv("DJANGO_ALLOWED_HOSTS", "example.test")
-    with pytest.raises(ImproperlyConfigured, match="DJANGO_SECRET_KEY"):
+@pytest.mark.parametrize("missing", ["DJANGO_SECRET_KEY", "DJANGO_ALLOWED_HOSTS", "DATABASE_URL"])
+def test_prod_settings_require_each_variable(monkeypatch: pytest.MonkeyPatch, missing: str) -> None:
+    _set_prod_env(monkeypatch, **{missing: None})
+    with pytest.raises(ImproperlyConfigured, match=missing):
         _fresh_import("config.settings.prod")
 
 
 @pytest.mark.usefixtures("isolated_env")
-def test_prod_settings_require_allowed_hosts(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("DJANGO_SECRET_KEY", "x" * 50)
-    monkeypatch.delenv("DJANGO_ALLOWED_HOSTS", raising=False)
-    with pytest.raises(ImproperlyConfigured, match="DJANGO_ALLOWED_HOSTS"):
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_prod_settings_reject_blank_secret_key(monkeypatch: pytest.MonkeyPatch, blank: str) -> None:
+    _set_prod_env(monkeypatch, DJANGO_SECRET_KEY=blank)
+    with pytest.raises(ImproperlyConfigured, match="must not be empty"):
         _fresh_import("config.settings.prod")
 
 
 @pytest.mark.usefixtures("isolated_env")
-def test_prod_settings_load_with_secret_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("DJANGO_SECRET_KEY", "x" * 50)
-    monkeypatch.setenv("DJANGO_ALLOWED_HOSTS", "example.test")
+def test_prod_settings_load_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_prod_env(monkeypatch)
     module = _fresh_import("config.settings.prod")
     assert module.DEBUG is False
     assert module.ALLOWED_HOSTS == ["example.test"]
     assert module.SECRET_KEY == "x" * 50
+    assert module.DATABASES["default"]["HOST"] == "dbhost"
+    assert module.DATABASES["default"]["NAME"] == "prod"

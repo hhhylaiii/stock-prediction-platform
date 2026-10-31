@@ -1,9 +1,14 @@
 """Settings for the always-on Compose deployment; secrets must come from the environment."""
 
+from django.core.exceptions import ImproperlyConfigured
+
 from .base import *  # noqa: F403
 from .base import env
 
 SECRET_KEY = env.str("DJANGO_SECRET_KEY")
+if not SECRET_KEY.strip():
+    raise ImproperlyConfigured("DJANGO_SECRET_KEY must not be empty")
+DATABASES = {"default": env.db_url("DATABASE_URL")}
 ALLOWED_HOSTS = env.list("DJANGO_ALLOWED_HOSTS")
 SESSION_COOKIE_SECURE = env.bool("DJANGO_SECURE_COOKIES", default=True)
 CSRF_COOKIE_SECURE = env.bool("DJANGO_SECURE_COOKIES", default=True)

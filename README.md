@@ -29,5 +29,5 @@ curl http://localhost:8000/healthz
 
 四個容器：`web`（gunicorn）、`worker`（Celery worker 內含 beat）、`db`（PostgreSQL 16）、`redis`（broker）。所有容器與主機都要用 `TZ=Asia/Taipei`，否則排程會偏 8 小時。
 
-- web 與 db 的對外 port 只綁 `127.0.0.1`，區網連不到。
-- Compose 預設用 `config.settings.dev`（DEBUG 開）。改成 `config.settings.prod` 時要在 `.env` 設 `DJANGO_SECRET_KEY` 與 `DJANGO_ALLOWED_HOSTS`，且 `DJANGO_ALLOWED_HOSTS` 要保留 `localhost`，web 的 healthcheck 靠它。
+- web、db、redis 的對外 port 只綁 `127.0.0.1`，區網連不到。
+- Compose 預設用 `config.settings.dev`（DEBUG 開）。改成 `config.settings.prod` 時要在 `.env` 設 `DJANGO_SECRET_KEY` 與 `DJANGO_ALLOWED_HOSTS`，`DATABASE_URL` 也必填（Compose 會自動注入）。`DJANGO_ALLOWED_HOSTS` 要保留 `localhost`，web 的 healthcheck 靠它；只用 http 存取時設 `DJANGO_SECURE_COOKIES=false`，否則瀏覽器可能丟掉 session 與 CSRF cookie。

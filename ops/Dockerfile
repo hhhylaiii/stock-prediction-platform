@@ -14,7 +14,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends tzdata \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system app \
-    && useradd --system --gid app --home-dir /app app
+    && useradd --system --gid app --create-home --home-dir /home/app app
 
 WORKDIR /app
 

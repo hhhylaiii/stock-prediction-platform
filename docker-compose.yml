@@ -32,7 +32,7 @@ services:
 
   worker:
     <<: *app
-    command: ["celery", "-A", "config", "worker", "--beat", "--loglevel=info", "--schedule=/tmp/celerybeat-schedule"]
+    command: ["celery", "-A", "config", "worker", "--beat", "--loglevel=${LOG_LEVEL:-INFO}", "--schedule=/tmp/celerybeat-schedule"]
     healthcheck:
       test: ["CMD-SHELL", "celery -A config inspect ping -d celery@$$HOSTNAME --timeout 5"]
       interval: 30s
@@ -63,6 +63,8 @@ services:
     image: redis:7-alpine
     environment:
       TZ: Asia/Taipei
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
