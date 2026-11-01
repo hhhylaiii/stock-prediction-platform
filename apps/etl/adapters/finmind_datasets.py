@@ -25,6 +25,13 @@ POLICY_KEYS = (
     "CashExDividendTradingDate",
 )
 RESULT_KEYS = ("date", "stock_id", "before_price", "after_price")
+REDUCTION_KEYS = (
+    "date",
+    "stock_id",
+    "ClosingPriceonTheLastTradingDay",
+    "PostReductionReferencePrice",
+)
+SPLIT_KEYS = ("date", "stock_id", "before_price", "after_price")
 EVENT_COLUMNS = [
     "ex_date",
     "stock_id",
@@ -102,14 +109,16 @@ def price_bars(rows: Iterable[Row], stock_id: str) -> pd.DataFrame:
     return pd.DataFrame(records, columns=PRICE_COLUMNS, dtype=object)
 
 
-def _ex_factor(row: Row, stock_id: str) -> float | None:
-    """除權息參考價 ÷ 前收; rights issues included, so it is not the dividend-only reference."""
-    before, after = row["before_price"], row["after_price"]
+def _ratio(row: Row, after_key: str, before_key: str, label: str) -> float | None:
+    """Reference price ÷ last close; for dividends this is 除權息參考價, rights issues included."""
+    before, after = row[before_key], row[after_key]
     if not isinstance(before, int | float) or not isinstance(after, int | float):
-        raise SchemaChangedError(f"FinMind dividend result for {stock_id} has bad prices")
+        raise SchemaChangedError(f"FinMind {label} for {row['stock_id']} has bad prices")
     if before > 0 and after > 0:
         return float(after) / float(before)
-    logger.warning("%s %s: no usable reference price, adj_factor left empty", stock_id, row["date"])
+    logger.warning(
+        "%s %s: no usable reference price, adj_factor left empty", row["stock_id"], row["date"]
+    )
     return None
 
 
@@ -119,12 +128,14 @@ def dividend_events(
     stock_id: str,
     start: date = date.min,
     end: date = date.max,
+    reductions: Iterable[Row] = (),
+    splits: Iterable[Row] = (),
 ) -> pd.DataFrame:
-    """One dividend_event per ex-date in range: amounts from the policy, factor from the result."""
+    """One event per ex-date in range; capital reductions and splits add factor-only events."""
     events: dict[date, dict[str, Any]] = {}
 
     def event(day: date) -> dict[str, Any]:
-        return events.setdefault(day, {"cash": Decimal(0), "stock": Decimal(0), "factor": None})
+        return events.setdefault(day, {"cash": Decimal(0), "stock": Decimal(0), "factors": []})
 
     for row in _checked(policy, POLICY_KEYS, "TaiwanStockDividend", stock_id):
         for kind, ex_key, keys in DIVIDEND_PARTS:
@@ -133,23 +144,49 @@ def dividend_events(
                 continue
             target = event(ex_date)
             target[kind] += sum(_decimal(row[key], "TaiwanStockDividend") for key in keys)
-    for row in _checked(results, RESULT_KEYS, "TaiwanStockDividendResult", stock_id):
-        event(_day(row["date"], "TaiwanStockDividendResult"))["factor"] = _ex_factor(row, stock_id)
+    sources: list[tuple[Iterable[Row], Sequence[str], str, str, str]] = [
+        (results, RESULT_KEYS, "TaiwanStockDividendResult", "after_price", "before_price"),
+        (
+            reductions,
+            REDUCTION_KEYS,
+            "TaiwanStockCapitalReductionReferencePrice",
+            "PostReductionReferencePrice",
+            "ClosingPriceonTheLastTradingDay",
+        ),
+        (splits, SPLIT_KEYS, "TaiwanStockSplitPrice", "after_price", "before_price"),
+    ]
+    for rows, required, label, after_key, before_key in sources:
+        for row in _checked(rows, required, label, stock_id):
+            factor = _ratio(row, after_key, before_key, label)
+            event(_day(row["date"], label))["factors"].append(factor)
     records = []
     for ex_date in sorted(day for day in events if start <= day <= end):
         found = events[ex_date]
-        if found["factor"] is None:
-            logger.warning("%s %s: no ex-right result, adj_factor left empty", stock_id, ex_date)
+        factor = _combined(found["factors"], stock_id, ex_date)
         records.append(
             {
                 "ex_date": ex_date,
                 "stock_id": stock_id,
                 "cash_dividend": found["cash"].quantize(DIVIDEND_PLACES).normalize(),
                 "stock_dividend": found["stock"].quantize(DIVIDEND_PLACES).normalize(),
-                "adj_factor": found["factor"],
+                "adj_factor": factor,
             }
         )
     return pd.DataFrame(records, columns=EVENT_COLUMNS, dtype=object)
+
+
+def _combined(factors: Sequence[float | None], stock_id: str, ex_date: date) -> float | None:
+    if not factors:
+        logger.warning("%s %s: no ex-right result, adj_factor left empty", stock_id, ex_date)
+        return None
+    if len(factors) > 1:
+        logger.warning("%s %s: %d ex-right sources on one day", stock_id, ex_date, len(factors))
+    product = 1.0
+    for factor in factors:
+        if factor is None:
+            return None
+        product *= factor
+    return product
 
 
 def _number(value: Any, label: str) -> float | None:

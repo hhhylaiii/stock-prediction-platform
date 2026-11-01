@@ -1,3 +1,4 @@
+import logging
 from collections.abc import Callable
 from datetime import date
 from decimal import Decimal
@@ -252,3 +253,56 @@ def test_missing_share_counts_are_skipped(rows: Callable[[str], Rows]) -> None:
     data = rows("shareholding_2884_2013q3")
     frame = share_counts([{**data[0], "NumberOfSharesIssued": None}, *data[1:]], "2884")
     assert frame.iloc[0]["effective_date"] == date(2013, 8, 2)
+
+
+def test_a_capital_reduction_becomes_a_factor_only_event(rows: Callable[[str], Rows]) -> None:
+    events = dividend_events([], [], "2412", reductions=rows("capred_2412"))
+    event = events.iloc[0]
+    assert event["ex_date"] == date(2011, 1, 25)
+    assert (event["cash_dividend"], event["stock_dividend"]) == (Decimal("0"), Decimal("0"))
+    assert event["adj_factor"] == pytest.approx(88.87 / 73.1)
+
+
+def test_a_split_becomes_a_factor_only_event(rows: Callable[[str], Rows]) -> None:
+    splits = [row for row in rows("split_all") if row["stock_id"] == "0050"]
+    event = dividend_events([], [], "0050", splits=splits).iloc[0]
+    assert event["ex_date"] == date(2025, 6, 18)
+    assert event["adj_factor"] == pytest.approx(47.16 / 188.65)
+
+
+def test_factors_on_one_day_multiply_and_are_flagged(
+    rows: Callable[[str], Rows], caplog: pytest.LogCaptureFixture
+) -> None:
+    result = {**rows("dividend_result_2330")[0], "stock_id": "2412", "date": "2011-01-25"}
+    with caplog.at_level(logging.WARNING, logger="apps.etl.adapters.finmind_datasets"):
+        events = dividend_events([], [result], "2412", reductions=rows("capred_2412"))
+    expected = (749.5 / 753.0) * (88.87 / 73.1)
+    assert events.iloc[0]["adj_factor"] == pytest.approx(expected)
+    assert "2 ex-right sources" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "change", [{"PostReductionReferencePrice": 0.0}, {"ClosingPriceonTheLastTradingDay": -1.0}]
+)
+def test_unusable_reduction_prices_leave_the_factor_empty(
+    rows: Callable[[str], Rows], change: dict[str, Any]
+) -> None:
+    reduction = [{**rows("capred_2412")[0], **change}]
+    assert dividend_events([], [], "2412", reductions=reduction).iloc[0]["adj_factor"] is None
+
+
+@pytest.mark.parametrize(
+    ("kind", "name", "missing"),
+    [
+        ("reductions", "capred_2412", "PostReductionReferencePrice"),
+        ("splits", "split_all", "after_price"),
+    ],
+)
+def test_capital_change_rows_without_a_key_are_schema_changes(
+    rows: Callable[[str], Rows], kind: str, name: str, missing: str
+) -> None:
+    row = {k: v for k, v in rows(name)[0].items() if k != missing}
+    stock = str(row["stock_id"])
+    reductions, splits = ([row], []) if kind == "reductions" else ([], [row])
+    with pytest.raises(SchemaChangedError, match=missing):
+        dividend_events([], [], stock, reductions=reductions, splits=splits)

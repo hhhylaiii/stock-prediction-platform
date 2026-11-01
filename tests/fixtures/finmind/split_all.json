@@ -1,0 +1,356 @@
+{
+ "msg": "success",
+ "status": 200,
+ "data": [
+  {
+   "date": "2019-09-09",
+   "stock_id": "6548",
+   "type": "面額變更",
+   "before_price": 312.0,
+   "after_price": 31.2,
+   "max_price": 34.3,
+   "min_price": 28.1,
+   "open_price": 31.2
+  },
+  {
+   "date": "2020-08-17",
+   "stock_id": "8070",
+   "type": "面額變更",
+   "before_price": 190.0,
+   "after_price": 19.0,
+   "max_price": 20.9,
+   "min_price": 17.1,
+   "open_price": 19.0
+  },
+  {
+   "date": "2021-10-18",
+   "stock_id": "6531",
+   "type": "面額變更",
+   "before_price": 750.0,
+   "after_price": 375.0,
+   "max_price": 412.5,
+   "min_price": 337.5,
+   "open_price": 375.0
+  },
+  {
+   "date": "2022-07-13",
+   "stock_id": "6415",
+   "type": "面額變更",
+   "before_price": 2485.0,
+   "after_price": 621.25,
+   "max_price": 683.0,
+   "min_price": 560.0,
+   "open_price": 621.0
+  },
+  {
+   "date": "2022-08-29",
+   "stock_id": "6613",
+   "type": "面額變更",
+   "before_price": 169.0,
+   "after_price": 84.5,
+   "max_price": 92.9,
+   "min_price": 76.1,
+   "open_price": 84.5
+  },
+  {
+   "date": "2022-09-05",
+   "stock_id": "6548",
+   "type": "面額變更",
+   "before_price": 90.6,
+   "after_price": 36.24,
+   "max_price": 39.85,
+   "min_price": 32.65,
+   "open_price": 36.25
+  },
+  {
+   "date": "2022-09-19",
+   "stock_id": "5536",
+   "type": "面額變更",
+   "before_price": 206.0,
+   "after_price": 103.0,
+   "max_price": 113.0,
+   "min_price": 92.7,
+   "open_price": 103.0
+  },
+  {
+   "date": "2022-12-12",
+   "stock_id": "3093",
+   "type": "面額變更",
+   "before_price": 109.5,
+   "after_price": 27.38,
+   "max_price": 30.1,
+   "min_price": 24.65,
+   "open_price": 27.4
+  },
+  {
+   "date": "2024-09-09",
+   "stock_id": "6763",
+   "type": "面額變更",
+   "before_price": 491.0,
+   "after_price": 49.1,
+   "max_price": 54.0,
+   "min_price": 44.2,
+   "open_price": 49.1
+  },
+  {
+   "date": "2024-09-09",
+   "stock_id": "8932",
+   "type": "面額變更",
+   "before_price": 169.5,
+   "after_price": 84.75,
+   "max_price": 93.2,
+   "min_price": 76.3,
+   "open_price": 84.8
+  },
+  {
+   "date": "2024-11-11",
+   "stock_id": "8476",
+   "type": "面額變更",
+   "before_price": 58.8,
+   "after_price": 29.4,
+   "max_price": 32.3,
+   "min_price": 26.5,
+   "open_price": 29.4
+  },
+  {
+   "date": "2024-12-09",
+   "stock_id": "5278",
+   "type": "面額變更",
+   "before_price": 319.5,
+   "after_price": 31.95,
+   "max_price": 35.1,
+   "min_price": 28.8,
+   "open_price": 31.95
+  },
+  {
+   "date": "2024-12-11",
+   "stock_id": "00632R",
+   "type": "反分割",
+   "before_price": 3.28,
+   "after_price": 22.96,
+   "max_price": 25.25,
+   "min_price": 20.67,
+   "open_price": 22.96
+  },
+  {
+   "date": "2025-02-19",
+   "stock_id": "00676R",
+   "type": "反分割",
+   "before_price": 2.04,
+   "after_price": 12.23,
+   "max_price": 13.45,
+   "min_price": 11.01,
+   "open_price": 12.23
+  },
+  {
+   "date": "2025-03-31",
+   "stock_id": "5314",
+   "type": "面額變更",
+   "before_price": 1390.0,
+   "after_price": 69.5,
+   "max_price": 76.4,
+   "min_price": 62.6,
+   "open_price": 69.5
+  },
+  {
+   "date": "2025-06-11",
+   "stock_id": "00663L",
+   "type": "分割",
+   "before_price": 170.15,
+   "after_price": 24.3,
+   "max_price": 29.16,
+   "min_price": 19.44,
+   "open_price": 24.3
+  },
+  {
+   "date": "2025-06-18",
+   "stock_id": "0050",
+   "type": "分割",
+   "before_price": 188.65,
+   "after_price": 47.16,
+   "max_price": 51.85,
+   "min_price": 42.45,
+   "open_price": 47.16
+  },
+  {
+   "date": "2025-06-30",
+   "stock_id": "4763",
+   "type": "面額變更",
+   "before_price": 885.0,
+   "after_price": 88.5,
+   "max_price": 97.3,
+   "min_price": 79.7,
+   "open_price": 88.5
+  },
+  {
+   "date": "2025-07-21",
+   "stock_id": "6919",
+   "type": "面額變更",
+   "before_price": 1215.0,
+   "after_price": 121.5,
+   "max_price": 133.5,
+   "min_price": 109.5,
+   "open_price": 121.5
+  },
+  {
+   "date": "2025-08-25",
+   "stock_id": "2327",
+   "type": "面額變更",
+   "before_price": 546.0,
+   "after_price": 136.5,
+   "max_price": 150.0,
+   "min_price": 123.0,
+   "open_price": 136.5
+  },
+  {
+   "date": "2025-10-22",
+   "stock_id": "00673R",
+   "type": "反分割",
+   "before_price": 7.02,
+   "after_price": 28.08,
+   "max_price": 9999.95,
+   "min_price": 0.01,
+   "open_price": 28.08
+  },
+  {
+   "date": "2025-10-22",
+   "stock_id": "00706L",
+   "type": "反分割",
+   "before_price": 5.54,
+   "after_price": 22.16,
+   "max_price": 9999.95,
+   "min_price": 0.01,
+   "open_price": 22.16
+  },
+  {
+   "date": "2025-11-17",
+   "stock_id": "8422",
+   "type": "面額變更",
+   "before_price": 250.0,
+   "after_price": 25.0,
+   "max_price": 27.5,
+   "min_price": 22.5,
+   "open_price": 25.0
+  },
+  {
+   "date": "2025-11-26",
+   "stock_id": "0052",
+   "type": "分割",
+   "before_price": 245.3,
+   "after_price": 35.04,
+   "max_price": 38.54,
+   "min_price": 31.54,
+   "open_price": 35.04
+  },
+  {
+   "date": "2025-12-10",
+   "stock_id": "00715L",
+   "type": "反分割",
+   "before_price": 10.43,
+   "after_price": 20.86,
+   "max_price": 9999.95,
+   "min_price": 0.01,
+   "open_price": 20.86
+  },
+  {
+   "date": "2026-01-19",
+   "stock_id": "7780",
+   "type": "面額變更",
+   "before_price": 185.0,
+   "after_price": 18.5,
+   "max_price": 20.35,
+   "min_price": 16.65,
+   "open_price": 18.5
+  },
+  {
+   "date": "2026-03-09",
+   "stock_id": "8932",
+   "type": "面額變更",
+   "before_price": 199.5,
+   "after_price": 99.75,
+   "max_price": 109.5,
+   "min_price": 89.8,
+   "open_price": 99.8
+  },
+  {
+   "date": "2026-03-31",
+   "stock_id": "00631L",
+   "type": "",
+   "before_price": 443.15,
+   "after_price": 20.14,
+   "max_price": 24.16,
+   "min_price": 16.12,
+   "open_price": 20.14
+  },
+  {
+   "date": "2026-04-13",
+   "stock_id": "8937",
+   "type": "面額變更",
+   "before_price": 145.5,
+   "after_price": 36.38,
+   "max_price": 40.0,
+   "min_price": 32.75,
+   "open_price": 36.4
+  },
+  {
+   "date": "2026-04-20",
+   "stock_id": "3086",
+   "type": "面額變更",
+   "before_price": 325.0,
+   "after_price": 32.5,
+   "max_price": 35.75,
+   "min_price": 29.25,
+   "open_price": 32.5
+  },
+  {
+   "date": "2026-04-22",
+   "stock_id": "00674R",
+   "type": "反分割",
+   "before_price": 5.18,
+   "after_price": 25.9,
+   "max_price": 9999.95,
+   "min_price": 0.01,
+   "open_price": 25.9
+  },
+  {
+   "date": "2026-07-07",
+   "stock_id": "00685L",
+   "type": "分割",
+   "before_price": 306.0,
+   "after_price": 12.75,
+   "max_price": 15.3,
+   "min_price": 10.2,
+   "open_price": 12.75
+  },
+  {
+   "date": "2026-08-10",
+   "stock_id": "5904",
+   "type": "面額變更",
+   "before_price": 720.0,
+   "after_price": 72.0,
+   "max_price": 79.2,
+   "min_price": 64.8,
+   "open_price": 72.0
+  },
+  {
+   "date": "2026-08-31",
+   "stock_id": "4747",
+   "type": "面額變更",
+   "before_price": 56.5,
+   "after_price": 28.25,
+   "max_price": 31.05,
+   "min_price": 25.45,
+   "open_price": 28.25
+  },
+  {
+   "date": "2026-09-07",
+   "stock_id": "6949",
+   "type": "面額變更",
+   "before_price": 1490.0,
+   "after_price": 74.5,
+   "max_price": 81.9,
+   "min_price": 67.1,
+   "open_price": 74.5
+  }
+ ]
+}
