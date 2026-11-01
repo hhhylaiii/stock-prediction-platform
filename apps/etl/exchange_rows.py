@@ -13,6 +13,16 @@ VOLUME_AT = 1
 CLOSE_AT = 6
 
 
+class Layout(NamedTuple):
+    volume_field: str
+    volume_unit: int
+
+
+TWSE_LAYOUT = Layout("成交股數", 1)
+TPEX_LAYOUT = Layout("成交仟股", 1000)
+CLOSE_FIELD = "收盤"
+
+
 class OfficialDay(NamedTuple):
     day: date
     close: Decimal | None
@@ -37,12 +47,22 @@ def parse_count(text: str) -> int:
     return int(cleaned)
 
 
-def official_days(rows: Any, month: date, label: str, volume_unit: int) -> list[OfficialDay]:
+def official_days(
+    rows: Any, fields: Any, month: date, label: str, layout: Layout
+) -> list[OfficialDay]:
     """One month of a per-stock table; TPEx counts thousands of shares and marks a first day '*'."""
     if not isinstance(rows, list) or not all(
         isinstance(row, list) and len(row) > CLOSE_AT for row in rows
     ):
         raise SchemaChangedError(f"{label} rows are malformed")
+    if rows and not (
+        isinstance(fields, list)
+        and len(fields) > CLOSE_AT
+        and fields[VOLUME_AT] == layout.volume_field
+        and CLOSE_FIELD in str(fields[CLOSE_AT])
+    ):
+        raise SchemaChangedError(f"{label} fields changed: {fields}")
+    volume_unit = layout.volume_unit
     days = sorted(
         OfficialDay(
             parse_roc_date(str(row[0]).rstrip(FIRST_DAY_MARK)),

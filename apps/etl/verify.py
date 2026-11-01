@@ -24,7 +24,7 @@ class Difference(NamedTuple):
 
 
 def sample_pairs(count: int, years: int, seed: int, last_year: int) -> list[tuple[str, int]]:
-    """count stocks with prices, then up to years of their priced years each, from a fixed seed."""
+    """count stocks with at least years priced years, then years of each, from a fixed seed."""
     priced = (
         DailyPrice.objects.filter(date__year__gte=FIRST_YEAR, date__year__lte=last_year)
         .annotate(year=ExtractYear("date"))
@@ -34,12 +34,13 @@ def sample_pairs(count: int, years: int, seed: int, last_year: int) -> list[tupl
     years_of: dict[str, list[int]] = {}
     for stock_id, year in priced:
         years_of.setdefault(stock_id, []).append(year)
+    years_of = {code: found for code, found in years_of.items() if len(found) >= years}
     rng = random.Random(seed)  # noqa: S311
     stocks = sorted(rng.sample(sorted(years_of), min(count, len(years_of))))
     pairs = []
     for stock_id in stocks:
         priced_years = sorted(years_of[stock_id])
-        chosen = rng.sample(priced_years, min(years, len(priced_years)))
+        chosen = rng.sample(priced_years, years)
         pairs += [(stock_id, year) for year in sorted(chosen)]
     return pairs
 
@@ -54,7 +55,7 @@ def stored_days(stock_id: str, first: date, last: date) -> dict[date, Stored]:
 def compare_days(
     stock_id: str, official: Mapping[date, OfficialDay], stored: Mapping[date, Stored]
 ) -> list[Difference]:
-    """Close must match exactly; volume within the official unit (TPEx rounds to 1,000 shares)."""
+    """Close must match exactly; volume within half the official unit (TPEx rounds to 1,000)."""
     differences = []
     for day in sorted(official.keys() | stored.keys()):
         if day not in stored:
@@ -73,7 +74,7 @@ def _field_differences(stock_id: str, official: OfficialDay, stored: Stored) -> 
     found = []
     if close != official.close:
         found.append(Difference(stock_id, official.day, "close", str(close), str(official.close)))
-    if abs(volume - official.volume) >= official.volume_unit:
+    if abs(volume - official.volume) * 2 > official.volume_unit:
         found.append(
             Difference(stock_id, official.day, "volume", str(volume), str(official.volume))
         )

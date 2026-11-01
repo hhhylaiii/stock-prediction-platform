@@ -8,14 +8,13 @@ from django.conf import settings
 
 from apps.etl.client import SourceClient
 from apps.etl.errors import SchemaChangedError
-from apps.etl.exchange_rows import OfficialDay, official_days
+from apps.etl.exchange_rows import TPEX_LAYOUT, OfficialDay, official_days
 from apps.etl.models import RawTpex
 from apps.etl.ratelimit import RateLimiter
 
 TPEX_MIN_INTERVAL = 3.0
 DELISTED_PATH = "/www/zh-tw/company/deListed"
 TRADING_STOCK_PATH = "/www/zh-tw/afterTrading/tradingStock"
-THOUSAND_SHARES = 1000
 DEFAULT_PAGE_SIZE = 1000
 
 
@@ -81,8 +80,9 @@ class TpexClient(SourceClient):
         tables = payload.get("tables")
         if not isinstance(tables, list) or not tables or not isinstance(tables[0], dict):
             raise SchemaChangedError("TPEx stock month has no table")
+        table = tables[0]
         return official_days(
-            tables[0].get("data"), month, "TPEx stock month", volume_unit=THOUSAND_SHARES
+            table.get("data"), table.get("fields"), month, "TPEx stock month", TPEX_LAYOUT
         )
 
     @staticmethod

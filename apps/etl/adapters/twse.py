@@ -11,7 +11,13 @@ from django.conf import settings
 from apps.etl.adapters.base import BaseAdapter
 from apps.etl.client import SourceClient
 from apps.etl.errors import SchemaChangedError, SourceNotReadyError
-from apps.etl.exchange_rows import OfficialDay, official_days, parse_count, parse_price
+from apps.etl.exchange_rows import (
+    TWSE_LAYOUT,
+    OfficialDay,
+    official_days,
+    parse_count,
+    parse_price,
+)
 from apps.etl.models import RawTwse
 from apps.etl.ratelimit import RateLimiter
 from apps.etl.upsert import upsert
@@ -114,7 +120,7 @@ class TwseClient(SourceClient):
         return None if days is None else [official.day for official in days]
 
     def stock_days(self, stock_id: str, month: date) -> list[OfficialDay] | None:
-        """STOCK_DAY rows of one stock and month, volume in shares; empty before listing."""
+        """STOCK_DAY rows of one stock-month in shares; empty before listing, None before 2010."""
         if month < STOCK_DAY_FIRST_MONTH:
             return None
         params = {"date": f"{month:%Y%m}01", "stockNo": stock_id, "response": "json"}
@@ -125,7 +131,9 @@ class TwseClient(SourceClient):
             return []
         if stat != "OK":
             raise SchemaChangedError(f"TWSE stock month stat is {stat!r}")
-        return official_days(payload.get("data"), month, "TWSE stock month", volume_unit=1)
+        return official_days(
+            payload.get("data"), payload.get("fields"), month, "TWSE stock month", TWSE_LAYOUT
+        )
 
     def suspend_listing(self) -> dict[str, Any]:
         """The 終止上市公司 list (2001 onwards); kept raw as dataset 'delisted'."""
