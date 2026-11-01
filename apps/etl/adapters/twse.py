@@ -278,12 +278,12 @@ class TwseAdapter(BaseAdapter):
         return event_frame(day_events([code for code in codes if code], day, FULL_DELIVERY))
 
     def _listed(self, dataset: str, path: str, params: dict[str, str]) -> dict[str, Any] | None:
-        """An answered list, kept raw; None when TWSE says nothing matched."""
+        """An answered list, kept raw even when empty; None when TWSE says nothing matched."""
         payload = self.client.get_json(path, params)
+        self.save_raw(dataset, params, payload)
         stat = str(payload.get("stat", ""))
         if NO_DATA_STAT in stat:
             return None
-        self.save_raw(dataset, params, payload)
         if stat != "OK":
             raise SchemaChangedError(f"TWSE {path} answered with stat {stat!r}")
         return payload
