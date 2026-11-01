@@ -168,11 +168,29 @@ def test_sector_return_averages_universe_stocks_of_the_same_industry() -> None:
     features = industry_risk_features(panel)
 
     sector = ((1.01**20 - 1) + (1.02**20 - 1)) / 2
+    market = ((1.01**20 - 1) + (1.02**20 - 1) + (1.03**20 - 1)) / 3
     assert at(features, "2330", 24, "ind_sector_ret_20d") == pytest.approx(sector)
     assert at(features, "2317", 24, "ind_sector_ret_20d") == pytest.approx(sector)
     assert at(features, "2317", 24, "ind_rel_ret_20d") == pytest.approx(1.05**20 - 1 - sector)
-    assert math.isnan(at(features, "1101", 24, "ind_sector_ret_20d"))
+    assert at(features, "1101", 24, "ind_sector_ret_20d") == pytest.approx(market)
+    assert at(features, "1101", 24, "ind_rel_ret_20d") == pytest.approx(1.03**20 - 1 - market)
     assert math.isnan(at(features, "2330", 19, "ind_sector_ret_20d"))
+
+
+def test_an_industry_without_universe_stocks_takes_the_universe_average() -> None:
+    closes = [100.0 * 1.01**k for k in range(25)]
+    panel = pd.concat(
+        [
+            listing("2330", closes, industry="半導體業"),
+            listing("1101", [100.0] * 25, industry="水泥工業", in_universe=False),
+        ],
+        ignore_index=True,
+    )
+
+    features = industry_risk_features(panel)
+
+    assert at(features, "1101", 24, "ind_sector_ret_20d") == pytest.approx(1.01**20 - 1)
+    assert at(features, "1101", 24, "ind_rel_ret_20d") == pytest.approx(-(1.01**20 - 1))
 
 
 def test_unsorted_panel_is_refused() -> None:

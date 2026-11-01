@@ -202,12 +202,12 @@ def test_segments_report_first_and_last_day_per_listing() -> None:
     ]
 
 
-def test_only_the_latest_listing_takes_the_master_market_and_industry() -> None:
+def test_only_the_latest_listing_takes_the_master_industry() -> None:
     stock("5450", market="TPEx", industry="光電業")
     bars("5450", days("2013-01-02", "2013-01-10") + days("2014-06-02", "2014-06-06"))
     panel = load_price_panel(CALENDAR, d("2013-01-01"), d("2014-12-31"))
     old, new = panel[panel["segment"] == 1], panel[panel["segment"] == 2]
-    assert set(old["market"]) == {""}
+    assert set(old["market"]) == {"TPEx"}
     assert set(old["industry"]) == {""}
     assert set(new["market"]) == {"TPEx"}
     assert set(new["industry"]) == {"光電業"}
