@@ -7,7 +7,7 @@ from typing import Any
 
 import pandas as pd
 from django.db import transaction
-from django.db.models import QuerySet
+from django.db.models import Max, QuerySet
 
 from apps.etl.adapters import limiter_for
 from apps.etl.adapters.tpex import TpexClient
@@ -51,6 +51,8 @@ def quoted_listings(day: date) -> dict[str, Listing]:
     tpex_rows = RawTpex.objects.filter(request_params__type="EW", payload__date=f"{day:%Y%m%d}")
     tpex = _latest(tpex_rows, "TPEx", day)
     frame = quotes_frame(twse.payload, day)
+    if not {"證券代號", "證券名稱"} <= set(frame.columns):
+        raise SchemaChangedError(f"TWSE daily quotes fields changed: {list(frame.columns)}")
     codes = frame["證券代號"].astype(str).str.strip()
     names = frame["證券名稱"].astype(str).str.strip()
     listed = {
@@ -99,9 +101,12 @@ def master_changes(
     delisted = [
         code
         for code, (_, market, gone) in sorted(master.items())
-        if gone is None and code not in quoted and recent.get(code, (None, ""))[1] == market
+        if gone is None and code not in quoted and (code, market) in recent
     ]
-    rows.extend(_row(code, master[code][0], master[code][1], recent[code][0]) for code in delisted)
+    rows.extend(
+        _row(code, master[code][0], master[code][1], recent[(code, master[code][1])])
+        for code in delisted
+    )
     return MasterChanges(rows, added, moved, relisted, delisted)
 
 
@@ -115,28 +120,31 @@ def _row(code: str, name: str, market: str, delisted: date | None) -> dict[str, 
     }
 
 
-def _recent_delistings(delistings: pd.DataFrame, day: date) -> dict[str, tuple[date, str]]:
-    """Latest official delisting per code within the window, with the market that delisted it."""
+def _recent_delistings(delistings: pd.DataFrame, day: date) -> dict[tuple[str, str], date]:
+    """Latest official delisting per code and market within the window."""
     recent = delistings.loc[
         (delistings["delist_date"] > day - DELISTING_WINDOW) & (delistings["delist_date"] <= day)
     ]
-    latest = recent.sort_values("delist_date").drop_duplicates("stock_id", keep="last")
-    pairs = zip(latest["delist_date"], latest["market"], strict=True)
-    return dict(zip(latest["stock_id"], pairs, strict=True))
+    latest = recent.sort_values("delist_date").drop_duplicates(["stock_id", "market"], keep="last")
+    keys = zip(latest["stock_id"], latest["market"], strict=True)
+    return dict(zip(keys, latest["delist_date"], strict=True))
 
 
-def newly_vanished(codes: Iterable[str], day: date, calendar: TradingDays) -> list[str]:
-    """Codes with prices the session before the last few but none in them, reported once."""
+def newly_vanished(
+    codes: Iterable[str], day: date, calendar: TradingDays, after: date | None = None
+) -> list[str]:
+    """Codes whose last prices went five sessions quiet since the refresh after which this runs."""
     try:
-        before = calendar.shift(day, -VANISHED_SESSIONS)
-        since = calendar.shift(day, 1 - VANISHED_SESSIONS)
+        upper = calendar.shift(day, -VANISHED_SESSIONS)
+        if after is not None and after < day:
+            lower = calendar.shift(calendar.latest_on_or_before(after), -VANISHED_SESSIONS)
+        else:
+            lower = calendar.shift(upper, -1)
     except OutsideCalendarError:
         return []
-    asked = list(codes)
-    prices = DailyPrice.objects.filter(stock_id__in=asked)
-    seen_before = set(prices.filter(date=before).values_list("stock_id", flat=True))
-    seen_since = set(prices.filter(date__range=(since, day)).values_list("stock_id", flat=True))
-    return sorted(seen_before - seen_since)
+    prices = DailyPrice.objects.filter(stock_id__in=list(codes), date__gt=lower, date__lte=day)
+    last = prices.values("stock_id").annotate(last=Max("date")).values_list("stock_id", "last")
+    return sorted(code for code, seen in last if seen <= upper)
 
 
 def refresh_stock_master(day: date, calendar: TradingDays) -> EtlRun:
@@ -148,8 +156,9 @@ def refresh_stock_master(day: date, calendar: TradingDays) -> EtlRun:
         .order_by("-start_date")
         .first()
     )
-    if last is not None and day < last.start_date:
-        raise CalendarError(f"{day} is before the last refresh on {last.start_date}")
+    after = last.start_date if last is not None else None
+    if after is not None and day < after:
+        raise CalendarError(f"{day} is before the last refresh on {after}")
     with tracked_run("stock_master", DAILY_DATASET, day, day) as run:
         quoted = quoted_listings(day)
         delistings = pd.concat(
@@ -167,7 +176,7 @@ def refresh_stock_master(day: date, calendar: TradingDays) -> EtlRun:
         listed = StockMaster.objects.filter(delist_date__isnull=True).values_list(
             "stock_id", flat=True
         )
-        vanished = newly_vanished(set(listed) - set(quoted), day, calendar)
+        vanished = newly_vanished(set(listed) - set(quoted), day, calendar, after)
         run.checkpoint = {
             "listed": len(listed),
             "added": changes.added,

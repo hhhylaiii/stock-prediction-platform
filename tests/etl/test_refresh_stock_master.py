@@ -201,3 +201,76 @@ def test_only_a_recent_delisting_by_the_codes_own_market_applies(
     call_command("refresh_stock_master", date="2026-10-28")
     assert _state()["8908"][2] is None
     assert _state()["6666"][2] is None
+
+
+def _quotes_for(load_fixture: Callable[[str], Any], day: date) -> None:
+    twse = {**load_fixture("twse/daily_price/mi_index_20261028.json"), "date": f"{day:%Y%m%d}"}
+    tpex = {**load_fixture("tpex/daily_price/otc_20261028.json"), "date": f"{day:%Y%m%d}"}
+    store_raw(RawTwse, "daily_price", {"date": f"{day:%Y%m%d}", "type": "ALLBUT0999"}, twse)
+    store_raw(RawTpex, "daily_price", {"date": f"{day:%Y/%m/%d}", "type": "EW"}, tpex)
+
+
+@responses.activate
+@pytest.mark.usefixtures("delistings")
+def test_codes_gone_quiet_on_a_skipped_day_are_still_reported_once(
+    load_fixture: Callable[[str], Any], alerts: list[list[DataQualityLog]]
+) -> None:
+    EtlRun.objects.create(
+        source="stock_master",
+        dataset="stock_master_daily",
+        start_date=date(2026, 10, 27),
+        end_date=date(2026, 10, 27),
+        status=EtlRun.Status.SUCCESS,
+    )
+    _quotes_for(load_fixture, date(2026, 10, 29))
+    for code, last in (("5551", date(2026, 10, 16)), ("5552", date(2026, 10, 19))):
+        _master(code, Market.TWSE)
+        DailyPrice.objects.create(stock_id=code, date=last, volume=1, turnover=1)
+    _master("5553", Market.TWSE)
+    DailyPrice.objects.create(stock_id="5553", date=date(2026, 10, 20), volume=1, turnover=1)
+    call_command("refresh_stock_master", date="2026-10-29")
+    row = DataQualityLog.objects.get(date=date(2026, 10, 29), check_name="stock_master")
+    assert row.detail["vanished"] == ["5552", "5553"]
+
+
+@responses.activate
+@pytest.mark.usefixtures("delistings", "alerts")
+def test_a_renamed_twse_name_column_is_a_schema_change(
+    load_fixture: Callable[[str], Any],
+) -> None:
+    payload = load_fixture("twse/daily_price/mi_index_20261028.json")
+    for table in payload["tables"]:
+        if "每日收盤行情" in (table.get("title") or ""):
+            table["fields"] = [
+                "證券簡稱" if name == "證券名稱" else name for name in table["fields"]
+            ]
+    store_raw(RawTwse, "daily_price", {"date": "20261028", "type": "ALLBUT0999"}, payload)
+    store_raw(
+        RawTpex,
+        "daily_price",
+        {"date": "2026/10/28", "type": "EW"},
+        load_fixture("tpex/daily_price/otc_20261028.json"),
+    )
+    with pytest.raises(CommandError, match="TWSE daily quotes fields changed"):
+        call_command("refresh_stock_master", date="2026-10-28")
+
+
+@responses.activate
+@pytest.mark.usefixtures("quotes", "alerts")
+def test_a_later_delisting_by_the_other_market_does_not_hide_its_own(
+    load_fixture: Callable[[str], Any],
+) -> None:
+    twse = load_fixture("twse/reference/suspend_listing.json")
+    twse["data"] = [*twse["data"], ["115/10/25", "轉上市", "7777"]]
+    responses.get(TWSE_URL, json=twse)
+    tpex = load_fixture("tpex/delisted.json")
+    table = tpex["tables"][0]
+    table["data"] = [
+        *table["data"],
+        ["7777", "轉上市股份有限公司", "115-10-20", *table["data"][0][3:]],
+    ]
+    table["totalCount"] = len(table["data"])
+    responses.post(TPEX_URL, json=tpex)
+    _master("7777", Market.TPEX)
+    call_command("refresh_stock_master", date="2026-10-28")
+    assert _state()["7777"][2] == date(2026, 10, 20)
