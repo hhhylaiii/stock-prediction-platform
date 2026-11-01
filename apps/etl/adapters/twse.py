@@ -2,7 +2,6 @@
 
 from collections.abc import Callable
 from datetime import date
-from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import pandas as pd
@@ -12,9 +11,9 @@ from django.conf import settings
 from apps.etl.adapters.base import BaseAdapter
 from apps.etl.client import SourceClient
 from apps.etl.errors import SchemaChangedError, SourceNotReadyError
+from apps.etl.exchange_rows import OfficialDay, official_days, parse_count, parse_price
 from apps.etl.models import RawTwse
 from apps.etl.ratelimit import RateLimiter
-from apps.etl.roc import days_in_month
 from apps.etl.upsert import upsert
 from apps.market.adjust import refresh_where_later_events
 from apps.market.calendar import TradingDays
@@ -40,7 +39,6 @@ DAILY_QUOTES_COLUMNS = {
 }
 PRICE_COLUMNS = ("open", "high", "low", "close")
 COUNT_COLUMNS = ("volume", "turnover")
-NO_TRADE_MARKERS = frozenset({"--", "---", ""})
 NO_DATA_STAT = "沒有符合條件的資料"
 FOREIGN_CURRENCY_CODE_SUFFIXES = frozenset("KMSC")
 
@@ -48,23 +46,6 @@ FOREIGN_CURRENCY_CODE_SUFFIXES = frozenset("KMSC")
 def is_foreign_currency_etf(code: str) -> bool:
     """TWSE: an ETF code whose sixth character is K, M, S or C trades in a foreign currency."""
     return len(code) == 6 and code.startswith("00") and code[5] in FOREIGN_CURRENCY_CODE_SUFFIXES
-
-
-def parse_price(text: str) -> Decimal | None:
-    cleaned = str(text).replace(",", "").strip()
-    if cleaned in NO_TRADE_MARKERS:
-        return None
-    try:
-        return Decimal(cleaned)
-    except InvalidOperation:
-        raise SchemaChangedError(f"unexpected price value {text!r}") from None
-
-
-def parse_count(text: str) -> int:
-    cleaned = str(text).replace(",", "").strip()
-    if not cleaned.isdigit():
-        raise SchemaChangedError(f"unexpected count value {text!r}")
-    return int(cleaned)
 
 
 def find_table(payload: dict[str, Any], title_part: str) -> dict[str, Any]:
@@ -129,6 +110,11 @@ class TwseClient(SourceClient):
 
     def stock_month(self, stock_id: str, month: date) -> list[date] | None:
         """Days one stock traded on TWSE in a month; None before 2010, which STOCK_DAY refuses."""
+        days = self.stock_days(stock_id, month)
+        return None if days is None else [official.day for official in days]
+
+    def stock_days(self, stock_id: str, month: date) -> list[OfficialDay] | None:
+        """STOCK_DAY rows of one stock and month, volume in shares; empty before listing."""
         if month < STOCK_DAY_FIRST_MONTH:
             return None
         params = {"date": f"{month:%Y%m}01", "stockNo": stock_id, "response": "json"}
@@ -139,7 +125,7 @@ class TwseClient(SourceClient):
             return []
         if stat != "OK":
             raise SchemaChangedError(f"TWSE stock month stat is {stat!r}")
-        return days_in_month(payload.get("data"), month, "TWSE stock month")
+        return official_days(payload.get("data"), month, "TWSE stock month", volume_unit=1)
 
     def suspend_listing(self) -> dict[str, Any]:
         """The 終止上市公司 list (2001 onwards); kept raw as dataset 'delisted'."""
