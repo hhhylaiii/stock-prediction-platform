@@ -1,0 +1,17 @@
+{
+ "msg": "success",
+ "status": 200,
+ "data": [
+  {
+   "date": "2011-01-25",
+   "stock_id": "2412",
+   "ClosingPriceonTheLastTradingDay": 73.1,
+   "PostReductionReferencePrice": 88.87,
+   "LimitUp": 95.0,
+   "LimitDown": 82.7,
+   "OpeningReferencePrice": 88.9,
+   "ExrightReferencePrice": -1.0,
+   "ReasonforCapitalReduction": "Cash refund"
+  }
+ ]
+}

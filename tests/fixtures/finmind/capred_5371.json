@@ -1,0 +1,28 @@
+{
+ "msg": "success",
+ "status": 200,
+ "data": [
+  {
+   "date": "2014-08-29",
+   "stock_id": "5371",
+   "ClosingPriceonTheLastTradingDay": 39.6,
+   "PostReductionReferencePrice": 49.47,
+   "LimitUp": 52.9,
+   "LimitDown": 46.05,
+   "OpeningReferencePrice": 49.45,
+   "ExrightReferencePrice": 0.0,
+   "ReasonforCapitalReduction": "現金減資"
+  },
+  {
+   "date": "2016-08-26",
+   "stock_id": "5371",
+   "ClosingPriceonTheLastTradingDay": 29.85,
+   "PostReductionReferencePrice": 34.81,
+   "LimitUp": 38.25,
+   "LimitDown": 31.35,
+   "OpeningReferencePrice": 34.8,
+   "ExrightReferencePrice": 0.0,
+   "ReasonforCapitalReduction": "現金減資"
+  }
+ ]
+}

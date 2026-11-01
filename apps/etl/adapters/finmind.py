@@ -131,14 +131,22 @@ class FinmindClient(SourceClient):
 
 FINMIND_DATASETS = {
     "daily_price": ("TaiwanStockPrice",),
-    "dividend_event": ("TaiwanStockDividend", "TaiwanStockDividendResult"),
+    "dividend_event": (
+        "TaiwanStockDividend",
+        "TaiwanStockDividendResult",
+        "TaiwanStockCapitalReductionReferencePrice",
+        "TaiwanStockSplitPrice",
+    ),
     "daily_valuation": ("TaiwanStockPER",),
     "shares_outstanding": ("TaiwanStockShareholding",),
 }
 RAW_NAMES = {
     "TaiwanStockDividend": "dividend_policy",
     "TaiwanStockDividendResult": "dividend_result",
+    "TaiwanStockCapitalReductionReferencePrice": "capital_reduction",
+    "TaiwanStockSplitPrice": "split",
 }
+WHOLE_MARKET = frozenset({"TaiwanStockSplitPrice"})
 TRADING_DATE_COLUMNS = {
     "daily_price": "date",
     "daily_valuation": "date",
@@ -178,6 +186,7 @@ class FinmindAdapter(BaseAdapter):
     ) -> None:
         super().__init__(calendar, limiter)
         self.client = FinmindClient.build(limiter, session)
+        self._whole_market: dict[tuple[str, date, date], list[dict[str, Any]]] = {}
 
     def fetch(
         self, dataset: str, start: date, end: date, stock_id: str | None = None
@@ -185,17 +194,22 @@ class FinmindAdapter(BaseAdapter):
         self.require_dataset(dataset)
         if stock_id is None:
             raise ValueError("FinMind datasets are fetched one stock at a time")
-        rows = []
+        rows: list[dict[str, Any]] = []
         for finmind_dataset in FINMIND_DATASETS[dataset]:
-            last = end + RECORD_DATE_LOOKAHEAD if finmind_dataset == "TaiwanStockDividend" else end
-            params = {
-                "data_id": stock_id,
-                "start_date": start.isoformat(),
-                "end_date": last.isoformat(),
-            }
-            raw_name = RAW_NAMES.get(finmind_dataset, dataset)
-            for row in self.client.data(raw_name, finmind_dataset, **params):
-                rows.append({**row, FROM_COLUMN: finmind_dataset})
+            if finmind_dataset in WHOLE_MARKET:
+                fetched = self._market_rows(finmind_dataset, start, end, stock_id)
+            else:
+                last = (
+                    end + RECORD_DATE_LOOKAHEAD if finmind_dataset == "TaiwanStockDividend" else end
+                )
+                fetched = self.client.data(
+                    RAW_NAMES.get(finmind_dataset, dataset),
+                    finmind_dataset,
+                    data_id=stock_id,
+                    start_date=start.isoformat(),
+                    end_date=last.isoformat(),
+                )
+            rows.extend({**row, FROM_COLUMN: finmind_dataset} for row in fetched)
         frame = pd.DataFrame(rows, dtype=object)
         frame.attrs.update(stock_id=stock_id, start=start, end=end)
         return frame
@@ -210,6 +224,8 @@ class FinmindAdapter(BaseAdapter):
                 stock_id,
                 start=raw_df.attrs["start"],
                 end=raw_df.attrs["end"],
+                reductions=parts["TaiwanStockCapitalReductionReferencePrice"],
+                splits=parts["TaiwanStockSplitPrice"],
             )
         else:
             normalizer = {
@@ -250,6 +266,23 @@ class FinmindAdapter(BaseAdapter):
         rows += upsert(DividendEvent, frame[~with_factor], ("stock_id", "ex_date"), EVENT_FIELDS)
         refresh_adj_factor(stock_id)
         return rows
+
+    def _market_rows(
+        self, finmind_dataset: str, start: date, end: date, stock_id: str
+    ) -> list[dict[str, Any]]:
+        """Small whole-market lists are fetched once per run and filtered per stock."""
+        key = (finmind_dataset, start, end)
+        if key not in self._whole_market:
+            self._whole_market[key] = self.client.data(
+                RAW_NAMES[finmind_dataset],
+                finmind_dataset,
+                start_date=start.isoformat(),
+                end_date=end.isoformat(),
+            )
+        rows = self._whole_market[key]
+        if any("stock_id" not in row for row in rows):
+            raise SchemaChangedError(f"FinMind {finmind_dataset} rows lost key stock_id")
+        return [row for row in rows if str(row["stock_id"]).strip() == stock_id]
 
     def _require_trading_days(self, days: pd.Series, dataset: str, stock_id: str) -> None:
         """SPEC §5 rejects a batch dated off the calendar; ex-dates may fall on closures."""

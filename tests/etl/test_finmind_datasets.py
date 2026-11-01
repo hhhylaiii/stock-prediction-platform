@@ -1,3 +1,4 @@
+import logging
 from collections.abc import Callable
 from datetime import date
 from decimal import Decimal
@@ -252,3 +253,101 @@ def test_missing_share_counts_are_skipped(rows: Callable[[str], Rows]) -> None:
     data = rows("shareholding_2884_2013q3")
     frame = share_counts([{**data[0], "NumberOfSharesIssued": None}, *data[1:]], "2884")
     assert frame.iloc[0]["effective_date"] == date(2013, 8, 2)
+
+
+def test_a_capital_reduction_becomes_a_factor_only_event(
+    rows: Callable[[str], Rows], caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level(logging.WARNING, logger="apps.etl.adapters.finmind_datasets"):
+        events = dividend_events([], [], "2412", reductions=rows("capred_2412"))
+    assert caplog.text == ""
+    event = events.iloc[0]
+    assert event["ex_date"] == date(2011, 1, 25)
+    assert (event["cash_dividend"], event["stock_dividend"]) == (Decimal("0"), Decimal("0"))
+    assert event["adj_factor"] == pytest.approx(88.87 / 73.1)
+
+
+def test_a_split_becomes_a_factor_only_event(rows: Callable[[str], Rows]) -> None:
+    splits = [row for row in rows("split_all") if row["stock_id"] == "0050"]
+    event = dividend_events([], [], "0050", splits=splits).iloc[0]
+    assert event["ex_date"] == date(2025, 6, 18)
+    assert event["adj_factor"] == pytest.approx(47.16 / 188.65)
+
+
+def test_factors_on_one_day_multiply_and_are_flagged(
+    rows: Callable[[str], Rows], caplog: pytest.LogCaptureFixture
+) -> None:
+    result = {**rows("dividend_result_2330")[0], "stock_id": "2412", "date": "2011-01-25"}
+    with caplog.at_level(logging.WARNING, logger="apps.etl.adapters.finmind_datasets"):
+        events = dividend_events([], [result], "2412", reductions=rows("capred_2412"))
+    expected = (749.5 / 753.0) * (88.87 / 73.1)
+    assert events.iloc[0]["adj_factor"] == pytest.approx(expected)
+    assert "TaiwanStockCapitalReductionReferencePrice, TaiwanStockDividendResult" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "change", [{"PostReductionReferencePrice": 0.0}, {"ClosingPriceonTheLastTradingDay": -1.0}]
+)
+def test_unusable_reduction_prices_leave_the_factor_empty(
+    rows: Callable[[str], Rows], change: dict[str, Any], caplog: pytest.LogCaptureFixture
+) -> None:
+    reduction = [{**rows("capred_2412")[0], **change}]
+    with caplog.at_level(logging.WARNING, logger="apps.etl.adapters.finmind_datasets"):
+        events = dividend_events([], [], "2412", reductions=reduction)
+    assert events.iloc[0]["adj_factor"] is None
+    assert "TaiwanStockCapitalReductionReferencePrice has no usable reference price" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("kind", "name", "missing"),
+    [
+        ("reductions", "capred_2412", "PostReductionReferencePrice"),
+        ("splits", "split_all", "after_price"),
+    ],
+)
+def test_capital_change_rows_without_a_key_are_schema_changes(
+    rows: Callable[[str], Rows], kind: str, name: str, missing: str
+) -> None:
+    row = {k: v for k, v in rows(name)[0].items() if k != missing}
+    stock = str(row["stock_id"])
+    reductions, splits = ([row], []) if kind == "reductions" else ([], [row])
+    with pytest.raises(SchemaChangedError, match=missing):
+        dividend_events([], [], stock, reductions=reductions, splits=splits)
+
+
+def test_each_capital_reduction_is_its_own_event(rows: Callable[[str], Rows]) -> None:
+    events = dividend_events([], [], "5371", reductions=rows("capred_5371"))
+    assert events["ex_date"].tolist() == [date(2014, 8, 29), date(2016, 8, 26)]
+    assert events["adj_factor"].tolist() == pytest.approx([49.47 / 39.6, 34.81 / 29.85])
+
+
+def test_a_missing_dividend_result_keeps_the_split_factor_and_warns(
+    rows: Callable[[str], Rows], caplog: pytest.LogCaptureFixture
+) -> None:
+    policy = {
+        **rows("dividend_2330")[0],
+        "stock_id": "0050",
+        "CashExDividendTradingDate": "2025-06-18",
+    }
+    splits = [row for row in rows("split_all") if row["stock_id"] == "0050"]
+    with caplog.at_level(logging.WARNING, logger="apps.etl.adapters.finmind_datasets"):
+        event = dividend_events([policy], [], "0050", splits=splits).iloc[0]
+    assert event["adj_factor"] == pytest.approx(47.16 / 188.65)
+    assert "0050 2025-06-18: no ex-right result" in caplog.text
+
+
+def test_a_repeated_row_from_one_source_counts_once(
+    rows: Callable[[str], Rows], caplog: pytest.LogCaptureFixture
+) -> None:
+    result = rows("dividend_result_2330")[0]
+    with caplog.at_level(logging.WARNING, logger="apps.etl.adapters.finmind_datasets"):
+        events = dividend_events([], [result, result], "2330")
+    assert events.iloc[0]["adj_factor"] == pytest.approx(749.5 / 753.0)
+    assert "repeated TaiwanStockDividendResult" in caplog.text
+
+
+def test_an_unusable_source_does_not_discard_the_others(rows: Callable[[str], Rows]) -> None:
+    result = {**rows("dividend_result_2330")[0], "stock_id": "2412", "date": "2011-01-25"}
+    bad = [{**rows("capred_2412")[0], "PostReductionReferencePrice": 0.0}]
+    event = dividend_events([], [result], "2412", reductions=bad).iloc[0]
+    assert event["adj_factor"] == pytest.approx(749.5 / 753.0)
