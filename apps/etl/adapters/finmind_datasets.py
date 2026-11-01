@@ -1,7 +1,7 @@
 """FinMind rows mapped onto the standard tables; units checked against TWSE (SPEC §4)."""
 
 import logging
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -47,6 +47,37 @@ DIVIDEND_PARTS = (
     ("stock", "StockExDividendTradingDate", ("StockEarningsDistribution", "StockStatutorySurplus")),
     ("cash", "CashExDividendTradingDate", ("CashEarningsDistribution", "CashStatutorySurplus")),
 )
+INSTITUTIONAL_KEYS = ("date", "stock_id", "name", "buy", "sell")
+INVESTOR_COLUMNS = {
+    "Foreign_Investor": "fi_net",
+    "Foreign_Dealer_Self": "fi_net",
+    "Investment_Trust": "it_net",
+    "Dealer_self": "dealer_self_net",
+    "Dealer_Hedging": "dealer_hedge_net",
+    "Dealer": None,
+}
+LOTS = {
+    "MarginPurchaseTodayBalance": "margin_balance",
+    "MarginPurchaseLimit": "margin_limit",
+    "ShortSaleTodayBalance": "short_balance",
+}
+MARGIN_KEYS = ("date", "stock_id", *LOTS)
+LENDING_KEYS = ("date", "stock_id", "SBLShortSalesCurrentDayBalance")
+HOLDING_KEYS = ("date", "stock_id", "ForeignInvestmentSharesRatio")
+CHIP_COLUMNS = [
+    "stock_id",
+    "date",
+    "fi_net",
+    "it_net",
+    "dealer_self_net",
+    "dealer_hedge_net",
+    "margin_balance",
+    "margin_limit",
+    "short_balance",
+    "sbl_short_balance",
+    "fi_holding_pct",
+]
+SHARES_PER_LOT = 1000
 DIVIDEND_PLACES = Decimal("0.00000001")
 PERCENT = 100.0
 
@@ -245,3 +276,74 @@ def share_counts(rows: Iterable[Row], stock_id: str) -> pd.DataFrame:
             }
         )
     return pd.DataFrame(records, columns=SHARE_COLUMNS, dtype=object)
+
+
+def _signed(value: Any, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise SchemaChangedError(f"FinMind {label} has a bad count {value!r}")
+    return value
+
+
+def chip_rows(
+    institutional: Iterable[Row],
+    margin: Iterable[Row],
+    lending: Iterable[Row],
+    holding: Iterable[Row],
+    stock_id: str,
+) -> pd.DataFrame:
+    """Four FinMind datasets joined into daily_chip rows; margin lots become shares."""
+    days: dict[date, dict[str, Any]] = {}
+    _fill_investors(days, institutional, stock_id)
+    parts: list[tuple[Iterable[Row], Sequence[str], str, Callable[[Row, str], dict[str, Any]]]] = [
+        (margin, MARGIN_KEYS, "TaiwanStockMarginPurchaseShortSale", _lots),
+        (lending, LENDING_KEYS, "TaiwanDailyShortSaleBalances", _lending),
+        (holding, HOLDING_KEYS, "TaiwanStockShareholding", _holding),
+    ]
+    for rows, required, label, columns in parts:
+        filled: set[date] = set()
+        for row in _checked(rows, required, label, stock_id):
+            day = _day(row["date"], label)
+            if day in filled:
+                raise SchemaChangedError(f"FinMind {label} repeated {day}")
+            filled.add(day)
+            days.setdefault(day, {}).update(columns(row, label))
+    records = [{"stock_id": stock_id, "date": day, **days[day]} for day in sorted(days)]
+    frame = pd.DataFrame(records, columns=CHIP_COLUMNS, dtype=object)
+    return frame.astype(object).where(frame.notna(), None)
+
+
+def _fill_investors(days: dict[date, dict[str, Any]], rows: Iterable[Row], stock_id: str) -> None:
+    """Net shares per investor type; foreign dealers join foreign investors as before 2017-12-18."""
+    label = "TaiwanStockInstitutionalInvestorsBuySell"
+    seen: set[tuple[date, str]] = set()
+    for row in _checked(rows, INSTITUTIONAL_KEYS, label, stock_id):
+        name = str(row["name"])
+        if name not in INVESTOR_COLUMNS:
+            raise SchemaChangedError(f"FinMind {label} has an unknown investor type {name!r}")
+        day = _day(row["date"], label)
+        if (day, name) in seen:
+            raise SchemaChangedError(f"FinMind {label} repeated {name} on {day}")
+        seen.add((day, name))
+        column = INVESTOR_COLUMNS[name]
+        if column is not None:
+            target = days.setdefault(day, {})
+            net = _signed(row["buy"], label) - _signed(row["sell"], label)
+            target[column] = target.get(column, 0) + net
+
+
+def _lots(row: Row, label: str) -> dict[str, Any]:
+    return {column: _count(row[key], label) * SHARES_PER_LOT for key, column in LOTS.items()}
+
+
+def _lending(row: Row, label: str) -> dict[str, Any]:
+    return {"sbl_short_balance": _count(row["SBLShortSalesCurrentDayBalance"], label)}
+
+
+def _holding(row: Row, label: str) -> dict[str, Any]:
+    ratio = _number(row["ForeignInvestmentSharesRatio"], label)
+    if ratio is not None and not 0 <= ratio <= PERCENT:
+        logger.warning(
+            "%s %s: foreign holding %s%% left empty", row["stock_id"], row["date"], ratio
+        )
+        ratio = None
+    return {"fi_holding_pct": ratio}
