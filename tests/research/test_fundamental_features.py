@@ -87,19 +87,39 @@ def test_revenue_growth_needs_a_positive_base_and_a_complete_history() -> None:
     assert one(revenue_signals(holed), "2016-02")["fund_rev_mom"] == pytest.approx(0.0)
 
 
-def test_each_revenue_signal_waits_only_for_the_months_it_reads() -> None:
-    revenue = months("2015-01", [100.0] * 16)
-    late = pd.Timestamp("2016-06-01")
-    revenue.loc[revenue["period"] == "2015-02", "announce_date"] = late.date()
+REVENUE_READS = {
+    "fund_rev_yoy": {0, 12},
+    "fund_rev_3m_yoy": {0, 1, 2, 12, 13, 14},
+    "fund_rev_mom": {0, 1},
+}
+STATEMENT_READS = {
+    "eps_ttm": {0, 1, 2, 3},
+    "fund_eps_yoy": set(range(8)),
+    "fund_roe_ttm": {0, 1, 2, 3},
+    "fund_gross_margin": {0},
+    "fund_op_margin": {0},
+    "fund_debt_ratio": {0},
+    "fund_gm_yoy_chg": {0, 4},
+    "fund_opm_yoy_chg": {0, 4},
+    "fund_cfo_to_ni": {0, 1, 2, 3},
+}
+LATE = pd.Timestamp("2030-01-02")
+
+
+def later_by(signals: pd.DataFrame, first: str, k: int) -> str:
+    periods = signals["period"].drop_duplicates().tolist()
+    return str(periods[periods.index(first) + k])
+
+
+@pytest.mark.parametrize("signal", list(REVENUE_READS))
+def test_each_revenue_signal_waits_for_exactly_the_months_it_reads(signal: str) -> None:
+    revenue = months("2015-01", [100.0] * 30)
+    revenue.loc[revenue["period"] == "2015-03", "announce_date"] = LATE.date()
 
     signals = revenue_signals(revenue)
 
-    assert known(signals, "2016-02", "fund_rev_yoy") == late
-    assert known(signals, "2016-02", "fund_rev_mom") < late
-    assert known(signals, "2016-03", "fund_rev_3m_yoy") == late
-    assert known(signals, "2016-04", "fund_rev_3m_yoy") == late
-    assert known(signals, "2016-03", "fund_rev_yoy") < late
-    assert known(signals, "2015-03", "fund_rev_mom") == late
+    waits = [known(signals, later_by(signals, "2015-03", k), signal) == LATE for k in range(15)]
+    assert waits == [k in REVENUE_READS[signal] for k in range(15)]
 
 
 def test_ttm_eps_growth_and_ratios_over_four_quarters() -> None:
@@ -192,21 +212,24 @@ def test_features_divide_ttm_eps_by_the_carried_raw_close() -> None:
     assert at(features, "2330", 3, "fund_days_since_fs") == 4.0
 
 
-def test_each_statement_signal_waits_only_for_the_quarters_it_reads() -> None:
-    statements = quarters("2014-Q1", 8)
-    late = pd.Timestamp("2016-06-01")
-    statements.loc[statements["period"] == "2014-Q1", "announce_date"] = late.date()
+@pytest.mark.parametrize("signal", list(STATEMENT_READS))
+def test_each_statement_signal_waits_for_exactly_the_quarters_it_reads(signal: str) -> None:
+    statements = quarters("2013-Q1", 16)
+    statements.loc[statements["period"] == "2013-Q2", "announce_date"] = LATE.date()
 
     signals = statement_signals(statements)
 
-    assert known(signals, "2014-Q4", "eps_ttm") == late
-    assert known(signals, "2014-Q4", "fund_cfo_to_ni") == late
-    assert known(signals, "2014-Q4", "fund_roe_ttm") == late
-    assert known(signals, "2015-Q1", "eps_ttm") < late
-    assert known(signals, "2015-Q1", "fund_gm_yoy_chg") == late
-    assert known(signals, "2015-Q1", "fund_opm_yoy_chg") == late
-    assert known(signals, "2015-Q2", "fund_gm_yoy_chg") < late
-    assert known(signals, "2015-Q4", "fund_eps_yoy") == late
-    assert known(signals, "2015-Q4", "eps_ttm") < late
-    assert known(signals, "2014-Q1", "fund_debt_ratio") == late
-    assert known(signals, "2014-Q2", "fund_gross_margin") < late
+    waits = [known(signals, later_by(signals, "2013-Q2", k), signal) == LATE for k in range(8)]
+    assert waits == [k in STATEMENT_READS[signal] for k in range(8)]
+
+
+def test_the_first_announced_statement_of_a_quarter_is_kept() -> None:
+    individual = quarters("2015-Q1", 2, gross_margin=[0.3, 0.3]).assign(fin_type="individual")
+    consolidated = quarters("2015-Q1", 2, gross_margin=[0.5, 0.6])
+    late = consolidated["period"] == "2015-Q1"
+    consolidated.loc[late, "announce_date"] = date(2015, 9, 1)
+
+    signals = statement_signals(pd.concat([consolidated, individual]))
+
+    assert one(signals, "2015-Q1")["fund_gross_margin"] == pytest.approx(0.3)
+    assert one(signals, "2015-Q2")["fund_gross_margin"] == pytest.approx(0.6)

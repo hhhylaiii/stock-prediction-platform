@@ -31,11 +31,24 @@ STATEMENT_INPUTS: Mapping[str, tuple[int, ...]] = {
     "fund_opm_yoy_chg": (TTM_QUARTERS,),
     "fund_cfo_to_ni": TTM_LAGS,
 }
-SIGNAL_COLUMNS = ["stock_id", "period", "number", "signal", "value", "first_known", "known_from"]
-REVENUE_STALE = pd.Timedelta(62, unit="D")
-STATEMENT_STALE = pd.Timedelta(200, unit="D")
-REVENUE_LOOKBACK = timedelta(days=550)
-STATEMENT_LOOKBACK = timedelta(days=1000)
+SIGNAL_COLUMNS = [
+    "stock_id",
+    "period",
+    "number",
+    "signal",
+    "value",
+    "announce_date",
+    "first_known",
+    "known_from",
+]
+REVENUE_STALE = timedelta(days=62)
+STATEMENT_STALE = timedelta(days=200)
+MONTH_SPAN = timedelta(days=31)
+QUARTER_SPAN = timedelta(days=92)
+REVENUE_LOOKBACK = REVENUE_STALE + MONTH_SPAN * (max(map(max, REVENUE_INPUTS.values())) + 1)
+STATEMENT_LOOKBACK = STATEMENT_STALE + QUARTER_SPAN * (
+    max(max(lags, default=0) for lags in STATEMENT_INPUTS.values()) + 1
+)
 STATEMENT_COLUMNS = [
     "stock_id",
     "period",
@@ -72,6 +85,7 @@ class _Lags:
         return self.frame[["stock_id", "period", "number"]].assign(
             signal=name,
             value=value.astype("float64"),
+            announce_date=dates[0],
             first_known=stacked.min(axis=1),
             known_from=stacked.max(axis=1),
         )
@@ -112,9 +126,10 @@ def revenue_signals(revenue: pd.DataFrame) -> pd.DataFrame:
 
 
 def _preferred(statements: pd.DataFrame) -> pd.DataFrame:
-    """One statement per stock and quarter, consolidated over individual, numbered by quarter."""
+    """First announced statement per stock and quarter (consolidated on a tie), numbered."""
     rank = statements["fin_type"].ne(FinType.CONSOLIDATED).astype(int)
-    ordered = statements.assign(rank=rank).sort_values(["stock_id", "period", "rank"])
+    keys = ["stock_id", "period", "announce_date", "rank"]
+    ordered = statements.assign(rank=rank).sort_values(keys)
     chosen = ordered.drop_duplicates(["stock_id", "period"]).drop(columns="rank")
     return _numbered(chosen.astype(dict.fromkeys(NUMERIC, "float64")), "-Q", 4)
 
@@ -182,18 +197,27 @@ def segment_starts(panel: pd.DataFrame, calendar: TradingDays) -> pd.Series:
     return starts
 
 
+def _events(rows: pd.DataFrame) -> pd.DataFrame:
+    """Each period shows up on its announce date, missing until its last input is announced."""
+    waiting = rows["known_from"] > rows["announce_date"]
+    if not waiting.any():
+        return rows
+    pending = rows[waiting].assign(value=np.nan, known_from=rows.loc[waiting, "announce_date"])
+    return pd.concat([rows, pending], ignore_index=True)
+
+
 def _newest(events: pd.DataFrame) -> pd.DataFrame:
     """Events by visibility, without those older than a period of the stock already visible."""
     ordered = events.sort_values(["on", "number"], kind="stable")
     seen = ordered.groupby("stock_id")["number"].cummax()
     before = seen.groupby(ordered["stock_id"]).shift(1)
-    return ordered[~(ordered["number"] <= before)]
+    return ordered[~(ordered["number"] < before)]
 
 
 def _latest(
     panel: pd.DataFrame,
     events: pd.DataFrame,
-    stale: pd.Timedelta,
+    stale: timedelta,
     starts: pd.Series,
     column: str = "value",
 ) -> pd.Series:
@@ -207,9 +231,11 @@ def _latest(
             "on": pd.to_datetime(panel["date"]),
         }
     ).sort_values("on")
-    right = _newest(events.assign(on=pd.to_datetime(events["known_from"])))
+    timed = _events(events)
+    right = _newest(timed.assign(on=pd.to_datetime(timed["known_from"])))
     columns = ["stock_id", "on", "first_known", column]
-    merged = pd.merge_asof(left, right[columns], on="on", by="stock_id", tolerance=stale)
+    window = pd.Timedelta(stale)
+    merged = pd.merge_asof(left, right[columns], on="on", by="stock_id", tolerance=window)
     merged = merged.sort_values("row")
     merged.index = panel.index
     return merged[column].mask(merged["first_known"] < starts)
@@ -230,7 +256,7 @@ def _attached(
     panel: pd.DataFrame,
     signals: pd.DataFrame,
     names: Sequence[str],
-    stale: pd.Timedelta,
+    stale: timedelta,
     starts: pd.Series,
 ) -> dict[str, np.ndarray]:
     return {
@@ -278,7 +304,7 @@ def attach_fundamentals(
     monthly = revenue_signals(revenue) if not revenue.empty else empty
     quarterly = statement_signals(statements) if not statements.empty else empty
     filings = _filings(statements) if not statements.empty else empty
-    seen = _latest(panel, filings, STATEMENT_STALE, starts, "known_from")
+    seen = _latest(panel, filings, STATEMENT_LOOKBACK, starts, "known_from")
     keys = pd.MultiIndex.from_arrays([panel["stock_id"], panel["date"]])
     daily = valuation.set_index(["stock_id", "date"]).astype("float64").reindex(keys)
     return panel.assign(
