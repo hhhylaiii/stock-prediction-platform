@@ -72,6 +72,19 @@ def test_missing_days_inside_a_listing_are_filled_as_halted() -> None:
     assert panel.loc[~panel["has_bar"], ["close", "volume", "adj_factor"]].isna().all().all()
 
 
+def test_a_day_without_a_close_keeps_no_open_high_or_low() -> None:
+    stock("4923")
+    bars("4923", days("2014-03-03", "2014-03-05"))
+    DailyPrice.objects.filter(stock_id="4923", date=d("2014-03-04")).update(
+        close=None, high=None, low=None
+    )
+    panel = load_price_panel(CALENDAR, d("2014-03-03"), d("2014-03-05"))
+    untraded = panel.loc[panel["date"] == d("2014-03-04")].iloc[0]
+    assert untraded["has_bar"]
+    assert untraded[["open", "high", "low", "adj_open", "adj_high", "adj_low"]].isna().all()
+    assert panel["open"].notna().sum() == 2
+
+
 def test_gap_longer_than_the_reuse_gap_starts_a_new_listing() -> None:
     stock("5450")
     stock("2330")

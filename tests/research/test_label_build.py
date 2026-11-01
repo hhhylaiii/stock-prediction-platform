@@ -6,8 +6,10 @@ import pytest
 from django.core.management import call_command
 from django.core.management.base import CommandError
 
+from apps.market.calendar import TradingDays
 from apps.market.models import DailyPrice, StockMaster, TradingCalendar
 from apps.research.labels import LABEL_COLUMNS, build_labels, write_labels
+from apps.research.management.commands.build_labels import _years
 from apps.research.models import LabelDaily
 from tests.research.conftest import weekday_calendar
 
@@ -98,6 +100,7 @@ def test_untradable_t1_on_limit_up_open() -> None:
     assert math.isnan(blocked["fwd_rank_pct"])
     assert open_below["untradable_t1"] is False
     assert open_below["fwd_rank_pct"] == 1.0
+    assert one(labels, "1102", "2016-04-04", 20)["fwd_rank_pct"] == 1.0
 
 
 def test_labels_are_limited_to_the_requested_trading_days() -> None:
@@ -213,7 +216,14 @@ def test_rebuilding_a_range_drops_rows_no_longer_built() -> None:
         write_labels(build_labels(CALENDAR, *march), d("2016-03-10"), d("2016-03-31"))
 
 
-def test_command_takes_a_range_across_years() -> None:
+def test_command_takes_a_range_across_years(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[date, date]] = []
+
+    def recorded(calendar: TradingDays, start: date, end: date) -> pd.DataFrame:
+        calls.append((start, end))
+        return build_labels(calendar, start, end)
+
+    monkeypatch.setattr("apps.research.management.commands.build_labels.build_labels", recorded)
     calendar_rows("2015-12-01", "2016-12-31")
     listed("2330", list_date=d("2015-12-01"))
     DailyPrice.objects.bulk_create(
@@ -228,6 +238,7 @@ def test_command_takes_a_range_across_years() -> None:
     call_command("build_labels", start=d("2015-12-28"), end=d("2016-01-05"))
 
     assert LabelDaily.objects.filter(horizon=5).count() == 7
+    assert calls == [(d("2015-12-28"), d("2015-12-31")), (d("2016-01-01"), d("2016-01-05"))]
 
 
 def test_command_refuses_an_empty_price_table_and_a_reversed_range() -> None:
@@ -238,3 +249,25 @@ def test_command_refuses_an_empty_price_table_and_a_reversed_range() -> None:
     prices("2330", "2016-01-04", "2016-03-31")
     with pytest.raises(CommandError, match="after the end"):
         call_command("build_labels", start=d("2016-04-04"))
+
+
+def test_untraded_next_day_with_an_open_cannot_be_entered() -> None:
+    listed("4923")
+    prices("4923", "2016-01-04", "2016-05-31")
+    DailyPrice.objects.filter(stock_id="4923", date=d("2016-04-05")).update(
+        close=None, high=None, low=None
+    )
+
+    labels = build_labels(CALENDAR, d("2016-04-04"), d("2016-04-04"))
+    blocked = one(labels, "4923", "2016-04-04", 5)
+
+    assert blocked["untradable_t1"] is True
+    assert math.isnan(blocked["fwd_ret_open"])
+
+
+def test_ranges_are_rebuilt_one_calendar_year_at_a_time() -> None:
+    assert list(_years(d("2015-12-28"), d("2017-01-05"))) == [
+        (d("2015-12-28"), d("2015-12-31")),
+        (d("2016-01-01"), d("2016-12-31")),
+        (d("2017-01-01"), d("2017-01-05")),
+    ]

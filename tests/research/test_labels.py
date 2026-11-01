@@ -162,7 +162,13 @@ def test_volatility_of_a_listing_that_ends_counts_flat_days_after_it() -> None:
 
 @pytest.mark.parametrize(
     ("entry", "exit_close", "expected"),
-    [(100.5, 110.0, True), (100.5, 105.0, False), (100.0, 105.0, False), (100.0, 105.01, True)],
+    [
+        (100.5, 110.0, True),
+        (100.5, 105.0, False),
+        (100.0, 105.0, False),
+        (100.0, 105.01, True),
+        (99.0, 104.5, True),
+    ],
 )
 def test_up_five_percent_is_strictly_above_five_percent(
     entry: float, exit_close: float, expected: bool
@@ -200,10 +206,13 @@ def test_rank_waits_until_the_whole_day_is_settled() -> None:
 
     early = row(labels, "1101", days[5], 20)
     late = row(labels, "1101", days[15], 20)
+    last_settled, first_open = row(labels, "1101", days[9], 20), row(labels, "1101", days[10], 20)
 
     assert early["fwd_rank_pct"] == pytest.approx(1 / 3)
     assert late["fwd_ret_open"] == pytest.approx(76.0 / 99.5 - 1)
     assert math.isnan(late["fwd_rank_pct"])
+    assert last_settled["fwd_rank_pct"] == pytest.approx(1 / 3)
+    assert math.isnan(first_open["fwd_rank_pct"])
     assert not math.isnan(row(labels, "1101", days[15], 5)["fwd_rank_pct"])
 
 
@@ -215,3 +224,13 @@ def test_volatility_of_a_day_without_a_close_is_left_open() -> None:
 
     assert math.isnan(row(labels, "2330", panel["date"][3], 20)["fwd_vol_20d"])
     assert not math.isnan(row(labels, "2330", panel["date"][2], 20)["fwd_vol_20d"])
+
+
+def test_rank_orders_open_entry_returns_not_close_to_close() -> None:
+    close_winner = listing("1101", [100.0] + [110.0] * 29, adj_open=[109.5] * 30)
+    open_winner = listing("1102", [100.0] + [105.0] * 29, adj_open=[95.0] * 30)
+    labels = label_panel(pd.concat([close_winner, open_winner], ignore_index=True))
+    first = close_winner["date"][0]
+
+    assert row(labels, "1102", first, 5)["fwd_rank_pct"] == 1.0
+    assert row(labels, "1101", first, 5)["fwd_rank_pct"] == 0.5
