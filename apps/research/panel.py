@@ -67,7 +67,10 @@ WHERE p.date BETWEEN %(start)s AND %(end)s
 
 
 class Segment(NamedTuple):
-    """Trading days one listing spans; listing_day is None when it predates the data."""
+    """Trading days one listing spans; listing_day is None when it predates the data.
+
+    Industry comes from stock_master, which describes only the code's latest listing.
+    """
 
     stock_id: str
     segment: int
@@ -145,7 +148,8 @@ def _segments(calendar: TradingDays, stock_ids: Sequence[str] | None) -> list[Se
         bars = _split(calendar, rows)
         for number in range(1, len(bars) + 1):
             first_day, last_day, listing_day = _span(number, bars, rows[0], (data[0], data[1]))
-            market, industry = rows[0][4], rows[0][5]
+            market = rows[0][4]
+            industry = rows[0][5] if number == len(bars) else ""
             segments.append(
                 Segment(stock_id, number, first_day, last_day, listing_day, market, industry)
             )

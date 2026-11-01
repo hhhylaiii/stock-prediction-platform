@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from apps.research.features.technical import technical_features
 from apps.research.pricelimit import (
     apply_price_limits,
     limit_down_price,
@@ -157,21 +158,30 @@ def recorded_moves() -> pd.DataFrame:
     return frame.assign(segment=1, age=1_000, adj_factor=1.0, adj_close=frame["close"])
 
 
+def limit_up_feature(frame: pd.DataFrame) -> pd.Series:
+    """tech_limit_up_t of each row, through the price limits and the technical features."""
+    limits = apply_price_limits(frame)
+    filler = {"adj_high": limits["adj_close"], "adj_low": limits["adj_close"]}
+    panel = limits.assign(has_bar=True, volume=1.0, shares=1.0, attention=False, **filler)
+    return technical_features(panel).set_index(["stock_id", "date"])["tech_limit_up_t"]
+
+
 @pytest.mark.spec8
 def test_limit_up_by_era_and_tick() -> None:
     result = apply_price_limits(recorded_moves()).set_index(["stock_id", "date"])
+    feature = limit_up_feature(recorded_moves())
     moves = {
-        ("1338", d("2015-03-23")): (101.5, True),
-        ("3085", d("2015-03-09")): (10.3, True),
-        ("1232", d("2015-03-20")): (80.5, False),
-        ("2417", d("2015-07-07")): (11.45, True),
-        ("4107", d("2015-07-01")): (105.0, True),
+        ("1338", d("2015-03-23")): (101.5, 1.0),
+        ("3085", d("2015-03-09")): (10.3, 1.0),
+        ("1232", d("2015-03-20")): (80.5, 0.0),
+        ("2417", d("2015-07-07")): (11.45, 1.0),
+        ("4107", d("2015-07-01")): (105.0, 1.0),
     }
     for key, (limit, flagged) in moves.items():
         assert result.loc[key, "limit_up"] == pytest.approx(limit)
-        assert result.loc[key, "limit_up_close"] == flagged
+        assert feature.loc[key] == flagged
     assert result.loc[("3085", d("2015-03-09")), "limit_up_open"]
     era_days = [d("2015-05-28"), BEFORE, AFTER, d("2015-06-02")]
     era = bars(close=[10.45, 11.15, 10.45, 11.15], date=era_days)
     era = era.assign(segment=[1, 1, 2, 2], age=1_000)
-    assert apply_price_limits(era)["limit_up_close"].tolist() == [False, True, False, False]
+    assert limit_up_feature(era).tolist() == [0.0, 1.0, 0.0, 0.0]
