@@ -116,9 +116,7 @@ def _ratio(row: Row, after_key: str, before_key: str, label: str) -> float | Non
         raise SchemaChangedError(f"FinMind {label} for {row['stock_id']} has bad prices")
     if before > 0 and after > 0:
         return float(after) / float(before)
-    logger.warning(
-        "%s %s: no usable reference price, adj_factor left empty", row["stock_id"], row["date"]
-    )
+    logger.warning("%s %s: %s has no usable reference price", row["stock_id"], row["date"], label)
     return None
 
 

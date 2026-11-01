@@ -255,8 +255,12 @@ def test_missing_share_counts_are_skipped(rows: Callable[[str], Rows]) -> None:
     assert frame.iloc[0]["effective_date"] == date(2013, 8, 2)
 
 
-def test_a_capital_reduction_becomes_a_factor_only_event(rows: Callable[[str], Rows]) -> None:
-    events = dividend_events([], [], "2412", reductions=rows("capred_2412"))
+def test_a_capital_reduction_becomes_a_factor_only_event(
+    rows: Callable[[str], Rows], caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level(logging.WARNING, logger="apps.etl.adapters.finmind_datasets"):
+        events = dividend_events([], [], "2412", reductions=rows("capred_2412"))
+    assert caplog.text == ""
     event = events.iloc[0]
     assert event["ex_date"] == date(2011, 1, 25)
     assert (event["cash_dividend"], event["stock_dividend"]) == (Decimal("0"), Decimal("0"))
@@ -285,10 +289,13 @@ def test_factors_on_one_day_multiply_and_are_flagged(
     "change", [{"PostReductionReferencePrice": 0.0}, {"ClosingPriceonTheLastTradingDay": -1.0}]
 )
 def test_unusable_reduction_prices_leave_the_factor_empty(
-    rows: Callable[[str], Rows], change: dict[str, Any]
+    rows: Callable[[str], Rows], change: dict[str, Any], caplog: pytest.LogCaptureFixture
 ) -> None:
     reduction = [{**rows("capred_2412")[0], **change}]
-    assert dividend_events([], [], "2412", reductions=reduction).iloc[0]["adj_factor"] is None
+    with caplog.at_level(logging.WARNING, logger="apps.etl.adapters.finmind_datasets"):
+        events = dividend_events([], [], "2412", reductions=reduction)
+    assert events.iloc[0]["adj_factor"] is None
+    assert "TaiwanStockCapitalReductionReferencePrice has no usable reference price" in caplog.text
 
 
 @pytest.mark.parametrize(
