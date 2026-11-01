@@ -150,3 +150,13 @@ def test_a_broken_table_changes_nothing_and_fails_the_run(
         call_command("refresh_calendar")
     assert _flags() == before
     assert EtlRun.objects.get().status == "failed"
+
+
+@responses.activate
+def test_today_is_left_to_the_holiday_schedule_even_when_listed(
+    monkeypatch: pytest.MonkeyPatch, load_fixture: Callable[[str], Any]
+) -> None:
+    _today(monkeypatch, date(2026, 10, 24))
+    _serve("202610", _with(load_fixture(OCTOBER), "115/10/24"))
+    call_command("refresh_calendar")
+    assert _flags()[date(2026, 10, 24)] == (False, "")
