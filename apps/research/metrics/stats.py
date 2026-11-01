@@ -1,4 +1,4 @@
-"""Newey-West t statistics for overlapping-label metric series (SPEC §7 評估指標)."""
+"""Newey-West t statistics and daily equal-count buckets for metric series (SPEC §7 評估指標)."""
 
 import math
 
@@ -12,6 +12,15 @@ FLAT_TOLERANCE = 1e-12
 def is_flat(spread: float, level: float) -> bool:
     """A spread this small next to the level is float noise around a constant series."""
     return spread <= FLAT_TOLERANCE * max(1.0, abs(level))
+
+
+def equal_count_buckets(values: pd.Series, dates: pd.Series, n_buckets: int) -> pd.Series:
+    """Bucket 1..n_buckets of each value within its date, equal counts, ties in row order."""
+    if n_buckets < 1:
+        raise ValueError("n_buckets must be at least 1")
+    grouped = values.groupby(dates)
+    position = grouped.rank(method="first").astype(np.int64) - 1
+    return position * n_buckets // grouped.transform("size") + 1
 
 
 def newey_west_t(values: npt.ArrayLike, lag: int) -> float:

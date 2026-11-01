@@ -9,6 +9,7 @@ import numpy.typing as npt
 import pandas as pd
 
 from apps.research.metrics.ic import DATE, MIN_STOCKS
+from apps.research.metrics.stats import equal_count_buckets
 from apps.research.walkforward import Fold
 
 QUANTILE_COLUMNS: Mapping[float, str] = MappingProxyType({0.1: "q10", 0.5: "q50", 0.9: "q90"})
@@ -102,13 +103,11 @@ def coverage_by_bucket(
     rows = _rows(frame, [label, lower, upper, by])
     if rows.empty:
         return pd.DataFrame(columns=BUCKET_COLUMNS)
-    grouped = rows.groupby(DATE)[by]
-    position = grouped.rank(method="first").astype(np.int64) - 1
     inside = (rows[label] >= rows[lower]) & (rows[label] <= rows[upper])
     table = pd.DataFrame(
         {
             DATE: rows[DATE],
-            "bucket": position * n_buckets // grouped.transform("size") + 1,
+            "bucket": equal_count_buckets(rows[by], rows[DATE], n_buckets),
             "coverage": inside.astype(np.float64),
             "width": rows[upper] - rows[lower],
         }

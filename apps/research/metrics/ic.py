@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass, fields
 import numpy as np
 import pandas as pd
 
-from apps.research.metrics.stats import is_flat, newey_west_t
+from apps.research.metrics.stats import equal_count_buckets, is_flat, newey_west_t
 from apps.research.walkforward import Fold
 
 DATE = "date"
@@ -156,13 +156,9 @@ def rank_ic_by_bucket(
     min_stocks: int = MIN_STOCKS,
 ) -> pd.DataFrame:
     """Daily rank IC in equal-count buckets of by over rows with score and label; 1 is lowest."""
-    if n_buckets < 1:
-        raise ValueError("n_buckets must be at least 1")
     needed = list(dict.fromkeys([DATE, score, label, by]))
     rows = frame.loc[frame[[score, label, by]].notna().all(axis=1), needed].reset_index(drop=True)
-    grouped = rows.groupby(DATE)[by]
-    position = grouped.rank(method="first").astype(np.int64) - 1
-    bucket = position * n_buckets // grouped.transform("size") + 1
+    bucket = equal_count_buckets(rows[by], rows[DATE], n_buckets)
     return pd.DataFrame(
         {
             number: daily_rank_ic(rows[bucket == number], score, label, min_stocks)
