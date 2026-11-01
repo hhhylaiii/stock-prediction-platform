@@ -158,3 +158,24 @@ def test_feature_parquet_follows_the_environment(
     monkeypatch.setenv("FEATURE_PARQUET_DIR", str(target))
     module = _fresh_import("config.settings.base")
     assert target == module.FEATURE_PARQUET_DIR
+
+
+@pytest.mark.usefixtures("isolated_env")
+@pytest.mark.parametrize("value", [None, ""])
+def test_model_dir_defaults_under_artifacts(
+    monkeypatch: pytest.MonkeyPatch, value: str | None
+) -> None:
+    if value is None:
+        monkeypatch.delenv("MODEL_DIR", raising=False)
+    else:
+        monkeypatch.setenv("MODEL_DIR", value)
+    module = _fresh_import("config.settings.base")
+    assert module.MODEL_DIR == module.BASE_DIR / "artifacts" / "models"
+
+
+@pytest.mark.usefixtures("isolated_env")
+def test_model_dir_follows_the_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    target = tmp_path / "models"
+    monkeypatch.setenv("MODEL_DIR", str(target))
+    module = _fresh_import("config.settings.base")
+    assert target == module.MODEL_DIR
