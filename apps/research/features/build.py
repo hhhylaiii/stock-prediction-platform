@@ -21,6 +21,7 @@ from apps.research.features.technical import technical_features
 
 FEATURE_COLUMNS = feature_names(batch=1)
 FRAME_COLUMNS = ["stock_id", "date", "in_universe", *FEATURE_COLUMNS]
+FRAME_TYPES: dict[str, str] = {"in_universe": "bool", **dict.fromkeys(FEATURE_COLUMNS, "float64")}
 
 
 def _with_inputs(panel: pd.DataFrame, calendar: TradingDays, end: date) -> pd.DataFrame:
@@ -54,9 +55,12 @@ def build_feature_frame(calendar: TradingDays, start: date, end: date) -> pd.Dat
 
     Always the whole market: industry averages need the full cross-section of each day.
     """
+    low, high = max(start, calendar.start), min(end, calendar.end)
+    if low > high or not calendar.between(low, high):
+        return pd.DataFrame(columns=FRAME_COLUMNS).astype(FRAME_TYPES)
     panel = load_feature_panel(calendar, start, end)
     if panel.empty:
-        return pd.DataFrame(columns=FRAME_COLUMNS)
+        return pd.DataFrame(columns=FRAME_COLUMNS).astype(FRAME_TYPES)
     features = compute_features(_with_inputs(panel, calendar, end))
     inside = features[features["date"].between(start, end)]
     return inside.sort_values(["date", "stock_id"], ignore_index=True)[FRAME_COLUMNS]

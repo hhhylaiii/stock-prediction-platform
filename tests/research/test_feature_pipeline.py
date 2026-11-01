@@ -307,6 +307,24 @@ def test_the_command_rebuilds_the_recent_days_by_default(tmp_path: Path, setting
     assert days == set(CALENDAR.between(d("2016-03-29"), d("2016-03-31")))
 
 
+def test_ranges_without_prices_or_trading_days_build_nothing(tmp_path: Path, settings: Any) -> None:
+    settings.FEATURE_PARQUET_DIR = tmp_path
+    calendar_rows()
+    listed("2330", "2015-06-01", "2016-03-31")
+
+    call_command("build_features", start=d("2014-12-01"), end=d("2015-06-05"))
+    call_command("build_features", start=d("2016-02-08"), end=d("2016-02-12"))
+
+    days = set(FeatureDaily.objects.values_list("date", flat=True))
+    assert days == set(CALENDAR.between(d("2015-06-01"), d("2015-06-05")))
+    assert [path.parent.name for path in tmp_path.glob("*/*.parquet")] == ["year=2015"]
+    empty = build_feature_frame(CALENDAR, d("2014-12-01"), d("2014-12-31"))
+    assert empty.empty
+    assert list(empty.columns) == FRAME_COLUMNS
+    assert empty["in_universe"].dtype == bool
+    assert (empty[feature_names(batch=1)].dtypes == "float64").all()
+
+
 def test_the_command_works_year_by_year(
     tmp_path: Path, settings: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -329,6 +347,8 @@ def test_the_command_works_year_by_year(
         "year=2015",
         "year=2016",
     ]
+    december = pd.read_parquet(tmp_path / "year=2015" / "part-0.parquet")
+    assert set(december["date"]) == set(CALENDAR.between(d("2015-12-28"), d("2015-12-31")))
 
 
 def test_each_year_is_exported_before_the_next_is_built(

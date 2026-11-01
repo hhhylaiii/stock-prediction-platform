@@ -14,7 +14,7 @@ import pyarrow.parquet as pq
 from django.db import transaction
 
 from apps.etl.upsert import upsert
-from apps.research.features.build import FEATURE_COLUMNS, FRAME_COLUMNS
+from apps.research.features.build import FEATURE_COLUMNS, FRAME_COLUMNS, FRAME_TYPES
 from apps.research.models import FeatureDaily
 
 KEYS = ["stock_id", "date"]
@@ -49,14 +49,16 @@ def write_features(frame: pd.DataFrame, start: date, end: date) -> int:
 def _read_year(year: int) -> pd.DataFrame:
     parts = []
     for month in range(1, 13):
-        rows = FeatureDaily.objects.filter(date__year=year, date__month=month)
+        first = date(year, month, 1)
+        after = date(year + month // 12, month % 12 + 1, 1)
+        rows = FeatureDaily.objects.filter(date__gte=first, date__lt=after)
         listed = list(rows.order_by("date", "stock_id").values_list(*FRAME_COLUMNS))
         if listed:
             parts.append(pd.DataFrame(listed, columns=FRAME_COLUMNS))
     if not parts:
         return pd.DataFrame(columns=FRAME_COLUMNS)
     frame = pd.concat(parts, ignore_index=True)
-    return frame.astype({"in_universe": bool, **dict.fromkeys(FEATURE_COLUMNS, "float64")})
+    return frame.astype(FRAME_TYPES)
 
 
 def export_year(year: int, directory: Path) -> Path | None:
