@@ -7,12 +7,14 @@ from datetime import date
 from typing import Any, ClassVar
 
 import pandas as pd
+from django.db import transaction
 from django.utils import timezone
 
+from apps.etl.errors import SourceError
 from apps.etl.models import EtlRun, RawRecord
 from apps.etl.ratelimit import RateLimiter
 from apps.etl.raw import store_raw
-from apps.etl.runs import tracked_run
+from apps.etl.runs import fail_on_rejections, stop_on_streak, tracked_run
 from apps.market.calendar import CalendarError, NotATradingDayError, TradingDays
 
 
@@ -90,8 +92,9 @@ class BaseAdapter(ABC):
         end: date,
         resume_after: str | None = None,
         selection: str | list[str] = "all",
+        rejected: Mapping[str, str] | None = None,
     ) -> EtlRun:
-        """Fetch, normalize and upsert stock by stock; the checkpoint is the last finished stock."""
+        """Stock by stock; a stock with unusable source data is skipped and recorded (SPEC §5)."""
         self.require_dataset(dataset)
         if not self.per_stock:
             raise ValueError(f"{self.source} cannot fetch one stock at a time")
@@ -106,11 +109,26 @@ class BaseAdapter(ABC):
                 "digest": stock_list_digest(stock_ids),
                 "last_stock_id": resume_after,
             }
-            run.checkpoint = checkpoint
+            found = dict(rejected or {})
+            run.checkpoint = {**checkpoint, "rejected": found}
             run.save(update_fields=["checkpoint"])
+            streak = 0
             for stock_id in pending:
-                raw = self.fetch(dataset, start, end, stock_id)
-                run.rows += self.upsert(dataset, self.normalize(dataset, raw))
-                run.checkpoint = {**checkpoint, "last_stock_id": stock_id}
+                try:
+                    run.rows += self._load_stock(dataset, start, end, stock_id)
+                    streak = 0
+                except SourceError as exc:
+                    found[stock_id] = f"{type(exc).__name__}: {exc}"
+                    streak += 1
+                run.checkpoint = {**checkpoint, "last_stock_id": stock_id, "rejected": found}
                 run.save(update_fields=["rows", "checkpoint"])
+                stop_on_streak(streak, stock_id)
+            run.checkpoint = {**run.checkpoint, "finished": True}
+            fail_on_rejections(found)
         return run
+
+    def _load_stock(self, dataset: str, start: date, end: date, stock_id: str) -> int:
+        raw = self.fetch(dataset, start, end, stock_id)
+        frame = self.normalize(dataset, raw)
+        with transaction.atomic():
+            return self.upsert(dataset, frame)
