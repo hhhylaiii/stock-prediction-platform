@@ -9,7 +9,7 @@
     <string>/usr/bin/caffeinate</string>
     <string>-i</string>
     <string>-t</string>
-    <string>30600</string>
+    <string>39600</string>
   </array>
   <key>StartCalendarInterval</key>
   <array>
