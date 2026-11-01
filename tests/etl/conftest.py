@@ -48,6 +48,11 @@ def october_2026() -> TradingDays:
     return load_trading_days("twse_2026_10.json")
 
 
+@pytest.fixture(scope="session")
+def january_2010() -> TradingDays:
+    return load_trading_days("tpex_2010_01.json")
+
+
 @pytest.fixture
 def october_2026_in_db(db: None, october_2026: TradingDays) -> TradingDays:
     TradingCalendar.objects.bulk_create(

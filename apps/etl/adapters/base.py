@@ -5,6 +5,7 @@ import logging
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from datetime import date
+from itertools import groupby
 from typing import Any, ClassVar
 
 import pandas as pd
@@ -25,12 +26,20 @@ def stock_list_digest(stock_ids: Iterable[str]) -> str:
     return hashlib.sha256(",".join(sorted(set(stock_ids))).encode()).hexdigest()
 
 
+def monthly_spans(days: Iterable[date]) -> Iterator[tuple[date, date]]:
+    """First and last trading day of each calendar month the days touch."""
+    for _, group in groupby(days, key=lambda day: (day.year, day.month)):
+        month = list(group)
+        yield month[0], month[-1]
+
+
 class BaseAdapter(ABC):
     """One adapter per source; each dataset maps to one standard table."""
 
     source: ClassVar[str]
     raw_model: ClassVar[type[RawRecord]]
     datasets: ClassVar[frozenset[str]]
+    monthly_datasets: ClassVar[frozenset[str]] = frozenset()
     per_stock: ClassVar[bool] = False
 
     def __init__(self, calendar: TradingDays, limiter: RateLimiter) -> None:
@@ -72,18 +81,23 @@ class BaseAdapter(ABC):
             raise CalendarError(f"no trading days between {start} and {end}")
         return days
 
-    def units(self, start: date, end: date) -> Iterator[date]:
-        yield from self.trading_days(start, end)
+    def units(self, dataset: str, start: date, end: date) -> Iterator[tuple[date, date]]:
+        """Spans fetched in one go: a trading day each, or a month for monthly datasets."""
+        days = self.trading_days(start, end)
+        if dataset in self.monthly_datasets:
+            yield from monthly_spans(days)
+        else:
+            yield from ((day, day) for day in days)
 
     def run(self, dataset: str, start: date, end: date, stock_id: str | None = None) -> EtlRun:
-        """Fetch, normalize and upsert day by day, recording progress in one etl_run row."""
+        """Fetch, normalize and upsert span by span, recording progress in one etl_run row."""
         self.require_dataset(dataset)
-        days = list(self.units(start, end))
+        spans = list(self.units(dataset, start, end))
         with tracked_run(self.source, dataset, start, end) as run:
-            for day in days:
-                raw = self.fetch(dataset, day, day, stock_id)
+            for first, last in spans:
+                raw = self.fetch(dataset, first, last, stock_id)
                 run.rows += self.upsert(dataset, self.normalize(dataset, raw))
-                run.checkpoint = {"last_date": day.isoformat()}
+                run.checkpoint = {"last_date": last.isoformat()}
                 run.save(update_fields=["rows", "checkpoint"])
         return run
 
