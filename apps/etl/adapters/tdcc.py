@@ -22,7 +22,7 @@ from apps.etl.exchange_rows import stock_code
 from apps.etl.models import RawTdcc
 from apps.etl.ratelimit import RateLimiter
 from apps.etl.upsert import upsert
-from apps.market.calendar import TradingDays
+from apps.market.calendar import CalendarError, TradingDays
 from apps.market.models import StockMaster, WeeklyHolding
 
 logger = logging.getLogger(__name__)
@@ -38,6 +38,7 @@ ADJUSTMENT = 16
 TOTAL = 17
 MAX_PERCENT = 100.0
 PUBLISH_DELAY = timedelta(days=1)
+SATURDAY = 5
 
 
 class Level(NamedTuple):
@@ -82,14 +83,16 @@ class TdccAdapter(BaseAdapter):
         self.client = TdccClient.build(limiter, session)
 
     def units(self, dataset: str, start: date, end: date) -> Iterator[tuple[date, date]]:
-        """One request for the whole range: the file only ever holds the latest week."""
+        """One request per run, which must ask for one week: the file only holds the latest."""
         days = self.trading_days(start, end)
+        self._asked_week(start, end)
         yield days[0], days[-1]
 
     def fetch(
         self, dataset: str, start: date, end: date, stock_id: str | None = None
     ) -> pd.DataFrame:
         self.require_dataset(dataset)
+        asked = self._asked_week(start, end)
         text = self.client.holding_csv()
         rows = list(csv.reader(io.StringIO(text)))
         if len(rows) < 2:
@@ -100,7 +103,7 @@ class TdccAdapter(BaseAdapter):
         if any(len(row) != len(FIELDS) for row in rows[1:]):
             raise SchemaChangedError("TDCC shareholding rows do not match its columns")
         frame = pd.DataFrame(rows[1:], columns=COLUMNS, dtype=object)
-        self._check_week(frame, start, end)
+        _check_week(frame, asked, end)
         return frame
 
     def normalize(self, dataset: str, raw_df: pd.DataFrame) -> pd.DataFrame:
@@ -109,8 +112,6 @@ class TdccAdapter(BaseAdapter):
         by_code: dict[str, list[Level]] = defaultdict(list)
         for record in records:
             by_code[record.stock_id].append(record)
-        for code, levels in by_code.items():
-            _check_levels(code, levels)
         week = min(record.data_date for record in records)
         listed = _listed_codes(week)
         kept = [
@@ -120,6 +121,8 @@ class TdccAdapter(BaseAdapter):
         ]
         if not kept:
             raise SchemaChangedError(f"no TDCC code is listed in stock_master on {week}")
+        for code in {record.stock_id for record in kept}:
+            _check_levels(code, by_code[code])
         unlisted = set(by_code) - listed
         if unlisted:
             logger.warning("TDCC %s: %d code(s) not listed on either exchange", week, len(unlisted))
@@ -136,27 +139,31 @@ class TdccAdapter(BaseAdapter):
             update_fields=("holders", "shares", "pct", "publish_date"),
         )
 
-    def _check_week(self, frame: pd.DataFrame, start: date, end: date) -> None:
-        texts = set(frame["data_date"].str.strip())
-        if len(texts) != 1:
-            raise SchemaChangedError(f"TDCC shareholding file has data dates {sorted(texts)}")
-        week = _day(texts.pop())
-        if week < start:
-            raise SourceNotReadyError(f"TDCC still serves {week}; {start}..{end} is not out yet")
-        if week > end:
-            raise SourceRequestError(
-                f"TDCC only serves the latest week ({week}); {start}..{end} is gone"
+    def _asked_week(self, start: date, end: date) -> tuple[int, int]:
+        """The single ISO week whose trading days the run covers."""
+        weeks = {day.isocalendar()[:2] for day in self.calendar.between(start, end)}
+        if len(weeks) != 1:
+            raise CalendarError(
+                f"TDCC serves one week at a time; {start}..{end} covers {len(weeks)} weeks"
             )
-        if not self.calendar.is_trading_day(week):
-            raise SchemaChangedError(f"TDCC data date {week} is not a trading day")
-        this_week = week.isocalendar()[:2]
-        earlier = [
-            day for day in self.calendar.between(start, week) if day.isocalendar()[:2] < this_week
-        ]
-        if earlier:
-            raise SourceRequestError(
-                f"TDCC only serves the latest week ({week}); the week of {earlier[-1]} is gone"
-            )
+        return weeks.pop()
+
+
+def _check_week(frame: pd.DataFrame, asked: tuple[int, int], end: date) -> None:
+    """The file's one data date must fall in the asked week; it may be a settlement-only day."""
+    texts = set(frame["data_date"].str.strip())
+    if len(texts) != 1:
+        raise SchemaChangedError(f"TDCC shareholding file has data dates {sorted(texts)}")
+    served = _day(texts.pop())
+    if served.weekday() >= SATURDAY:
+        raise SchemaChangedError(f"TDCC data date {served} falls on a weekend")
+    week = served.isocalendar()[:2]
+    if week < asked:
+        raise SourceNotReadyError(f"TDCC still serves {served}; the week of {end} is not out yet")
+    if week > asked:
+        raise SourceRequestError(
+            f"TDCC only serves the latest week ({served}); the week of {end} is gone"
+        )
 
 
 def _day(text: str) -> date:

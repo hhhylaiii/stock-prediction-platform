@@ -13,7 +13,7 @@ from apps.etl.adapters.tdcc import TdccAdapter
 from apps.etl.errors import SchemaChangedError, SourceNotReadyError, SourceRequestError
 from apps.etl.models import EtlRun, RawTdcc
 from apps.etl.ratelimit import RateLimiter, RetryableError
-from apps.market.calendar import NotATradingDayError, TradingDays
+from apps.market.calendar import CalendarError, NotATradingDayError, TradingDays
 from apps.market.models import Market, StockMaster, WeeklyHolding
 
 URL = "https://opendata.tdcc.com.tw/getOD.ashx"
@@ -133,12 +133,27 @@ def test_a_week_without_any_listed_code_is_a_schema_change(
 
 
 @responses.activate
-def test_a_range_reaching_an_earlier_week_means_that_week_is_gone(
+def test_a_range_spanning_two_weeks_is_refused_before_any_request(adapter: TdccAdapter) -> None:
+    start = date(2026, 10, 19)
+    with pytest.raises(CalendarError, match="one week at a time"):
+        list(adapter.units(DATASET, start, DAY))
+    with pytest.raises(CalendarError, match="one week at a time"):
+        adapter.fetch(DATASET, start, DAY)
+    assert len(responses.calls) == 0
+
+
+def test_a_range_running_into_the_weekend_is_still_one_week(adapter: TdccAdapter) -> None:
+    assert list(adapter.units(DATASET, DAY, date(2026, 10, 31))) == [(DAY, DAY)]
+
+
+@responses.activate
+def test_a_settlement_only_weekday_of_the_same_week_is_accepted(
     adapter: TdccAdapter, csv_text: str
 ) -> None:
-    _serve(csv_text)
-    with pytest.raises(SourceRequestError, match="2026-10-22"):
-        adapter.fetch(DATASET, date(2026, 10, 19), DAY)
+    thursday = date(2026, 10, 22)
+    frame = _frame(adapter, csv_text.replace("20261030,", "20261023,"), thursday, thursday)
+    assert set(frame["data_date"]) == {date(2026, 10, 23)}
+    assert set(frame["publish_date"]) == {date(2026, 10, 24)}
 
 
 @responses.activate
@@ -176,7 +191,7 @@ def test_an_older_week_means_not_published_yet_and_keeps_raw(
 def test_a_newer_week_means_the_requested_one_is_gone(adapter: TdccAdapter, csv_text: str) -> None:
     _serve(csv_text)
     with pytest.raises(SourceRequestError, match="only serves the latest week"):
-        adapter.fetch(DATASET, date(2026, 10, 23), date(2026, 10, 23))
+        adapter.fetch(DATASET, date(2026, 10, 22), date(2026, 10, 22))
 
 
 @responses.activate
@@ -209,12 +224,18 @@ def test_two_data_dates_in_one_file_is_a_schema_change(adapter: TdccAdapter, csv
 
 @responses.activate
 @pytest.mark.django_db
-def test_a_data_date_off_the_calendar_is_a_schema_change(
+def test_a_weekend_data_date_is_a_schema_change(adapter: TdccAdapter, csv_text: str) -> None:
+    _serve(csv_text.replace("20261030,", "20261031,"))
+    with pytest.raises(SchemaChangedError, match="weekend"):
+        adapter.fetch(DATASET, date(2026, 10, 26), date(2026, 10, 31))
+
+
+@responses.activate
+def test_levels_are_only_checked_for_codes_that_are_kept(
     adapter: TdccAdapter, csv_text: str
 ) -> None:
-    _serve(csv_text.replace("20261030,", "20261031,"))
-    with pytest.raises(SchemaChangedError, match="not a trading day"):
-        adapter.fetch(DATASET, date(2026, 10, 26), date(2026, 10, 31))
+    frame = _frame(adapter, _edit(csv_text, "1238", 4, 3, "999"))
+    assert "1238" not in set(frame["stock_id"])
 
 
 @responses.activate
