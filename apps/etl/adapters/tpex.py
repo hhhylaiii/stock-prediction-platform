@@ -10,12 +10,11 @@ from apps.etl.client import SourceClient
 from apps.etl.errors import SchemaChangedError
 from apps.etl.models import RawTpex
 from apps.etl.ratelimit import RateLimiter
-from apps.etl.roc import parse_roc_date
+from apps.etl.roc import days_in_month
 
 TPEX_MIN_INTERVAL = 3.0
 DELISTED_PATH = "/www/zh-tw/company/deListed"
 TRADING_STOCK_PATH = "/www/zh-tw/afterTrading/tradingStock"
-FIRST_DAY_MARK = "*"
 DEFAULT_PAGE_SIZE = 1000
 
 
@@ -74,9 +73,10 @@ class TpexClient(SourceClient):
         self.save_raw("trading_stock", form, payload)
         if payload.get("stat") != "ok":
             raise SchemaChangedError(f"TPEx stock month stat is {payload.get('stat')!r}")
-        tables = payload.get("tables") or [{}]
-        rows = tables[0].get("data") or []
-        return sorted(parse_roc_date(str(row[0]).rstrip(FIRST_DAY_MARK)) for row in rows)
+        tables = payload.get("tables")
+        if not isinstance(tables, list) or not tables or not isinstance(tables[0], dict):
+            raise SchemaChangedError("TPEx stock month has no table")
+        return days_in_month(tables[0].get("data"), month, "TPEx stock month")
 
     @staticmethod
     def _first_table(payload: dict[str, Any]) -> dict[str, Any]:

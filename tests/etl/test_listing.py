@@ -1,5 +1,7 @@
+import os
+import signal
 from collections.abc import Callable
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 
 import pytest
@@ -12,7 +14,7 @@ from apps.etl.adapters import limiter_for
 from apps.etl.adapters.tpex import TpexClient
 from apps.etl.adapters.twse import TwseClient
 from apps.etl.errors import SchemaChangedError
-from apps.etl.listing import Listing, first_listed_day
+from apps.etl.listing import Listing, Outcome, first_listed_day
 from apps.etl.models import EtlRun
 from apps.market.models import (
     DailyChip,
@@ -26,6 +28,7 @@ from apps.market.models import (
 
 TWSE_URL = "https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY"
 TPEX_URL = "https://www.tpex.org.tw/www/zh-tw/afterTrading/tradingStock"
+EMPTY_TWSE = "twse/stock_day/6446_202312"
 EMPTY_TPEX = "tpex/trading_stock/6488_201508"
 
 
@@ -64,19 +67,43 @@ def tpex_month(load_fixture: Callable[[str], Any]) -> Callable[[str, str, str], 
 @pytest.mark.django_db
 def test_twse_months_list_their_trading_days(twse_month: Callable[..., None]) -> None:
     twse_month("6446", "202401", "twse/stock_day/6446_202401")
-    twse_month("6446", "202312", "twse/stock_day/6446_202312")
+    twse_month("6446", "202312", EMPTY_TWSE)
     client = TwseClient.build(limiter_for("twse"))
     days = client.stock_month("6446", date(2024, 1, 1))
+    assert days is not None
     assert days[:2] == [date(2024, 1, 25), date(2024, 1, 26)]
     assert client.stock_month("6446", date(2023, 12, 1)) == []
 
 
+@pytest.mark.django_db
+def test_twse_cannot_answer_months_before_2010() -> None:
+    assert TwseClient.build(limiter_for("twse")).stock_month("2330", date(2009, 12, 1)) is None
+
+
 @responses.activate
 @pytest.mark.django_db
-def test_an_unexpected_twse_answer_is_a_schema_change() -> None:
-    responses.get(TWSE_URL, json={"stat": "查詢日期大於今日，請重新查詢!"})
-    with pytest.raises(SchemaChangedError, match="查詢日期"):
-        TwseClient.build(limiter_for("twse")).stock_month("6446", date(2030, 1, 1))
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        ({"stat": "查詢日期大於今日，請重新查詢!"}, "查詢日期"),
+        ({"stat": "OK"}, "rows are malformed"),
+        ({"stat": "OK", "data": [{"date": "115/10/01"}]}, "rows are malformed"),
+    ],
+)
+def test_unexpected_twse_months_are_schema_changes(payload: dict[str, Any], message: str) -> None:
+    responses.get(TWSE_URL, json=payload)
+    with pytest.raises(SchemaChangedError, match=message):
+        TwseClient.build(limiter_for("twse")).stock_month("6446", date(2026, 10, 1))
+
+
+@responses.activate
+@pytest.mark.django_db
+def test_a_month_answered_with_other_days_is_a_schema_change(
+    twse_month: Callable[..., None],
+) -> None:
+    twse_month("6446", "202402", "twse/stock_day/6446_202401")
+    with pytest.raises(SchemaChangedError, match="2024-02 with days of another month"):
+        TwseClient.build(limiter_for("twse")).stock_month("6446", date(2024, 2, 1))
 
 
 @responses.activate
@@ -89,41 +116,97 @@ def test_tpex_months_drop_the_first_day_marker(tpex_month: Callable[..., None]) 
     assert client.stock_month("6488", date(2015, 8, 1)) == []
 
 
-def _probe_from(first: date, asked: list[date]) -> Callable[[date], list[date]]:
-    def probe(month: date) -> list[date]:
+@responses.activate
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        ({"stat": "error"}, "stat is 'error'"),
+        ({"stat": "ok", "tables": []}, "has no table"),
+        ({"stat": "ok", "tables": [{"data": None}]}, "rows are malformed"),
+    ],
+)
+def test_unexpected_tpex_months_are_schema_changes(payload: dict[str, Any], message: str) -> None:
+    responses.post(TPEX_URL, json=payload)
+    with pytest.raises(SchemaChangedError, match=message):
+        TpexClient.build(limiter_for("tpex")).stock_month("6488", date(2015, 9, 1))
+
+
+def _months(first: date, last: date, skip: tuple[date, date] | None = None) -> list[date]:
+    """The first day of every month in [first, last], minus an optional span without prices."""
+    days, day = [], first
+    while day <= last:
+        if skip is None or not skip[0] <= day <= skip[1]:
+            days.append(day)
+        day = (day.replace(day=1) + timedelta(days=32)).replace(day=1)
+    return days
+
+
+def _probe_from(
+    first: date, asked: list[date], silent: tuple[date, date] | None = None
+) -> Callable[[date], list[date] | None]:
+    def probe(month: date) -> list[date] | None:
         asked.append(month)
+        if silent is not None and silent[0] <= month <= silent[1]:
+            return None
         return [max(month, first)] if month >= first.replace(day=1) else []
 
     return probe
 
 
-def test_a_stock_also_trading_the_month_before_the_hint_was_listed_earlier() -> None:
+def test_a_stock_also_trading_the_month_before_its_prices_was_listed_earlier() -> None:
     asked: list[date] = []
-    probe = _probe_from(date(2008, 3, 1), asked)
-    found = first_listed_day(date(2010, 1, 4), date(2026, 10, 30), probe)
-    assert found == Listing(None, before_hint=True)
+    probe = _probe_from(date(2008, 3, 3), asked)
+    found = first_listed_day(_months(date(2010, 1, 4), date(2026, 10, 1)), probe)
+    assert found == Listing(Outcome.EARLIER)
     assert asked == [date(2010, 1, 1), date(2009, 12, 1)]
 
 
-def test_a_stock_first_trading_in_the_hint_month_is_listed_then() -> None:
-    probe = _probe_from(date(2012, 3, 5), [])
-    found = first_listed_day(date(2012, 3, 5), date(2026, 10, 30), probe)
-    assert found == Listing(date(2012, 3, 5))
+def test_prices_before_the_first_official_day_of_their_month_are_emerging() -> None:
+    asked: list[date] = []
+    probe = _probe_from(date(2012, 3, 5), asked)
+    found = first_listed_day(_months(date(2012, 3, 1), date(2026, 10, 1)), probe)
+    assert found == Listing(Outcome.LISTED, date(2012, 3, 5))
+    assert asked == [date(2012, 3, 1)]
+
+
+def test_a_first_price_on_the_listing_day_after_an_empty_month_is_the_listing() -> None:
+    probe = _probe_from(date(2012, 3, 1), [])
+    found = first_listed_day(_months(date(2012, 3, 1), date(2026, 10, 1)), probe)
+    assert found == Listing(Outcome.LISTED, date(2012, 3, 1))
 
 
 def test_emerging_market_months_are_skipped_with_few_probes() -> None:
     asked: list[date] = []
     probe = _probe_from(date(2015, 9, 25), asked)
-    found = first_listed_day(date(2014, 10, 28), date(2026, 10, 30), probe)
-    assert found == Listing(date(2015, 9, 25))
+    found = first_listed_day(_months(date(2014, 10, 28), date(2026, 10, 1)), probe)
+    assert found == Listing(Outcome.LISTED, date(2015, 9, 25))
     assert len(asked) <= 10
 
 
-def test_no_official_month_up_to_the_last_price_gives_none() -> None:
+def test_months_without_prices_are_never_probed() -> None:
+    asked: list[date] = []
+    halted = (date(2013, 9, 1), date(2025, 1, 1))
+    firsts = _months(date(2012, 1, 2), date(2026, 10, 1), skip=halted)
+    found = first_listed_day(firsts, _probe_from(date(2013, 7, 15), asked))
+    assert found == Listing(Outcome.LISTED, date(2013, 7, 15))
+    assert not [month for month in asked if halted[0] <= month <= halted[1]]
+
+
+def test_a_month_no_market_can_answer_leaves_the_listing_unknown() -> None:
+    probe = _probe_from(date(2015, 9, 25), [], silent=(date(2015, 1, 1), date(2015, 12, 1)))
+    found = first_listed_day(_months(date(2014, 10, 28), date(2026, 10, 1)), probe)
+    assert found == Listing(Outcome.UNKNOWN)
+
+
+def test_no_official_month_among_the_prices_is_missing() -> None:
     asked: list[date] = []
     probe = _probe_from(date(2030, 1, 1), asked)
-    assert first_listed_day(date(2014, 10, 28), date(2016, 3, 1), probe) == Listing(None)
+    assert first_listed_day(_months(date(2014, 10, 1), date(2016, 3, 1)), probe) == Listing(
+        Outcome.MISSING
+    )
     assert asked[-1] == date(2016, 3, 1)
+    assert first_listed_day([date(2016, 3, 1)], probe) == Listing(Outcome.MISSING)
 
 
 def _prices(stock: str, *days: date) -> None:
@@ -132,10 +215,26 @@ def _prices(stock: str, *days: date) -> None:
     )
 
 
+def _dates(stock: str) -> list[date]:
+    return list(DailyPrice.objects.filter(stock_id=stock).values_list("date", flat=True))
+
+
+@pytest.fixture
+def listed_6488(
+    twse_month: Callable[..., None], tpex_month: Callable[..., None]
+) -> Callable[[], None]:
+    def _mock() -> None:
+        tpex_month("6488", "201508", EMPTY_TPEX)
+        twse_month("6488", "201508", EMPTY_TWSE)
+        tpex_month("6488", "201509", "tpex/trading_stock/6488_201509")
+
+    return _mock
+
+
 @responses.activate
 @pytest.mark.django_db
 def test_listing_dates_drop_earlier_market_rows_but_keep_shares(
-    tpex_month: Callable[..., None],
+    listed_6488: Callable[[], None],
 ) -> None:
     StockMaster.objects.create(stock_id="6488", name="環球晶", market=Market.TPEX)
     _prices("6488", date(2015, 8, 31), date(2015, 9, 25), date(2015, 9, 30))
@@ -147,14 +246,10 @@ def test_listing_dates_drop_earlier_market_rows_but_keep_shares(
         shares=1,
         reason=ShareChangeReason.UNKNOWN,
     )
-    tpex_month("6488", "201508", EMPTY_TPEX)
-    tpex_month("6488", "201509", "tpex/trading_stock/6488_201509")
+    listed_6488()
     call_command("load_listing_dates", "--stock", "6488")
     assert StockMaster.objects.get(stock_id="6488").list_date == date(2015, 9, 25)
-    assert list(DailyPrice.objects.values_list("date", flat=True).order_by("date")) == [
-        date(2015, 9, 25),
-        date(2015, 9, 30),
-    ]
+    assert sorted(_dates("6488")) == [date(2015, 9, 25), date(2015, 9, 30)]
     assert not DailyChip.objects.exists()
     assert not DailyValuation.objects.exists()
     assert SharesOutstanding.objects.count() == 1
@@ -164,48 +259,153 @@ def test_listing_dates_drop_earlier_market_rows_but_keep_shares(
 
 @responses.activate
 @pytest.mark.django_db
-def test_a_listed_stock_that_moved_from_tpex_keeps_its_tpex_years(
+def test_a_tpex_stock_that_traded_on_twse_first_keeps_its_twse_rows(
+    twse_month: Callable[..., None], tpex_month: Callable[..., None]
+) -> None:
+    StockMaster.objects.create(stock_id="6423", name="億而得", market=Market.TPEX)
+    _prices("6423", date(2025, 6, 2), date(2025, 12, 1), date(2026, 2, 2))
+    tpex_month("6423", "202506", "tpex/trading_stock/6423_202506")
+    twse_month("6423", "202506", "twse/stock_day/6423_202506")
+    tpex_month("6423", "202505", "tpex/trading_stock/6423_202505")
+    twse_month("6423", "202505", "twse/stock_day/6423_202505")
+    call_command("load_listing_dates", "--stock", "6423")
+    assert StockMaster.objects.get(stock_id="6423").list_date is None
+    assert len(_dates("6423")) == 3
+    settled = EtlRun.objects.get(dataset="list_date").checkpoint["settled"]
+    assert settled == {"6423": ["2025-06-02", "listed_before_prices"]}
+
+
+@responses.activate
+@pytest.mark.django_db
+def test_a_twse_stock_that_traded_on_tpex_first_keeps_its_tpex_rows(
     twse_month: Callable[..., None], tpex_month: Callable[..., None]
 ) -> None:
     StockMaster.objects.create(stock_id="6446", name="藥華藥", market=Market.TWSE)
-    _prices("6446", date(2016, 9, 1))
-    twse_month("6446", "201609", "twse/stock_day/6446_202312")
+    _prices("6446", date(2016, 9, 1), date(2024, 1, 25))
+    twse_month("6446", "201609", EMPTY_TWSE)
     tpex_month("6446", "201609", "tpex/trading_stock/6446_201609")
-    twse_month("6446", "201608", "twse/stock_day/6446_202312")
-    tpex_month("6446", "201608", EMPTY_TPEX)
+    twse_month("6446", "201608", EMPTY_TWSE)
+    tpex_month("6446", "201608", "tpex/trading_stock/6446_201608")
     call_command("load_listing_dates", "--stock", "6446")
-    assert StockMaster.objects.get(stock_id="6446").list_date == date(2016, 9, 1)
+    assert StockMaster.objects.get(stock_id="6446").list_date is None
+    assert len(_dates("6446")) == 2
+
+
+@responses.activate
+@pytest.mark.django_db
+def test_prices_starting_in_its_twse_month_find_the_earlier_tpex_listing(
+    twse_month: Callable[..., None], tpex_month: Callable[..., None]
+) -> None:
+    StockMaster.objects.create(stock_id="6446", name="藥華藥", market=Market.TWSE)
+    _prices("6446", date(2024, 1, 25))
+    twse_month("6446", "202401", "twse/stock_day/6446_202401")
+    twse_month("6446", "202312", EMPTY_TWSE)
+    tpex_month("6446", "202312", "tpex/trading_stock/6446_202312")
+    call_command("load_listing_dates", "--stock", "6446")
+    assert StockMaster.objects.get(stock_id="6446").list_date is None
+    assert EtlRun.objects.get().checkpoint["settled"]["6446"][1] == "listed_before_prices"
+
+
+@responses.activate
+@pytest.mark.django_db
+def test_twse_stocks_trading_in_january_2010_stay_unknown(
+    twse_month: Callable[..., None], tpex_month: Callable[..., None]
+) -> None:
+    StockMaster.objects.create(stock_id="2330", name="台積電", market=Market.TWSE)
+    _prices("2330", date(2010, 1, 4))
+    twse_month("2330", "201001", "twse/stock_day/2330_201001")
+    tpex_month("2330", "200912", EMPTY_TPEX)
+    call_command("load_listing_dates", "--stock", "2330")
+    assert StockMaster.objects.get(stock_id="2330").list_date is None
+    run = EtlRun.objects.get()
+    assert (run.status, run.checkpoint["settled"]) == (
+        "success",
+        {"2330": ["2010-01-04", "unanswerable"]},
+    )
+    call_command("load_listing_dates")
+    assert len(responses.calls) == 2
+
+
+@responses.activate
+@pytest.mark.django_db
+def test_refresh_clears_a_listing_date_the_months_no_longer_confirm(
+    twse_month: Callable[..., None], tpex_month: Callable[..., None]
+) -> None:
+    StockMaster.objects.create(
+        stock_id="6423", name="億而得", market=Market.TPEX, list_date=date(2025, 6, 2)
+    )
+    _prices("6423", date(2025, 6, 2))
+    call_command("load_listing_dates")
+    assert not responses.calls
+    tpex_month("6423", "202506", "tpex/trading_stock/6423_202506")
+    twse_month("6423", "202506", "twse/stock_day/6423_202506")
+    tpex_month("6423", "202505", "tpex/trading_stock/6423_202505")
+    twse_month("6423", "202505", "twse/stock_day/6423_202505")
+    call_command("load_listing_dates", "--refresh")
+    assert StockMaster.objects.get(stock_id="6423").list_date is None
+    assert EtlRun.objects.latest("run_id").checkpoint["cleared"] == ["6423"]
 
 
 @responses.activate
 @pytest.mark.django_db
 def test_a_bad_answer_for_one_stock_is_recorded_and_the_rest_continue(
-    tpex_month: Callable[..., None],
+    listed_6488: Callable[[], None],
 ) -> None:
     for code in ("6488", "6489"):
         StockMaster.objects.create(stock_id=code, name=code, market=Market.TPEX)
         _prices(code, date(2015, 9, 25))
+    form = {"code": "6489", "date": "2015/09/01", "response": "json"}
     responses.post(
-        TPEX_URL,
-        json={"stat": "error"},
-        match=[
-            matchers.urlencoded_params_matcher(
-                {"code": "6489", "date": "2015/09/01", "response": "json"}
-            )
-        ],
+        TPEX_URL, json={"stat": "error"}, match=[matchers.urlencoded_params_matcher(form)]
     )
-    tpex_month("6488", "201509", "tpex/trading_stock/6488_201509")
-    tpex_month("6488", "201508", EMPTY_TPEX)
+    listed_6488()
     with pytest.raises(CommandError, match="1 stock rejected: 6489"):
         call_command("load_listing_dates")
     assert StockMaster.objects.get(stock_id="6488").list_date == date(2015, 9, 25)
     run = EtlRun.objects.get(dataset="list_date")
     assert run.status == "failed"
-    assert run.checkpoint["rejected"] == {
-        "6489": "SchemaChangedError: TPEx stock month stat is 'error'"
-    }
+    reason = "SchemaChangedError: TPEx stock month stat is 'error'"
+    assert run.checkpoint["rejected"] == {"6489": reason}
 
 
+@responses.activate
+@pytest.mark.django_db
+def test_a_dead_source_stops_the_run_but_keeps_the_rejections(
+    tpex_month: Callable[..., None],
+) -> None:
+    for code in ("6488", "6489"):
+        StockMaster.objects.create(stock_id=code, name=code, market=Market.TPEX)
+        _prices(code, date(2015, 9, 25))
+    form = {"code": "6488", "date": "2015/09/01", "response": "json"}
+    responses.post(
+        TPEX_URL, json={"stat": "error"}, match=[matchers.urlencoded_params_matcher(form)]
+    )
+    with pytest.raises(CommandError, match="RetryableError"):
+        call_command("load_listing_dates")
+    run = EtlRun.objects.get()
+    assert run.status == "failed"
+    assert list(run.checkpoint["rejected"]) == ["6488"]
+
+
+@responses.activate
+@pytest.mark.django_db
+def test_termination_marks_the_run_failed(monkeypatch: pytest.MonkeyPatch) -> None:
+    StockMaster.objects.create(stock_id="6488", name="環球晶", market=Market.TPEX)
+    _prices("6488", date(2015, 9, 25))
+
+    def terminate(firsts: list[date], probe: Any) -> Listing:
+        os.kill(os.getpid(), signal.SIGTERM)
+        return Listing(Outcome.UNKNOWN)
+
+    monkeypatch.setattr(
+        "apps.etl.management.commands.load_listing_dates.first_listed_day", terminate
+    )
+    with pytest.raises(SystemExit):
+        call_command("load_listing_dates")
+    assert EtlRun.objects.get().status == "failed"
+
+
+@responses.activate
 @pytest.mark.django_db
 def test_stocks_without_prices_or_with_a_date_are_left_alone() -> None:
     StockMaster.objects.create(stock_id="1101", name="台泥", market=Market.TWSE)
@@ -215,6 +415,24 @@ def test_stocks_without_prices_or_with_a_date_are_left_alone() -> None:
     _prices("2330", date(2010, 1, 4))
     call_command("load_listing_dates")
     assert EtlRun.objects.get(dataset="list_date").rows == 0
+    assert StockMaster.objects.get(stock_id="2330").list_date == date(1994, 9, 5)
+
+
+@responses.activate
+@pytest.mark.django_db
+def test_rows_from_the_delisting_day_on_are_dropped() -> None:
+    StockMaster.objects.create(
+        stock_id="5371",
+        name="中光電",
+        market=Market.TPEX,
+        list_date=date(2001, 1, 1),
+        delist_date=date(2026, 9, 3),
+    )
+    _prices("5371", date(2026, 8, 21), date(2026, 9, 3), date(2026, 9, 10))
+    DailyChip.objects.create(stock_id="5371", date=date(2026, 9, 10), fi_net=1)
+    call_command("load_listing_dates", "--stock", "5371")
+    assert _dates("5371") == [date(2026, 8, 21)]
+    assert not DailyChip.objects.exists()
 
 
 @responses.activate
@@ -224,39 +442,9 @@ def test_a_stock_never_found_on_either_market_is_rejected(
 ) -> None:
     StockMaster.objects.create(stock_id="6446", name="藥華藥", market=Market.TWSE)
     _prices("6446", date(2023, 12, 1))
-    twse_month("6446", "202312", "twse/stock_day/6446_202312")
+    twse_month("6446", "202312", EMPTY_TWSE)
     tpex_month("6446", "202312", EMPTY_TPEX)
     with pytest.raises(CommandError, match="1 stock rejected: 6446"):
         call_command("load_listing_dates", "--stock", "6446")
     run = EtlRun.objects.get(dataset="list_date")
     assert run.checkpoint["rejected"] == {"6446": "no official trading day up to the last price"}
-
-
-@responses.activate
-@pytest.mark.django_db
-def test_a_listing_older_than_the_prices_leaves_the_date_empty(
-    twse_month: Callable[..., None],
-) -> None:
-    StockMaster.objects.create(stock_id="6446", name="藥華藥", market=Market.TWSE)
-    _prices("6446", date(2024, 2, 1))
-    twse_month("6446", "202402", "twse/stock_day/6446_202401")
-    twse_month("6446", "202401", "twse/stock_day/6446_202401")
-    call_command("load_listing_dates", "--stock", "6446")
-    assert StockMaster.objects.get(stock_id="6446").list_date is None
-    run = EtlRun.objects.get(dataset="list_date")
-    assert (run.status, run.rows) == ("success", 0)
-    assert run.checkpoint["listed_before_prices"] == ["6446"]
-
-
-@responses.activate
-@pytest.mark.django_db
-def test_twse_stocks_trading_in_january_2010_count_as_listed_earlier(
-    twse_month: Callable[..., None], tpex_month: Callable[..., None]
-) -> None:
-    StockMaster.objects.create(stock_id="2330", name="台積電", market=Market.TWSE)
-    _prices("2330", date(2010, 1, 4))
-    twse_month("2330", "201001", "twse/stock_day/6446_202401")
-    tpex_month("2330", "200912", EMPTY_TPEX)
-    call_command("load_listing_dates", "--stock", "2330")
-    assert StockMaster.objects.get(stock_id="2330").list_date is None
-    assert EtlRun.objects.get(dataset="list_date").checkpoint["listed_before_prices"] == ["2330"]

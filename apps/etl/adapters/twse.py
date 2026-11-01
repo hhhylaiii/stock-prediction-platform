@@ -14,7 +14,7 @@ from apps.etl.client import SourceClient
 from apps.etl.errors import SchemaChangedError, SourceNotReadyError
 from apps.etl.models import RawTwse
 from apps.etl.ratelimit import RateLimiter
-from apps.etl.roc import parse_roc_date
+from apps.etl.roc import days_in_month
 from apps.etl.upsert import upsert
 from apps.market.adjust import refresh_where_later_events
 from apps.market.calendar import TradingDays
@@ -127,8 +127,10 @@ class TwseClient(SourceClient):
         self.save_raw("trading_days", params, payload)
         return payload
 
-    def stock_month(self, stock_id: str, month: date) -> list[date]:
-        """Days one stock traded on TWSE in a month (STOCK_DAY); empty before listing."""
+    def stock_month(self, stock_id: str, month: date) -> list[date] | None:
+        """Days one stock traded on TWSE in a month; None before 2010, which STOCK_DAY refuses."""
+        if month < STOCK_DAY_FIRST_MONTH:
+            return None
         params = {"date": f"{month:%Y%m}01", "stockNo": stock_id, "response": "json"}
         payload = self.get_json(STOCK_DAY_PATH, params)
         self.save_raw("stock_day", params, payload)
@@ -137,7 +139,7 @@ class TwseClient(SourceClient):
             return []
         if stat != "OK":
             raise SchemaChangedError(f"TWSE stock month stat is {stat!r}")
-        return sorted(parse_roc_date(row[0]) for row in payload.get("data") or [])
+        return days_in_month(payload.get("data"), month, "TWSE stock month")
 
     def suspend_listing(self) -> dict[str, Any]:
         """The 終止上市公司 list (2001 onwards); kept raw as dataset 'delisted'."""
