@@ -6,6 +6,7 @@ from datetime import date, timedelta
 import numpy as np
 import pandas as pd
 
+from apps.market.calendar import TradingDays
 from apps.market.models import DailyChip, WeeklyHolding
 from apps.research.features.common import carried, feature_frame, ratio, rolling, shifted
 from apps.research.features.registry import Group, feature_names
@@ -27,8 +28,8 @@ CHIP_COLUMNS = [
     "sbl_short_balance",
     "fi_holding_pct",
 ]
-HOLDING_LOOKBACK = timedelta(days=35)
-HOLDING_STALE = pd.Timedelta(14, unit="D")
+HOLDING_LOOKBACK = timedelta(days=42)
+HOLDING_STALE = pd.Timedelta(21, unit="D")
 
 
 def _flow(panel: pd.DataFrame, column: str) -> pd.Series:
@@ -70,8 +71,19 @@ def chip_features(panel: pd.DataFrame) -> pd.DataFrame:
     return feature_frame(panel, columns, feature_names(Group.CHIP))
 
 
-def holding_changes(holdings: pd.DataFrame) -> pd.DataFrame:
-    """Week-on-week change of the 400-lot-and-up share (points) and of the holder count (ratio)."""
+def _trading_weeks(dates: pd.Series, calendar: TradingDays) -> pd.Series:
+    """Number of weeks with a trading day whose Monday is on or before each date's Monday."""
+    days = calendar.between(calendar.start, calendar.end)
+    weeks = np.unique([day.toordinal() - day.weekday() for day in days])
+    mondays = [day.toordinal() - day.weekday() for day in dates]
+    return pd.Series(np.searchsorted(weeks, mondays, side="right"), index=dates.index)
+
+
+def holding_changes(holdings: pd.DataFrame, calendar: TradingDays) -> pd.DataFrame:
+    """Change of the 400-lot-and-up share (points) and of the holder count (ratio) per week.
+
+    Missing unless the previous row is from the previous week with trading days.
+    """
     levels = holdings["level"]
     big = holdings["pct"].where(levels.isin(BIG_HOLDER_LEVELS), 0.0)
     holders = holdings["holders"].where(levels.isin(HOLDER_LEVELS), 0)
@@ -81,12 +93,14 @@ def holding_changes(holdings: pd.DataFrame) -> pd.DataFrame:
         .sum()
         .sort_values(["stock_id", "data_date"], ignore_index=True)
     )
-    previous = weekly.groupby("stock_id")[["big", "counted"]].shift(1)
+    weeks = _trading_weeks(weekly["data_date"], calendar)
+    adjacent = weeks - weeks.groupby(weekly["stock_id"]).shift(1) == 1
+    previous = weekly.groupby("stock_id")[["big", "counted"]].shift(1).where(adjacent, axis=0)
     changes = weekly.assign(
         big_holder_pct_chg=weekly["big"] - previous["big"],
         holder_count_chg=ratio(weekly["counted"].astype("float64"), previous["counted"]) - 1,
     )
-    return changes.loc[previous["big"].notna(), HOLDING_COLUMNS].reset_index(drop=True)
+    return changes[HOLDING_COLUMNS]
 
 
 def load_chips(start: date, end: date, stock_ids: Sequence[str] | None = None) -> pd.DataFrame:
@@ -107,9 +121,9 @@ def attach_chips(panel: pd.DataFrame, chips: pd.DataFrame) -> pd.DataFrame:
 
 
 def load_holding_changes(
-    start: date, end: date, stock_ids: Sequence[str] | None = None
+    calendar: TradingDays, start: date, end: date, stock_ids: Sequence[str] | None = None
 ) -> pd.DataFrame:
-    """Weekly holding changes published in [start − 35 days, end]."""
+    """Weekly holding changes published in [start − 42 days, end]."""
     rows = WeeklyHolding.objects.filter(publish_date__range=(start - HOLDING_LOOKBACK, end))
     if stock_ids is not None:
         rows = rows.filter(stock_id__in=list(stock_ids))
@@ -117,11 +131,11 @@ def load_holding_changes(
     holdings = pd.DataFrame(list(rows.values_list(*columns)), columns=columns)
     if holdings.empty:
         return pd.DataFrame(columns=HOLDING_COLUMNS)
-    return holding_changes(holdings)
+    return holding_changes(holdings, calendar)
 
 
 def attach_holding_changes(panel: pd.DataFrame, changes: pd.DataFrame) -> pd.DataFrame:
-    """New panel with the latest change published on or before each day, at most 14 days old."""
+    """New panel with the latest change published on or before each day, at most 21 days old."""
     names = ["big_holder_pct_chg", "holder_count_chg"]
     if changes.empty or panel.empty:
         return panel.assign(**dict.fromkeys(names, np.nan))

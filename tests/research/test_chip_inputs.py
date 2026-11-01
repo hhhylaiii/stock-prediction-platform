@@ -11,7 +11,9 @@ from apps.research.features.chip import (
     load_chips,
     load_holding_changes,
 )
+from tests.research.conftest import weekday_calendar
 
+CALENDAR = weekday_calendar(date(2015, 1, 1), date(2016, 12, 31))
 pytestmark = pytest.mark.django_db
 
 
@@ -43,24 +45,27 @@ def panel_of(days: list[str]) -> pd.DataFrame:
 def test_friday_weekly_features_wait_for_the_saturday_publication() -> None:
     week("2330", "2016-02-19", 40.0, 1_000)
     week("2330", "2016-02-26", 41.0, 1_100)
-    week("2330", "2016-03-04", 45.0, 1_210)
+    week("2330", "2016-03-04", 45.0, 1_320)
     days = ["2016-03-04", "2016-03-07"]
 
     start, end = d(days[0]), d(days[-1])
-    attached = attach_holding_changes(panel_of(days), load_holding_changes(start, end))
+    changes = load_holding_changes(CALENDAR, start, end)
+    attached = attach_holding_changes(panel_of(days), changes)
 
     friday, monday = attached.iloc[0], attached.iloc[1]
     assert friday["big_holder_pct_chg"] == pytest.approx(1.0)
     assert friday["holder_count_chg"] == pytest.approx(0.1)
     assert monday["big_holder_pct_chg"] == pytest.approx(4.0)
+    assert monday["holder_count_chg"] == pytest.approx(0.2)
 
 
-def test_weekly_changes_go_stale_after_two_weeks() -> None:
+def test_weekly_changes_go_stale_after_three_weeks() -> None:
     week("2330", "2016-02-19", 40.0, 1_000)
     week("2330", "2016-02-26", 41.0, 1_100)
-    days = ["2016-03-11", "2016-03-14"]
+    days = ["2016-03-18", "2016-03-21"]
 
-    attached = attach_holding_changes(panel_of(days), load_holding_changes(d(days[0]), d(days[-1])))
+    changes = load_holding_changes(CALENDAR, d(days[0]), d(days[-1]))
+    attached = attach_holding_changes(panel_of(days), changes)
 
     assert attached["big_holder_pct_chg"].tolist()[0] == pytest.approx(1.0)
     assert math.isnan(attached["big_holder_pct_chg"].iloc[1])
@@ -82,6 +87,23 @@ def test_chip_rows_join_by_stock_and_day() -> None:
 def test_no_holdings_give_missing_changes() -> None:
     panel = panel_of(["2016-03-04"])
 
-    attached = attach_holding_changes(panel, load_holding_changes(d("2016-03-04"), d("2016-03-04")))
+    changes = load_holding_changes(CALENDAR, d("2016-03-04"), d("2016-03-04"))
+    attached = attach_holding_changes(panel, changes)
 
     assert attached[["big_holder_pct_chg", "holder_count_chg"]].isna().all().all()
+
+
+def test_a_later_load_start_gives_the_same_weekly_changes_across_a_gap() -> None:
+    fridays = ["2016-01-22", "2016-01-29", "2016-02-05", "2016-03-11", "2016-03-18"]
+    for k, friday in enumerate(fridays):
+        week("2330", friday, 40.0 + k, 1_000 + 100 * k)
+    days = [day.isoformat() for day in CALENDAR.between(d("2016-03-14"), d("2016-03-25"))]
+
+    def attached(start: str) -> pd.DataFrame:
+        changes = load_holding_changes(CALENDAR, d(start), d(days[-1]))
+        return attach_holding_changes(panel_of(days), changes)
+
+    full, late = attached("2016-01-04"), attached(days[0])
+
+    pd.testing.assert_frame_equal(full, late)
+    assert full["big_holder_pct_chg"].isna().tolist() == [True] * 5 + [False] * 5

@@ -1,15 +1,16 @@
 import math
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 
 import numpy as np
 import pandas as pd
 import pytest
 
+from apps.market.calendar import TradingDays
 from apps.research.features.chip import chip_features, holding_changes
 from apps.research.features.inputs import FEATURE_WARMUP
 from apps.research.features.registry import Group, feature_names
-from tests.research.feature_panels import at, listing, rising
+from tests.research.feature_panels import CALENDAR, at, listing, rising
 
 NAN = math.nan
 
@@ -102,29 +103,56 @@ def test_zero_limits_and_balances_give_missing_ratios() -> None:
     assert features["chip_short_ratio"].isna().all()
 
 
-def test_weekly_holding_changes_compare_consecutive_weeks() -> None:
-    weeks = [date(2016, 3, 4), date(2016, 3, 11), date(2016, 3, 18)]
+def holdings(weeks: list[date], scales: list[float]) -> pd.DataFrame:
     rows = []
-    for week, scale in zip(weeks, (1.0, 1.1, 1.21), strict=True):
+    for week, scale in zip(weeks, scales, strict=True):
         for level in range(1, 18):
             rows.append(
                 {
                     "stock_id": "2330",
                     "data_date": week,
-                    "publish_date": date.fromordinal(week.toordinal() + 1),
+                    "publish_date": week + timedelta(days=1),
                     "level": level,
-                    "holders": int(100 * scale) if level <= 15 else 999,
-                    "pct": 5.0 * scale if level in (12, 13, 14, 15) else 1.0,
+                    "holders": int(100 * scale) if level <= 15 else int(999 * scale),
+                    "pct": 5.0 * scale if level in (11, 12, 13, 14, 15, 16, 17) else 1.0,
                 }
             )
+    return pd.DataFrame(rows)
 
-    changes = holding_changes(pd.DataFrame(rows))
 
-    assert changes["publish_date"].tolist() == [date(2016, 3, 12), date(2016, 3, 19)]
-    assert changes["big_holder_pct_chg"].tolist() == pytest.approx([2.0, 2.2])
-    assert changes["holder_count_chg"].tolist() == pytest.approx(
+def test_weekly_holding_changes_compare_consecutive_weeks() -> None:
+    weeks = [date(2016, 3, 4), date(2016, 3, 11), date(2016, 3, 18)]
+
+    changes = holding_changes(holdings(weeks, [1.0, 1.1, 1.21]), CALENDAR)
+
+    assert changes["publish_date"].tolist() == [date(2016, 3, d) for d in (5, 12, 19)]
+    assert changes["big_holder_pct_chg"].tolist()[1:] == pytest.approx([2.0, 2.2])
+    assert changes["holder_count_chg"].tolist()[1:] == pytest.approx(
         [1_650 / 1_500 - 1, 1_815 / 1_650 - 1]
     )
+    assert changes.iloc[0][["big_holder_pct_chg", "holder_count_chg"]].isna().all()
+
+
+def test_a_missing_week_or_a_reused_code_gives_no_weekly_change() -> None:
+    weeks = [date(2012, 6, 1), date(2016, 3, 4), date(2016, 3, 18), date(2016, 3, 25)]
+
+    changes = holding_changes(holdings(weeks, [3.0, 1.0, 1.1, 1.21]), CALENDAR)
+
+    assert changes["big_holder_pct_chg"].isna().tolist() == [True, True, True, False]
+    assert changes["holder_count_chg"].isna().tolist() == [True, True, True, False]
+
+
+def test_a_week_without_trading_does_not_break_the_weekly_change() -> None:
+    closed = {date(2016, 2, 4) + timedelta(days=k) for k in range(9)}
+    days = [
+        day for day in CALENDAR.between(date(2016, 1, 4), date(2016, 3, 31)) if day not in closed
+    ]
+    calendar = TradingDays(days, date(2016, 1, 1), date(2016, 3, 31))
+    weeks = [date(2016, 1, 29), date(2016, 2, 3), date(2016, 2, 19)]
+
+    changes = holding_changes(holdings(weeks, [1.0, 1.1, 1.21]), calendar)
+
+    assert changes["big_holder_pct_chg"].tolist()[1:] == pytest.approx([2.0, 2.2])
 
 
 def test_unsorted_panel_is_refused() -> None:
