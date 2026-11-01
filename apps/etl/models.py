@@ -128,3 +128,31 @@ class EtlRun(models.Model):
 
     def __str__(self) -> str:
         return f"{self.source}/{self.dataset} {self.start_date}..{self.end_date} {self.status}"
+
+
+class DataQualityLog(models.Model):
+    """One quality-check result for a day; any error stops that day's predictions (SPEC §5)."""
+
+    class Severity(models.TextChoices):
+        INFO = "info"
+        WARNING = "warning"
+        ERROR = "error"
+
+    id = models.BigAutoField(primary_key=True)
+    date = models.DateField()
+    check_name = models.CharField(max_length=64)
+    severity = models.CharField(max_length=16, choices=Severity.choices)
+    detail = models.JSONField(default=dict)
+
+    class Meta:
+        db_table = "data_quality_log"
+        indexes = [models.Index(fields=["date", "severity"], name="dq_log_date_severity_idx")]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(severity__in=["info", "warning", "error"]),
+                name="data_quality_log_severity_valid",
+            )
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.date} {self.check_name} {self.severity}"
