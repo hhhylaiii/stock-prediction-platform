@@ -3,11 +3,12 @@
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import date
 
 from django.db import IntegrityError, transaction
 from django.db.models import Max
 
-from apps.research.models import HoldoutRun
+from apps.research.models import HoldoutRun, HoldoutScope
 from apps.research.walkforward import Fold, WalkForwardConfig
 
 KEY_PATTERN = re.compile(r"[a-z0-9][a-z0-9_.-]{0,63}", re.ASCII)
@@ -23,6 +24,7 @@ class HoldoutTicket:
     scope: str
     run_key: str
     attempt: int
+    last_date: date
 
 
 def require_key(value: str) -> str:
@@ -41,29 +43,42 @@ def _last_attempt(scope: str) -> int:
 
 
 def claim_holdout(
-    scope: str, run_key: str, *, force: bool = False, reason: str = ""
+    scope: str, run_key: str, last_date: date, *, force: bool = False, reason: str = ""
 ) -> HoldoutTicket:
-    """Record a holdout run for scope; any later run needs force and a reason."""
-    require_key(scope)
+    """Record a holdout run on data through last_date; a rerun needs force, a reason, a new key."""
+    if scope not in HoldoutScope.values:
+        raise ValueError(f"scope must be one of {HoldoutScope.values}, not {scope!r}")
     require_key(run_key)
     note = reason.strip()
     if force and not note:
         raise HoldoutError("a forced holdout rerun needs a reason")
+    if HoldoutRun.objects.filter(run_key=run_key).exists():
+        raise HoldoutError(f"{run_key} already holds a holdout run; a rerun needs a new run_key")
     attempt = _last_attempt(scope) + 1 if force else 1
     try:
         with transaction.atomic(durable=True):
-            HoldoutRun.objects.create(scope=scope, attempt=attempt, run_key=run_key, reason=note)
+            HoldoutRun.objects.create(
+                scope=scope, attempt=attempt, run_key=run_key, last_date=last_date, reason=note
+            )
     except IntegrityError as error:
         hint = "another claim took it first" if force else "rerun only with force and a reason"
         raise HoldoutError(
             f"holdout attempt {attempt} for {scope} is already recorded; {hint}"
         ) from error
-    return HoldoutTicket(scope, run_key, attempt)
+    return HoldoutTicket(scope, run_key, attempt, last_date)
 
 
 def holdout_claimed(scope: str) -> bool:
     """Whether scope has run its holdout at least once."""
     return HoldoutRun.objects.filter(scope=scope).exists()
+
+
+def latest_ticket(scope: str) -> HoldoutTicket | None:
+    """Ticket of the latest recorded claim, to resume its missing holdout folds."""
+    row = HoldoutRun.objects.filter(scope=scope).order_by("-attempt").first()
+    if row is None:
+        return None
+    return HoldoutTicket(row.scope, row.run_key, row.attempt, row.last_date)
 
 
 def is_holdout(fold: Fold) -> bool:
@@ -73,13 +88,14 @@ def is_holdout(fold: Fold) -> bool:
 
 def authorize_folds(folds: Iterable[Fold], run_key: str, ticket: HoldoutTicket | None) -> None:
     """Refuse holdout folds unless ticket is the latest recorded claim of its scope for run_key."""
-    holdout = [fold.index for fold in folds if is_holdout(fold)]
+    holdout = [fold for fold in folds if is_holdout(fold)]
     if not holdout:
         return
     if ticket is None or ticket.run_key != run_key:
-        raise HoldoutError(f"folds {holdout} are holdout; claim_holdout for {run_key} first")
+        indices = [fold.index for fold in holdout]
+        raise HoldoutError(f"folds {indices} are holdout; claim_holdout for {run_key} first")
     recorded = HoldoutRun.objects.filter(
-        scope=ticket.scope, attempt=ticket.attempt, run_key=run_key
+        scope=ticket.scope, attempt=ticket.attempt, run_key=run_key, last_date=ticket.last_date
     ).exists()
     if not recorded:
         raise HoldoutError(
@@ -87,3 +103,6 @@ def authorize_folds(folds: Iterable[Fold], run_key: str, ticket: HoldoutTicket |
         )
     if ticket.attempt != _last_attempt(ticket.scope):
         raise HoldoutError(f"attempt {ticket.attempt} of {ticket.scope} has been superseded")
+    beyond = [fold.index for fold in holdout if fold.test_end > ticket.last_date]
+    if beyond:
+        raise HoldoutError(f"folds {beyond} run past the claimed last_date {ticket.last_date}")

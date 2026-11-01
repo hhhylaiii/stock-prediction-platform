@@ -215,7 +215,7 @@ def test_holdout_fold_without_a_ticket_is_not_written(folds: list[Fold]) -> None
 @pytest.mark.django_db
 def test_holdout_fold_is_written_with_a_recorded_ticket(folds: list[Fold]) -> None:
     fold = next(fold for fold in folds if fold.holdout)
-    ticket = claim_holdout("rank", RUN)
+    ticket = claim_holdout("rank", RUN, LAST)
 
     save_fold_predictions(RUN, fold, predictions(fold), ticket)
 
@@ -225,7 +225,7 @@ def test_holdout_fold_is_written_with_a_recorded_ticket(folds: list[Fold]) -> No
 @pytest.mark.django_db
 def test_holdout_fold_is_written_once(folds: list[Fold]) -> None:
     fold = next(fold for fold in folds if fold.holdout)
-    ticket = claim_holdout("rank", RUN)
+    ticket = claim_holdout("rank", RUN, LAST)
     save_fold_predictions(RUN, fold, predictions(fold, 0.1), ticket)
 
     with pytest.raises(HoldoutError, match="written once"):
@@ -238,7 +238,7 @@ def test_holdout_fold_written_meanwhile_is_kept(
     folds: list[Fold], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fold = next(fold for fold in folds if fold.holdout)
-    ticket = claim_holdout("rank", RUN)
+    ticket = claim_holdout("rank", RUN, LAST)
     target = fold_path(RUN, fold.index)
     write = prediction_cache.pq.write_table
 

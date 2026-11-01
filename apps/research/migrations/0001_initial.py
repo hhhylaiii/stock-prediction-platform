@@ -17,9 +17,20 @@ class Migration(migrations.Migration):
                         auto_created=True, primary_key=True, serialize=False, verbose_name="ID"
                     ),
                 ),
-                ("scope", models.CharField(max_length=64)),
+                (
+                    "scope",
+                    models.CharField(
+                        choices=[
+                            ("rank", "排名"),
+                            ("return", "絕對報酬"),
+                            ("interval", "區間與機率"),
+                        ],
+                        max_length=16,
+                    ),
+                ),
                 ("attempt", models.PositiveSmallIntegerField()),
                 ("run_key", models.CharField(max_length=64)),
+                ("last_date", models.DateField()),
                 ("reason", models.TextField(blank=True, default="")),
                 ("claimed_at", models.DateTimeField(default=django.utils.timezone.now)),
             ],
@@ -28,6 +39,11 @@ class Migration(migrations.Migration):
                 "constraints": [
                     models.UniqueConstraint(
                         fields=("scope", "attempt"), name="holdout_run_scope_attempt"
+                    ),
+                    models.UniqueConstraint(fields=("run_key",), name="holdout_run_run_key"),
+                    models.CheckConstraint(
+                        condition=models.Q(("scope__in", ["rank", "return", "interval"])),
+                        name="holdout_run_scope_known",
                     ),
                     models.CheckConstraint(
                         condition=models.Q(("attempt__gte", 1)), name="holdout_run_attempt_gte_1"
