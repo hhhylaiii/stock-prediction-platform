@@ -197,11 +197,17 @@ def _row(own: pd.Series, bench: pd.Series, turnover: pd.Series) -> dict[str, flo
 
 
 def tranche_summary(daily: pd.DataFrame, horizon: int) -> pd.DataFrame:
-    """Each group against the universe on days all sleeves hold, then top long and group 1 short.
+    """Each group against the universe on steady days, then top long and group 1 short.
 
+    Steady days hold every sleeve on the day before and after, so no full build or unwind.
     The short leg loses group 1's gross return and pays its costs; turnover adds both legs.
     """
-    full = daily[daily["sleeves"] == horizon]
+    if not daily.empty and daily["sleeves"].max() > horizon:
+        raise ValueError(f"daily holds more sleeves than horizon {horizon}")
+    ordered = daily.sort_values("date", kind="stable")
+    held = (ordered["sleeves"] == horizon).groupby(ordered["portfolio"])
+    steady = held.shift(1, fill_value=False) & held.shift(-1, fill_value=False)
+    full = ordered[(ordered["sleeves"] == horizon) & steady]
     if full.empty:
         return pd.DataFrame(columns=SUMMARY_COLUMNS)
     books = {str(name): part.set_index("date") for name, part in full.groupby("portfolio")}

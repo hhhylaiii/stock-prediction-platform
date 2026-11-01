@@ -184,6 +184,9 @@ def test_costs_and_turnover_spread_over_the_sleeves_of_a_longer_horizon() -> Non
             SELL_COST / 2,
         ]
     )
+    assert tranche_summary(daily, 2).empty
+    with pytest.raises(ValueError, match="horizon"):
+        tranche_summary(daily, 1)
 
 
 def test_holding_the_same_names_costs_nothing_to_roll() -> None:
@@ -236,21 +239,25 @@ def test_the_inputs_stay_unchanged() -> None:
     daily = tranche_returns(frame, bars, CALENDAR, 2, groups=1)
     decile_groups(frame)
     before_daily = daily.copy()
-    tranche_summary(daily, 1)
-    top_liquidity(frame.assign(liq_dollar_vol_med_20d=1.0))
+    tranche_summary(daily, 2)
+    liquid = frame.assign(liq_dollar_vol_med_20d=1.0)
+    before_liquid = liquid.copy()
+    top_liquidity(liquid)
     pd.testing.assert_frame_equal(daily, before_daily)
+    pd.testing.assert_frame_equal(liquid, before_liquid)
 
     pd.testing.assert_frame_equal(frame, before[0])
     pd.testing.assert_frame_equal(bars, before[1])
 
 
-def test_the_summary_reports_monthly_excess_drawdown_and_turnover_on_full_days() -> None:
-    days = [date(2016, 1, 27), date(2016, 1, 28), date(2016, 1, 29), date(2016, 2, 1)]
-    days.append(date(2016, 2, 2))
+def test_the_summary_skips_building_and_unwinding_days() -> None:
+    days = CALENDAR.between(date(2016, 1, 26), date(2016, 2, 4))
+    sleeves = [1, 2, 2, 2, 2, 2, 2, 1]
+    edge = [0.5, 0.5]
     nets = {
-        "D10": [0.5, -0.04, 0.01, 0.02, 0.0],
-        UNIVERSE: [0.5, 0.01, 0.0, 0.01, 0.0],
-        "D1": [0.5, 0.0, 0.01, -0.01, 0.0],
+        "D10": [*edge, -0.04, 0.01, 0.02, 0.0, *edge],
+        UNIVERSE: [*edge, 0.01, 0.0, 0.01, 0.0, *edge],
+        "D1": [*edge, 0.0, 0.01, -0.01, 0.0, *edge],
     }
     turnover = {"D10": 0.1, UNIVERSE: 0.02, "D1": 0.05}
     costs = {"D10": 0.002, UNIVERSE: 0.0, "D1": 0.001}
@@ -263,7 +270,7 @@ def test_the_summary_reports_monthly_excess_drawdown_and_turnover_on_full_days()
                 "cost": costs[name],
                 "net": values[k],
                 "turnover": turnover[name],
-                "sleeves": 1 if k == 0 else 2,
+                "sleeves": sleeves[k],
             }
             for name, values in nets.items()
             for k, day in enumerate(days)
