@@ -14,6 +14,15 @@ def is_flat(spread: float, level: float) -> bool:
     return spread <= FLAT_TOLERANCE * max(1.0, abs(level))
 
 
+def equal_count_buckets(values: pd.Series, dates: pd.Series, n_buckets: int) -> pd.Series:
+    """Bucket 1..n_buckets of each value within its date, equal counts, ties in row order."""
+    if n_buckets < 1:
+        raise ValueError("n_buckets must be at least 1")
+    grouped = values.groupby(dates)
+    position = grouped.rank(method="first").astype(np.int64) - 1
+    return position * n_buckets // grouped.transform("size") + 1
+
+
 def newey_west_t(values: npt.ArrayLike, lag: int) -> float:
     """t of the mean with a Bartlett-kernel long-run variance; NaN when undefined."""
     if lag < 0:
