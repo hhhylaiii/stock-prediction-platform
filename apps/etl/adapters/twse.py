@@ -47,10 +47,10 @@ from apps.etl.errors import SchemaChangedError, SourceNotReadyError
 from apps.etl.exchange_rows import TWSE_LAYOUT, OfficialDay, official_days
 from apps.etl.models import RawTwse
 from apps.etl.ratelimit import RateLimiter
-from apps.etl.share_counts import drop_repeated_counts
+from apps.etl.share_counts import drop_repeated_counts, latest_counts
 from apps.etl.upsert import upsert
 from apps.market.calendar import TradingDays
-from apps.market.models import DailyChip, SharesOutstanding
+from apps.market.models import DailyChip
 
 logger = logging.getLogger(__name__)
 TWSE_MIN_INTERVAL = 3.0
@@ -190,7 +190,7 @@ class TwseAdapter(BaseAdapter):
             zeros = tuple(table.columns) if dataset == INSTITUTIONAL else ()
             return quoted_only(frame, quoted, f"TWSE {table.label}", zeros)
         if dataset == SHARES_OUTSTANDING:
-            return share_changes(frame, self._latest_shares(min(raw_df["date"])))
+            return share_changes(frame, latest_counts(min(raw_df["date"])))
         return frame
 
     def upsert(self, dataset: str, frame: pd.DataFrame) -> int:
@@ -307,16 +307,6 @@ class TwseAdapter(BaseAdapter):
             raise SourceNotReadyError(f"TWSE daily quotes for {day} not available: {stat}")
         self.save_raw(DAILY_PRICE, params, payload)
         return quotes_frame(payload, day)
-
-    def _latest_shares(self, before: date) -> dict[str, int]:
-        """The last shares_outstanding count of each stock effective before the given day."""
-        latest = (
-            SharesOutstanding.objects.filter(effective_date__lt=before)
-            .order_by("stock_id", "-effective_date")
-            .distinct("stock_id")
-            .values_list("stock_id", "shares")
-        )
-        return dict(latest)
 
     def _quoted_codes(self, day: date) -> set[str]:
         """Local-currency codes of the latest stored MI_INDEX quotes answered for the day."""
