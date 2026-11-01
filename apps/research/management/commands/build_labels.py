@@ -19,7 +19,7 @@ def _years(start: date, end: date) -> Iterator[tuple[date, date]]:
 
 
 class Command(BaseCommand):
-    help = "Upsert label_daily year by year; without --start it redoes the last 60 trading days."
+    help = "Rebuild label_daily year by year; without --start it redoes the last 60 trading days."
 
     def add_arguments(self, parser: ArgumentParser) -> None:
         parser.add_argument("--start", type=date.fromisoformat)
@@ -38,6 +38,7 @@ class Command(BaseCommand):
         if start > end:
             raise CommandError(f"--start {start} is after the end {end}")
         rows = sum(
-            write_labels(build_labels(calendar, low, high)) for low, high in _years(start, end)
+            write_labels(build_labels(calendar, low, high), low, high)
+            for low, high in _years(start, end)
         )
         self.stdout.write(f"label_daily: {rows} rows for {start}..{end}")

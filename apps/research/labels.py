@@ -4,6 +4,7 @@ import math
 from datetime import date
 
 import pandas as pd
+from django.db import transaction
 from django.db.models import Max
 
 from apps.etl.upsert import upsert
@@ -16,6 +17,7 @@ from apps.research.universe import load_universe_panel
 HORIZONS = (5, 20)
 VOL_DAYS = 20
 UP_THRESHOLD = 0.05
+UP_TOLERANCE = 1e-9
 ANNUAL_ROOT = math.sqrt(252)
 LABEL_COLUMNS = [
     "stock_id",
@@ -42,7 +44,7 @@ def _flags(values: pd.Series, known: pd.Series) -> pd.Series:
 
 
 def label_panel(panel: pd.DataFrame, horizons: tuple[int, ...] = HORIZONS) -> pd.DataFrame:
-    """Labels of every panel row; a listing ending before the panel's last day settles there."""
+    """Labels per row; ended listings settle at their last close, ranks wait for a settled day."""
     require_sorted(panel)
     keys = [panel["stock_id"], panel["segment"]]
     ended = panel["date"].groupby(keys).transform("max") < panel["date"].max()
@@ -51,12 +53,16 @@ def label_panel(panel: pd.DataFrame, horizons: tuple[int, ...] = HORIZONS) -> pd
     has_next = panel["date"].groupby(keys).shift(-1).notna()
     blocked = panel["limit_up_open"].groupby(keys).shift(-1).eq(True)
     untradable = _flags((has_next & (entry.isna() | blocked)) | ~has_next, has_next | ended)
-    vol = _forward_volatility(close, keys, ended)
+    vol = _forward_volatility(close, keys, ended).where(panel["adj_close"].notna())
+    days = pd.Index(panel["date"].unique()).sort_values()
+    position = pd.Series(days.get_indexer(panel["date"]), index=panel.index)
     parts = []
     for horizon in horizons:
         exit_close = _ahead(close, keys, horizon, ended)
         open_return = exit_close / entry - 1
+        settled = position + horizon < len(days)
         eligible = panel["in_universe"].astype(bool) & has_next & ~(entry.isna() | blocked)
+        eligible &= settled
         rank = open_return.where(eligible).groupby(panel["date"]).rank(pct=True)
         counted = horizon == VOL_DAYS
         parts.append(
@@ -70,7 +76,7 @@ def label_panel(panel: pd.DataFrame, horizons: tuple[int, ...] = HORIZONS) -> pd
                     "fwd_rank_pct": rank,
                     "fwd_vol_20d": vol if counted else math.nan,
                     "fwd_up_5pct": _flags(
-                        open_return > UP_THRESHOLD, open_return.notna() & counted
+                        open_return > UP_THRESHOLD + UP_TOLERANCE, open_return.notna() & counted
                     ),
                     "untradable_t1": untradable,
                 }
@@ -115,8 +121,12 @@ def build_labels(calendar: TradingDays, start: date, end: date) -> pd.DataFrame:
     return labels[inside].reset_index(drop=True)
 
 
-def write_labels(labels: pd.DataFrame) -> int:
-    """Upsert label rows by (stock_id, date, horizon); rerunning changes nothing."""
+def write_labels(labels: pd.DataFrame, start: date, end: date) -> int:
+    """Replace the label_daily rows dated in [start, end], so rows no longer built go away."""
+    if not labels["date"].between(start, end).all():
+        raise ValueError(f"labels fall outside {start}..{end}")
     keys = ["stock_id", "date", "horizon"]
     values = [column for column in LABEL_COLUMNS if column not in keys]
-    return upsert(LabelDaily, labels, unique_fields=keys, update_fields=values)
+    with transaction.atomic():
+        LabelDaily.objects.filter(date__range=(start, end)).delete()
+        return upsert(LabelDaily, labels, unique_fields=keys, update_fields=values)

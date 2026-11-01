@@ -160,11 +160,16 @@ def test_volatility_of_a_listing_that_ends_counts_flat_days_after_it() -> None:
     assert vol == pytest.approx(steps.std(ddof=1) * math.sqrt(252))
 
 
-@pytest.mark.parametrize(("exit_close", "expected"), [(110.0, True), (105.0, False)])
-def test_up_five_percent_is_strictly_above_five_percent(exit_close: float, expected: bool) -> None:
+@pytest.mark.parametrize(
+    ("entry", "exit_close", "expected"),
+    [(100.5, 110.0, True), (100.5, 105.0, False), (100.0, 105.0, False), (100.0, 105.01, True)],
+)
+def test_up_five_percent_is_strictly_above_five_percent(
+    entry: float, exit_close: float, expected: bool
+) -> None:
     closes = [100.0] * 30
     closes[20] = exit_close
-    panel = listing("2330", closes, adj_open=[100.5] * 30)
+    panel = listing("2330", closes, adj_open=[entry] * 30)
 
     assert row(label_panel(panel), "2330", panel["date"][0], 20)["fwd_up_5pct"] is expected
 
@@ -183,3 +188,30 @@ def test_labels_stay_inside_one_listing() -> None:
 def test_unsorted_panel_is_refused() -> None:
     with pytest.raises(ValueError, match="sorted"):
         label_panel(listing("2330", rising(30)).iloc[::-1])
+
+
+def test_rank_waits_until_the_whole_day_is_settled() -> None:
+    ended = listing("1101", [100.0 - k for k in range(25)], adj_open=[99.5] * 25)
+    panel = pd.concat(
+        [ended, listing("2317", rising(30)), listing("2330", rising(30))], ignore_index=True
+    )
+    labels = label_panel(panel)
+    days = list(ended["date"])
+
+    early = row(labels, "1101", days[5], 20)
+    late = row(labels, "1101", days[15], 20)
+
+    assert early["fwd_rank_pct"] == pytest.approx(1 / 3)
+    assert late["fwd_ret_open"] == pytest.approx(76.0 / 99.5 - 1)
+    assert math.isnan(late["fwd_rank_pct"])
+    assert not math.isnan(row(labels, "1101", days[15], 5)["fwd_rank_pct"])
+
+
+def test_volatility_of_a_day_without_a_close_is_left_open() -> None:
+    closes = rising(30)
+    closes[3] = NAN
+    panel = listing("2330", closes, adj_open=[NAN if math.isnan(c) else c - 0.5 for c in closes])
+    labels = label_panel(panel)
+
+    assert math.isnan(row(labels, "2330", panel["date"][3], 20)["fwd_vol_20d"])
+    assert not math.isnan(row(labels, "2330", panel["date"][2], 20)["fwd_vol_20d"])

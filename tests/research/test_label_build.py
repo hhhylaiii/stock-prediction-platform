@@ -86,17 +86,18 @@ def test_delisted_stock_settles_at_its_last_close() -> None:
 @pytest.mark.spec8
 def test_untradable_t1_on_limit_up_open() -> None:
     listed("1101")
-    prices("1101", "2016-01-04", "2016-03-31", special={d("2016-03-02"): (110.0, 110.0)})
+    prices("1101", "2016-01-04", "2016-05-31", special={d("2016-04-05"): (110.0, 110.0)})
     listed("1102")
-    prices("1102", "2016-01-04", "2016-03-31", special={d("2016-03-02"): (109.5, 110.0)})
+    prices("1102", "2016-01-04", "2016-05-31", special={d("2016-04-05"): (109.5, 110.0)})
 
-    labels = build_labels(CALENDAR, d("2016-03-01"), d("2016-03-01"))
-    blocked = one(labels, "1101", "2016-03-01", 5)
-    open_below = one(labels, "1102", "2016-03-01", 5)
+    labels = build_labels(CALENDAR, d("2016-04-04"), d("2016-04-04"))
+    blocked = one(labels, "1101", "2016-04-04", 5)
+    open_below = one(labels, "1102", "2016-04-04", 5)
 
     assert blocked["untradable_t1"] is True
     assert math.isnan(blocked["fwd_rank_pct"])
     assert open_below["untradable_t1"] is False
+    assert open_below["fwd_rank_pct"] == 1.0
 
 
 def test_labels_are_limited_to_the_requested_trading_days() -> None:
@@ -147,12 +148,13 @@ def test_no_labels_on_an_empty_price_table() -> None:
 def test_writing_twice_changes_nothing_and_a_new_price_updates_the_row() -> None:
     listed("2330")
     prices("2330", "2016-01-04", "2016-04-29")
-    labels = build_labels(CALENDAR, d("2016-03-01"), d("2016-03-31"))
+    march = (d("2016-03-01"), d("2016-03-31"))
+    labels = build_labels(CALENDAR, *march)
 
-    assert write_labels(labels) == len(labels)
-    write_labels(labels)
+    assert write_labels(labels, *march) == len(labels)
+    write_labels(labels, *march)
     DailyPrice.objects.filter(stock_id="2330", date=d("2016-03-08")).update(close=120.0)
-    write_labels(build_labels(CALENDAR, d("2016-03-01"), d("2016-03-31")))
+    write_labels(build_labels(CALENDAR, *march), *march)
 
     assert LabelDaily.objects.count() == len(labels)
     row = LabelDaily.objects.get(stock_id="2330", date=d("2016-03-01"), horizon=5)
@@ -179,6 +181,36 @@ def test_command_rebuilds_the_recent_days_by_default() -> None:
 
     days = set(LabelDaily.objects.values_list("date", flat=True))
     assert days == set(CALENDAR.between(d("2016-04-25"), d("2016-04-29")))
+
+
+def test_command_without_a_range_rebuilds_the_last_sixty_trading_days() -> None:
+    calendar_rows("2016-01-01", "2016-12-31")
+    listed("2330")
+    prices("2330", "2016-01-04", "2016-04-29")
+
+    call_command("build_labels")
+
+    days = set(LabelDaily.objects.values_list("date", flat=True))
+    assert days == set(CALENDAR.between(CALENDAR.shift(d("2016-04-29"), -59), d("2016-04-29")))
+
+
+def test_rebuilding_a_range_drops_rows_no_longer_built() -> None:
+    listed("2330")
+    prices("2330", "2016-01-04", "2016-04-29")
+    march = (d("2016-03-01"), d("2016-03-31"))
+    write_labels(build_labels(CALENDAR, *march), *march)
+    write_labels(
+        build_labels(CALENDAR, d("2016-04-01"), d("2016-04-05")), d("2016-04-01"), d("2016-04-05")
+    )
+    LabelDaily.objects.filter(date=d("2016-03-02")).update(fwd_rank_pct=0.5)
+    StockMaster.objects.filter(stock_id="2330").update(list_date=d("2016-03-03"))
+
+    write_labels(build_labels(CALENDAR, *march), *march)
+
+    assert not LabelDaily.objects.filter(date__lt=d("2016-03-03")).exists()
+    assert LabelDaily.objects.filter(date=d("2016-04-01")).exists()
+    with pytest.raises(ValueError, match="outside"):
+        write_labels(build_labels(CALENDAR, *march), d("2016-03-10"), d("2016-03-31"))
 
 
 def test_command_takes_a_range_across_years() -> None:
