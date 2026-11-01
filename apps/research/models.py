@@ -3,6 +3,8 @@
 from django.db import models
 from django.utils import timezone
 
+from apps.market.models import finite
+
 
 class HoldoutScope(models.TextChoices):
     RANK = "rank", "排名"
@@ -39,3 +41,43 @@ class HoldoutRun(models.Model):
 
     def __str__(self) -> str:
         return f"{self.scope} #{self.attempt} {self.run_key}"
+
+
+class LabelDaily(models.Model):
+    """Forward labels per stock, day and horizon; vol and up_5pct sit on the 20-day rows."""
+
+    pk = models.CompositePrimaryKey("stock_id", "date", "horizon")
+    stock_id = models.CharField(max_length=10)
+    date = models.DateField()
+    horizon = models.PositiveSmallIntegerField()
+    fwd_ret = models.FloatField(null=True, blank=True)
+    fwd_ret_open = models.FloatField(null=True, blank=True)
+    fwd_rank_pct = models.FloatField(null=True, blank=True)
+    fwd_vol_20d = models.FloatField(null=True, blank=True)
+    fwd_up_5pct = models.BooleanField(null=True, blank=True)
+    untradable_t1 = models.BooleanField(null=True, blank=True)
+
+    class Meta:
+        db_table = "label_daily"
+        indexes = [models.Index(fields=["date", "horizon"], name="label_daily_date_horizon_idx")]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(horizon__in=[5, 20]), name="label_daily_horizon_known"
+            ),
+            models.CheckConstraint(
+                condition=finite("fwd_ret", "fwd_ret_open", "fwd_vol_20d"),
+                name="label_daily_finite",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(fwd_rank_pct__gt=0, fwd_rank_pct__lte=1)
+                | models.Q(fwd_rank_pct__isnull=True),
+                name="label_daily_rank_pct_range",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(fwd_vol_20d__gte=0) | models.Q(fwd_vol_20d__isnull=True),
+                name="label_daily_vol_gte_0",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.stock_id} {self.date} {self.horizon}d"
