@@ -51,9 +51,13 @@ def quiet(monkeypatch: pytest.MonkeyPatch, db: None) -> None:
 
 @pytest.fixture
 def mock(load_fixture: Callable[[str], Any]) -> Callable[..., None]:
-    def _mock(dataset: str, name: str, stock: str, span: tuple[str, str], **override: Any) -> None:
+    def _mock(
+        dataset: str, name: str, stock: str | None, span: tuple[str, str], **override: Any
+    ) -> None:
         payload = load_fixture(f"finmind/{name}.json")
-        query = {"dataset": dataset, "data_id": stock, "start_date": span[0], "end_date": span[1]}
+        query = {"dataset": dataset, "start_date": span[0], "end_date": span[1]}
+        if stock is not None:
+            query["data_id"] = stock
         responses.get(
             URL,
             json={**payload, **override},
@@ -85,11 +89,28 @@ def _factors(stock: str) -> dict[date, float]:
 
 
 def _mock_dividends(
-    mock: Callable[..., None], span: tuple[str, str] = AUGUST, **result: Any
+    mock: Callable[..., None],
+    span: tuple[str, str] = AUGUST,
+    stock: str = "2884",
+    policy: str = "dividend_2884",
+    reductions: Any = None,
+    **result: Any,
 ) -> None:
     policy_end = (date.fromisoformat(span[1]) + timedelta(days=30)).isoformat()
-    mock("TaiwanStockDividend", "dividend_2884", "2884", (span[0], policy_end))
-    mock("TaiwanStockDividendResult", "dividend_result_2884", "2884", span, **result)
+    own = stock == "2884"
+    mock(
+        "TaiwanStockDividend", policy, stock, (span[0], policy_end), **({} if own else {"data": []})
+    )
+    result = result if own else {"data": [], **result}
+    mock("TaiwanStockDividendResult", "dividend_result_2884", stock, span, **result)
+    mock(
+        "TaiwanStockCapitalReductionReferencePrice",
+        "capred_2412",
+        stock,
+        span,
+        data=reductions if reductions is not None else [],
+    )
+    mock("TaiwanStockSplitPrice", "split_all", None, span)
 
 
 def test_finmind_is_registered() -> None:
@@ -312,3 +333,67 @@ def test_events_without_a_factor_are_logged(
         _backfill("dividend_event", "2884", AUGUST)
     assert "2884 2013-08-15" in caplog.text
     assert "no ex-right result" in caplog.text
+
+
+def _gap(stock: str, before: date, after: date) -> tuple[float, float]:
+    prev = DailyPrice.objects.get(stock_id=stock, date=before)
+    nxt = DailyPrice.objects.get(stock_id=stock, date=after)
+    assert prev.close is not None
+    assert nxt.open is not None
+    raw = float(nxt.open) / float(prev.close) - 1
+    adjusted = float(nxt.open) * nxt.adj_factor / (float(prev.close) * prev.adj_factor) - 1
+    return raw, adjusted
+
+
+@responses.activate
+def test_a_capital_reduction_is_flat_after_adjustment(
+    mock: Callable[..., None],
+    load_fixture: Callable[[str], Any],
+) -> None:
+    span = ("2010-12-15", "2011-02-15")
+    StockMaster.objects.create(stock_id="2412", name="中華電", market=Market.TWSE)
+    reductions = load_fixture("finmind/capred_2412.json")["data"]
+    _mock_dividends(mock, span, "2412", reductions=reductions, data=[])
+    _backfill("dividend_event", "2412", span)
+    mock("TaiwanStockPrice", "price_2412_201101", "2412", span)
+    _backfill("daily_price", "2412", span)
+    raw, adjusted = _gap("2412", date(2011, 1, 6), date(2011, 1, 25))
+    assert raw > 0.2
+    assert abs(adjusted) < 0.02
+
+
+@responses.activate
+def test_a_split_is_flat_after_adjustment(mock: Callable[..., None]) -> None:
+    span = ("2025-06-01", "2025-06-30")
+    StockMaster.objects.create(stock_id="0050", name="元大台灣50", market=Market.TWSE)
+    _mock_dividends(mock, span, "0050", data=[])
+    _backfill("dividend_event", "0050", span)
+    mock("TaiwanStockPrice", "price_0050_202506", "0050", span)
+    _backfill("daily_price", "0050", span)
+    raw, adjusted = _gap("0050", date(2025, 6, 10), date(2025, 6, 18))
+    assert raw < -0.7
+    assert abs(adjusted) < 0.01
+
+
+@responses.activate
+def test_the_whole_market_split_list_is_fetched_once_per_run(mock: Callable[..., None]) -> None:
+    span = AUGUST
+    _mock_dividends(mock, span, "2884")
+    _mock_dividends(mock, span, "2330", data=[])
+    call_command(
+        "backfill",
+        "--source",
+        "finmind",
+        "--dataset",
+        "dividend_event",
+        "--from",
+        span[0],
+        "--to",
+        span[1],
+        "--stock",
+        "2330",
+        "--stock",
+        "2884",
+    )
+    split_calls = [c for c in responses.calls if "TaiwanStockSplitPrice" in str(c.request.url)]
+    assert len(split_calls) == 1
