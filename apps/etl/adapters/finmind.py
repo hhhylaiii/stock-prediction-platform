@@ -360,11 +360,16 @@ class FinmindAdapter(BaseAdapter):
 
 
 def _listed_only(frame: pd.DataFrame) -> pd.DataFrame:
-    """Market rows before stock_master.list_date are emerging-market trades (SPEC §8.6)."""
+    """Market rows before list_date or from delist_date on are emerging trades (SPEC §8.6)."""
     stock_id = str(frame["stock_id"].iloc[0])
-    listed = StockMaster.objects.filter(stock_id=stock_id).values_list("list_date", flat=True)
-    first = listed.first()
-    return frame if first is None else frame[frame["date"] >= first]
+    span = StockMaster.objects.filter(stock_id=stock_id).values_list("list_date", "delist_date")
+    listed, delisted = span.first() or (None, None)
+    keep = pd.Series(True, index=frame.index)
+    if listed is not None:
+        keep &= frame["date"] >= listed
+    if delisted is not None:
+        keep &= frame["date"] < delisted
+    return frame[keep]
 
 
 def _rows_from(raw_df: pd.DataFrame, finmind_dataset: str) -> list[dict[str, Any]]:
