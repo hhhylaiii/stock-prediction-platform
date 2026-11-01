@@ -14,6 +14,7 @@ from apps.etl.client import SourceClient
 from apps.etl.errors import SchemaChangedError, SourceNotReadyError
 from apps.etl.models import RawTwse
 from apps.etl.ratelimit import RateLimiter
+from apps.etl.roc import parse_roc_date
 from apps.etl.upsert import upsert
 from apps.market.adjust import refresh_where_later_events
 from apps.market.calendar import TradingDays
@@ -24,6 +25,8 @@ DAILY_QUOTES_PATH = "/rwd/zh/afterTrading/MI_INDEX"
 SUSPEND_LISTING_PATH = "/rwd/zh/company/suspendListing"
 HOLIDAY_SCHEDULE_PATH = "/rwd/zh/holidaySchedule/holidaySchedule"
 MONTHLY_TRADING_PATH = "/rwd/zh/afterTrading/FMTQIK"
+STOCK_DAY_PATH = "/rwd/zh/afterTrading/STOCK_DAY"
+STOCK_DAY_FIRST_MONTH = date(2010, 1, 1)
 DAILY_QUOTES_TITLE = "每日收盤行情"
 DAILY_QUOTES_UNIT_HINT = "單位：元、股"
 DAILY_QUOTES_COLUMNS = {
@@ -123,6 +126,18 @@ class TwseClient(SourceClient):
         payload = self.get_json(MONTHLY_TRADING_PATH, params)
         self.save_raw("trading_days", params, payload)
         return payload
+
+    def stock_month(self, stock_id: str, month: date) -> list[date]:
+        """Days one stock traded on TWSE in a month (STOCK_DAY); empty before listing."""
+        params = {"date": f"{month:%Y%m}01", "stockNo": stock_id, "response": "json"}
+        payload = self.get_json(STOCK_DAY_PATH, params)
+        self.save_raw("stock_day", params, payload)
+        stat = str(payload.get("stat", ""))
+        if NO_DATA_STAT in stat:
+            return []
+        if stat != "OK":
+            raise SchemaChangedError(f"TWSE stock month stat is {stat!r}")
+        return sorted(parse_roc_date(row[0]) for row in payload.get("data") or [])
 
     def suspend_listing(self) -> dict[str, Any]:
         """The 終止上市公司 list (2001 onwards); kept raw as dataset 'delisted'."""

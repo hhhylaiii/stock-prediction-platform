@@ -1,0 +1,31 @@
+{
+ "tables": [
+  {
+   "title": "個股日成交資訊",
+   "subtitle": "6488 環球晶 104年08月",
+   "date": "20150801",
+   "data": [],
+   "fields": [
+    "日 期",
+    "成交仟股",
+    "成交仟元",
+    "開盤",
+    "最高",
+    "最低",
+    "收盤",
+    "漲跌",
+    "筆數"
+   ],
+   "notes": [],
+   "totalCount": 0,
+   "summary": []
+  }
+ ],
+ "date": "20150801",
+ "code": "6488",
+ "name": "環球晶",
+ "showListPriceNote": false,
+ "showListPriceLink": false,
+ "flagField": "仟股",
+ "stat": "ok"
+}
