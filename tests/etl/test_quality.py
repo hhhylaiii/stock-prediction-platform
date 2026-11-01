@@ -98,14 +98,15 @@ def test_clean_days_pass_every_check_and_allow_the_prediction(calendar: TradingD
 @pytest.mark.django_db
 @pytest.mark.parametrize(
     ("kept", "severity"),
-    [(94, WARNING), (95, INFO), (96, INFO), (0, ERROR)],
-    ids=["six-percent", "five-percent", "four-percent", "empty"],
+    [(94, WARNING), (95, INFO), (96, INFO), (0, ERROR), (106, WARNING)],
+    ids=["six-percent", "five-percent", "four-percent", "empty", "six-percent-more"],
 )
 def test_a_day_with_a_different_stock_count_is_flagged(
     calendar: TradingDays, kept: int, severity: str
 ) -> None:
     _two_clean_days()
     DailyPrice.objects.filter(date=DAY, stock_id__in=CODES[kept:]).delete()
+    _prices(DAY, [f"{1300 + n}" for n in range(max(kept - 100, 0))])
     run_checks(DAY, calendar)
     row = _results()[("row_count", "daily_price")]
     assert row.severity == severity
@@ -158,7 +159,8 @@ def test_rows_gone_since_yesterday_count_as_missing_but_delisted_ones_do_not(
     run_checks(DAY, calendar)
     row = _results()[("missing_values", "daily_price")]
     assert row.severity == WARNING
-    assert row.detail["columns"]["row"] == {"missing": 2, "population": 99}
+    gap = row.detail["columns"]["row"]
+    assert (gap["missing"], gap["population"]) == (2, 99)
 
 
 @pytest.mark.django_db
@@ -188,7 +190,8 @@ def test_a_column_that_went_empty_since_yesterday_is_flagged(
     run_checks(DAY, calendar)
     row = _results()[("missing_values", table)]
     assert row.severity == WARNING
-    assert row.detail["columns"][column] == {"missing": 2, "population": 100}
+    gap = row.detail["columns"][column]
+    assert (gap["missing"], gap["population"]) == (2, 100)
 
 
 @pytest.mark.django_db
@@ -210,8 +213,58 @@ def test_a_column_that_stays_empty_keeps_failing(calendar: TradingDays) -> None:
     DailyChip.objects.filter(date__in=[PREV, DAY]).update(margin_balance=None)
     run_checks(DAY, calendar)
     gap = _results()[("missing_values", "daily_chip")].detail["columns"]["margin_balance"]
-    assert gap == {"missing": 100, "population": 100}
+    assert (gap["missing"], gap["population"]) == (100, 100)
     assert not should_run_prediction(DAY)
+
+
+def _two_markets() -> None:
+    StockMaster.objects.bulk_create(
+        StockMaster(stock_id=code, name=code, market="TWSE" if n < 58 else "TPEx")
+        for n, code in enumerate(CODES)
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("lost", "market"), [(CODES[:58], "TWSE"), (CODES[58:], "TPEx")], ids=["twse", "tpex"]
+)
+def test_one_market_losing_its_rows_blocks_every_day_it_lasts(
+    calendar: TradingDays, lost: list[str], market: str
+) -> None:
+    _two_markets()
+    _two_clean_days()
+    _prices(date(2026, 10, 29), CODES)
+    DailyPrice.objects.filter(date__in=[DAY, date(2026, 10, 29)], stock_id__in=lost).delete()
+    for day in (DAY, date(2026, 10, 29)):
+        run_checks(day, calendar)
+        row = DataQualityLog.objects.get(
+            date=day, check_name="missing_values", detail__table="daily_price"
+        )
+        assert row.severity == ERROR
+        assert row.detail["columns"]["row"]["markets"][market]["missing"] == len(lost)
+        assert not should_run_prediction(day)
+
+
+@pytest.mark.django_db
+def test_a_partly_emptied_column_keeps_warning_on_later_days(calendar: TradingDays) -> None:
+    _two_clean_days()
+    _chips(date(2026, 10, 29), CODES)
+    DailyChip.objects.filter(date__in=[DAY, date(2026, 10, 29)], stock_id__in=CODES[:10]).update(
+        margin_balance=None
+    )
+    run_checks(date(2026, 10, 29), calendar)
+    row = DataQualityLog.objects.get(
+        date=date(2026, 10, 29), check_name="missing_values", detail__table="daily_chip"
+    )
+    assert row.severity == WARNING
+    assert row.detail["columns"]["margin_balance"]["missing"] == 10
+
+
+@pytest.mark.django_db
+def test_a_table_empty_for_over_a_month_still_blocks(calendar: TradingDays) -> None:
+    _prices(date(2026, 9, 1), CODES)
+    run_checks(DAY, calendar)
+    assert _severity("row_count", "daily_price") == ERROR
 
 
 @pytest.mark.django_db
@@ -329,6 +382,7 @@ def test_checks_refuse_a_closed_or_uncovered_day(
     [
         (lambda: None, set()),
         (lambda: IndexDaily.objects.filter(index_id="TAIEX").delete(), {"TAIEX"}),
+        (lambda: IndexDaily.objects.filter(index_id="TPEX").update(date=PREV), {"TPEX"}),
         (
             lambda: IndexDaily.objects.filter(index_id="SOX").update(date=date(2026, 10, 23)),
             {"SOX"},
@@ -339,7 +393,14 @@ def test_checks_refuse_a_closed_or_uncovered_day(
         ),
         (lambda: IndexDaily.objects.all().delete(), {"TAIEX", "TPEX", "SOX", "TSM_ADR", "USDTWD"}),
     ],
-    ids=["fresh", "taiex-missing", "sox-five-days", "usdtwd-four-days", "none-loaded"],
+    ids=[
+        "fresh",
+        "taiex-missing",
+        "tpex-yesterday",
+        "sox-five-days",
+        "usdtwd-four-days",
+        "none-loaded",
+    ],
 )
 def test_market_series_that_stopped_updating_are_flagged(
     calendar: TradingDays, change: Callable[[], object], stale: set[str]

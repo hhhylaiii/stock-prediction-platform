@@ -30,6 +30,8 @@ ROW_CHANGE_LIMIT = 0.05
 BIG_MOVE_LIMIT = Decimal("0.10")
 MISSING_LIMIT = 0.01
 MISSING_ERROR_LIMIT = 0.5
+MIN_MARKET_POPULATION = 20
+UNKNOWN_MARKET = "unknown"
 NO_TRADE_LIMIT = 0.05
 BASELINE_DAYS = timedelta(days=31)
 STALE_AFTER_DAYS = {
@@ -99,7 +101,7 @@ def row_count_results(day: date, previous: date | None) -> list[DataQualityLog]:
     for table, model in TABLES.items():
         count = model._default_manager.filter(date=day).count()
         before = None if previous is None else model._default_manager.filter(date=previous).count()
-        if count == 0 and _baseline(model, ROW, day) is not None:
+        if count == 0 and model._default_manager.filter(date__lt=day).exists():
             severity = Severity.ERROR
         elif not before:
             severity = Severity.INFO
@@ -130,16 +132,17 @@ def big_move_result(day: date, previous: date | None) -> DataQualityLog:
 
 
 def missing_results(day: date) -> list[DataQualityLog]:
-    """Per column, stocks valued on its last filled day but not today; most gone is an error."""
+    """Per column, stocks valued on its fullest recent day but not today, by market too."""
     delisted = set(
         StockMaster.objects.filter(delist_date__lte=day).values_list("stock_id", flat=True)
     )
+    markets = dict(StockMaster.objects.values_list("stock_id", "market"))
     results = []
     for table, columns in MISSING_COLUMNS.items():
         model = TABLES[table]
-        gaps = {column: _gap(model, column, day, delisted) for column in columns}
+        gaps = {column: _gap(model, column, day, delisted, markets) for column in columns}
         shares = {column: _share(gap) for column, gap in gaps.items()}
-        if any(share > MISSING_ERROR_LIMIT for share in shares.values()):
+        if any(_market_failed(gap) for gap in gaps.values()):
             severity = Severity.ERROR
         elif any(
             share > COLUMN_LIMITS.get((table, column), MISSING_LIMIT)
@@ -199,26 +202,46 @@ def _closes(day: date) -> dict[str, Decimal]:
     return {code: close for code, close in rows if close}
 
 
-def _gap(model: type[models.Model], column: str, day: date, delisted: set[str]) -> dict[str, int]:
+def _gap(
+    model: type[models.Model],
+    column: str,
+    day: date,
+    delisted: set[str],
+    markets: dict[str, str],
+) -> dict[str, Any]:
     baseline = _baseline(model, column, day)
-    if baseline is None:
-        return {"missing": 0, "population": 0}
-    before = _codes_with(model, column, baseline) - delisted
+    before = set() if baseline is None else _codes_with(model, column, baseline) - delisted
     missing = before - _codes_with(model, column, day)
-    return {"missing": len(missing), "population": len(before)}
+    by_market: dict[str, dict[str, int]] = {}
+    for code in before:
+        group = by_market.setdefault(
+            markets.get(code, UNKNOWN_MARKET), {"missing": 0, "population": 0}
+        )
+        group["population"] += 1
+        group["missing"] += code in missing
+    return {"missing": len(missing), "population": len(before), "markets": by_market}
 
 
-def _share(gap: dict[str, int]) -> float:
-    return gap["missing"] / gap["population"] if gap["population"] else 0.0
+def _share(gap: dict[str, Any]) -> float:
+    return int(gap["missing"]) / int(gap["population"]) if gap["population"] else 0.0
+
+
+def _market_failed(gap: dict[str, Any]) -> bool:
+    """Either exchange's adapter failing leaves most of that market's stocks without values."""
+    groups = [gap, *gap["markets"].values()]
+    return any(
+        group["population"] >= MIN_MARKET_POPULATION and _share(group) > MISSING_ERROR_LIMIT
+        for group in groups
+    )
 
 
 def _baseline(model: type[models.Model], column: str, day: date) -> date | None:
-    """The latest earlier day within a month on which the column had any value."""
+    """The day within the past month with the most values in the column, the latest on ties."""
     rows = model._default_manager.filter(date__lt=day, date__gte=day - BASELINE_DAYS)
     if column != ROW:
         rows = rows.filter(**{f"{column}__isnull": False})
-    found: date | None = rows.aggregate(latest=models.Max("date"))["latest"]
-    return found
+    fullest = rows.values("date").annotate(n=models.Count("pk")).order_by("-n", "-date").first()
+    return None if fullest is None else fullest["date"]
 
 
 def _codes_with(model: type[models.Model], column: str, day: date) -> set[str]:
