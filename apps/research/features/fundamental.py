@@ -1,6 +1,6 @@
 """Fundamental features of SPEC §6, each visible from the day every input was announced."""
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import date, timedelta
 
 import numpy as np
@@ -14,22 +14,28 @@ from apps.research.features.registry import Group, feature_names
 from apps.research.panel import require_sorted
 
 TTM_QUARTERS = 4
-REVENUE_LAGS = (1, 2, 12, 13, 14)
-STATEMENT_LAGS = tuple(range(1, 2 * TTM_QUARTERS))
-REVENUE_SIGNALS = ["fund_rev_yoy", "fund_rev_3m_yoy", "fund_rev_mom"]
-STATEMENT_SIGNALS = [
-    "eps_ttm",
-    "fund_eps_yoy",
-    "fund_roe_ttm",
-    "fund_gross_margin",
-    "fund_op_margin",
-    "fund_debt_ratio",
-    "fund_gm_yoy_chg",
-    "fund_opm_yoy_chg",
-    "fund_cfo_to_ni",
-]
-REVENUE_LOOKBACK = timedelta(days=500)
-STATEMENT_LOOKBACK = timedelta(days=900)
+TTM_LAGS = tuple(range(1, TTM_QUARTERS))
+REVENUE_INPUTS: Mapping[str, tuple[int, ...]] = {
+    "fund_rev_yoy": (12,),
+    "fund_rev_3m_yoy": (1, 2, 12, 13, 14),
+    "fund_rev_mom": (1,),
+}
+STATEMENT_INPUTS: Mapping[str, tuple[int, ...]] = {
+    "eps_ttm": TTM_LAGS,
+    "fund_eps_yoy": tuple(range(1, 2 * TTM_QUARTERS)),
+    "fund_roe_ttm": TTM_LAGS,
+    "fund_gross_margin": (),
+    "fund_op_margin": (),
+    "fund_debt_ratio": (),
+    "fund_gm_yoy_chg": (TTM_QUARTERS,),
+    "fund_opm_yoy_chg": (TTM_QUARTERS,),
+    "fund_cfo_to_ni": TTM_LAGS,
+}
+SIGNAL_COLUMNS = ["stock_id", "period", "number", "signal", "value", "first_known", "known_from"]
+REVENUE_STALE = pd.Timedelta(62, unit="D")
+STATEMENT_STALE = pd.Timedelta(200, unit="D")
+REVENUE_LOOKBACK = timedelta(days=550)
+STATEMENT_LOOKBACK = timedelta(days=1000)
 STATEMENT_COLUMNS = [
     "stock_id",
     "period",
@@ -43,7 +49,8 @@ STATEMENT_COLUMNS = [
     "operating_cf",
     "announce_date",
 ]
-PASSED = [*REVENUE_SIGNALS, *STATEMENT_SIGNALS[1:], "fund_days_since_fs"]
+NUMERIC = STATEMENT_COLUMNS[3:-1]
+PASSED = [*REVENUE_INPUTS, *list(STATEMENT_INPUTS)[1:], "fund_days_since_fs"]
 
 
 class _Lags:
@@ -57,12 +64,17 @@ class _Lags:
         keys = pd.MultiIndex.from_arrays([self.frame["stock_id"], self.frame["number"] - lag])
         return pd.Series(self.lookup[column].reindex(keys).to_numpy(), index=self.frame.index)
 
-    def known_from(self, lags: Sequence[int]) -> pd.Series:
-        """Latest announce date among the period and its lags that exist."""
+    def signal(self, name: str, value: pd.Series, lags: Sequence[int]) -> pd.DataFrame:
+        """Rows of one signal with the first and last announce date of the periods it reads."""
         dates = [pd.to_datetime(self.frame["announce_date"])]
         dates += [pd.to_datetime(self("announce_date", lag)) for lag in lags]
-        latest: pd.Series = pd.concat(dates, axis=1).max(axis=1).dt.date
-        return latest
+        stacked = pd.concat(dates, axis=1)
+        return self.frame[["stock_id", "period", "number"]].assign(
+            signal=name,
+            value=value.astype("float64"),
+            first_known=stacked.min(axis=1),
+            known_from=stacked.max(axis=1),
+        )
 
 
 def _numbered(frame: pd.DataFrame, separator: str, per_year: int) -> pd.DataFrame:
@@ -72,31 +84,39 @@ def _numbered(frame: pd.DataFrame, separator: str, per_year: int) -> pd.DataFram
     return numbered.sort_values(["stock_id", "number"], ignore_index=True)
 
 
+def _signals(
+    lag: _Lags, values: Mapping[str, pd.Series], inputs: Mapping[str, Sequence[int]]
+) -> pd.DataFrame:
+    parts = [lag.signal(name, value, inputs[name]) for name, value in values.items()]
+    return pd.concat(parts, ignore_index=True)[SIGNAL_COLUMNS]
+
+
 def _growth(now: pd.Series, base: pd.Series) -> pd.Series:
     """now / base − 1, missing when the base is not positive."""
     return now / base.where(base > 0) - 1
 
 
 def revenue_signals(revenue: pd.DataFrame) -> pd.DataFrame:
-    """Single-month yoy, three-month yoy and mom of each announced month."""
+    """Single-month yoy, three-month yoy and mom of each announced month, one row per signal."""
     frame = _numbered(revenue.assign(revenue=revenue["revenue"].astype("float64")), "-", 12)
     lag = _Lags(frame)
     now = frame["revenue"]
     three = now + lag("revenue", 1) + lag("revenue", 2)
     base = lag("revenue", 12) + lag("revenue", 13) + lag("revenue", 14)
-    return frame.assign(
-        fund_rev_yoy=_growth(now, lag("revenue", 12)),
-        fund_rev_3m_yoy=_growth(three, base),
-        fund_rev_mom=_growth(now, lag("revenue", 1)),
-        known_from=lag.known_from(REVENUE_LAGS),
-    )[["stock_id", "period", "announce_date", "known_from", *REVENUE_SIGNALS]]
+    values = {
+        "fund_rev_yoy": _growth(now, lag("revenue", 12)),
+        "fund_rev_3m_yoy": _growth(three, base),
+        "fund_rev_mom": _growth(now, lag("revenue", 1)),
+    }
+    return _signals(lag, values, REVENUE_INPUTS)
 
 
 def _preferred(statements: pd.DataFrame) -> pd.DataFrame:
-    """One statement per stock and quarter, consolidated over individual."""
+    """One statement per stock and quarter, consolidated over individual, numbered by quarter."""
     rank = statements["fin_type"].ne(FinType.CONSOLIDATED).astype(int)
     ordered = statements.assign(rank=rank).sort_values(["stock_id", "period", "rank"])
-    return ordered.drop_duplicates(["stock_id", "period"]).drop(columns="rank")
+    chosen = ordered.drop_duplicates(["stock_id", "period"]).drop(columns="rank")
+    return _numbered(chosen.astype(dict.fromkeys(NUMERIC, "float64")), "-Q", 4)
 
 
 def _ttm(lag: _Lags, frame: pd.DataFrame, column: str, offset: int = 0) -> pd.Series:
@@ -108,32 +128,22 @@ def _ttm(lag: _Lags, frame: pd.DataFrame, column: str, offset: int = 0) -> pd.Se
 
 def statement_signals(statements: pd.DataFrame) -> pd.DataFrame:
     """TTM EPS and its growth, TTM ROE and cash conversion, margins and their yoy changes."""
-    numeric = [
-        "eps",
-        "gross_margin",
-        "op_margin",
-        "net_income",
-        "roe",
-        "debt_ratio",
-        "operating_cf",
-    ]
-    chosen = _preferred(statements)
-    frame = _numbered(chosen.astype(dict.fromkeys(numeric, "float64")), "-Q", 4)
+    frame = _preferred(statements)
     lag = _Lags(frame)
     eps = _ttm(lag, frame, "eps")
     income = _ttm(lag, frame, "net_income")
-    return frame.assign(
-        eps_ttm=eps,
-        fund_eps_yoy=_growth(eps, _ttm(lag, frame, "eps", TTM_QUARTERS)),
-        fund_roe_ttm=_ttm(lag, frame, "roe"),
-        fund_gross_margin=frame["gross_margin"],
-        fund_op_margin=frame["op_margin"],
-        fund_debt_ratio=frame["debt_ratio"],
-        fund_gm_yoy_chg=frame["gross_margin"] - lag("gross_margin", TTM_QUARTERS),
-        fund_opm_yoy_chg=frame["op_margin"] - lag("op_margin", TTM_QUARTERS),
-        fund_cfo_to_ni=ratio(_ttm(lag, frame, "operating_cf"), income.where(income > 0)),
-        known_from=lag.known_from(STATEMENT_LAGS),
-    )[["stock_id", "period", "announce_date", "known_from", *STATEMENT_SIGNALS]]
+    values = {
+        "eps_ttm": eps,
+        "fund_eps_yoy": _growth(eps, _ttm(lag, frame, "eps", TTM_QUARTERS)),
+        "fund_roe_ttm": _ttm(lag, frame, "roe"),
+        "fund_gross_margin": frame["gross_margin"],
+        "fund_op_margin": frame["op_margin"],
+        "fund_debt_ratio": frame["debt_ratio"],
+        "fund_gm_yoy_chg": frame["gross_margin"] - lag("gross_margin", TTM_QUARTERS),
+        "fund_opm_yoy_chg": frame["op_margin"] - lag("op_margin", TTM_QUARTERS),
+        "fund_cfo_to_ni": ratio(_ttm(lag, frame, "operating_cf"), income.where(income > 0)),
+    }
+    return _signals(lag, values, STATEMENT_INPUTS)
 
 
 def fundamental_features(panel: pd.DataFrame) -> pd.DataFrame:
@@ -172,12 +182,24 @@ def segment_starts(panel: pd.DataFrame, calendar: TradingDays) -> pd.Series:
     return starts
 
 
+def _newest(events: pd.DataFrame) -> pd.DataFrame:
+    """Events by visibility, without those older than a period of the stock already visible."""
+    ordered = events.sort_values(["on", "number"], kind="stable")
+    seen = ordered.groupby("stock_id")["number"].cummax()
+    before = seen.groupby(ordered["stock_id"]).shift(1)
+    return ordered[~(ordered["number"] <= before)]
+
+
 def _latest(
-    panel: pd.DataFrame, events: pd.DataFrame, on: str, columns: list[str], starts: pd.Series
-) -> pd.DataFrame:
-    """Latest event per row with event[on] on or before the row's date and inside its listing."""
+    panel: pd.DataFrame,
+    events: pd.DataFrame,
+    stale: pd.Timedelta,
+    starts: pd.Series,
+    column: str = "value",
+) -> pd.Series:
+    """Column of the newest period visible on each row's date, stale ones and other listings out."""
     if events.empty or panel.empty:
-        return pd.DataFrame(np.nan, index=panel.index, columns=columns)
+        return pd.Series(np.nan, index=panel.index)
     left = pd.DataFrame(
         {
             "row": np.arange(len(panel)),
@@ -185,12 +207,12 @@ def _latest(
             "on": pd.to_datetime(panel["date"]),
         }
     ).sort_values("on")
-    right = events.assign(on=pd.to_datetime(events[on]), at=pd.to_datetime(events["announce_date"]))
-    ordered = right.sort_values(["on", "period"])[["stock_id", "on", "at", *columns]]
-    merged = pd.merge_asof(left, ordered, on="on", by="stock_id").sort_values("row")
+    right = _newest(events.assign(on=pd.to_datetime(events["known_from"])))
+    columns = ["stock_id", "on", "first_known", column]
+    merged = pd.merge_asof(left, right[columns], on="on", by="stock_id", tolerance=stale)
+    merged = merged.sort_values("row")
     merged.index = panel.index
-    stale = merged["at"] < starts
-    return merged[columns].mask(stale)
+    return merged[column].mask(merged["first_known"] < starts)
 
 
 def _days_since(panel: pd.DataFrame, announced: pd.Series, calendar: TradingDays) -> pd.Series:
@@ -202,6 +224,27 @@ def _days_since(panel: pd.DataFrame, announced: pd.Series, calendar: TradingDays
     ordinals = [stamp.toordinal() for stamp in announced[known]]
     then[known.to_numpy()] = np.searchsorted(days, ordinals, side="right") - 1
     return pd.Series(np.where(known, now - then, np.nan), index=panel.index)
+
+
+def _attached(
+    panel: pd.DataFrame,
+    signals: pd.DataFrame,
+    names: Sequence[str],
+    stale: pd.Timedelta,
+    starts: pd.Series,
+) -> dict[str, np.ndarray]:
+    return {
+        name: _latest(panel, signals[signals["signal"] == name], stale, starts).to_numpy(
+            dtype=np.float64
+        )
+        for name in names
+    }
+
+
+def _filings(statements: pd.DataFrame) -> pd.DataFrame:
+    """One event per chosen statement, visible from its own announce date."""
+    frame = _preferred(statements)
+    return _Lags(frame).signal("filed", pd.Series(np.nan, index=frame.index), ())
 
 
 def attach_fundamentals(
@@ -231,24 +274,17 @@ def attach_fundamentals(
         date__range=(start, end),
     )
     starts = segment_starts(panel, calendar)
-    signals = statement_signals(statements) if not statements.empty else statements
-    with_revenue = _latest(
-        panel,
-        revenue_signals(revenue) if not revenue.empty else revenue,
-        "known_from",
-        REVENUE_SIGNALS,
-        starts,
-    )
-    with_statements = _latest(panel, signals, "known_from", STATEMENT_SIGNALS, starts)
-    announced = _latest(
-        panel, signals.assign(seen=signals.get("announce_date")), "announce_date", ["seen"], starts
-    )
+    empty = pd.DataFrame(columns=SIGNAL_COLUMNS)
+    monthly = revenue_signals(revenue) if not revenue.empty else empty
+    quarterly = statement_signals(statements) if not statements.empty else empty
+    filings = _filings(statements) if not statements.empty else empty
+    seen = _latest(panel, filings, STATEMENT_STALE, starts, "known_from")
     keys = pd.MultiIndex.from_arrays([panel["stock_id"], panel["date"]])
     daily = valuation.set_index(["stock_id", "date"]).astype("float64").reindex(keys)
     return panel.assign(
-        **{name: with_revenue[name].to_numpy(dtype=np.float64) for name in REVENUE_SIGNALS},
-        **{name: with_statements[name].to_numpy(dtype=np.float64) for name in STATEMENT_SIGNALS},
-        fund_days_since_fs=_days_since(panel, pd.to_datetime(announced["seen"]), calendar),
+        **_attached(panel, monthly, list(REVENUE_INPUTS), REVENUE_STALE, starts),
+        **_attached(panel, quarterly, list(STATEMENT_INPUTS), STATEMENT_STALE, starts),
+        fund_days_since_fs=_days_since(panel, pd.to_datetime(seen), calendar),
         pb=daily["pb"].to_numpy(),
         dividend_yield=daily["dividend_yield"].to_numpy(),
     )

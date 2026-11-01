@@ -46,6 +46,24 @@ def statement(period: str, announce: str, eps: float = 1.0, **fields: object) ->
     )
 
 
+def revenue(stock_id: str, first: str, values: list[float]) -> None:
+    year, month = map(int, first.split("-"))
+    for k, value in enumerate(values):
+        y, m = divmod(year * 12 + month - 1 + k, 12)
+        after_y, after_m = divmod(y * 12 + m + 1, 12)
+        MonthlyRevenue.objects.create(
+            stock_id=stock_id,
+            period=f"{y}-{m + 1:02d}",
+            revenue=value,
+            announce_date=date(after_y, after_m + 1, 10),
+        )
+
+
+def attach(panel: pd.DataFrame, start: str | None = None) -> pd.DataFrame:
+    first = d(start) if start else panel["date"].min()
+    return attach_fundamentals(panel, CALENDAR, first, panel["date"].max())
+
+
 def year_of_statements(eps: float = 1.0) -> None:
     for period, announce in (
         ("2015-Q1", "2015-05-15"),
@@ -92,19 +110,70 @@ def test_revenue_and_valuation_join_by_announcement_and_day() -> None:
     assert attached[["pb", "dividend_yield"]].iloc[1].tolist() == [2.0, 0.04]
 
 
-def test_a_reused_code_does_not_inherit_the_old_companys_statements() -> None:
+def test_a_reused_code_reads_only_filings_of_the_new_listing() -> None:
     year_of_statements()
     statement("2015-Q4", "2016-01-29")
+    statement("2016-Q1", "2016-05-13", eps=3.0, gross_margin=0.5)
+    revenue("2330", "2015-01", [100.0] * 12)
+    revenue("2330", "2016-03", [300.0, 330.0])
     old = panel_of("2330", "2016-02-01", "2016-02-02", segment=1)
-    new = panel_of("2330", "2016-12-28", "2016-12-30", segment=2, age=0)
+    new = panel_of("2330", "2016-03-01", "2016-05-16", segment=2, age=0)
 
-    attached = attach_fundamentals(
-        pd.concat([old, new], ignore_index=True), CALENDAR, d("2016-02-01"), d("2016-12-30")
+    attached = attach(pd.concat([old, new], ignore_index=True)).set_index("date")
+
+    assert attached["eps_ttm"].iloc[:2].tolist() == [4.0, 4.0]
+    before, after = attached.loc[d("2016-03-01") : d("2016-05-12")], attached.loc[d("2016-05-13") :]
+    assert before[["eps_ttm", "fund_gross_margin", "fund_days_since_fs"]].isna().all().all()
+    assert after["fund_gross_margin"].tolist() == [0.5, 0.5]
+    assert after["fund_days_since_fs"].tolist() == [0.0, 1.0]
+    assert after[["eps_ttm", "fund_gm_yoy_chg", "fund_rev_yoy"]].isna().all().all()
+    assert after["fund_rev_mom"].tolist() == pytest.approx([0.1, 0.1])
+
+
+def test_a_late_earlier_quarter_delays_only_the_signals_that_read_it() -> None:
+    for period, announce in (
+        ("2015-Q1", "2015-05-15"),
+        ("2015-Q2", "2015-08-14"),
+        ("2015-Q3", "2016-04-05"),
+    ):
+        statement(period, announce, 2.0)
+    statement("2014-Q4", "2015-03-31")
+    statement("2015-Q4", "2016-03-31", eps=5.0, gross_margin=0.5)
+
+    attached = attach(panel_of("2330", "2016-03-30", "2016-04-06")).set_index("date")
+
+    assert math.isnan(attached["fund_gross_margin"].iloc[0])
+    assert attached["fund_gross_margin"].iloc[1:].tolist() == [0.5] * 5
+    assert attached["eps_ttm"].iloc[:4].isna().all()
+    assert attached["eps_ttm"].iloc[4:].tolist() == [11.0, 11.0]
+    assert attached["fund_days_since_fs"].iloc[1:].tolist() == [0.0, 1.0, 2.0, 3.0, 4.0]
+
+
+def test_an_older_month_announced_late_does_not_replace_a_newer_one() -> None:
+    revenue("2330", "2015-01", [100.0 + k for k in range(16)])
+    MonthlyRevenue.objects.filter(period="2015-01").update(announce_date=d("2016-05-16"))
+
+    attached = attach(panel_of("2330", "2016-05-13", "2016-05-16"))
+
+    assert attached["fund_rev_3m_yoy"].tolist() == pytest.approx(
+        [(113 + 114 + 115) / (101 + 102 + 103) - 1] * 2
     )
 
-    assert attached["eps_ttm"].tolist()[:2] == [4.0, 4.0]
-    assert attached["eps_ttm"].iloc[2:].isna().all()
-    assert attached["fund_days_since_fs"].iloc[2:].isna().all()
+
+def test_old_filings_go_stale_and_the_load_start_does_not_matter() -> None:
+    revenue("2330", "2014-06", [100.0] * 12 + [110.0])
+    statement("2015-Q1", "2015-05-15")
+
+    edge = attach(panel_of("2330", "2015-09-10", "2015-09-11")).set_index("date")
+    margin = attach(panel_of("2330", "2015-12-01", "2015-12-02")).set_index("date")
+    full = attach(panel_of("2330", "2016-11-28", "2016-12-01"), "2015-01-02")
+    late = attach(panel_of("2330", "2016-11-28", "2016-12-01"))
+
+    assert edge["fund_rev_yoy"].tolist()[0] == pytest.approx(0.1)
+    assert math.isnan(edge["fund_rev_yoy"].iloc[1])
+    assert margin["fund_gross_margin"].tolist()[0] == 0.4
+    assert margin[["fund_gross_margin", "fund_days_since_fs"]].iloc[1].isna().all()
+    pd.testing.assert_frame_equal(full, late)
 
 
 def test_a_weekend_announcement_counts_from_the_next_trading_day() -> None:
