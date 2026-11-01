@@ -1,0 +1,117 @@
+"""Per-fold prediction cache in Parquet, so metrics rerun without retraining (SPEC §7)."""
+
+import json
+import os
+import tempfile
+from collections.abc import Iterable
+from dataclasses import asdict
+from datetime import date
+from pathlib import Path
+
+import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
+from django.conf import settings
+
+from apps.research.holdout import HoldoutTicket, authorize_folds, require_key
+from apps.research.walkforward import Fold
+
+KEYS = ["date", "stock_id"]
+FOLD_METADATA = b"fold"
+
+
+class MissingFoldsError(LookupError):
+    """Some folds have no cached predictions."""
+
+    def __init__(self, run_key: str, folds: list[int]) -> None:
+        super().__init__(f"{run_key} has no cached predictions for folds {folds}")
+        self.folds = folds
+
+
+class FoldMismatchError(ValueError):
+    """Cached predictions were written for other fold boundaries."""
+
+
+def fold_path(run_key: str, index: int) -> Path:
+    """Cache file of one fold under RESEARCH_CACHE_DIR/run_key."""
+    return Path(settings.RESEARCH_CACHE_DIR) / require_key(run_key) / f"fold-{index:03d}.parquet"
+
+
+def _record(fold: Fold) -> dict[str, object]:
+    return {
+        name: value.isoformat() if isinstance(value, date) else value
+        for name, value in asdict(fold).items()
+    }
+
+
+def _check(fold: Fold, predictions: pd.DataFrame) -> None:
+    absent = [column for column in KEYS if column not in predictions.columns]
+    if absent:
+        raise ValueError(f"predictions need the columns {absent}")
+    days = predictions["date"]
+    if not days.map(lambda day: type(day) is date).all():
+        raise ValueError("prediction dates must be datetime.date values")
+    outside = days[(days < fold.test_start) | (days > fold.test_end)]
+    if not outside.empty:
+        raise ValueError(
+            f"fold {fold.index} has predictions outside its test period on {outside.iloc[0]}"
+        )
+    if predictions.duplicated(KEYS).any():
+        raise ValueError("predictions repeat a (date, stock_id) pair")
+
+
+def save_fold_predictions(
+    run_key: str, fold: Fold, predictions: pd.DataFrame, ticket: HoldoutTicket | None = None
+) -> Path:
+    """Write one fold's predictions atomically, without the index; holdout folds need a ticket."""
+    path = fold_path(run_key, fold.index)
+    authorize_folds([fold], run_key, ticket)
+    _check(fold, predictions)
+    table = pa.Table.from_pandas(predictions, preserve_index=False)
+    metadata = {**(table.schema.metadata or {}), FOLD_METADATA: json.dumps(_record(fold)).encode()}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle, temporary = tempfile.mkstemp(dir=path.parent, prefix=f".{path.stem}-", suffix=".tmp")
+    os.close(handle)
+    try:
+        pq.write_table(table.replace_schema_metadata(metadata), temporary)
+        os.replace(temporary, path)
+    except BaseException:
+        Path(temporary).unlink(missing_ok=True)
+        raise
+    return path
+
+
+def load_fold_predictions(run_key: str, fold: Fold) -> pd.DataFrame:
+    """One fold's cached predictions, refused when the fold boundaries changed since writing."""
+    path = fold_path(run_key, fold.index)
+    if not path.exists():
+        raise MissingFoldsError(run_key, [fold.index])
+    table = pq.read_table(path)
+    stored = json.loads((table.schema.metadata or {}).get(FOLD_METADATA, b"{}"))
+    expected = _record(fold)
+    changed = sorted(
+        name for name in expected.keys() | stored.keys() if stored.get(name) != expected.get(name)
+    )
+    if changed:
+        raise FoldMismatchError(
+            f"fold {fold.index} of {run_key} was cached with different {changed}; rerun it"
+        )
+    frame: pd.DataFrame = table.to_pandas()
+    return frame
+
+
+def missing_folds(run_key: str, folds: Iterable[Fold]) -> list[int]:
+    """Indices of the folds that have no cached predictions."""
+    return [fold.index for fold in folds if not fold_path(run_key, fold.index).exists()]
+
+
+def load_predictions(run_key: str, folds: Iterable[Fold]) -> pd.DataFrame:
+    """Cached predictions of the folds stacked with a fold column; names every missing fold."""
+    chosen = list(folds)
+    absent = missing_folds(run_key, chosen)
+    if absent:
+        raise MissingFoldsError(run_key, absent)
+    if not chosen:
+        return pd.DataFrame(columns=[*KEYS, "fold"])
+    frames = [load_fold_predictions(run_key, fold).assign(fold=fold.index) for fold in chosen]
+    return pd.concat(frames, ignore_index=True)
