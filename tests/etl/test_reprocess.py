@@ -6,6 +6,7 @@ from typing import Any
 import pytest
 import responses
 from django.core.management import call_command
+from django.core.management.base import CommandError
 
 from apps.etl.adapters.tpex import TpexAdapter
 from apps.etl.adapters.twse import TwseAdapter
@@ -297,3 +298,28 @@ def test_reprocess_command_lists_the_later_share_days_it_rebuilt(
         end="2026-10-28",
     )
     assert capsys.readouterr().out.splitlines()[-1] == "later fetched days rebuilt: 2026-10-29"
+
+
+@responses.activate
+@pytest.mark.usefixtures("october_2026_in_db")
+def test_a_failed_later_rebuild_is_reported_after_the_range(
+    load_fixture: Callable[[str], Any],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr("apps.etl.ratelimit.time.sleep", lambda seconds: None)
+    payload = load_fixture("twse/shares_outstanding/mi_qfiis_20261028.json")
+    for day in (DAY, NEXT):
+        responses.get(f"{TWSE}/fund/MI_QFIIS", json={**payload, "date": f"{day:%Y%m%d}"})
+        call_command("fetch", source="twse", dataset="shares_outstanding", date=day.isoformat())
+        responses.reset()
+    RawTwse.objects.filter(request_params__date="20261029").delete()
+    with pytest.raises(CommandError, match="fetched days after 2026-10-28 failed: MissingRawError"):
+        call_command(
+            "reprocess",
+            source="twse",
+            dataset="shares_outstanding",
+            start="2026-10-28",
+            end="2026-10-28",
+        )
+    assert "success" in capsys.readouterr().out

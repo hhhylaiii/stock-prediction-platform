@@ -16,7 +16,7 @@ from apps.etl.adapters import ADAPTERS
 from apps.etl.adapters.base import BaseAdapter
 from apps.etl.adapters.tpex_tables import TABLES as TPEX_TABLES
 from apps.etl.adapters.twse_tables import TABLES as TWSE_TABLES
-from apps.etl.errors import SourceNotReadyError
+from apps.etl.errors import SourceError, SourceNotReadyError
 from apps.etl.models import EtlRun, RawRecord
 from apps.etl.ratelimit import RateLimit, RateLimiter
 from apps.etl.runs import covered_days, tracked_run
@@ -78,6 +78,7 @@ def replay_adapter(source: str, dataset: str, calendar: TradingDays) -> BaseAdap
 class Reprocessed(NamedTuple):
     run: EtlRun
     rebuilt: list[date]
+    rebuild_error: str = ""
 
 
 def reprocess(
@@ -85,8 +86,12 @@ def reprocess(
 ) -> Reprocessed:
     """Replay the range; share counts also replay every later fetched day after it."""
     run = replay_range(source, dataset, start, end, calendar)
-    rebuilt = rebuild_after(source, dataset, end, calendar) if dataset == SHARES else []
-    return Reprocessed(run, rebuilt)
+    if dataset != SHARES:
+        return Reprocessed(run, [])
+    try:
+        return Reprocessed(run, rebuild_after(source, dataset, end, calendar))
+    except SourceError as exc:
+        return Reprocessed(run, [], f"{type(exc).__name__}: {exc}")
 
 
 def replay_range(
