@@ -1,5 +1,6 @@
 """TPEx-specific tables and checks on top of the shared exchange table parsing (SPEC §8.6)."""
 
+import re
 from collections.abc import Hashable, Mapping, Sequence
 from datetime import date
 from typing import Any
@@ -76,6 +77,7 @@ DISPOSAL_FIELDS = (SECURITY_CODE, "公布日期", "處置起訖時間")
 ALTERED_TITLE = "變更交易、分盤交易、管理股票與停止交易資訊"
 ALTERED_FLAGS = ("變更交易", "屬管理股票")
 FLAG = "Ｙ"
+LISTED_COUNT = re.compile(r"總累計次數:\s*(\d+)")
 
 
 def check_answer(payload: dict[str, Any], day: date) -> None:
@@ -180,13 +182,32 @@ def index_frame(raw_df: pd.DataFrame) -> pd.DataFrame:
 def attention_events(payload: dict[str, Any], sessions: Sequence[date]) -> list[dict[str, Any]]:
     table = find_table(payload, ATTENTION_TITLE)
     records = list_rows(table, "TPEx attention", ATTENTION_FIELDS)
-    return announced_events(records, ATTENTION_FIELDS, "TPEx attention", sessions)
+    events = announced_events(records, ATTENTION_FIELDS, "TPEx attention", sessions)
+    check_listed_count(table, records, "TPEx attention")
+    return events
 
 
 def disposal_events(payload: dict[str, Any], window: tuple[date, date]) -> list[dict[str, Any]]:
     table = find_table(payload, DISPOSAL_TITLE)
     records = list_rows(table, "TPEx disposal", DISPOSAL_FIELDS)
-    return period_events(records, DISPOSAL_FIELDS, "TPEx disposal", window)
+    events = period_events(records, DISPOSAL_FIELDS, "TPEx disposal", window)
+    check_listed_count(table, records, "TPEx disposal")
+    return events
+
+
+def check_listed_count(
+    table: Mapping[str, Any], records: Sequence[Mapping[str, Any]], label: str
+) -> None:
+    """TPEx lists give their row count only in the subtitle (總累計次數), placeholders aside."""
+    listed = sum(1 for record in records if str(record[SECURITY_CODE]).strip())
+    subtitle = str(table.get("subtitle") or "")
+    match = LISTED_COUNT.search(subtitle)
+    if match is None:
+        if listed:
+            raise SchemaChangedError(f"{label} subtitle no longer gives 總累計次數: {subtitle!r}")
+        return
+    if int(match.group(1)) != listed:
+        raise SchemaChangedError(f"{label} sent {listed} of {match.group(1)} rows")
 
 
 def full_delivery_codes(payload: dict[str, Any], day: date) -> list[str]:
@@ -196,6 +217,8 @@ def full_delivery_codes(payload: dict[str, Any], day: date) -> list[str]:
     codes = []
     for record in list_rows(table, "TPEx chtm", (SECURITY_CODE, *ALTERED_FLAGS)):
         code = stock_code(record[SECURITY_CODE])
+        if is_foreign_currency_etf(code):
+            continue
         flags = {str(record[name]).strip() for name in ALTERED_FLAGS}
         if not flags <= {"", FLAG}:
             raise SchemaChangedError(f"TPEx chtm {code} has an unexpected flag {sorted(flags)}")

@@ -44,10 +44,18 @@ def _events(adapter: TpexAdapter, dataset: str, start: date, end: date) -> set[t
     return {tuple(row) for row in frame[["stock_id", "start_date", "type", "end_date"]].values}
 
 
+def _recount(payload: dict[str, Any], code_column: int) -> dict[str, Any]:
+    table = payload["tables"][0]
+    listed = [row for row in table["data"] if str(row[code_column]).strip()]
+    codes = {row[code_column] for row in listed}
+    table["subtitle"] = f"證券個數:{len(codes)} 總累計次數: {len(listed)}"
+    return payload
+
+
 def _within(payload: dict[str, Any], column: int, keep: set[str]) -> dict[str, Any]:
     table = payload["tables"][0]
     table["data"] = [row for row in table["data"] if row[column] in keep]
-    return payload
+    return _recount(payload, 1)
 
 
 @responses.activate
@@ -276,7 +284,7 @@ def test_empty_list_writes_nothing(
     fixture = "attention_20261028_30.json" if dataset == "attention" else "disposal_202610.json"
     payload = load_fixture(f"tpex/disposition/{fixture}")
     payload["tables"][0]["data"] = []
-    responses.post(url, json=payload)
+    responses.post(url, json=_recount(payload, 1))
     assert (
         adapter.upsert(dataset, adapter.normalize(dataset, adapter.fetch(dataset, DAY, DAY))) == 0
     )
@@ -307,6 +315,46 @@ def test_fetch_command_backfills_a_month_of_disposals_idempotently(
     run = EtlRun.objects.filter(dataset="disposition").latest("run_id")
     assert (run.status, run.rows, run.checkpoint) == ("success", 10, {"last_date": "2026-10-30"})
     assert copy.deepcopy(payload) == RawTpex.objects.get().payload
+
+
+@responses.activate
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("url", "dataset", "fixture", "subtitle", "message"),
+    [
+        (DISPOSAL, "disposition", "disposal_202610.json", "證券個數:5 總累計次數: 11", "10 of 11"),
+        (ATTENTION, "attention", "attention_20261028_30.json", "證券個數:4", "總累計次數"),
+    ],
+    ids=["truncated", "count-missing"],
+)
+def test_list_count_in_the_subtitle_must_match_the_rows(
+    adapter: TpexAdapter,
+    load_fixture: Callable[[str], Any],
+    url: str,
+    dataset: str,
+    fixture: str,
+    subtitle: str,
+    message: str,
+) -> None:
+    payload = load_fixture(f"tpex/disposition/{fixture}")
+    payload["tables"][0]["subtitle"] = subtitle
+    responses.post(url, json=payload)
+    with pytest.raises(SchemaChangedError, match=message):
+        adapter.fetch(dataset, *OCTOBER)
+    assert RawTpex.objects.count() == 1
+
+
+@responses.activate
+@pytest.mark.django_db
+def test_foreign_currency_lines_are_left_out(
+    adapter: TpexAdapter, load_fixture: Callable[[str], Any]
+) -> None:
+    payload = load_fixture("tpex/disposition/chtm_20261028.json")
+    payload["tables"][0]["data"][0][0] = "00687C"
+    responses.post(CHTM, json=payload)
+    events = _events(adapter, "full_delivery", DAY, DAY)
+    assert len(events) == 18
+    assert "00687C" not in {event[0] for event in events}
 
 
 @responses.activate
