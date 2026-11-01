@@ -78,7 +78,6 @@ def _regression(
 def industry_risk_features(panel: pd.DataFrame) -> pd.DataFrame:
     """Beta and residual volatility against the market index, and industry returns.
 
-    Unknown industries take the day's universe average, so a blank never marks a later delisting.
     Industry averages need the day's whole cross-section, so split loads by date, not by stock.
     """
     require_sorted(panel)

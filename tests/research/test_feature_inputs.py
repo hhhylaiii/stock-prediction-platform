@@ -51,13 +51,13 @@ def test_shares_apply_from_their_effective_date() -> None:
     )
 
     shares = load_shares(d("2016-03-31"))
-    attached = attach_shares(panel, shares, CALENDAR)
+    attached = attach_shares(panel, shares)
 
     assert set(shares["effective_date"]) == {d("2016-01-04"), d("2016-03-01")}
     assert attached["shares"].tolist()[:2] == [1_000.0, 2_000.0]
     assert attached["shares"].isna().tolist()[2:] == [True, True]
     assert attached[["stock_id", "date"]].equals(panel[["stock_id", "date"]])
-    assert attach_shares(panel, shares.iloc[0:0], CALENDAR)["shares"].isna().all()
+    assert attach_shares(panel, shares.iloc[0:0])["shares"].isna().all()
 
 
 def test_index_returns_need_closes_on_consecutive_trading_days() -> None:
@@ -137,21 +137,17 @@ def test_inputs_at_the_edges_of_the_calendar_and_of_a_stock_filter() -> None:
     assert panel["shares"].tolist() == [5.0]
 
 
-def test_a_reused_code_does_not_inherit_the_old_companys_shares() -> None:
+def test_a_relisted_code_keeps_its_count_until_a_new_one_is_recorded() -> None:
     SharesOutstanding.objects.bulk_create(
         [
-            SharesOutstanding(stock_id="4931", effective_date=d("2014-03-03"), shares=50),
-            SharesOutstanding(stock_id="4931", effective_date=d("2016-05-04"), shares=70),
+            SharesOutstanding(stock_id="2065", effective_date=d("2014-03-03"), shares=50),
+            SharesOutstanding(stock_id="2065", effective_date=d("2016-05-04"), shares=70),
         ]
     )
-    old = frame(["4931"], ["2014-06-02"])
-    new = frame(["4931"] * 3, ["2016-05-02", "2016-05-03", "2016-05-04"]).assign(
-        segment=2, age=[0, 1, 2]
-    )
+    old = frame(["2065"], ["2014-06-02"])
+    new = frame(["2065"] * 2, ["2016-05-03", "2016-05-04"]).assign(segment=2, age=[0, 1])
     panel = pd.concat([old, new], ignore_index=True)
 
-    attached = attach_shares(panel, load_shares(d("2016-12-31")), CALENDAR)
+    attached = attach_shares(panel, load_shares(d("2016-12-31")))
 
-    assert attached["shares"].tolist()[0] == 50.0
-    assert attached["shares"].isna().tolist()[1:3] == [True, True]
-    assert attached["shares"].tolist()[3] == 70.0
+    assert attached["shares"].tolist() == [50.0, 50.0, 70.0]

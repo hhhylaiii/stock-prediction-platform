@@ -1,9 +1,11 @@
 import math
+from datetime import date
 
 import numpy as np
 import pandas as pd
 import pytest
 
+from apps.research.features.inputs import FEATURE_WARMUP
 from apps.research.features.registry import Group, feature_names
 from apps.research.features.size_risk import (
     canonical_industry,
@@ -199,3 +201,18 @@ def test_unsorted_panel_is_refused() -> None:
         size_liquidity_features(panel)
     with pytest.raises(ValueError, match="sorted"):
         industry_risk_features(panel)
+
+
+def test_industry_features_ignore_a_load_start_inside_a_long_halt() -> None:
+    start = 300
+    closes = [100.0 * 1.001**k for k in range(start + FEATURE_WARMUP + 100)]
+    closes[start - 10 : start + 590] = [NAN] * 600
+    full_panel = listing("2330", closes, start=date(2012, 1, 2), market_ret=NAN)
+    late_panel = full_panel.iloc[start:].reset_index(drop=True)
+
+    full, late = industry_risk_features(full_panel), industry_risk_features(late_panel)
+
+    pd.testing.assert_frame_equal(
+        full.iloc[start + FEATURE_WARMUP :].reset_index(drop=True),
+        late.iloc[FEATURE_WARMUP:].reset_index(drop=True),
+    )

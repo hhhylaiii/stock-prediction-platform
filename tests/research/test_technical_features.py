@@ -175,6 +175,16 @@ def test_52_week_gaps_use_the_listed_range_until_a_year_passes() -> None:
     assert at(features, "2330", 260, "tech_low_52w_gap") == pytest.approx(360 / 110 - 1)
 
 
+def test_52_week_high_drops_out_after_250_rows() -> None:
+    closes = [100.0 + k for k in range(20)] + [119.0 - 0.1 * k for k in range(300)]
+    features = technical_features(listing("2330", closes))
+
+    assert at(features, "2330", 268, "tech_high_52w_gap") == pytest.approx(closes[268] / 119.0 - 1)
+    assert at(features, "2330", 270, "tech_high_52w_gap") == pytest.approx(
+        closes[270] / closes[21] - 1
+    )
+
+
 def test_limit_counts_and_attention() -> None:
     limit_up = [k in (3, 10, 25) for k in range(30)]
     limit_down = [k == 12 for k in range(30)]
