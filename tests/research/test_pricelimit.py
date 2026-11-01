@@ -1,3 +1,4 @@
+import json
 import math
 from collections.abc import Sequence
 from datetime import date, timedelta
@@ -12,6 +13,7 @@ from apps.research.pricelimit import (
     limit_up_price,
     tick_size,
 )
+from tests.conftest import FIXTURES
 
 BEFORE, AFTER = date(2015, 5, 29), date(2015, 6, 1)
 
@@ -129,3 +131,30 @@ def test_input_is_not_modified() -> None:
     before = frame.copy()
     apply_price_limits(frame)
     pd.testing.assert_frame_equal(frame, before)
+
+
+def recorded_moves() -> pd.DataFrame:
+    """Real day-before and move-day bars around 2015-06-01 from tests/fixtures/research."""
+    data = json.loads((FIXTURES / "research" / "limit_up_2015.json").read_text(encoding="utf-8"))
+    frame = pd.DataFrame(data["rows"])
+    frame["date"] = [d(text) for text in frame["date"]]
+    return frame.assign(segment=1, age=1_000, adj_factor=1.0, adj_close=frame["close"])
+
+
+@pytest.mark.spec8
+def test_limit_up_by_era_and_tick() -> None:
+    result = apply_price_limits(recorded_moves()).set_index(["stock_id", "date"])
+    moves = {
+        ("1338", d("2015-03-23")): (101.5, True),
+        ("3085", d("2015-03-09")): (10.3, True),
+        ("1232", d("2015-03-20")): (80.5, False),
+        ("2417", d("2015-07-07")): (11.45, True),
+        ("4107", d("2015-07-01")): (105.0, True),
+    }
+    for key, (limit, flagged) in moves.items():
+        assert result.loc[key, "limit_up"] == pytest.approx(limit)
+        assert result.loc[key, "limit_up_close"] == flagged
+    assert result.loc[("3085", d("2015-03-09")), "limit_up_open"]
+    era = bars(close=[10.45, 11.15, 10.45, 11.15], date=[BEFORE, BEFORE, AFTER, AFTER])
+    era = era.assign(segment=[1, 1, 2, 2], age=1_000)
+    assert apply_price_limits(era)["limit_up_close"].tolist() == [False, True, False, False]

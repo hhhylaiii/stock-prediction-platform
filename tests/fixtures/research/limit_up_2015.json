@@ -1,0 +1,15 @@
+{
+  "source": "daily_price rows (FinMind TaiwanStockPrice, unadjusted) read from the dev database on 2026-11-01; each pair is the day before and the day of a move toward the limit",
+  "rows": [
+    {"stock_id": "1338", "market": "TWSE", "date": "2015-03-20", "open": 93.1, "close": 95.3},
+    {"stock_id": "1338", "market": "TWSE", "date": "2015-03-23", "open": 96.8, "close": 101.5},
+    {"stock_id": "3085", "market": "TPEx", "date": "2015-03-06", "open": 9.67, "close": 9.67},
+    {"stock_id": "3085", "market": "TPEx", "date": "2015-03-09", "open": 10.3, "close": 10.3},
+    {"stock_id": "1232", "market": "TWSE", "date": "2015-03-19", "open": 75.0, "close": 75.3},
+    {"stock_id": "1232", "market": "TWSE", "date": "2015-03-20", "open": 79.2, "close": 80.2},
+    {"stock_id": "2417", "market": "TWSE", "date": "2015-07-06", "open": 10.6, "close": 10.45},
+    {"stock_id": "2417", "market": "TWSE", "date": "2015-07-07", "open": 10.8, "close": 11.45},
+    {"stock_id": "4107", "market": "TPEx", "date": "2015-06-30", "open": 95.0, "close": 95.9},
+    {"stock_id": "4107", "market": "TPEx", "date": "2015-07-01", "open": 97.0, "close": 105.0}
+  ]
+}
