@@ -41,12 +41,12 @@ def panel(days: tuple[date, ...], stocks: int, seed: int, signal: float = 1.0) -
             "x": x,
             "z": z,
             "x_missing": (rng.random(size) < 0.05).astype(np.int8),
-            "raw": signal * x + noise,
+            "fwd_ret_open": signal * x + noise,
         }
     )
     return frame.assign(
-        fwd_rank_pct=frame.groupby("date")["raw"].rank(pct=True),
-        fwd_up_5pct=(frame["raw"] > 1.0).astype(np.float64),
+        fwd_rank_pct=frame.groupby("date")["fwd_ret_open"].rank(pct=True),
+        fwd_up_5pct=(frame["fwd_ret_open"] > 1.0).astype(np.float64),
     )
 
 
@@ -213,21 +213,23 @@ def test_historical_quantiles_come_from_the_training_labels() -> None:
     )
 
 
-def test_shuffling_permutes_labels_within_each_date_only() -> None:
+def test_shuffling_moves_label_columns_together_within_each_date_only() -> None:
     days = CALENDAR.between(date(2011, 1, 3), date(2011, 1, 14))
     frame = panel(days, 30, seed=5)
+    labels = ["fwd_rank_pct", "fwd_ret_open"]
 
-    shuffled = shuffle_within_dates(frame, "fwd_rank_pct", seed=11)
+    shuffled = shuffle_within_dates(frame, labels, seed=11)
 
     assert shuffled[["date", "stock_id", "x"]].equals(frame[["date", "stock_id", "x"]])
     for day in days:
-        before = frame.loc[frame["date"] == day, "fwd_rank_pct"]
-        after = shuffled.loc[shuffled["date"] == day, "fwd_rank_pct"]
-        assert sorted(before) == sorted(after)
+        before = frame.loc[frame["date"] == day, labels]
+        after = shuffled.loc[shuffled["date"] == day, labels]
+        assert sorted(map(tuple, before.to_numpy())) == sorted(map(tuple, after.to_numpy()))
     assert not shuffled["fwd_rank_pct"].equals(frame["fwd_rank_pct"])
-    again = shuffle_within_dates(frame, "fwd_rank_pct", seed=11)
+    again = shuffle_within_dates(frame, ["fwd_rank_pct"], seed=11)
     assert again["fwd_rank_pct"].equals(shuffled["fwd_rank_pct"])
-    assert frame["fwd_rank_pct"].equals(panel(days, 30, seed=5)["fwd_rank_pct"])
+    assert again["fwd_ret_open"].equals(frame["fwd_ret_open"])
+    assert frame[labels].equals(panel(days, 30, seed=5)[labels])
 
 
 @pytest.mark.spec8
@@ -249,11 +251,24 @@ def test_label_shuffle_drops_oos_rank_ic_to_zero() -> None:
     fit = fit_ridge(train, FEATURES, "fwd_rank_pct", horizon=20)
     unshuffled = daily_rank_ic(test.assign(score=fit.predict(test)), "score", "fwd_rank_pct")
 
-    clean = shuffled_oos_ic(frame, fold, FEATURES, "fwd_rank_pct", horizon=20, seed=7)
-    leaky = shuffled_oos_ic(
-        frame, fold, [*FEATURES, "fwd_rank_pct"], "fwd_rank_pct", horizon=20, seed=7
+    shuffled = shuffle_within_dates(frame, ["fwd_rank_pct"], seed=7)
+    refit = fit_ridge(
+        shuffled[shuffled["date"].between(fold.train_start, fold.train_end)],
+        FEATURES,
+        "fwd_rank_pct",
+        horizon=20,
     )
+    scored = test.assign(
+        score=refit.predict(test), fwd_rank_pct=shuffled.loc[test.index, "fwd_rank_pct"]
+    )
+
+    clean = shuffled_oos_ic(frame, fold, FEATURES, "fwd_rank_pct", horizon=20, seed=7)
+    leaks = [
+        shuffled_oos_ic(frame, fold, [*FEATURES, leak], "fwd_rank_pct", horizon=20, seed=7)
+        for leak in ("fwd_rank_pct", "fwd_ret_open", "fwd_up_5pct")
+    ]
 
     assert unshuffled.mean() > 0.3
     assert abs(clean) < 0.05
-    assert leaky > 0.5
+    assert clean == pytest.approx(daily_rank_ic(scored, "score", "fwd_rank_pct").mean())
+    assert min(leaks) > 0.3

@@ -11,6 +11,7 @@ import numpy.typing as npt
 import pandas as pd
 from sklearn.linear_model import LogisticRegression, Ridge
 
+from apps.research.labels import LABEL_COLUMNS
 from apps.research.metrics.forecast import daily_brier
 from apps.research.metrics.ic import daily_rank_ic
 from apps.research.walkforward import Fold
@@ -23,6 +24,7 @@ INTERVAL_HORIZON = 20
 TRAILING_DAYS = 60
 QUANTILES = {"q10": 0.1, "q50": 0.5, "q90": 0.9}
 LOGISTIC_ITERATIONS = 1_000
+LABEL_FIELDS = [name for name in LABEL_COLUMNS if name not in ("stock_id", "date", "horizon")]
 Values = npt.NDArray[np.float64]
 Scorer = Callable[[pd.DataFrame, Values, str], float]
 
@@ -68,7 +70,10 @@ class LinearFit:
 def cv_splits(
     days: Sequence[date], gap: int, n_splits: int = CV_SPLITS
 ) -> list[tuple[tuple[date, ...], tuple[date, ...]]]:
-    """Expanding time-ordered splits; each fit part ends gap days before its validation block."""
+    """Expanding time-ordered splits; each fit part ends gap dates before its validation block.
+
+    Dates are the window's own; with rows on every trading day the gap is in trading days.
+    """
     blocks = np.array_split(np.array(list(days), dtype=object), n_splits + 1)
     splits = []
     for k in range(1, n_splits + 1):
@@ -172,13 +177,13 @@ def historical_quantiles(train: pd.DataFrame, label: str) -> dict[str, float]:
     return {name: float(values.quantile(level)) for name, level in QUANTILES.items()}
 
 
-def shuffle_within_dates(frame: pd.DataFrame, column: str, seed: int) -> pd.DataFrame:
-    """New frame with column permuted across stocks inside each date (SPEC §8 標籤打亂測試)."""
+def shuffle_within_dates(frame: pd.DataFrame, columns: Sequence[str], seed: int) -> pd.DataFrame:
+    """New frame whose columns move together to other stocks of the same date (SPEC §8 打亂測試)."""
     rng = np.random.default_rng(seed)
-    values = frame[column].to_numpy(copy=True)
+    order = np.arange(len(frame))
     for positions in frame.groupby("date").indices.values():
-        values[positions] = values[rng.permutation(positions)]
-    return frame.assign(**{column: values})
+        order[positions] = rng.permutation(positions)
+    return frame.assign(**{column: frame[column].to_numpy()[order] for column in columns})
 
 
 def shuffled_oos_ic(
@@ -189,11 +194,12 @@ def shuffled_oos_ic(
     horizon: int,
     seed: int,
 ) -> float:
-    """Mean daily OOS rank IC of a Ridge refit on labels shuffled within dates; near 0 if clean.
+    """Mean daily OOS rank IC of a Ridge refit after shuffling every label column; near 0 if clean.
 
-    A linear fit flags labels leaking into features; it cannot memorize rows across a bad split.
+    A linear fit flags label columns among the features; it cannot memorize rows across a bad split.
     """
-    shuffled = shuffle_within_dates(frame, label, seed)
+    labels = [label, *(name for name in LABEL_FIELDS if name in frame and name != label)]
+    shuffled = shuffle_within_dates(frame, labels, seed)
     train = shuffled[shuffled["date"].between(fold.train_start, fold.train_end)]
     test = shuffled[shuffled["date"].between(fold.test_start, fold.eval_end)]
     fit = fit_ridge(train, features, label, horizon)
