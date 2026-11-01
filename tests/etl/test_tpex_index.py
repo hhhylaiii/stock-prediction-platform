@@ -6,12 +6,14 @@ from urllib.parse import parse_qs
 
 import pytest
 import responses
+from django.core.management import call_command
 
 from apps.etl.adapters.tpex import TpexAdapter
 from apps.etl.errors import SchemaChangedError, SourceNotReadyError
-from apps.etl.models import RawTpex
+from apps.etl.models import EtlRun, RawTpex
 from apps.etl.ratelimit import RateLimiter
 from apps.market.calendar import TradingDays
+from apps.market.models import IndexDaily
 
 BASE = "https://www.tpex.org.tw/www/zh-tw"
 DAY = date(2026, 10, 28)
@@ -114,3 +116,21 @@ def test_previous_month_answer_means_not_published_yet(
     with pytest.raises(SourceNotReadyError, match="still serves 20260901"):
         adapter.fetch("index_daily", DAY, DAY)
     assert RawTpex.objects.count() == 1
+
+
+@responses.activate
+@pytest.mark.usefixtures("october_2026_in_db")
+def test_fetch_command_backfills_a_month_in_one_request(
+    load_fixture: Callable[[str], Any], october_2026: TradingDays, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("apps.etl.ratelimit.time.sleep", lambda seconds: None)
+    responses.post(INDEX, json=load_fixture("tpex/index_daily/inx_202610.json"))
+    call_command(
+        "fetch", source="tpex", dataset="index_daily", start="2026-10-01", end="2026-10-30"
+    )
+    assert len(responses.calls) == 1
+    october = october_2026.between(date(2026, 10, 1), date(2026, 10, 30))
+    stored = IndexDaily.objects.filter(index_id="TPEX").order_by("date")
+    assert list(stored.values_list("date", flat=True)) == list(october)
+    run = EtlRun.objects.get()
+    assert (run.rows, run.checkpoint) == (len(october), {"last_date": "2026-10-30"})

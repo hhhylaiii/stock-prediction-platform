@@ -127,3 +127,45 @@ def test_fetch_command_writes_taiex_once_when_rerun(
     taiex = IndexDaily.objects.get()
     assert (taiex.index_id, taiex.date, taiex.close) == ("TAIEX", DAY, Decimal("47035.5800"))
     assert list(EtlRun.objects.values_list("status", "rows")) == [("success", 1)] * 2
+
+
+@responses.activate
+@pytest.mark.usefixtures("october_2026_in_db")
+def test_fetch_command_backfills_a_month_in_one_request(
+    payload: dict[str, Any], october_2026: TradingDays, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("apps.etl.ratelimit.time.sleep", lambda seconds: None)
+    responses.get(URL, json=payload)
+    call_command(
+        "fetch", source="twse", dataset="index_daily", start="2026-10-01", end="2026-10-30"
+    )
+    assert len(responses.calls) == 1
+    october = october_2026.between(date(2026, 10, 1), date(2026, 10, 30))
+    assert list(IndexDaily.objects.order_by("date").values_list("date", flat=True)) == list(october)
+    run = EtlRun.objects.get()
+    assert (run.rows, run.checkpoint) == (len(october), {"last_date": "2026-10-30"})
+
+
+@responses.activate
+@pytest.mark.django_db
+def test_backfill_across_months_writes_each_month_from_one_request(
+    payload: dict[str, Any], october_2026: TradingDays, twse_limiter: RateLimiter
+) -> None:
+    october = october_2026.between(date(2026, 10, 1), date(2026, 10, 30))
+    calendar = TradingDays(
+        (date(2026, 9, 29), date(2026, 9, 30), *october), date(2026, 9, 29), date(2026, 10, 31)
+    )
+    september = {
+        **payload,
+        "data": [["115/09/29", *payload["data"][0][1:]], ["115/09/30", *payload["data"][1][1:]]],
+    }
+    responses.get(URL, json=september)
+    responses.get(URL, json=payload)
+    run = TwseAdapter(calendar, twse_limiter).run(
+        "index_daily", date(2026, 9, 29), date(2026, 10, 30)
+    )
+    sent = [call.request.url or "" for call in responses.calls]
+    assert ["date=20260901" in url for url in sent] == [True, False]
+    assert ["date=20261001" in url for url in sent] == [False, True]
+    assert (run.rows, run.checkpoint) == (len(october) + 2, {"last_date": "2026-10-30"})
+    assert IndexDaily.objects.count() == len(october) + 2

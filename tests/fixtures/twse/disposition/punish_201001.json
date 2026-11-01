@@ -1,0 +1,104 @@
+{
+  "stat": "OK",
+  "title": "公布處置有價證券資訊 (99/01/01 至 99/01/31)",
+  "fields": [
+    "編號",
+    "公布日期",
+    "證券代號",
+    "證券名稱",
+    "累計",
+    "處置條件",
+    "處置起迄時間",
+    "處置措施",
+    "處置內容",
+    "備註"
+  ],
+  "data": [
+    [
+      1,
+      "99/01/26",
+      "1439",
+      "中  和",
+      2,
+      "連續五次",
+      "99/01/27～99/02/02",
+      "收足全部款券",
+      " ",
+      "\n提供處置有價證券連結資訊<br>\n1.<a href='notice.html?querytype=2&startDate=20091226&endDate=20100126&stockNo=1439' target='_blank'>處置原因</a>：提供公布日期近一個月之「公布注意交易資訊」數據標準<br>\n2.<a href='https://mopsov.twse.com.tw/mops/web/t146sb05?step=1&firstin=Y&co_id=1439' target='_blank'>公開資訊觀測站</a>：提供財務業務與重大訊息之精華版資訊\n"
+    ],
+    [
+      1,
+      "99/01/19",
+      "1439",
+      "中  和",
+      2,
+      "連續五次",
+      "99/01/20～99/01/26",
+      "收足五成款券",
+      " ",
+      "\n提供處置有價證券連結資訊<br>\n1.<a href='notice.html?querytype=2&startDate=20091219&endDate=20100119&stockNo=1439' target='_blank'>處置原因</a>：提供公布日期近一個月之「公布注意交易資訊」數據標準<br>\n2.<a href='https://mopsov.twse.com.tw/mops/web/t146sb05?step=1&firstin=Y&co_id=1439' target='_blank'>公開資訊觀測站</a>：提供財務業務與重大訊息之精華版資訊\n"
+    ],
+    [
+      2,
+      "98/12/28",
+      "1702",
+      "南  僑",
+      1,
+      "最近十個營業日已有六次",
+      "98/12/29～99/01/05",
+      "收足五成款券",
+      " ",
+      "\n提供處置有價證券連結資訊<br>\n1.<a href='notice.html?querytype=2&startDate=20091128&endDate=20091228&stockNo=1702' target='_blank'>處置原因</a>：提供公布日期近一個月之「公布注意交易資訊」數據標準<br>\n2.<a href='https://mopsov.twse.com.tw/mops/web/t146sb05?step=1&firstin=Y&co_id=1702' target='_blank'>公開資訊觀測站</a>：提供財務業務與重大訊息之精華版資訊\n"
+    ],
+    [
+      3,
+      "99/01/19",
+      "2348",
+      "力廣",
+      1,
+      "連續五次",
+      "99/01/20～99/01/26",
+      "人工管制撮合",
+      " ",
+      "\n提供處置有價證券連結資訊<br>\n1.<a href='notice.html?querytype=2&startDate=20091219&endDate=20100119&stockNo=2348' target='_blank'>處置原因</a>：提供公布日期近一個月之「公布注意交易資訊」數據標準<br>\n2.<a href='https://mopsov.twse.com.tw/mops/web/t146sb05?step=1&firstin=Y&co_id=2348' target='_blank'>公開資訊觀測站</a>：提供財務業務與重大訊息之精華版資訊\n"
+    ],
+    [
+      4,
+      "99/01/14",
+      "3051",
+      "力特",
+      1,
+      "最近十個營業日已有六次",
+      "99/01/15～99/01/21",
+      "人工管制撮合",
+      " ",
+      "\n提供處置有價證券連結資訊<br>\n1.<a href='notice.html?querytype=2&startDate=20091214&endDate=20100114&stockNo=3051' target='_blank'>處置原因</a>：提供公布日期近一個月之「公布注意交易資訊」數據標準<br>\n2.<a href='https://mopsov.twse.com.tw/mops/web/t146sb05?step=1&firstin=Y&co_id=3051' target='_blank'>公開資訊觀測站</a>：提供財務業務與重大訊息之精華版資訊\n"
+    ],
+    [
+      5,
+      "99/01/18",
+      "6197",
+      "佳必琪",
+      1,
+      "連續五次",
+      "99/01/19～99/01/25",
+      "收足五成款券",
+      " ",
+      "\n提供處置有價證券連結資訊<br>\n1.<a href='notice.html?querytype=2&startDate=20091218&endDate=20100118&stockNo=6197' target='_blank'>處置原因</a>：提供公布日期近一個月之「公布注意交易資訊」數據標準<br>\n2.<a href='https://mopsov.twse.com.tw/mops/web/t146sb05?step=1&firstin=Y&co_id=6197' target='_blank'>公開資訊觀測站</a>：提供財務業務與重大訊息之精華版資訊\n"
+    ],
+    [
+      6,
+      "99/01/19",
+      "910579",
+      "歐聖",
+      1,
+      "連續五次",
+      "99/01/20～99/01/26",
+      "收足五成款券",
+      " ",
+      "\n提供處置有價證券連結資訊<br>\n1.<a href='notice.html?querytype=2&startDate=20091219&endDate=20100119&stockNo=910579' target='_blank'>處置原因</a>：提供公布日期近一個月之「公布注意交易資訊」數據標準<br>\n2.<a href='https://mopsov.twse.com.tw/mops/web/t132sb05_1?step=1&TYPEK=sii' target='_blank'>公開資訊觀測站</a>：提供財務業務與重大訊息之精華版資訊\n"
+    ]
+  ],
+  "count": 6,
+  "total": 7
+}

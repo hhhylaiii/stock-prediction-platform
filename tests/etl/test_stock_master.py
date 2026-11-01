@@ -34,13 +34,16 @@ def master(load_fixture: Callable[[str], Any]) -> pd.DataFrame:
         ("090/01/20", date(2001, 1, 20)),
         ("81-10-27", date(1992, 10, 27)),
         (" 99/01/04", date(2010, 1, 4)),
+        ("99.01.04", date(2010, 1, 4)),
     ],
 )
 def test_roc_dates(text: str, expected: date) -> None:
     assert parse_roc_date(text) == expected
 
 
-@pytest.mark.parametrize("text", ["2026/09/01", "115/13/01", "115/02/30", "", "115-09"])
+@pytest.mark.parametrize(
+    "text", ["2026/09/01", "115/13/01", "115/02/30", "", "115-09", "115/10.30", "99.01-04"]
+)
 def test_bad_roc_dates_are_schema_changes(text: str) -> None:
     with pytest.raises(SchemaChangedError):
         parse_roc_date(text)
