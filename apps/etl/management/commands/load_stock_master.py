@@ -66,7 +66,9 @@ class Command(BaseCommand):
     @staticmethod
     def _last_listed_count() -> int | None:
         last = (
-            EtlRun.objects.filter(source="stock_master", status=EtlRun.Status.SUCCESS)
+            EtlRun.objects.filter(
+                source="stock_master", dataset="stock_master", status=EtlRun.Status.SUCCESS
+            )
             .order_by("-run_id")
             .first()
         )
