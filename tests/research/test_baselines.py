@@ -4,20 +4,23 @@ from datetime import date
 import numpy as np
 import pandas as pd
 import pytest
-from sklearn.linear_model import Ridge
+from sklearn.linear_model import LogisticRegression, Ridge
 
 from apps.research.baselines import (
     PENALTY_GRID,
+    _fit,
     cv_splits,
     fit_logistic,
     fit_ridge,
     historical_quantiles,
     shuffle_within_dates,
+    shuffled_oos_ic,
     trailing_mean_return,
     vol_baseline,
     vol_interval,
     zero_return,
 )
+from apps.research.metrics.forecast import daily_brier
 from apps.research.metrics.ic import daily_rank_ic
 from apps.research.walkforward import WalkForwardConfig, generate_folds
 from tests.research.conftest import weekday_calendar
@@ -103,8 +106,18 @@ def test_logistic_picks_c_by_validation_brier_and_returns_probabilities() -> Non
 
     fit = fit_logistic(train, FEATURES, "fwd_up_5pct", horizon=20)
 
-    assert set(fit.scores) == set(PENALTY_GRID)
-    assert fit.penalty == max(fit.scores, key=lambda c: fit.scores[c])
+    expected = {}
+    for c in PENALTY_GRID:
+        scores = []
+        for fit_days, valid_days in cv_splits(sorted(set(train["date"])), gap=20):
+            part = train[train["date"].isin(fit_days)]
+            valid = train[train["date"].isin(valid_days)]
+            model = LogisticRegression(C=c, max_iter=1_000).fit(part[FEATURES], part["fwd_up_5pct"])
+            scored = valid.assign(prob=model.predict_proba(valid[FEATURES])[:, 1])
+            scores.append(-daily_brier(scored, "fwd_up_5pct", "prob").mean())
+        expected[c] = float(np.mean(scores))
+    assert fit.scores == pytest.approx(expected)
+    assert fit.penalty == max(expected, key=lambda c: expected[c])
     probs = fit.predict(train)
     assert ((probs > 0) & (probs < 1)).all()
     assert np.corrcoef(probs, train["x"])[0, 1] > 0.5
@@ -123,6 +136,51 @@ def test_linear_fits_refuse_missing_values() -> None:
         fit_logistic(train, FEATURES, "fwd_up_5pct", horizon=20)
 
 
+class Constant:
+    """Model whose prediction is its penalty, so a scorer can rank penalties directly."""
+
+    def __init__(self, penalty: float) -> None:
+        self.penalty = penalty
+
+    def fit(self, values: np.ndarray, target: np.ndarray) -> "Constant":
+        return self
+
+    def predict(self, values: np.ndarray) -> np.ndarray:
+        return np.full(len(values), self.penalty)
+
+
+@pytest.mark.parametrize(
+    ("table", "chosen"),
+    [
+        ({0.1: 0.1, 0.3: 0.2, 1.0: 0.5, 3.0: 0.9, 10.0: 0.4, 30.0: 0.3, 100.0: 0.0}, 3.0),
+        ({0.1: 0.1, 0.3: 0.7, 1.0: 0.7, 3.0: 0.2, 10.0: 0.4, 30.0: 0.3, 100.0: 0.0}, 0.3),
+    ],
+)
+def test_the_best_cv_score_wins_and_ties_take_the_smaller_penalty(
+    table: dict[float, float], chosen: float
+) -> None:
+    days = CALENDAR.between(date(2011, 1, 3), date(2011, 6, 30))
+
+    fit = _fit(
+        panel(days, 5, seed=8),
+        FEATURES,
+        "fwd_rank_pct",
+        5,
+        Constant,
+        lambda valid, predicted, label: table[float(predicted[0])],
+    )
+
+    assert fit.penalty == chosen
+    assert fit.scores == pytest.approx(table)
+
+
+def test_a_window_too_short_to_cross_validate_is_refused() -> None:
+    days = CALENDAR.between(date(2011, 1, 3), date(2011, 1, 14))
+
+    with pytest.raises(ValueError, match="too short"):
+        fit_ridge(panel(days, 40, seed=9), FEATURES, "fwd_rank_pct", horizon=20)
+
+
 def test_return_volatility_and_interval_baselines() -> None:
     frame = pd.DataFrame({"tech_ret_60d": [0.2, -0.1, math.nan], "tech_vol_20d": [0.3, 0.5, 0.4]})
 
@@ -135,6 +193,16 @@ def test_return_volatility_and_interval_baselines() -> None:
     half = 1.28 * 0.3 * math.sqrt(20 / 252)
     assert list(band.columns) == ["q10", "q50", "q90"]
     assert band.iloc[0].tolist() == pytest.approx([-half, 0.0, half])
+
+
+def test_rule_baselines_refuse_standardized_inputs() -> None:
+    scored = pd.DataFrame({"tech_ret_60d": [0.5, -1.4], "tech_vol_20d": [0.8, -0.6]})
+
+    for baseline in (vol_baseline, vol_interval):
+        with pytest.raises(ValueError, match="raw"):
+            baseline(scored)
+    with pytest.raises(ValueError, match="raw"):
+        trailing_mean_return(scored, 5)
 
 
 def test_historical_quantiles_come_from_the_training_labels() -> None:
@@ -176,13 +244,16 @@ def test_label_shuffle_drops_oos_rank_ic_to_zero() -> None:
     )
     fold = generate_folds(CALENDAR, date(2011, 6, 30), config)[0]
     frame = panel(CALENDAR.between(fold.train_start, fold.eval_end), 60, seed=6, signal=0.5)
+    train = frame[frame["date"].between(fold.train_start, fold.train_end)]
+    test = frame[frame["date"].between(fold.test_start, fold.eval_end)]
+    fit = fit_ridge(train, FEATURES, "fwd_rank_pct", horizon=20)
+    unshuffled = daily_rank_ic(test.assign(score=fit.predict(test)), "score", "fwd_rank_pct")
 
-    def oos_ic(rows: pd.DataFrame) -> float:
-        train = rows[rows["date"].between(fold.train_start, fold.train_end)]
-        test = rows[rows["date"].between(fold.test_start, fold.eval_end)]
-        fit = fit_ridge(train, FEATURES, "fwd_rank_pct", horizon=20)
-        scored = test.assign(score=fit.predict(test))
-        return float(daily_rank_ic(scored, "score", "fwd_rank_pct").mean())
+    clean = shuffled_oos_ic(frame, fold, FEATURES, "fwd_rank_pct", horizon=20, seed=7)
+    leaky = shuffled_oos_ic(
+        frame, fold, [*FEATURES, "fwd_rank_pct"], "fwd_rank_pct", horizon=20, seed=7
+    )
 
-    assert oos_ic(frame) > 0.3
-    assert abs(oos_ic(shuffle_within_dates(frame, "fwd_rank_pct", seed=7))) < 0.05
+    assert unshuffled.mean() > 0.3
+    assert abs(clean) < 0.05
+    assert leaky > 0.5

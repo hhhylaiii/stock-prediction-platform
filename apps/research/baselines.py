@@ -13,6 +13,7 @@ from sklearn.linear_model import LogisticRegression, Ridge
 
 from apps.research.metrics.forecast import daily_brier
 from apps.research.metrics.ic import daily_rank_ic
+from apps.research.walkforward import Fold
 
 PENALTY_GRID = (0.1, 0.3, 1.0, 3.0, 10.0, 30.0, 100.0)
 CV_SPLITS = 4
@@ -127,15 +128,21 @@ def fit_logistic(
     train: pd.DataFrame, features: Sequence[str], label: str, horizon: int
 ) -> LinearFit:
     """Logistic regression with C chosen by mean daily validation Brier (SPEC §7 機率 baseline)."""
-    labels = train.assign(**{label: train[label].astype(np.float64)})
     return _fit(
-        labels,
+        train,
         features,
         label,
         horizon,
         lambda c: LogisticRegression(C=c, max_iter=LOGISTIC_ITERATIONS),
         _negative_brier,
     )
+
+
+def _raw(frame: pd.DataFrame, column: str, lowest: float) -> pd.Series:
+    values = frame[column].astype(np.float64)
+    if (values < lowest).any():
+        raise ValueError(f"{column} looks standardized; rule baselines need raw values")
+    return values
 
 
 def zero_return(frame: pd.DataFrame) -> pd.Series:
@@ -145,17 +152,17 @@ def zero_return(frame: pd.DataFrame) -> pd.Series:
 
 def trailing_mean_return(frame: pd.DataFrame, horizon: int) -> pd.Series:
     """The past 60 days' mean return compounded over the horizon."""
-    return (1 + frame["tech_ret_60d"].astype(np.float64)) ** (horizon / TRAILING_DAYS) - 1
+    return (1 + _raw(frame, "tech_ret_60d", -1.0)) ** (horizon / TRAILING_DAYS) - 1
 
 
 def vol_baseline(frame: pd.DataFrame) -> pd.Series:
     """Volatility forecast equal to the past 20 days' annualized volatility."""
-    return frame["tech_vol_20d"].astype(np.float64)
+    return _raw(frame, "tech_vol_20d", 0.0)
 
 
 def vol_interval(frame: pd.DataFrame, horizon: int = INTERVAL_HORIZON) -> pd.DataFrame:
     """q50 of 0 and q10, q90 at ∓1.28 × tech_vol_20d × √(horizon / 252)."""
-    half = INTERVAL_Z * frame["tech_vol_20d"].astype(np.float64) * math.sqrt(horizon / TRADING_YEAR)
+    half = INTERVAL_Z * _raw(frame, "tech_vol_20d", 0.0) * math.sqrt(horizon / TRADING_YEAR)
     return pd.DataFrame({"q10": -half, "q50": 0.0, "q90": half}, index=frame.index)
 
 
@@ -172,3 +179,22 @@ def shuffle_within_dates(frame: pd.DataFrame, column: str, seed: int) -> pd.Data
     for positions in frame.groupby("date").indices.values():
         values[positions] = values[rng.permutation(positions)]
     return frame.assign(**{column: values})
+
+
+def shuffled_oos_ic(
+    frame: pd.DataFrame,
+    fold: Fold,
+    features: Sequence[str],
+    label: str,
+    horizon: int,
+    seed: int,
+) -> float:
+    """Mean daily OOS rank IC of a Ridge refit on labels shuffled within dates; near 0 if clean.
+
+    A linear fit flags labels leaking into features; it cannot memorize rows across a bad split.
+    """
+    shuffled = shuffle_within_dates(frame, label, seed)
+    train = shuffled[shuffled["date"].between(fold.train_start, fold.train_end)]
+    test = shuffled[shuffled["date"].between(fold.test_start, fold.eval_end)]
+    fit = fit_ridge(train, features, label, horizon)
+    return float(daily_rank_ic(test.assign(_score=fit.predict(test)), "_score", label).mean())
