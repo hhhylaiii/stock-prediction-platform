@@ -13,12 +13,15 @@ from apps.etl.adapters import ADAPTERS
 from apps.etl.catchup import CatchupReport
 from apps.etl.errors import SchemaChangedError, SourceNotReadyError
 from apps.etl.models import DataQualityLog, EtlRun
+from apps.etl.quality import CHECKS
+from apps.etl.ratelimit import RetryableError, ThrottledError
 from apps.market.calendar import TradingDays
 from apps.market.models import IndexDaily, TradingCalendar
 from config.celery import app
 
 DAY = date(2026, 10, 28)
 TAIPEI = ZoneInfo("Asia/Taipei")
+DAILY_JOBS = {(job.source, job.dataset) for jobs in tasks.BATCHES.values() for job in jobs}
 
 pytestmark = pytest.mark.usefixtures("october_2026_in_db")
 
@@ -60,6 +63,28 @@ class FakeAdapter:
         if self.errors:
             raise self.errors.pop(0)
         return EtlRun(source="fake", dataset=dataset, start_date=start, end_date=end, rows=3)
+
+
+@pytest.fixture
+def sent(monkeypatch: pytest.MonkeyPatch) -> list[list[tuple[date, str, str]]]:
+    calls: list[list[tuple[date, str, str]]] = []
+    monkeypatch.setattr(
+        "apps.etl.tasks.dispatch",
+        lambda rows: calls.append([(row.date, row.check_name, row.severity) for row in rows]),
+    )
+    return calls
+
+
+def landed(day: date, jobs: set[tuple[str, str]]) -> None:
+    for source, dataset in jobs:
+        EtlRun.objects.create(
+            source=source, dataset=dataset, start_date=day, end_date=day, status="success"
+        )
+
+
+def checked(day: date, *extra: tuple[str, str]) -> None:
+    for check, severity in (*((name, "info") for name in CHECKS), *extra):
+        DataQualityLog.objects.create(date=day, check_name=check, severity=severity, detail={})
 
 
 @pytest.fixture
@@ -157,32 +182,69 @@ def test_nothing_runs_on_a_day_without_trading(
 
 
 def test_a_batch_fired_late_on_waking_before_its_slot_is_skipped(
-    today: Callable[..., None], queued: list[tuple[str, str, str]]
+    today: Callable[..., None],
+    queued: list[tuple[str, str, str]],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     today(DAY, time(8, 0))
     assert tasks.run_batch("prices") == []
     assert tasks.check_quality() == 0
     assert tasks.refresh_master.apply().get() == "closed"
     assert queued == []
+    skipped = [row for row in caplog.records if "etl skipped" in row.getMessage()]
+    assert [row.levelname for row in skipped] == ["WARNING"] * 3
+    assert "PRICES" in skipped[0].getMessage()
 
 
 def test_a_dataset_landing_after_a_failed_check_runs_the_checks_again(
-    adapter: Callable[..., FakeAdapter], monkeypatch: pytest.MonkeyPatch
+    adapter: Callable[..., FakeAdapter], sent: list[list[tuple[date, str, str]]]
 ) -> None:
     adapter()
-    sent: list[set[date]] = []
-    monkeypatch.setattr(
-        "apps.etl.tasks.dispatch", lambda rows: sent.append({row.date for row in rows})
-    )
     DataQualityLog.objects.create(
         date=DAY, check_name="missing_values", severity="error", detail={}
     )
     tasks.fetch_day.apply(args=("tpex", "margin", "2026-10-28")).get()
-    assert sent == [{DAY}]
     assert not DataQualityLog.objects.filter(date=DAY, severity="error").exists()
-    DataQualityLog.objects.create(date=DAY, check_name="big_move", severity="info", detail={})
+    assert DataQualityLog.objects.filter(date=DAY, check_name="big_move").exists()
+    DataQualityLog.objects.filter(date=DAY, check_name="big_move").update(detail={"again": 1})
     tasks.fetch_day.apply(args=("tpex", "margin", "2026-10-28")).get()
-    assert sent == [{DAY}]
+    assert DataQualityLog.objects.get(date=DAY, check_name="big_move").detail == {"again": 1}
+
+
+def test_an_alert_still_standing_after_a_recheck_is_not_sent_again(
+    adapter: Callable[..., FakeAdapter],
+    sent: list[list[tuple[date, str, str]]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter()
+    standing = [("missing_values", "error")]
+
+    def checks(day: date, calendar: TradingDays) -> list[DataQualityLog]:
+        DataQualityLog.objects.filter(date=day, check_name__in=CHECKS).delete()
+        return [
+            DataQualityLog.objects.create(date=day, check_name=name, severity=level, detail={})
+            for name, level in standing
+        ]
+
+    monkeypatch.setattr("apps.etl.tasks.run_checks", checks)
+    checks(DAY, TradingDays.from_db())
+    tasks.fetch_day.apply(args=("twse", "day_trade", "2026-10-28")).get()
+    assert sent == []
+    standing.append(("row_count", "warning"))
+    tasks.fetch_day.apply(args=("twse", "day_trade", "2026-10-28")).get()
+    assert sent == [[(DAY, "row_count", "warning")]]
+
+
+def test_a_gate_dataset_landing_late_refreshes_the_landed_row(
+    adapter: Callable[..., FakeAdapter], sent: list[list[tuple[date, str, str]]]
+) -> None:
+    adapter()
+    checked(DAY, ("etl_runs", "error"))
+    landed(DAY, {job for job in DAILY_JOBS if job[1] in tasks.GATE_DATASETS})
+    tasks.fetch_day.apply(args=("tpex", "margin", "2026-10-28")).get()
+    row = DataQualityLog.objects.get(date=DAY, check_name="etl_runs")
+    assert (row.severity, row.detail["blocking"]) == ("warning", [])
+    assert sent == [[(DAY, "etl_runs", "warning")]]
 
 
 def test_a_dataset_runs_for_its_day(adapter: Callable[..., FakeAdapter]) -> None:
@@ -192,27 +254,37 @@ def test_a_dataset_runs_for_its_day(adapter: Callable[..., FakeAdapter]) -> None
     assert result == "success: 3 rows"
 
 
-def test_a_day_not_published_yet_is_retried_until_the_limit(
-    adapter: Callable[..., FakeAdapter], caplog: pytest.LogCaptureFixture
+@pytest.mark.parametrize(
+    ("error", "outcome"),
+    [(SourceNotReadyError("not yet"), "not ready"), (RetryableError("timed out"), "unreachable")],
+)
+def test_a_day_not_published_or_unreachable_is_retried_until_the_limit(
+    adapter: Callable[..., FakeAdapter],
+    caplog: pytest.LogCaptureFixture,
+    error: Exception,
+    outcome: str,
 ) -> None:
     limit = settings.ETL_NOT_READY_RETRIES
-    fake = adapter(*(SourceNotReadyError("not yet") for _ in range(limit + 1)))
+    fake = adapter(*(error for _ in range(limit + 1)))
     result = tasks.fetch_day.apply(args=("twse", "sbl", "2026-10-28")).get()
     assert len(fake.runs) == limit + 1
-    assert result == "not ready"
+    assert result == outcome
     assert any("gave up" in row.getMessage() for row in caplog.records)
 
 
 def test_a_day_published_on_a_retry_is_loaded(adapter: Callable[..., FakeAdapter]) -> None:
-    fake = adapter(SourceNotReadyError("not yet"), SourceNotReadyError("not yet"))
+    fake = adapter(SourceNotReadyError("not yet"), RetryableError("connection reset"))
     result = tasks.fetch_day.apply(args=("twse", "sbl", "2026-10-28")).get()
     assert (len(fake.runs), result) == (3, "success: 3 rows")
 
 
+@pytest.mark.parametrize(
+    "error", [SchemaChangedError("layout changed"), ThrottledError("still throttled")]
+)
 def test_any_other_error_fails_without_retrying(
-    adapter: Callable[..., FakeAdapter], caplog: pytest.LogCaptureFixture
+    adapter: Callable[..., FakeAdapter], caplog: pytest.LogCaptureFixture, error: Exception
 ) -> None:
-    fake = adapter(SchemaChangedError("layout changed"))
+    fake = adapter(error)
     result = tasks.fetch_day.apply(args=("twse", "sbl", "2026-10-28")).get()
     assert (len(fake.runs), result) == (1, "failed")
     assert [row.levelname for row in caplog.records if "etl failed" in row.getMessage()] == [
@@ -220,26 +292,87 @@ def test_any_other_error_fails_without_retrying(
     ]
 
 
+@pytest.fixture
+def catch_ups(monkeypatch: pytest.MonkeyPatch) -> list[tuple[date, date, TradingDays]]:
+    calls: list[tuple[date, date, TradingDays]] = []
+
+    def fake_catch_up(since: date, until: date, calendar: TradingDays) -> Any:
+        calls.append((since, until, calendar))
+        return CatchupReport({}, {}, {}, {}, [])
+
+    monkeypatch.setattr("apps.etl.tasks.catch_up", fake_catch_up)
+    return calls
+
+
 def test_the_day_starts_with_the_calendar_then_missed_days(
-    today: Callable[..., None], monkeypatch: pytest.MonkeyPatch
+    today: Callable[..., None],
+    monkeypatch: pytest.MonkeyPatch,
+    catch_ups: list[tuple[date, date, TradingDays]],
 ) -> None:
-    calls: list[Any] = []
+    calls: list[str] = []
 
     def refresh(name: str, *args: Any, **kwargs: Any) -> None:
         calls.append(name)
         raise CommandError("SchemaChangedError: FMTQIK fields changed")
 
-    def fake_catch_up(since: date, until: date, calendar: TradingDays) -> Any:
-        calls.append((since, until))
-        return CatchupReport({}, {}, {}, {}, [])
-
     monkeypatch.setattr("apps.etl.tasks.call_command", refresh)
-    monkeypatch.setattr("apps.etl.tasks.catch_up", fake_catch_up)
     today(DAY, time(15, 10))
     tasks.prepare_day()
-    assert calls == ["refresh_calendar", (date(2026, 10, 14), date(2026, 10, 27))]
-    checked = set(DataQualityLog.objects.values_list("date", flat=True))
-    assert checked == {date(2026, 10, 27)}
+    assert calls == ["refresh_calendar"]
+    assert [call[:2] for call in catch_ups] == [(date(2026, 10, 14), date(2026, 10, 27))]
+    audited = set(DataQualityLog.objects.values_list("date", flat=True))
+    assert audited == {date(2026, 10, 27)}
+
+
+def test_missed_days_are_fetched_with_the_corrected_calendar(
+    today: Callable[..., None],
+    monkeypatch: pytest.MonkeyPatch,
+    catch_ups: list[tuple[date, date, TradingDays]],
+) -> None:
+    def close_a_day(name: str, *args: Any, **kwargs: Any) -> None:
+        TradingCalendar.objects.filter(date=date(2026, 10, 27)).update(is_trading_day=False)
+
+    monkeypatch.setattr("apps.etl.tasks.call_command", close_a_day)
+    today(DAY, time(15, 10))
+    tasks.prepare_day()
+    [(_, until, calendar)] = catch_ups
+    assert until == date(2026, 10, 22)
+    assert not calendar.is_trading_day(date(2026, 10, 27))
+
+
+@pytest.mark.usefixtures("catch_ups")
+def test_a_session_already_audited_is_left_alone(
+    today: Callable[..., None],
+    monkeypatch: pytest.MonkeyPatch,
+    sent: list[list[tuple[date, str, str]]],
+) -> None:
+    monkeypatch.setattr("apps.etl.tasks.call_command", lambda name, **kwargs: None)
+    checked(date(2026, 10, 27), ("etl_runs", "info"))
+    before = set(DataQualityLog.objects.values_list("id", flat=True))
+    today(DAY, time(15, 10))
+    tasks.prepare_day()
+    assert set(DataQualityLog.objects.values_list("id", flat=True)) == before
+    assert sent == []
+
+
+@pytest.mark.usefixtures("catch_ups")
+def test_sessions_missed_since_the_schedule_began_are_audited(
+    today: Callable[..., None],
+    monkeypatch: pytest.MonkeyPatch,
+    sent: list[list[tuple[date, str, str]]],
+) -> None:
+    monkeypatch.setattr("apps.etl.tasks.call_command", lambda name, **kwargs: None)
+    began = date(2026, 10, 20)
+    checked(began, ("etl_runs", "error"))
+    landed(began, DAILY_JOBS)
+    today(DAY, time(15, 10))
+    tasks.prepare_day()
+    audited = DataQualityLog.objects.filter(check_name="etl_runs")
+    since_start = TradingDays.from_db().between(began, date(2026, 10, 27))
+    assert len(since_start) > 2
+    assert set(audited.values_list("date", flat=True)) == set(since_start)
+    assert audited.get(date=began).severity == "info"
+    assert {call[0][0] for call in sent} == set(since_start[1:])
 
 
 def test_a_day_without_trading_is_not_prepared(
@@ -271,10 +404,8 @@ def test_the_master_refresh_waits_for_the_days_quotes(
 
 
 def test_quality_is_checked_on_trading_days_only(
-    today: Callable[..., None], monkeypatch: pytest.MonkeyPatch
+    today: Callable[..., None], sent: list[list[tuple[date, str, str]]]
 ) -> None:
-    sent: list[int] = []
-    monkeypatch.setattr("apps.etl.tasks.dispatch", lambda rows: sent.append(len(rows)))
     today(date(2026, 10, 25))
     tasks.check_quality()
     assert not DataQualityLog.objects.exists()
@@ -282,9 +413,29 @@ def test_quality_is_checked_on_trading_days_only(
     tasks.check_quality()
     assert set(DataQualityLog.objects.values_list("date", flat=True)) == {DAY}
     assert len(sent) == 1
-    landed = DataQualityLog.objects.get(check_name="etl_runs")
-    assert landed.severity == "warning"
-    assert "tpex/full_delivery" in landed.detail["missing"]
+    row = DataQualityLog.objects.get(check_name="etl_runs")
+    assert row.severity == "error"
+    assert "tpex/full_delivery" in row.detail["missing"]
+    assert "twse/daily_price" in row.detail["blocking"]
+    assert "tpex/full_delivery" not in row.detail["blocking"]
+
+
+@pytest.mark.parametrize(
+    ("absent", "severity"),
+    [(set(), "info"), ({("tpex", "full_delivery"), ("twse", "day_trade")}, "warning")],
+)
+def test_only_a_missing_gate_dataset_makes_the_landed_row_an_error(
+    today: Callable[..., None],
+    sent: list[list[tuple[date, str, str]]],
+    absent: set[tuple[str, str]],
+    severity: str,
+) -> None:
+    landed(DAY, DAILY_JOBS - absent)
+    today(DAY)
+    tasks.check_quality()
+    row = DataQualityLog.objects.get(check_name="etl_runs")
+    assert row.severity == severity
+    assert row.detail == {"missing": sorted(f"{s}/{d}" for s, d in absent), "blocking": []}
 
 
 def test_the_us_close_loads_the_last_session_and_logs_stale_series(
@@ -310,6 +461,16 @@ def test_usdtwd_a_session_behind_is_fresh_at_dawn(today: Callable[..., None]) ->
     tasks.us_close()
     row = DataQualityLog.objects.get(check_name="us_close")
     assert (row.severity, row.detail) == ("info", {"stale": {}})
+
+
+def test_the_us_close_fired_before_its_slot_waits_for_it(
+    today: Callable[..., None], adapter: Callable[..., FakeAdapter]
+) -> None:
+    fake = adapter()
+    today(date(2026, 10, 29), time(3, 0))
+    assert tasks.us_close() == "early"
+    assert fake.runs == []
+    assert not DataQualityLog.objects.exists()
 
 
 def test_the_us_close_of_a_session_runs_once(
@@ -366,16 +527,20 @@ def test_the_business_signal_runs_on_its_day(
     assert fake.runs == [("business_signal", date(2026, 10, 15), date(2026, 10, 15))]
 
 
-def test_research_waits_for_every_daily_dataset_and_the_quality_gate() -> None:
+def test_research_waits_for_the_gate_datasets_and_the_quality_gate() -> None:
     assert not tasks.ready_for_research(DAY)
-    for job in {(job.source, job.dataset) for jobs in tasks.BATCHES.values() for job in jobs}:
-        EtlRun.objects.create(
-            source=job[0], dataset=job[1], start_date=DAY, end_date=DAY, status="success"
-        )
+    gate = {job for job in DAILY_JOBS if job[1] in tasks.GATE_DATASETS}
+    assert {dataset for _, dataset in DAILY_JOBS - gate} == {
+        "attention",
+        "disposition",
+        "full_delivery",
+        "shares_outstanding",
+        "day_trade",
+    }
+    landed(DAY, gate)
     assert tasks.etl_complete(DAY)
     assert not tasks.ready_for_research(DAY)
-    for check in ("row_count", "big_move", "missing_values", "trading_calendar", "index_freshness"):
-        DataQualityLog.objects.create(date=DAY, check_name=check, severity="info", detail={})
+    checked(DAY)
     assert tasks.ready_for_research(DAY)
     EtlRun.objects.filter(dataset="margin", source="tpex").update(status="failed")
     assert not tasks.etl_complete(DAY)

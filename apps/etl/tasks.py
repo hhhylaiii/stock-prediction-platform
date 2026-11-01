@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from datetime import date, time, timedelta
 from typing import Any, NamedTuple
 
@@ -10,6 +11,7 @@ from celery import Task, shared_task
 from django.conf import settings
 from django.core.management import call_command
 from django.db import transaction
+from django.db.models import Min
 from django.utils import timezone
 
 from apps.etl.adapters import build_adapter
@@ -18,8 +20,8 @@ from apps.etl.catchup import catch_up
 from apps.etl.errors import SourceError, SourceNotReadyError
 from apps.etl.master_refresh import refresh_stock_master
 from apps.etl.models import DataQualityLog
-from apps.etl.quality import CHECKS, run_checks, should_run_prediction
-from apps.etl.ratelimit import RetryableError
+from apps.etl.quality import CHECKS, alerting, run_checks, should_run_prediction
+from apps.etl.ratelimit import RetryableError, ThrottledError
 from apps.etl.runs import covered_days
 from apps.market.calendar import TradingDays
 from apps.market.models import IndexDaily, IndexId
@@ -32,6 +34,19 @@ US_SERIES = {
 }
 US_CLOSE_CHECK = "us_close"
 ETL_RUNS_CHECK = "etl_runs"
+AUDITED = (*CHECKS, ETL_RUNS_CHECK)
+GATE_DATASETS = frozenset(
+    {
+        "daily_price",
+        "index_daily",
+        "institutional",
+        "margin",
+        "sbl",
+        "foreign_holding",
+        "daily_valuation",
+    }
+)
+Severity = DataQualityLog.Severity
 US_LAG = {IndexId.USDTWD.value: 1}
 SATURDAY = 5
 BATCH_SLOTS = {
@@ -70,34 +85,67 @@ BATCHES: dict[str, list[Fetch]] = {
 }
 
 
-def _session_today(slot: str | None = None) -> tuple[TradingDays, date] | None:
-    """Today when it is a session and its slot has come; a run fired late on waking is skipped."""
+def _before_slot(slot: str) -> bool:
+    """A run fired before its slot, as beat does on waking past midnight, is skipped and logged."""
     now = timezone.localtime()
-    if slot is not None and now.time() < time.fromisoformat(settings.ETL_AT[slot]):
+    if now.time() >= time.fromisoformat(settings.ETL_AT[slot]):
+        return False
+    logger.warning("etl skipped %s: fired at %s, before its slot", slot, now.isoformat())
+    return True
+
+
+def _session_today(slot: str | None = None) -> tuple[TradingDays, date] | None:
+    """Today when it is a session and its slot has come."""
+    if slot is not None and _before_slot(slot):
         return None
     calendar = TradingDays.from_db()
-    today = now.date()
+    today = timezone.localtime().date()
     return (calendar, today) if calendar.is_trading_day(today) else None
 
 
-def _check(day: date, calendar: TradingDays) -> list[DataQualityLog]:
-    results = run_checks(day, calendar)
+def _landed(day: date) -> DataQualityLog:
+    """The daily datasets without a run for the session; a gate dataset among them is an error."""
+    missing = sorted(
+        f"{source}/{dataset}"
+        for source, dataset in _daily_jobs()
+        if day not in covered_days(source, dataset, [day])
+    )
+    blocking = [key for key in missing if key.split("/")[1] in GATE_DATASETS]
+    severity = Severity.ERROR if blocking else Severity.WARNING if missing else Severity.INFO
+    return _replace_log(day, ETL_RUNS_CHECK, severity, {"missing": missing, "blocking": blocking})
+
+
+def _audit(day: date, calendar: TradingDays) -> list[DataQualityLog]:
+    results = [*run_checks(day, calendar), _landed(day)]
     dispatch(results)
     return results
 
 
-def _recheck_if_blocked(day: date) -> None:
-    """A dataset landing after the day's checks failed re-runs them, so the gate can open."""
-    checks = DataQualityLog.objects.filter(date=day, check_name__in=CHECKS)
-    if checks.filter(severity=DataQualityLog.Severity.ERROR).exists():
-        _check(day, TradingDays.from_db())
+def _alerts(day: date) -> set[tuple[str, str]]:
+    rows = DataQualityLog.objects.filter(date=day, check_name__in=AUDITED)
+    return set(rows.exclude(severity=Severity.INFO).values_list("check_name", "severity"))
 
 
-def _not_ready(task: Task[Any, Any], what: str, exc: SourceNotReadyError) -> str:
-    """Retry later while retries last; then log that the source never published."""
+def _reaudit(day: date, calendar: TradingDays | None = None) -> None:
+    """Data landing after a session's audit redoes what still alerts; only new alerts go out."""
+    before = _alerts(day)
+    results: list[DataQualityLog] = []
+    if any(check in CHECKS and level == Severity.ERROR for check, level in before):
+        results.extend(run_checks(day, calendar or TradingDays.from_db()))
+    if any(check == ETL_RUNS_CHECK for check, _ in before):
+        results.append(_landed(day))
+    fresh = [row for row in alerting(results) if (row.check_name, row.severity) not in before]
+    if fresh:
+        dispatch(fresh)
+
+
+def _retry_later(task: Task[Any, Any], what: str, exc: Exception) -> str:
+    """Unpublished days and network failures retry while retries last; throttling never does."""
+    if isinstance(exc, ThrottledError):
+        return _failed(what, exc)
     if task.request.retries >= settings.ETL_NOT_READY_RETRIES:
         logger.error("etl gave up %s after %d retries: %s", what, task.request.retries, exc)
-        return "not ready"
+        return "not ready" if isinstance(exc, SourceNotReadyError) else "unreachable"
     raise task.retry(exc=exc, countdown=settings.ETL_NOT_READY_COUNTDOWN)
 
 
@@ -114,11 +162,11 @@ def fetch_day(self: Task[Any, Any], source: str, dataset: str, day: str) -> str:
     session = date.fromisoformat(day)
     try:
         run = build_adapter(source).run(dataset, session, session)
-    except SourceNotReadyError as exc:
-        return _not_ready(self, what, exc)
+    except (SourceNotReadyError, RetryableError) as exc:
+        return _retry_later(self, what, exc)
     except Exception as exc:
         return _failed(what, exc)
-    _recheck_if_blocked(session)
+    _reaudit(session)
     return f"success: {run.rows} rows"
 
 
@@ -140,7 +188,7 @@ def run_batch(batch: str) -> list[str]:
 
 @shared_task(name="etl.prepare_day")
 def prepare_day() -> list[str]:
-    """Correct the calendar and fetch what earlier sessions missed, before today's run."""
+    """Correct the calendar, fetch what earlier sessions missed, then audit those sessions."""
     session = _session_today()
     if session is None:
         return []
@@ -150,14 +198,28 @@ def prepare_day() -> list[str]:
     except Exception as exc:
         _failed("trading_calendar refresh", exc)
     calendar = TradingDays.from_db()
-    since = today - timedelta(days=settings.ETL_CATCHUP_LOOKBACK_DAYS)
+    since = max(today - timedelta(days=settings.ETL_CATCHUP_LOOKBACK_DAYS), calendar.start)
     until = calendar.latest_on_or_before(today - timedelta(days=1))
-    report = catch_up(max(since, calendar.start), until, calendar)
+    report = catch_up(since, until, calendar)
     for line in report.lines():
         logger.info("catchup %s", line)
-    if not DataQualityLog.objects.filter(date=until, check_name__in=CHECKS).exists():
-        _check(until, calendar)
+    _audit_missed(calendar.between(since, until), calendar)
     return report.lines()
+
+
+def _audit_missed(sessions: Sequence[date], calendar: TradingDays) -> None:
+    """Audit sessions the evening audit missed since the schedule began; redo the rest."""
+    first = DataQualityLog.objects.filter(check_name=ETL_RUNS_CHECK).aggregate(first=Min("date"))
+    checked = set(
+        DataQualityLog.objects.filter(date__in=sessions, check_name__in=CHECKS).values_list(
+            "date", flat=True
+        )
+    )
+    for day in sessions:
+        if day in checked:
+            _reaudit(day, calendar)
+        elif day == sessions[-1] or (first["first"] is not None and day >= first["first"]):
+            _audit(day, calendar)
 
 
 @shared_task(bind=True, max_retries=None, name="etl.refresh_master")
@@ -169,8 +231,8 @@ def refresh_master(self: Task[Any, Any]) -> str:
     calendar, today = session
     try:
         refresh_stock_master(today, calendar)
-    except SourceNotReadyError as exc:
-        return _not_ready(self, f"stock_master {today}", exc)
+    except (SourceNotReadyError, RetryableError) as exc:
+        return _retry_later(self, f"stock_master {today}", exc)
     except Exception as exc:
         return _failed(f"stock_master {today}", exc)
     return "success"
@@ -183,21 +245,14 @@ def check_quality() -> int:
     if session is None:
         return 0
     calendar, today = session
-    results = run_checks(today, calendar)
-    missing = sorted(
-        f"{source}/{dataset}"
-        for source, dataset in _daily_jobs()
-        if today not in covered_days(source, dataset, [today])
-    )
-    severity = DataQualityLog.Severity.WARNING if missing else DataQualityLog.Severity.INFO
-    landed = _replace_log(today, ETL_RUNS_CHECK, severity, {"missing": missing})
-    dispatch([*results, landed])
-    return len(results)
+    return len(_audit(today, calendar))
 
 
 @shared_task(name="etl.us_close")
 def us_close() -> str:
     """US closes for the last session, once; a series without them keeps its last value, logged."""
+    if _before_slot("US_CLOSE"):
+        return "early"
     calendar = TradingDays.from_db()
     day = calendar.latest_on_or_before(timezone.localtime().date() - timedelta(days=1))
     if DataQualityLog.objects.filter(date=day, check_name=US_CLOSE_CHECK).exists():
@@ -214,7 +269,7 @@ def us_close() -> str:
         seen = _latest(index_id)
         if seen is None or seen < expected:
             stale[index_id] = seen.isoformat() if seen is not None else ""
-    severity = DataQualityLog.Severity.WARNING if stale else DataQualityLog.Severity.INFO
+    severity = Severity.WARNING if stale else Severity.INFO
     dispatch([_replace_log(day, US_CLOSE_CHECK, severity, {"stale": stale})])
     return severity
 
@@ -257,8 +312,8 @@ def _run_once(
     what = f"{source}/{dataset} {day}"
     try:
         run = build_adapter(source, calendar).run(dataset, day, day)
-    except SourceNotReadyError as exc:
-        return _not_ready(task, what, exc)
+    except (SourceNotReadyError, RetryableError) as exc:
+        return _retry_later(task, what, exc)
     except Exception as exc:
         return _failed(what, exc)
     return f"success: {run.rows} rows"
@@ -269,8 +324,12 @@ def _daily_jobs() -> set[tuple[str, str]]:
 
 
 def etl_complete(day: date) -> bool:
-    """Every dataset of the daily batches has a run covering the session."""
-    return all(day in covered_days(source, dataset, [day]) for source, dataset in _daily_jobs())
+    """Every daily snapshot the session's features read has a run covering it."""
+    return all(
+        day in covered_days(source, dataset, [day])
+        for source, dataset in _daily_jobs()
+        if dataset in GATE_DATASETS
+    )
 
 
 def ready_for_research(day: date) -> bool:
