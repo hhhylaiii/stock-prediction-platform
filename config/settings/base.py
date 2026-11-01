@@ -95,44 +95,62 @@ ETL_NOT_READY_RETRIES = env.int("ETL_NOT_READY_RETRIES", default=6)
 ETL_CATCHUP_LOOKBACK_DAYS = env.int("ETL_CATCHUP_LOOKBACK_DAYS", default=14)
 
 
-def _at(name: str, default: str, **fields: str) -> crontab:
-    """A crontab in TIME_ZONE for the HH:MM in ETL_AT_<name>, falling back to the default."""
-    hour, minute = env.str(f"ETL_AT_{name}", default=default).split(":")
+ETL_AT = {
+    name: env.str(f"ETL_AT_{name}", default=default)
+    for name, default in (
+        ("PREPARE_DAY", "15:10"),
+        ("PRICES", "15:30"),
+        ("REFRESH_MASTER", "16:00"),
+        ("AFTERNOON", "16:30"),
+        ("QFII", "18:30"),
+        ("NIGHT", "21:30"),
+        ("NOTICES_AGAIN", "22:40"),
+        ("CHECK_QUALITY", "22:50"),
+        ("US_CLOSE", "05:30"),
+        ("WEEKLY_HOLDING", "10:00"),
+        ("BUSINESS_SIGNAL", "10:00"),
+    )
+}
+
+
+def _at(name: str, **fields: str) -> crontab:
+    """A crontab in TIME_ZONE at the HH:MM of ETL_AT[name]."""
+    hour, minute = ETL_AT[name].split(":")
     return crontab(hour=hour, minute=minute, **fields)
 
 
 CELERY_BEAT_SCHEDULE: dict[str, dict[str, object]] = {
-    "etl-prepare-day": {"task": "etl.prepare_day", "schedule": _at("PREPARE_DAY", "15:10")},
+    "etl-prepare-day": {"task": "etl.prepare_day", "schedule": _at("PREPARE_DAY")},
     "etl-prices": {
         "task": "etl.run_batch",
-        "schedule": _at("PRICES", "15:30"),
+        "schedule": _at("PRICES"),
         "args": ("prices",),
     },
     "etl-refresh-master": {
         "task": "etl.refresh_master",
-        "schedule": _at("REFRESH_MASTER", "16:00"),
+        "schedule": _at("REFRESH_MASTER"),
     },
     "etl-afternoon": {
         "task": "etl.run_batch",
-        "schedule": _at("AFTERNOON", "16:30"),
+        "schedule": _at("AFTERNOON"),
         "args": ("afternoon",),
     },
-    "etl-qfii": {"task": "etl.run_batch", "schedule": _at("QFII", "18:30"), "args": ("qfii",)},
-    "etl-night": {"task": "etl.run_batch", "schedule": _at("NIGHT", "21:30"), "args": ("night",)},
+    "etl-qfii": {"task": "etl.run_batch", "schedule": _at("QFII"), "args": ("qfii",)},
+    "etl-night": {"task": "etl.run_batch", "schedule": _at("NIGHT"), "args": ("night",)},
     "etl-notices-again": {
         "task": "etl.run_batch",
-        "schedule": _at("NOTICES_AGAIN", "22:40"),
+        "schedule": _at("NOTICES_AGAIN"),
         "args": ("notices",),
     },
-    "etl-check-quality": {"task": "etl.check_quality", "schedule": _at("CHECK_QUALITY", "22:50")},
-    "etl-us-close": {"task": "etl.us_close", "schedule": _at("US_CLOSE", "05:30")},
+    "etl-check-quality": {"task": "etl.check_quality", "schedule": _at("CHECK_QUALITY")},
+    "etl-us-close": {"task": "etl.us_close", "schedule": _at("US_CLOSE")},
     "etl-weekly-holding": {
         "task": "etl.weekly_holding",
-        "schedule": _at("WEEKLY_HOLDING", "10:00", day_of_week="sat"),
+        "schedule": _at("WEEKLY_HOLDING", day_of_week="sat"),
     },
     "etl-business-signal": {
         "task": "etl.business_signal",
-        "schedule": _at("BUSINESS_SIGNAL", "10:00", day_of_month="15"),
+        "schedule": _at("BUSINESS_SIGNAL", day_of_month="15"),
     },
 }
 
