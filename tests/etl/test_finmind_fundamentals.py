@@ -189,10 +189,9 @@ def test_statement_rows_without_a_key_are_schema_changes(rows: Callable[[str], R
         statements(income, [], [], "2330", WEEKDAYS, *YEAR_2024)
 
 
-def test_balance_sheets_alone_before_2013_give_no_row(rows: Callable[[str], Rows]) -> None:
-    balance = rows("balance_2330_2010_2013")
-    frame = statements([], balance, [], "2330", WEEKDAYS, date(2012, 1, 1), date(2012, 12, 31))
-    assert frame.empty
+def test_income_statements_without_used_items_give_no_row(rows: Callable[[str], Rows]) -> None:
+    income = [r for r in rows("income_2330_2023_2024") if r["type"] == "TAX"]
+    assert statements(income, [], [], "2330", WEEKDAYS, *YEAR_2024).empty
 
 
 def test_an_empty_value_counts_as_missing(rows: Callable[[str], Rows]) -> None:
@@ -237,3 +236,32 @@ def test_half_year_figures_are_not_taken_as_a_quarter(rows: Callable[[str], Rows
     assert (q2["eps"], q2["revenue"], q2["net_income"]) == (None, None, None)
     assert q2["gross_margin"] == pytest.approx(358_124_478_000 / 673_510_177_000)
     assert _record(frame, "2024-Q4")["revenue"] is None
+
+
+def test_quarters_without_an_income_statement_are_not_written(
+    rows: Callable[[str], Rows],
+) -> None:
+    income = [r for r in rows("income_2330_2023_2024") if r["date"] != "2024-03-31"]
+    frame = statements(
+        income,
+        rows("balance_2330_2023_2024"),
+        rows("cashflow_2330_2023_2024"),
+        "2330",
+        WEEKDAYS,
+        *YEAR_2024,
+    )
+    assert "2024-Q1" not in frame["period"].tolist()
+    q2 = _record(frame, "2024-Q2")
+    assert q2["fin_type"] == "consolidated"
+    assert (q2["operating_cf"], q2["roe"]) == (None, None)
+    assert q2["debt_ratio"] is not None
+
+
+def test_flows_and_roe_never_span_a_change_of_report_type(
+    rows: Callable[[str], Rows],
+) -> None:
+    frame = _statements(rows, "2330", "2010_2013", date(2013, 1, 1), date(2013, 12, 31))
+    q1, q2 = _record(frame, "2013-Q1"), _record(frame, "2013-Q2")
+    assert (q1["fin_type"], q1["roe"]) == ("consolidated", None)
+    assert q1["operating_cf"] == 73_569_672_000
+    assert q2["roe"] is not None

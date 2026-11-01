@@ -127,15 +127,17 @@ def statements(
     balance_items = _pivot(balance, "TaiwanStockBalanceSheet", stock_id)
     cash_items = _pivot(cash_flow, "TaiwanStockCashFlowsStatement", stock_id)
     records = []
-    for day in sorted(income_items.keys() | balance_items.keys() | cash_items.keys()):
+    for day, items in sorted(income_items.items()):
         if not start <= day <= end:
             continue
-        items = income_items.get(day, {})
+        fin_type = _fin_type(items)
         values = dict.fromkeys(VALUE_COLUMNS) | _income_values(items)
         if not _whole_quarter(day, income_items):
             values |= dict.fromkeys(FLOW_COLUMNS)
         if day.year >= IFRS_FROM:
-            values |= _balance_values(day, values["net_income"], balance_items, cash_items)
+            before = income_items.get(_previous_quarter_end(day))
+            same = before is not None and _fin_type(before) == fin_type
+            values |= _balance_values(day, values["net_income"], balance_items, cash_items, same)
         if all(value is None for value in values.values()):
             continue
         period = f"{day.year}-Q{QUARTER_ENDS[(day.month, day.day)]}"
@@ -143,9 +145,7 @@ def statements(
             {
                 "stock_id": stock_id,
                 "period": period,
-                "fin_type": FinType.CONSOLIDATED
-                if CONSOLIDATED_MARKERS & items.keys()
-                else FinType.INDIVIDUAL,
+                "fin_type": fin_type,
                 **values,
                 "announce_date": visible_from(statement_deadline(period), calendar),
             }
@@ -187,17 +187,23 @@ def _income_values(items: Mapping[str, float]) -> dict[str, Any]:
     }
 
 
+def _fin_type(items: Mapping[str, float]) -> str:
+    return FinType.CONSOLIDATED if CONSOLIDATED_MARKERS & items.keys() else FinType.INDIVIDUAL
+
+
 def _balance_values(
-    day: date, net_income: int | None, balance: Sheet, cash: Sheet
+    day: date, net_income: int | None, balance: Sheet, cash: Sheet, continuous: bool
 ) -> dict[str, Any]:
+    """ROE and quarterly cash flow need the previous quarter filed as the same report type."""
     sheet = balance.get(day, {})
     previous = _previous_quarter_end(day)
     now, before = _parent_equity(sheet), _parent_equity(balance.get(previous, {}))
     roe = None
-    if net_income is not None and now is not None and before is not None and now + before > 0:
-        roe = net_income / ((now + before) / 2)
+    if continuous and net_income is not None and now is not None and before is not None:
+        roe = net_income / ((now + before) / 2) if now + before > 0 else None
     flow = _first(cash.get(day, {}), OPERATING_CF_TYPES)
-    earlier = 0.0 if day.month == 3 else _first(cash.get(previous, {}), OPERATING_CF_TYPES)
+    earlier = _first(cash.get(previous, {}), OPERATING_CF_TYPES) if continuous else None
+    earlier = 0.0 if day.month == 3 else earlier
     return {
         "roe": roe,
         "debt_ratio": _share(sheet.get("Liabilities"), sheet.get("TotalAssets")),
