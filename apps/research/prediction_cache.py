@@ -3,7 +3,7 @@
 import json
 import os
 import tempfile
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import asdict
 from datetime import date
 from pathlib import Path
@@ -25,6 +25,7 @@ from apps.research.walkforward import Fold
 
 KEYS = ["date", "stock_id"]
 FOLD_METADATA = b"fold"
+NOTES_METADATA = b"notes"
 
 
 class MissingFoldsError(LookupError):
@@ -70,7 +71,11 @@ def _check(fold: Fold, predictions: pd.DataFrame) -> None:
 
 
 def save_fold_predictions(
-    run_key: str, fold: Fold, predictions: pd.DataFrame, ticket: HoldoutTicket | None = None
+    run_key: str,
+    fold: Fold,
+    predictions: pd.DataFrame,
+    ticket: HoldoutTicket | None = None,
+    notes: Mapping[str, str] | None = None,
 ) -> Path:
     """Write one fold's predictions atomically, without the index; holdout folds need a ticket."""
     path = fold_path(run_key, fold.index)
@@ -83,6 +88,7 @@ def save_fold_predictions(
     metadata = {
         **(table.schema.metadata or {}),
         FOLD_METADATA: json.dumps(fold_record(fold)).encode(),
+        NOTES_METADATA: json.dumps(dict(notes or {})).encode(),
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     handle, temporary = tempfile.mkstemp(dir=path.parent, prefix=f".{path.stem}-", suffix=".tmp")
@@ -119,6 +125,16 @@ def _stored_record(path: Path) -> dict[str, object] | None:
         (pq.read_schema(path).metadata or {}).get(FOLD_METADATA, b"{}")
     )
     return record
+
+
+def fold_notes(run_key: str, index: int) -> dict[str, str]:
+    """Notes saved with a fold's predictions; empty without a file or notes."""
+    path = fold_path(run_key, index)
+    if not path.exists():
+        return {}
+    metadata = pq.read_schema(path).metadata or {}
+    notes: dict[str, str] = json.loads(metadata.get(NOTES_METADATA, b"{}"))
+    return notes
 
 
 def load_fold_predictions(run_key: str, fold: Fold) -> pd.DataFrame:
