@@ -1,7 +1,6 @@
 """Rebuild label_daily for a range, or for the most recent trading days (SPEC §6 處理步驟 6)."""
 
 from argparse import ArgumentParser
-from collections.abc import Iterator
 from datetime import date
 from typing import Any
 
@@ -9,13 +8,9 @@ from django.core.management.base import BaseCommand, CommandError
 
 from apps.market.calendar import TradingDays
 from apps.research.labels import build_labels, latest_price_date, write_labels
+from apps.research.ranges import years
 
 RECENT_DAYS = 60
-
-
-def _years(start: date, end: date) -> Iterator[tuple[date, date]]:
-    for year in range(start.year, end.year + 1):
-        yield max(start, date(year, 1, 1)), min(end, date(year, 12, 31))
 
 
 class Command(BaseCommand):
@@ -39,6 +34,6 @@ class Command(BaseCommand):
             raise CommandError(f"--start {start} is after the end {end}")
         rows = sum(
             write_labels(build_labels(calendar, low, high), low, high)
-            for low, high in _years(start, end)
+            for low, high in years(start, end)
         )
         self.stdout.write(f"label_daily: {rows} rows for {start}..{end}")

@@ -127,6 +127,9 @@ ETL_MAX_CONSECUTIVE_REJECTIONS = env.int("ETL_MAX_CONSECUTIVE_REJECTIONS", defau
 RESEARCH_CACHE_DIR = Path(
     env.str("RESEARCH_CACHE_DIR", default="") or BASE_DIR / "artifacts" / "predictions"
 )
+FEATURE_PARQUET_DIR = Path(
+    env.str("FEATURE_PARQUET_DIR", default="") or BASE_DIR / "artifacts" / "features"
+)
 
 LOGGING = {
     "version": 1,

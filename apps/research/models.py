@@ -4,6 +4,7 @@ from django.db import models
 from django.utils import timezone
 
 from apps.market.models import finite
+from apps.research.features.registry import feature_names
 
 
 class HoldoutScope(models.TextChoices):
@@ -81,3 +82,87 @@ class LabelDaily(models.Model):
 
     def __str__(self) -> str:
         return f"{self.stock_id} {self.date} {self.horizon}d"
+
+
+class FeatureDaily(models.Model):
+    """Raw first-batch features per stock and trading day; transforms run in the pipeline."""
+
+    pk = models.CompositePrimaryKey("stock_id", "date")
+    stock_id = models.CharField(max_length=10)
+    date = models.DateField()
+    in_universe = models.BooleanField()
+    tech_ret_1d = models.FloatField(null=True, blank=True)
+    tech_ret_5d = models.FloatField(null=True, blank=True)
+    tech_ret_20d = models.FloatField(null=True, blank=True)
+    tech_ret_60d = models.FloatField(null=True, blank=True)
+    tech_mom_250_20 = models.FloatField(null=True, blank=True)
+    tech_ma_gap_5d = models.FloatField(null=True, blank=True)
+    tech_ma_gap_20d = models.FloatField(null=True, blank=True)
+    tech_ma_gap_60d = models.FloatField(null=True, blank=True)
+    tech_vol_20d = models.FloatField(null=True, blank=True)
+    tech_vol_60d = models.FloatField(null=True, blank=True)
+    tech_volume_ratio_5_20 = models.FloatField(null=True, blank=True)
+    tech_turnover_rate_5d = models.FloatField(null=True, blank=True)
+    tech_rsi_14 = models.FloatField(null=True, blank=True)
+    tech_kd_k = models.FloatField(null=True, blank=True)
+    tech_kd_d = models.FloatField(null=True, blank=True)
+    tech_macd_hist_pct = models.FloatField(null=True, blank=True)
+    tech_high_52w_gap = models.FloatField(null=True, blank=True)
+    tech_low_52w_gap = models.FloatField(null=True, blank=True)
+    tech_limit_up_t = models.FloatField(null=True, blank=True)
+    tech_limit_up_cnt_20d = models.FloatField(null=True, blank=True)
+    tech_limit_down_cnt_20d = models.FloatField(null=True, blank=True)
+    tech_attention_t = models.FloatField(null=True, blank=True)
+    size_log_mcap = models.FloatField(null=True, blank=True)
+    liq_dollar_vol_med_20d = models.FloatField(null=True, blank=True)
+    liq_amihud_20d = models.FloatField(null=True, blank=True)
+    chip_fi_net_1d = models.FloatField(null=True, blank=True)
+    chip_fi_net_5d = models.FloatField(null=True, blank=True)
+    chip_fi_net_20d = models.FloatField(null=True, blank=True)
+    chip_it_net_5d = models.FloatField(null=True, blank=True)
+    chip_dealer_self_net_5d = models.FloatField(null=True, blank=True)
+    chip_dealer_hedge_net_5d = models.FloatField(null=True, blank=True)
+    chip_margin_chg_5d = models.FloatField(null=True, blank=True)
+    chip_margin_usage = models.FloatField(null=True, blank=True)
+    chip_short_ratio = models.FloatField(null=True, blank=True)
+    chip_fi_holding_pct = models.FloatField(null=True, blank=True)
+    chip_sbl_short_chg_5d = models.FloatField(null=True, blank=True)
+    chip_big_holder_pct_chg_1w = models.FloatField(null=True, blank=True)
+    chip_holder_count_chg_1w = models.FloatField(null=True, blank=True)
+    fund_rev_yoy = models.FloatField(null=True, blank=True)
+    fund_rev_3m_yoy = models.FloatField(null=True, blank=True)
+    fund_rev_mom = models.FloatField(null=True, blank=True)
+    fund_ep = models.FloatField(null=True, blank=True)
+    fund_eps_yoy = models.FloatField(null=True, blank=True)
+    fund_bp = models.FloatField(null=True, blank=True)
+    fund_dividend_yield = models.FloatField(null=True, blank=True)
+    fund_roe_ttm = models.FloatField(null=True, blank=True)
+    fund_gross_margin = models.FloatField(null=True, blank=True)
+    fund_op_margin = models.FloatField(null=True, blank=True)
+    fund_debt_ratio = models.FloatField(null=True, blank=True)
+    fund_gm_yoy_chg = models.FloatField(null=True, blank=True)
+    fund_opm_yoy_chg = models.FloatField(null=True, blank=True)
+    fund_cfo_to_ni = models.FloatField(null=True, blank=True)
+    fund_days_since_fs = models.FloatField(null=True, blank=True)
+    risk_beta_250d = models.FloatField(null=True, blank=True)
+    risk_idio_vol_60d = models.FloatField(null=True, blank=True)
+    ind_sector_ret_20d = models.FloatField(null=True, blank=True)
+    ind_rel_ret_20d = models.FloatField(null=True, blank=True)
+    mkt_taiex_ret_5d = models.FloatField(null=True, blank=True)
+    mkt_taiex_ret_20d = models.FloatField(null=True, blank=True)
+    mkt_sox_ret_5d = models.FloatField(null=True, blank=True)
+    mkt_tsm_adr_gap = models.FloatField(null=True, blank=True)
+    mkt_usdtwd_chg_20d = models.FloatField(null=True, blank=True)
+    mkt_business_signal = models.FloatField(null=True, blank=True)
+
+    class Meta:
+        db_table = "feature_daily"
+        indexes = [models.Index(fields=["date"], name="feature_daily_date_idx")]
+        constraints = [
+            models.CheckConstraint(
+                condition=finite(*feature_names(batch=1)), name="feature_daily_finite"
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.stock_id} {self.date}"
