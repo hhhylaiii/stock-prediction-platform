@@ -117,16 +117,63 @@ def test_business_signal_waits_for_its_announcement() -> None:
 
 
 def test_market_values_are_shared_by_every_stock_of_the_day() -> None:
-    days = weekdays("2016-03-01", 2)
-    market = market_features(days, series("TAIEX", {}), pd.Series(dtype="float64"), no_signal())
+    days = weekdays("2016-03-01", 7)
+    taiex = series("TAIEX", {day: 100.0 + k for k, day in enumerate(days)})
+    market = market_features(days, taiex, pd.Series(dtype="float64"), no_signal())
     panel = pd.DataFrame(
-        {"stock_id": ["2330", "1101", "2330"], "date": [days[0], days[0], days[1]]}
+        {"stock_id": ["2330", "1101", "2330"], "date": [days[5], days[5], days[6]], "close": 1.0}
     )
 
-    features = attach_market_features(panel, market)
+    attached = attach_market_features(panel, market)
 
-    assert list(features.columns) == ["stock_id", "date", *feature_names(Group.MARKET)]
-    assert features["stock_id"].tolist() == ["2330", "1101", "2330"]
+    assert list(attached.columns) == ["stock_id", "date", "close", *feature_names(Group.MARKET)]
+    assert attached["mkt_taiex_ret_5d"].tolist() == pytest.approx(
+        [105 / 100 - 1, 105 / 100 - 1, 106 / 101 - 1]
+    )
+
+
+def test_us_closes_go_stale_after_seven_days() -> None:
+    days = weekdays("2016-03-01", 9)
+    closes = pd.concat(
+        [
+            series("TSM_ADR", {day: 25.0 for day in days if day <= d("2016-03-03")}),
+            series("USDTWD", dict.fromkeys(days, 32.0)),
+        ]
+    )
+    tsmc = pd.Series(160.0, index=days)
+
+    gap = market_features(days, closes, tsmc, no_signal()).set_index("date")["mkt_tsm_adr_gap"]
+
+    assert gap[d("2016-03-10")] == pytest.approx(25 * 32 / 5 / 160 - 1)
+    assert math.isnan(gap[d("2016-03-11")])
+
+
+def test_business_signal_goes_stale_after_62_days() -> None:
+    days = [d("2016-03-29"), d("2016-03-30")]
+    signal = pd.DataFrame(
+        {"period": ["2015-12"], "value": [18.0], "announce_date": [d("2016-01-27")]}
+    )
+
+    values = market_features(days, series("TAIEX", {}), pd.Series(dtype="float64"), signal)
+
+    assert values["mkt_business_signal"].tolist()[0] == 18.0
+    assert math.isnan(values["mkt_business_signal"].iloc[1])
+
+
+@pytest.mark.django_db
+def test_loaded_taiex_returns_are_warm_from_the_first_day() -> None:
+    days = list(CALENDAR.between(d("2016-03-01"), d("2016-05-03")))
+    IndexDaily.objects.bulk_create(
+        IndexDaily(index_id="TAIEX", date=day, close=Decimal(8_000 + k))
+        for k, day in enumerate(days)
+    )
+
+    market = load_market_features(CALENDAR, d("2016-05-02"), d("2016-05-03"))
+
+    first = days.index(d("2016-05-02"))
+    assert value(market, d("2016-05-02"), "mkt_taiex_ret_20d") == pytest.approx(
+        (8_000 + first) / (8_000 + first - 20) - 1
+    )
 
 
 @pytest.mark.django_db

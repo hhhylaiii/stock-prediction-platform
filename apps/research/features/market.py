@@ -75,11 +75,10 @@ def market_features(
 
 
 def attach_market_features(panel: pd.DataFrame, market: pd.DataFrame) -> pd.DataFrame:
-    """Stock, date and the market features of each row's day."""
+    """New panel with the market features of each row's day."""
     names = feature_names(Group.MARKET)
     values = market.set_index("date")[names].reindex(panel["date"]).to_numpy(dtype=np.float64)
-    columns = {name: values[:, k] for k, name in enumerate(names)}
-    return pd.DataFrame({"stock_id": panel["stock_id"], "date": panel["date"], **columns})
+    return panel.assign(**{name: values[:, k] for k, name in enumerate(names)})
 
 
 def load_market_features(calendar: TradingDays, start: date, end: date) -> pd.DataFrame:
