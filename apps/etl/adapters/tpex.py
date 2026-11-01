@@ -1,5 +1,6 @@
 """TPEx OTC-market client; daily datasets arrive in Phase 2 (SPEC §3, §8.6)."""
 
+from datetime import date
 from typing import Any
 
 import requests
@@ -9,9 +10,11 @@ from apps.etl.client import SourceClient
 from apps.etl.errors import SchemaChangedError
 from apps.etl.models import RawTpex
 from apps.etl.ratelimit import RateLimiter
+from apps.etl.roc import days_in_month
 
 TPEX_MIN_INTERVAL = 3.0
 DELISTED_PATH = "/www/zh-tw/company/deListed"
+TRADING_STOCK_PATH = "/www/zh-tw/afterTrading/tradingStock"
 DEFAULT_PAGE_SIZE = 1000
 
 
@@ -62,6 +65,18 @@ class TpexClient(SourceClient):
                 raise SchemaChangedError(
                     f"TPEx delisting list ended at {len(rows)} of {total} rows"
                 )
+
+    def stock_month(self, stock_id: str, month: date) -> list[date]:
+        """Days one stock traded on TPEx in a month (個股日成交資訊); empty before listing."""
+        form = {"code": stock_id, "date": f"{month:%Y/%m}/01", "response": "json"}
+        payload = self.post_json(TRADING_STOCK_PATH, form)
+        self.save_raw("trading_stock", form, payload)
+        if payload.get("stat") != "ok":
+            raise SchemaChangedError(f"TPEx stock month stat is {payload.get('stat')!r}")
+        tables = payload.get("tables")
+        if not isinstance(tables, list) or not tables or not isinstance(tables[0], dict):
+            raise SchemaChangedError("TPEx stock month has no table")
+        return days_in_month(tables[0].get("data"), month, "TPEx stock month")
 
     @staticmethod
     def _first_table(payload: dict[str, Any]) -> dict[str, Any]:

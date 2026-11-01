@@ -1,12 +1,8 @@
 """Backfill a source dataset stock by stock with a resumable checkpoint (SPEC §5 Phase 1)."""
 
-import signal
 from argparse import ArgumentParser
-from collections.abc import Iterator
-from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, timedelta
-from types import FrameType
 from typing import Any
 
 from django.core.management.base import BaseCommand, CommandError
@@ -19,10 +15,9 @@ from apps.etl.errors import SourceError
 from apps.etl.management.options import as_date, required_date
 from apps.etl.models import EtlRun
 from apps.etl.ratelimit import RetryableError
+from apps.etl.runs import failing_on_termination
 from apps.market.calendar import CalendarError
 from apps.market.models import StockMaster
-
-STOP_SIGNALS = (signal.SIGTERM, signal.SIGHUP)
 
 
 def stocks_alive_in(start: date, chosen: list[str] | None) -> list[str]:
@@ -88,21 +83,6 @@ def require_same_stocks(point: ResumePoint, stocks: list[str]) -> None:
             f"stock list changed since etl_run {point.run_id} started, from {point.stocks} "
             f"to {len(stocks)} stocks; rerun without --resume, or back up the rest with --stock"
         )
-
-
-def _terminate(signum: int, frame: FrameType | None) -> None:
-    """SIGTERM and SIGHUP end the run as failed, keeping its checkpoint for --resume."""
-    raise SystemExit(128 + signum)
-
-
-@contextmanager
-def failing_on_termination() -> Iterator[None]:
-    previous = {signum: signal.signal(signum, _terminate) for signum in STOP_SIGNALS}
-    try:
-        yield
-    finally:
-        for signum, handler in previous.items():
-            signal.signal(signum, handler)
 
 
 class Command(BaseCommand):

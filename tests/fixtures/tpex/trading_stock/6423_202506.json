@@ -1,0 +1,31 @@
+{
+ "tables": [
+  {
+   "title": "個股日成交資訊",
+   "subtitle": "6423 億而得 114年06月",
+   "date": "20250601",
+   "data": [],
+   "fields": [
+    "日 期",
+    "成交張數",
+    "成交仟元",
+    "開盤",
+    "最高",
+    "最低",
+    "收盤",
+    "漲跌",
+    "筆數"
+   ],
+   "notes": [],
+   "totalCount": 0,
+   "summary": []
+  }
+ ],
+ "date": "20250601",
+ "code": "6423",
+ "name": "億而得",
+ "showListPriceNote": false,
+ "showListPriceLink": false,
+ "flagField": "張數",
+ "stat": "ok"
+}

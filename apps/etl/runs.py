@@ -1,14 +1,17 @@
 """etl_run bookkeeping shared by every ETL entry point (SPEC §5)."""
 
+import signal
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import date
+from types import FrameType
 
 from django.utils import timezone
 
 from apps.etl.models import EtlRun
 
 ERROR_TEXT_LIMIT = 4000
+STOP_SIGNALS = (signal.SIGTERM, signal.SIGHUP)
 
 
 @contextmanager
@@ -26,3 +29,18 @@ def tracked_run(source: str, dataset: str, start: date, end: date) -> Iterator[E
     run.status = EtlRun.Status.SUCCESS
     run.finished_at = timezone.now()
     run.save(update_fields=["status", "rows", "checkpoint", "end_date", "finished_at"])
+
+
+def _terminate(signum: int, frame: FrameType | None) -> None:
+    """SIGTERM and SIGHUP end the run as failed, keeping its checkpoint."""
+    raise SystemExit(128 + signum)
+
+
+@contextmanager
+def failing_on_termination() -> Iterator[None]:
+    previous = {signum: signal.signal(signum, _terminate) for signum in STOP_SIGNALS}
+    try:
+        yield
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)

@@ -538,3 +538,39 @@ def test_one_statement_losing_a_key_fails_the_batch(
     with pytest.raises(CommandError, match="value"):
         _backfill("financial_statement", "2330", YEAR_2024)
     assert FinancialStatement.objects.count() == 0
+
+
+@responses.activate
+def test_prices_before_the_listing_date_are_not_written(mock: Callable[..., None]) -> None:
+    StockMaster.objects.filter(stock_id="2884").update(list_date=date(2013, 8, 15))
+    mock("TaiwanStockPrice", "price_2884_201308", "2884", AUGUST)
+    _backfill("daily_price", "2884", AUGUST)
+    assert min(DailyPrice.objects.values_list("date", flat=True)) == date(2013, 8, 15)
+
+
+@responses.activate
+def test_chips_before_the_listing_date_are_not_written(mock: Callable[..., None]) -> None:
+    StockMaster.objects.filter(stock_id="2330").update(list_date=date(2026, 10, 15))
+    _mock_chip(mock)
+    _backfill("daily_chip", "2330", OCTOBER)
+    assert min(DailyChip.objects.values_list("date", flat=True)) == date(2026, 10, 15)
+
+
+@responses.activate
+def test_valuations_outside_the_listing_span_are_not_written(mock: Callable[..., None]) -> None:
+    span = ("2026-10-27", "2026-10-30")
+    StockMaster.objects.filter(stock_id="2330").update(
+        list_date=date(2026, 10, 28), delist_date=date(2026, 10, 30)
+    )
+    mock("TaiwanStockPER", "per_2330_202610", "2330", span)
+    _backfill("daily_valuation", "2330", span)
+    days = DailyValuation.objects.values_list("date", flat=True)
+    assert list(days) == [date(2026, 10, 28), date(2026, 10, 29)]
+
+
+@responses.activate
+def test_prices_from_the_delisting_day_on_are_not_written(mock: Callable[..., None]) -> None:
+    StockMaster.objects.filter(stock_id="2884").update(delist_date=date(2013, 8, 15))
+    mock("TaiwanStockPrice", "price_2884_201308", "2884", AUGUST)
+    _backfill("daily_price", "2884", AUGUST)
+    assert max(DailyPrice.objects.values_list("date", flat=True)) == date(2013, 8, 14)
