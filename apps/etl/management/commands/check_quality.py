@@ -5,6 +5,7 @@ from typing import Any
 
 from django.core.management.base import BaseCommand, CommandError
 
+from apps.etl.alerts import dispatch
 from apps.etl.management.options import as_date
 from apps.etl.quality import run_checks
 from apps.market.calendar import CalendarError, TradingDays
@@ -27,6 +28,7 @@ class Command(BaseCommand):
         except CalendarError as exc:
             raise CommandError(f"{type(exc).__name__}: {exc}") from exc
         results = run_checks(day, calendar)
+        dispatch(results)
         for row in results:
             self.stdout.write(
                 f"{day} {row.check_name} {row.severity} {row.detail.get('table', '')}"
