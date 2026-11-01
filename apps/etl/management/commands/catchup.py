@@ -1,6 +1,7 @@
 """Fetch the trading days the daily datasets missed and check those days again."""
 
 from argparse import ArgumentParser
+from datetime import timedelta
 from typing import Any
 
 from django.core.management.base import BaseCommand, CommandError
@@ -16,22 +17,26 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser: ArgumentParser) -> None:
         parser.add_argument("--since", required=True)
-        parser.add_argument("--until", help="last day to look at; defaults to today")
+        parser.add_argument(
+            "--until", help="last day to look at; defaults to the last session before today"
+        )
         parser.add_argument("--source")
         parser.add_argument("--dataset")
 
     def handle(self, *args: Any, **options: Any) -> None:
         since = required_date(options["since"], "--since")
-        until = as_date(options["until"], "--until") or timezone.localdate()
-        if since > until:
-            raise CommandError(f"--since {since} must not be after --until {until}")
+        until = as_date(options["until"], "--until")
         jobs = select_jobs(options["source"], options["dataset"])
         if not jobs:
             raise CommandError(
                 f"no catch-up job for source {options['source']!r} dataset {options['dataset']!r}"
             )
         try:
-            report = catch_up(since, until, TradingDays.from_db(), jobs)
+            calendar = TradingDays.from_db()
+            until = until or calendar.latest_on_or_before(timezone.localdate() - timedelta(days=1))
+            if since > until:
+                raise CommandError(f"--since {since} must not be after --until {until}")
+            report = catch_up(since, until, calendar, jobs)
         except CalendarError as exc:
             raise CommandError(f"{type(exc).__name__}: {exc}") from exc
         for line in report.lines():

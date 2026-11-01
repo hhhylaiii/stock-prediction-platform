@@ -5,7 +5,6 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from functools import reduce
-from itertools import groupby
 from operator import or_
 
 from django.db import models
@@ -19,11 +18,12 @@ from apps.etl.adapters.twse_tables import TABLES as TWSE_TABLES
 from apps.etl.adapters.yahoo import SERIES
 from apps.etl.alerts import dispatch
 from apps.etl.errors import SourceError, SourceNotReadyError
-from apps.etl.models import EtlRun
+from apps.etl.models import DataQualityLog
 from apps.etl.quality import run_checks
 from apps.etl.ratelimit import RetryableError
-from apps.etl.replay import reprocess
-from apps.market.calendar import CalendarError, TradingDays
+from apps.etl.replay import rebuild_after
+from apps.etl.runs import covered_days
+from apps.market.calendar import CalendarError, OutsideCalendarError, TradingDays
 from apps.market.models import (
     DailyChip,
     DailyPrice,
@@ -133,26 +133,6 @@ def select_jobs(source: str | None = None, dataset: str | None = None) -> list[J
     return [job for job in JOBS if source in (None, job.source) and dataset in (None, job.dataset)]
 
 
-def covered_days(source: str, dataset: str, days: Sequence[date]) -> set[date]:
-    """Days inside a successful run, or inside the checkpointed part of an unfinished one."""
-    if not days:
-        return set()
-    runs = EtlRun.objects.filter(
-        source=source, dataset=dataset, start_date__lte=max(days), end_date__gte=min(days)
-    ).values_list("start_date", "end_date", "status", "checkpoint")
-    spans = [
-        (start, _done_until(end, status, checkpoint)) for start, end, status, checkpoint in runs
-    ]
-    return {day for day in days for start, until in spans if until and start <= day <= until}
-
-
-def _done_until(end: date, status: str, checkpoint: dict[str, object]) -> date | None:
-    if status == EtlRun.Status.SUCCESS:
-        return end
-    last = checkpoint.get("last_date")
-    return date.fromisoformat(last) if isinstance(last, str) else None
-
-
 def missing_days(job: Job, days: Sequence[date]) -> list[date]:
     done = job.present(days) if job.present else covered_days(job.source, job.dataset, days)
     return [day for day in days if day not in done]
@@ -168,15 +148,31 @@ def catch_up(
     days = calendar.between(since, until)
     outcomes = {job.key: _catch_up_job(job, days, calendar) for job in jobs}
     written = sorted({day for outcome in outcomes.values() for day in outcome.written})
-    for day in written:
+    checked = _days_to_check(written, calendar)
+    for day in checked:
         dispatch(run_checks(day, calendar))
     return CatchupReport(
         written=_dated(outcomes, "written"),
         rebuilt=_dated(outcomes, "rebuilt"),
         not_ready={k: v for outcome in outcomes.values() for k, v in outcome.not_ready.items()},
         failed={k: v for outcome in outcomes.values() for k, v in outcome.failed.items()},
-        checked=[day.isoformat() for day in written],
+        checked=[day.isoformat() for day in checked],
     )
+
+
+def _days_to_check(written: Sequence[date], calendar: TradingDays) -> list[date]:
+    """Written days, plus each next session already checked against the gap before it."""
+    sessions = (_next_session(calendar, day) for day in written)
+    following = {day for day in sessions if day is not None} - set(written)
+    checked = DataQualityLog.objects.filter(date__in=following).values_list("date", flat=True)
+    return sorted({*written, *checked})
+
+
+def _next_session(calendar: TradingDays, day: date) -> date | None:
+    try:
+        return calendar.shift(day, 1)
+    except OutsideCalendarError:
+        return None
 
 
 def _dated(outcomes: dict[str, JobOutcome], name: str) -> dict[str, list[str]]:
@@ -198,35 +194,23 @@ def _catch_up_job(job: Job, days: Sequence[date], calendar: TradingDays) -> JobO
         except SourceNotReadyError as exc:
             not_ready[f"{job.key} {day}"] = str(exc)
             continue
-        except (SourceError, RetryableError) as exc:
-            failed[f"{job.key} {day}"] = f"{type(exc).__name__}: {exc}"
-            logger.warning("catchup %s %s failed; later days wait: %s", job.key, day, exc)
+        except Exception as exc:
+            failed[f"{job.key} {day}"] = _failure(job, f"{day}; later days wait", exc)
             break
         written.append(day)
     rebuilt: list[date] = []
     if job.rebuild_later and written:
-        rebuilt, rebuild_failed = _rebuild_after(job, written[0], calendar)
-        failed = {**failed, **rebuild_failed}
+        try:
+            rebuilt = rebuild_after(job.source, job.dataset, written[0], calendar)
+        except Exception as exc:
+            failed[f"{job.key} rebuild after {written[0]}"] = _failure(
+                job, f"rebuild after {written[0]}", exc
+            )
     return JobOutcome(written, rebuilt, not_ready, failed)
 
 
-def _rebuild_after(
-    job: Job, first: date, calendar: TradingDays
-) -> tuple[list[date], dict[str, str]]:
-    """Replay every later fetched day in order, so values kept only on change stay right."""
-    end = min(calendar.end, timezone.localdate())
-    later = [day for day in calendar.between(first, end) if day > first]
-    fetched = covered_days(job.source, job.dataset, later)
-    rebuilt: list[date] = []
-    for is_fetched, group in groupby(later, key=lambda day: day in fetched):
-        span = list(group)
-        if not is_fetched:
-            continue
-        try:
-            reprocess(job.source, job.dataset, span[0], span[-1], calendar)
-        except (SourceError, RetryableError) as exc:
-            return rebuilt, {
-                f"{job.key} rebuild {span[0]}..{span[-1]}": f"{type(exc).__name__}: {exc}"
-            }
-        rebuilt.extend(span)
-    return rebuilt, {}
+def _failure(job: Job, step: str, exc: Exception) -> str:
+    """Log a failed step, with the traceback when it is not a source answering badly."""
+    expected = isinstance(exc, (SourceError, RetryableError))
+    logger.error("catchup failed %s %s: %s", job.key, step, exc, exc_info=not expected)
+    return f"{type(exc).__name__}: {exc}"

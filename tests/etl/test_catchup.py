@@ -12,6 +12,7 @@ from django.core.management.base import CommandError
 from responses import matchers
 
 from apps.etl.adapters import ADAPTERS
+from apps.etl.adapters.twse import TwseAdapter
 from apps.etl.catchup import (
     JOBS,
     Job,
@@ -38,6 +39,7 @@ SHARES = "twse/shares_outstanding/mi_qfiis_20261028.json"
 PRICE_JOB = Job("twse", "daily_price", rows_present(DailyPrice, "TWSE"))
 SHARE_JOB = Job("twse", "shares_outstanding", rebuild_later=True)
 DAYS = [date(2026, 10, 27), date(2026, 10, 28), date(2026, 10, 29)]
+EVENING = datetime(2026, 10, 29, 20, tzinfo=ZoneInfo("Asia/Taipei"))
 
 pytestmark = pytest.mark.usefixtures("october_2026_in_db", "quiet_limiter", "listed")
 
@@ -218,7 +220,46 @@ def test_a_later_day_without_raw_is_reported_as_a_failed_rebuild(
     report = catch_up(DAYS[0], DAYS[1], october_2026_in_db, [SHARE_JOB])
     assert report.written == {"twse/shares_outstanding": ["2026-10-27", "2026-10-28"]}
     assert report.rebuilt == {}
-    assert list(report.failed) == ["twse/shares_outstanding rebuild 2026-10-28..2026-10-29"]
+    assert list(report.failed) == ["twse/shares_outstanding rebuild after 2026-10-27"]
+
+
+@responses.activate
+def test_the_next_session_checked_against_the_gap_is_checked_again(
+    october_2026_in_db: TradingDays,
+    load_fixture: Callable[[str], Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sent: list[set[date]] = []
+    monkeypatch.setattr(
+        "apps.etl.catchup.dispatch", lambda results: sent.append({row.date for row in results})
+    )
+    DailyPrice.objects.create(stock_id="2330", date=DAYS[2], volume=1, turnover=1)
+    DataQualityLog.objects.create(date=DAYS[2], check_name="row_count", severity="info", detail={})
+    _serve_prices(load_fixture, DAYS[1])
+    report = catch_up(DAYS[1], DAYS[1], october_2026_in_db, [PRICE_JOB])
+    assert report.checked == ["2026-10-28", "2026-10-29"]
+    assert sent == [{DAYS[1]}, {DAYS[2]}]
+
+
+@responses.activate
+def test_an_unexpected_error_fails_its_job_only(
+    october_2026_in_db: TradingDays,
+    load_fixture: Callable[[str], Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = TwseAdapter.normalize
+
+    def normalize(self: TwseAdapter, dataset: str, raw: Any) -> Any:
+        if dataset == "daily_price":
+            raise ValueError("duplicate keys")
+        return original(self, dataset, raw)
+
+    monkeypatch.setattr(TwseAdapter, "normalize", normalize)
+    _serve_prices(load_fixture, DAYS[0])
+    _serve(MI_QFIIS, load_fixture(SHARES), DAYS[0], selectType="ALLBUT0999")
+    report = catch_up(DAYS[0], DAYS[0], october_2026_in_db, [PRICE_JOB, SHARE_JOB])
+    assert report.failed == {"twse/daily_price 2026-10-27": "ValueError: duplicate keys"}
+    assert report.written == {"twse/shares_outstanding": ["2026-10-27"]}
 
 
 def test_catchup_command_prints_the_report(capsys: pytest.CaptureFixture[str]) -> None:
@@ -247,7 +288,17 @@ def test_catchup_command_fails_when_a_step_failed(capsys: pytest.CaptureFixture[
         ({"since": "2026-10-27", "until": "2026-10-30"}, "after today"),
     ],
 )
-@time_machine.travel(datetime(2026, 10, 29, 20, tzinfo=ZoneInfo("Asia/Taipei")), tick=False)
+@time_machine.travel(EVENING, tick=False)
 def test_catchup_command_rejects_bad_options(options: dict[str, str], message: str) -> None:
     with pytest.raises(CommandError, match=message):
         call_command("catchup", **options)
+
+
+@time_machine.travel(EVENING, tick=False)
+def test_catchup_command_stops_at_the_session_before_today(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    for day in DAYS[:2]:
+        DailyPrice.objects.create(stock_id="2330", date=day, volume=1, turnover=1)
+    call_command("catchup", since="2026-10-27", source="twse", dataset="daily_price")
+    assert capsys.readouterr().out.strip() == "nothing to catch up"
