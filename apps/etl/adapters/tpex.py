@@ -22,6 +22,7 @@ from apps.etl.adapters.exchange_tables import (
     check_published,
     parsed_quotes,
     quoted_only,
+    share_changes,
     source_rows,
     standard_rows,
     upsert_daily_prices,
@@ -44,8 +45,10 @@ from apps.etl.errors import SchemaChangedError, SourceNotReadyError
 from apps.etl.exchange_rows import TPEX_LAYOUT, OfficialDay, official_days
 from apps.etl.models import RawTpex
 from apps.etl.ratelimit import RateLimiter
+from apps.etl.share_counts import drop_repeated_counts, latest_counts
 from apps.etl.upsert import upsert
 from apps.market.calendar import TradingDays
+from apps.market.models import DailyChip
 
 TPEX_MIN_INTERVAL = 3.0
 DELISTED_PATH = "/www/zh-tw/company/deListed"
@@ -62,6 +65,7 @@ QUOTED_TYPE = "EW"
 DAILY_PRICE = "daily_price"
 INDEX_DAILY = "index_daily"
 INSTITUTIONAL = "institutional"
+SHARES_OUTSTANDING = "shares_outstanding"
 EVENT_DATASETS = frozenset({ATTENTION, DISPOSITION, FULL_DELIVERY})
 
 
@@ -183,9 +187,13 @@ class TpexAdapter(BaseAdapter):
             return index_frame(raw_df)
         table = TABLES[dataset]
         frame = standard_rows(raw_df, table)
-        quoted = {day: self._quoted_codes(day) for day in sorted(set(raw_df["date"]))}
-        zeros = tuple(table.columns) if dataset == INSTITUTIONAL else ()
-        return quoted_only(frame, quoted, table.where, zeros)
+        if table.model is DailyChip:
+            quoted = {day: self._quoted_codes(day) for day in sorted(set(raw_df["date"]))}
+            zeros = tuple(table.columns) if dataset == INSTITUTIONAL else ()
+            return quoted_only(frame, quoted, table.where, zeros)
+        if dataset == SHARES_OUTSTANDING:
+            return share_changes(frame, latest_counts(min(raw_df["date"])))
+        return frame
 
     def upsert(self, dataset: str, frame: pd.DataFrame) -> int:
         self.require_dataset(dataset)
@@ -196,9 +204,12 @@ class TpexAdapter(BaseAdapter):
         if dataset == INDEX_DAILY:
             return upsert_index_rows(frame)
         table = TABLES[dataset]
-        return upsert(
+        rows = upsert(
             table.model, frame, unique_fields=table.keys, update_fields=tuple(table.columns)
         )
+        if dataset == SHARES_OUTSTANDING:
+            drop_repeated_counts(frame["stock_id"])
+        return rows
 
     def _fetch_span(self, dataset: str, first: date, last: date) -> pd.DataFrame:
         if dataset == INDEX_DAILY:

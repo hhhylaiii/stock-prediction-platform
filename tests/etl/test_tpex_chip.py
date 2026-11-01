@@ -41,6 +41,18 @@ DATASETS = {
         "tpex/sbl/sbl_20261028.json",
         "tpex/sbl/sbl_20261101_empty.json",
     ),
+    "foreign_holding": (
+        f"{BASE}/insti/qfii",
+        {"date": "2026/10/28", "response": "json"},
+        "tpex/foreign_holding/qfii_20261028.json",
+        "tpex/foreign_holding/qfii_20261101_empty.json",
+    ),
+    "day_trade": (
+        f"{BASE}/intraday/stat",
+        {"date": "2026/10/28", "type": "Daily", "response": "json"},
+        "tpex/day_trade/daytrade_20261028.json",
+        "tpex/day_trade/daytrade_20261101_empty.json",
+    ),
 }
 QUOTE_FIXTURES = (
     "tpex/daily_price/otc_20261028.json",
@@ -216,6 +228,58 @@ def test_sbl_balance_that_does_not_roll_forward_is_a_schema_change(
     responses.post(DATASETS["sbl"][0], json=payload)
     with pytest.raises(SchemaChangedError, match="6488"):
         adapter.normalize("sbl", adapter.fetch("sbl", DAY, DAY))
+
+
+@responses.activate
+@pytest.mark.django_db
+@pytest.mark.usefixtures("quotes_loaded")
+def test_foreign_holding_percent_text_and_unquoted_codes_skipped(
+    adapter: TpexAdapter, load_fixture: Callable[[str], Any]
+) -> None:
+    _serve(load_fixture, "foreign_holding")
+    rows = _load(adapter, "foreign_holding")
+    assert rows["6488"] == {"stock_id": "6488", "date": DAY, "fi_holding_pct": 30.29}
+    assert rows["2064"]["fi_holding_pct"] == 0.18
+    assert set(rows) == {"1240", "2064", "3293", "6488"}
+
+
+@responses.activate
+@pytest.mark.django_db
+@pytest.mark.parametrize("text", ["30.29", "%", "abc%"], ids=["no-sign", "sign-only", "word"])
+def test_foreign_holding_percent_without_a_number_and_sign_is_a_schema_change(
+    adapter: TpexAdapter, load_fixture: Callable[[str], Any], text: str
+) -> None:
+    payload = load_fixture(DATASETS["foreign_holding"][2])
+    next(row for row in payload["tables"][0]["data"] if row[1] == "6488")[7] = text
+    responses.post(DATASETS["foreign_holding"][0], json=payload)
+    with pytest.raises(SchemaChangedError, match="percent"):
+        adapter.normalize("foreign_holding", adapter.fetch("foreign_holding", DAY, DAY))
+
+
+@responses.activate
+@pytest.mark.django_db
+@pytest.mark.usefixtures("quotes_loaded")
+def test_day_trade_reads_the_stock_table_and_keeps_zero_volume(
+    adapter: TpexAdapter, load_fixture: Callable[[str], Any]
+) -> None:
+    _serve(load_fixture, "day_trade")
+    rows = _load(adapter, "day_trade")
+    assert rows["6488"] == {"stock_id": "6488", "date": DAY, "day_trade_volume": 2_749_000}
+    assert rows["1240"]["day_trade_volume"] == 0
+    assert set(rows) == {"006201", "1240", "2064", "3293", "6488"}
+
+
+@responses.activate
+@pytest.mark.django_db
+def test_day_trade_without_the_stock_table_is_a_schema_change(
+    adapter: TpexAdapter, load_fixture: Callable[[str], Any]
+) -> None:
+    payload = load_fixture(DATASETS["day_trade"][2])
+    payload["tables"][1]["fields"][0] = "代號"
+    responses.post(DATASETS["day_trade"][0], json=payload)
+    with pytest.raises(SchemaChangedError, match="證券代號"):
+        adapter.fetch("day_trade", DAY, DAY)
+    assert RawTpex.objects.count() == 1
 
 
 @responses.activate

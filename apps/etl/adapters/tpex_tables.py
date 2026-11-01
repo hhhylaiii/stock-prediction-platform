@@ -1,7 +1,7 @@
 """TPEx-specific tables and checks on top of the shared exchange table parsing (SPEC §8.6)."""
 
 import re
-from collections.abc import Hashable, Mapping, Sequence
+from collections.abc import Callable, Hashable, Mapping, Sequence
 from datetime import date
 from typing import Any
 
@@ -13,14 +13,25 @@ from apps.etl.adapters.exchange_tables import (
     check_answered,
     find_table,
     is_foreign_currency_etf,
+    is_fraction,
+    is_percent,
+    is_positive,
     lots_in_shares,
     net_shares,
+    ratio,
     row_of_day,
     shares,
+    yield_fraction,
 )
 from apps.etl.errors import SchemaChangedError
-from apps.etl.exchange_rows import parse_count, parse_price, parse_signed, stock_code
-from apps.market.models import IndexId
+from apps.etl.exchange_rows import (
+    parse_count,
+    parse_percent,
+    parse_price,
+    parse_signed,
+    stock_code,
+)
+from apps.market.models import DailyValuation, IndexId, SharesOutstanding
 
 TPEX = "TPEx"
 OK_STAT = "ok"
@@ -77,6 +88,9 @@ DISPOSAL_FIELDS = (SECURITY_CODE, "公布日期", "處置起訖時間")
 ALTERED_TITLE = "變更交易、分盤交易、管理股票與停止交易資訊"
 ALTERED_FLAGS = ("變更交易", "屬管理股票")
 FLAG = "Ｙ"
+NOT_AVAILABLE = "N/A"
+PERCENT_SIGN = "%"
+QFII_TITLE = "櫃檯買賣股票僑外資及陸資持股比例排行表"
 LISTED_COUNT = re.compile(r"總累計次數:\s*(\d+)")
 
 
@@ -259,6 +273,31 @@ def sbl_rolls_forward(row: Mapping[Hashable, Any]) -> bool:
     return short_holds and lent_holds
 
 
+def published_ratio(values: Sequence[Any]) -> float | None:
+    """A ratio such as P/E; TPEx prints N/A where none is published."""
+    return None if [str(value).strip() for value in values] == [NOT_AVAILABLE] else ratio(values)
+
+
+def percent_text(values: Sequence[Any]) -> float:
+    """A percentage printed with its sign, such as 30.29%."""
+    (text,) = (str(value).strip() for value in values)
+    if not text.endswith(PERCENT_SIGN) or text == PERCENT_SIGN:
+        raise SchemaChangedError(f"unexpected percent value {text!r}")
+    return parse_percent(text.removesuffix(PERCENT_SIGN))
+
+
+def table_with(field: str) -> Callable[[dict[str, Any]], dict[str, Any]]:
+    """Locate the response table listing the given field, for tables without a title."""
+
+    def locate(payload: dict[str, Any]) -> dict[str, Any]:
+        for table in payload.get("tables", []):
+            if field in (str(name).strip() for name in table.get("fields") or []):
+                return dict(table)
+        raise SchemaChangedError(f"no TPEx table lists {field}")
+
+    return locate
+
+
 def _same(*names: str) -> tuple[tuple[str, str], ...]:
     return tuple((name, name) for name in names)
 
@@ -320,5 +359,62 @@ TABLES: dict[str, DailyTable] = {
             for group, field in zip(SBL_GROUPS, SBL_SOURCE_FIELDS, strict=True)
         ),
         consistent=sbl_rolls_forward,
+    ),
+    "foreign_holding": DailyTable(
+        label="insti/qfii",
+        path="/www/zh-tw/insti/qfii",
+        params={},
+        title=QFII_TITLE,
+        hints=None,
+        code=CODE_FIELD,
+        name="名稱",
+        columns={"fi_holding_pct": ("僑外資及陸資持股比率(E=C/A)",)},
+        convert=percent_text,
+        valid={"fi_holding_pct": is_percent},
+        exchange=TPEX,
+    ),
+    "day_trade": DailyTable(
+        label="intraday/stat",
+        path="/www/zh-tw/intraday/stat",
+        params={"type": "Daily"},
+        title=None,
+        hints=None,
+        code=SECURITY_CODE,
+        name="證券名稱",
+        columns={"day_trade_volume": ("當日沖銷交易成交股數",)},
+        convert=shares,
+        exchange=TPEX,
+        locate=table_with(SECURITY_CODE),
+    ),
+    "daily_valuation": DailyTable(
+        label="afterTrading/peQryDate",
+        path="/www/zh-tw/afterTrading/peQryDate",
+        params={},
+        title=None,
+        hints=None,
+        code="股票代號",
+        name="公司名稱",
+        columns={"pe": ("本益比",), "pb": ("股價淨值比",), "dividend_yield": ("殖利率(%)",)},
+        convert=published_ratio,
+        model=DailyValuation,
+        valid={"pe": is_positive, "pb": is_positive, "dividend_yield": is_fraction},
+        converters={"dividend_yield": yield_fraction},
+        exchange=TPEX,
+        locate=table_with("股票代號"),
+    ),
+    "shares_outstanding": DailyTable(
+        label="insti/qfii",
+        path="/www/zh-tw/insti/qfii",
+        params={},
+        title=QFII_TITLE,
+        hints=None,
+        code=CODE_FIELD,
+        name="名稱",
+        columns={"shares": ("發行股數(A)",)},
+        convert=shares,
+        model=SharesOutstanding,
+        valid={"shares": is_positive},
+        exchange=TPEX,
+        keys=("stock_id", "effective_date"),
     ),
 }
