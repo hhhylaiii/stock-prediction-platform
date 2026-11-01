@@ -9,6 +9,15 @@ import requests
 from django.conf import settings
 
 from apps.etl.adapters.base import BaseAdapter
+from apps.etl.adapters.twse_tables import (
+    NO_DATA_STAT,
+    check_answer,
+    check_published,
+    find_table,
+    is_foreign_currency_etf,
+    taiex_frame,
+    taiex_rows,
+)
 from apps.etl.client import SourceClient
 from apps.etl.errors import SchemaChangedError, SourceNotReadyError
 from apps.etl.exchange_rows import (
@@ -23,7 +32,7 @@ from apps.etl.ratelimit import RateLimiter
 from apps.etl.upsert import upsert
 from apps.market.adjust import refresh_where_later_events
 from apps.market.calendar import TradingDays
-from apps.market.models import DailyPrice
+from apps.market.models import DailyPrice, IndexDaily
 
 TWSE_MIN_INTERVAL = 3.0
 DAILY_QUOTES_PATH = "/rwd/zh/afterTrading/MI_INDEX"
@@ -45,34 +54,8 @@ DAILY_QUOTES_COLUMNS = {
 }
 PRICE_COLUMNS = ("open", "high", "low", "close")
 COUNT_COLUMNS = ("volume", "turnover")
-NO_DATA_STAT = "沒有符合條件的資料"
-FOREIGN_CURRENCY_CODE_SUFFIXES = frozenset("KMSC")
-
-
-def is_foreign_currency_etf(code: str) -> bool:
-    """TWSE: an ETF code whose sixth character is K, M, S or C trades in a foreign currency."""
-    return len(code) == 6 and code.startswith("00") and code[5] in FOREIGN_CURRENCY_CODE_SUFFIXES
-
-
-def find_table(payload: dict[str, Any], title_part: str) -> dict[str, Any]:
-    for table in payload.get("tables", []):
-        if title_part in (table.get("title") or ""):
-            return dict(table)
-    raise SchemaChangedError(f"no table titled *{title_part}* in TWSE response")
-
-
-def check_answer(payload: dict[str, Any], day: date) -> None:
-    """The payload must be a successful answer for the requested day itself."""
-    stat = str(payload.get("stat", ""))
-    if stat != "OK":
-        raise SchemaChangedError(f"TWSE answered with unexpected stat {stat!r}")
-    requested = day.strftime("%Y%m%d")
-    answered = str(payload.get("date", ""))
-    if answered == requested:
-        return
-    if len(answered) == len(requested) and answered.isdigit() and answered < requested:
-        raise SourceNotReadyError(f"TWSE still serves {answered} when asked for {day}")
-    raise SchemaChangedError(f"TWSE answered for {answered!r} instead of {requested}")
+DAILY_PRICE = "daily_price"
+INDEX_DAILY = "index_daily"
 
 
 def quotes_frame(payload: dict[str, Any], day: date) -> pd.DataFrame:
@@ -146,7 +129,7 @@ class TwseClient(SourceClient):
 class TwseAdapter(BaseAdapter):
     source = "twse"
     raw_model = RawTwse
-    datasets = frozenset({"daily_price"})
+    datasets = frozenset({DAILY_PRICE, INDEX_DAILY})
 
     def __init__(
         self,
@@ -161,11 +144,36 @@ class TwseAdapter(BaseAdapter):
         self, dataset: str, start: date, end: date, stock_id: str | None = None
     ) -> pd.DataFrame:
         self.require_dataset(dataset)
-        frames = [self._fetch_daily_quotes(day) for day in self.trading_days(start, end)]
+        frames = [self._fetch_day(dataset, day) for day in self.trading_days(start, end)]
         return pd.concat(frames, ignore_index=True)
 
     def normalize(self, dataset: str, raw_df: pd.DataFrame) -> pd.DataFrame:
         self.require_dataset(dataset)
+        if dataset == DAILY_PRICE:
+            return self._normalize_quotes(raw_df)
+        return taiex_frame(raw_df)
+
+    def upsert(self, dataset: str, frame: pd.DataFrame) -> int:
+        self.require_dataset(dataset)
+        if dataset == DAILY_PRICE:
+            return self._upsert_quotes(frame)
+        return upsert(
+            IndexDaily,
+            frame,
+            unique_fields=("index_id", "date"),
+            update_fields=("close", "volume"),
+        )
+
+    def _fetch_day(self, dataset: str, day: date) -> pd.DataFrame:
+        if dataset == DAILY_PRICE:
+            return self._fetch_daily_quotes(day)
+        params = {"date": f"{day:%Y%m}01", "response": "json"}
+        payload = self.client.get_json(MONTHLY_TRADING_PATH, params)
+        check_published(payload, "FMTQIK", day)
+        self.save_raw(dataset, params, payload)
+        return taiex_rows(payload, day)
+
+    def _normalize_quotes(self, raw_df: pd.DataFrame) -> pd.DataFrame:
         missing = set(DAILY_QUOTES_COLUMNS) - set(raw_df.columns)
         if missing:
             raise SchemaChangedError(f"TWSE daily quotes lost columns {sorted(missing)}")
@@ -182,8 +190,7 @@ class TwseAdapter(BaseAdapter):
             **{col: frame[col].map(convert) for col, convert in converters.items()},
         )
 
-    def upsert(self, dataset: str, frame: pd.DataFrame) -> int:
-        self.require_dataset(dataset)
+    def _upsert_quotes(self, frame: pd.DataFrame) -> int:
         rows = upsert(
             DailyPrice,
             frame,
@@ -200,5 +207,5 @@ class TwseAdapter(BaseAdapter):
         stat = str(payload.get("stat", ""))
         if NO_DATA_STAT in stat:
             raise SourceNotReadyError(f"TWSE daily quotes for {day} not available: {stat}")
-        self.save_raw("daily_price", params, payload)
+        self.save_raw(DAILY_PRICE, params, payload)
         return quotes_frame(payload, day)
