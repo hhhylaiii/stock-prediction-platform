@@ -9,6 +9,7 @@ from apps.etl.adapters.finmind import FinmindAdapter
 from apps.etl.adapters.tdcc import TdccAdapter
 from apps.etl.adapters.tpex import TpexAdapter
 from apps.etl.adapters.twse import TwseAdapter
+from apps.etl.adapters.yahoo import YahooAdapter
 from apps.etl.ratelimit import RateLimit, RateLimiter
 from apps.market.calendar import TradingDays
 
@@ -17,6 +18,7 @@ ADAPTERS: dict[str, type[BaseAdapter]] = {
     TpexAdapter.source: TpexAdapter,
     FinmindAdapter.source: FinmindAdapter,
     TdccAdapter.source: TdccAdapter,
+    YahooAdapter.source: YahooAdapter,
 }
 
 
