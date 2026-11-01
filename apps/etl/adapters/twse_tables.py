@@ -1,6 +1,7 @@
 """TWSE whole-market daily tables mapped onto standard rows (SPEC §4, §5)."""
 
 import logging
+import math
 from collections.abc import Callable, Mapping, Sequence
 from datetime import date
 from typing import Any, NamedTuple
@@ -99,9 +100,12 @@ def ratio(values: Sequence[Any]) -> float | None:
     if text in BLANK_MARKERS:
         return None
     try:
-        return float(text)
+        number = float(text)
     except ValueError:
         raise SchemaChangedError(f"unexpected ratio value {text!r}") from None
+    if not math.isfinite(number):
+        raise SchemaChangedError(f"unexpected ratio value {text!r}")
+    return number
 
 
 def yield_fraction(values: Sequence[Any]) -> float | None:

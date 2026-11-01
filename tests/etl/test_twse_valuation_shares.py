@@ -122,6 +122,20 @@ def test_valuation_word_in_a_ratio_column_is_a_schema_change(
 
 @responses.activate
 @pytest.mark.django_db
+@pytest.mark.parametrize("text", ["inf", "-Infinity", "nan", "1e400"])
+def test_valuation_non_finite_number_is_a_schema_change(
+    adapter: TwseAdapter, load_fixture: Callable[[str], Any], text: str
+) -> None:
+    payload = load_fixture(VALUATION)
+    next(row for row in payload["data"] if row[0] == "2330")[5] = text
+    responses.get(VALUATION_URL, json=payload)
+    with pytest.raises(SchemaChangedError, match="ratio"):
+        adapter.normalize("daily_valuation", adapter.fetch("daily_valuation", DAY, DAY))
+    assert RawTwse.objects.count() == 1
+
+
+@responses.activate
+@pytest.mark.django_db
 def test_valuation_without_percent_column_is_a_schema_change(
     adapter: TwseAdapter, load_fixture: Callable[[str], Any]
 ) -> None:
@@ -209,6 +223,41 @@ def test_count_matching_an_earlier_backfill_row_adds_nothing(
     )
     _load_shares(adapter, load_fixture(SHARES[DAY]), DAY)
     assert ("2330", DAY) not in _shares_in_db()
+
+
+@responses.activate
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("older", "newer", "written"),
+    [(500_000_000, 517_016_714, False), (517_016_714, 500_000_000, True)],
+    ids=["latest-matches", "only-older-matches"],
+)
+def test_comparison_uses_the_latest_earlier_row(
+    adapter: TwseAdapter,
+    load_fixture: Callable[[str], Any],
+    older: int,
+    newer: int,
+    written: bool,
+) -> None:
+    SharesOutstanding.objects.create(stock_id="2368", effective_date=date(2026, 5, 1), shares=older)
+    SharesOutstanding.objects.create(
+        stock_id="2368", effective_date=date(2026, 10, 1), shares=newer
+    )
+    _load_shares(adapter, load_fixture(SHARES[DAY]), DAY)
+    assert (("2368", DAY) in _shares_in_db()) is written
+
+
+@responses.activate
+@pytest.mark.django_db
+def test_negative_count_is_a_schema_change_and_keeps_raw(
+    adapter: TwseAdapter, load_fixture: Callable[[str], Any]
+) -> None:
+    payload = load_fixture(SHARES[DAY])
+    next(row for row in payload["data"] if row[0] == "2368")[3] = "-5"
+    with pytest.raises(SchemaChangedError, match="-5"):
+        _load_shares(adapter, payload, DAY)
+    assert RawTwse.objects.count() == 1
+    assert not SharesOutstanding.objects.exists()
 
 
 @responses.activate
