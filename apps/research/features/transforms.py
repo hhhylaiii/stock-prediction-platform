@@ -28,17 +28,26 @@ def _by_day(
 
 
 def winsorize(frame: pd.DataFrame, columns: Sequence[str] = STOCK_LEVEL) -> pd.DataFrame:
-    """New frame with columns clipped at the 1% and 99% universe quantiles of the day."""
+    """New frame clipped at the day's 1% and 99% universe quantiles.
+
+    A bound that would flatten every universe value is skipped, so rare flags and counts survive.
+    """
     low = _by_day(frame, columns, lambda days: days.quantile(LOW))
     high = _by_day(frame, columns, lambda days: days.quantile(HIGH))
-    return frame.assign(**{name: frame[name].clip(low[name], high[name]) for name in columns})
+    smallest = _by_day(frame, columns, lambda days: days.min())
+    largest = _by_day(frame, columns, lambda days: days.max())
+    lower, upper = low.where(low < largest), high.where(high > smallest)
+    return frame.assign(**{name: frame[name].clip(lower[name], upper[name]) for name in columns})
 
 
 def zscore(frame: pd.DataFrame, columns: Sequence[str] = STOCK_LEVEL) -> pd.DataFrame:
-    """New frame with columns scored by the universe mean and sample std; no spread gives NaN."""
+    """New frame scored by the universe mean and sample std; a day without spread scores 0."""
     mean = _by_day(frame, columns, lambda days: days.mean())
-    std = _by_day(frame, columns, lambda days: days.std()).where(lambda values: values > 0)
-    return frame.assign(**{name: (frame[name] - mean[name]) / std[name] for name in columns})
+    std = _by_day(frame, columns, lambda days: days.std())
+    spread = std > 0
+    scored = ((frame[list(columns)] - mean) / std.where(spread)).where(spread, 0.0)
+    known = frame[list(columns)].notna() & mean.notna()
+    return frame.assign(**{name: scored[name].where(known[name]) for name in columns})
 
 
 def standardize(frame: pd.DataFrame, columns: Sequence[str] = STOCK_LEVEL) -> pd.DataFrame:
@@ -47,7 +56,7 @@ def standardize(frame: pd.DataFrame, columns: Sequence[str] = STOCK_LEVEL) -> pd
 
 
 def fill_with_flags(frame: pd.DataFrame, columns: Sequence[str] = STOCK_LEVEL) -> pd.DataFrame:
-    """New frame with gaps set to the universe median of the day (0 if none) and _missing flags."""
+    """Fill gaps of z-scored columns with the day's universe median (0 if none) and flag them."""
     median = _by_day(frame, columns, lambda days: days.median()).fillna(0.0)
     filled = frame.assign(**{name: frame[name].fillna(median[name]) for name in columns})
     flags = {f"{name}_missing": frame[name].isna().astype(np.int8) for name in columns}
