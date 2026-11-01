@@ -1,2 +1,3 @@
 tests/etl/test_adjusted_price.py::test_adjusted_return_is_flat_across_a_large_stock_dividend
+tests/research/test_chip_inputs.py::test_friday_weekly_features_wait_for_the_saturday_publication
 tests/research/test_pricelimit.py::test_limit_up_by_era_and_tick
