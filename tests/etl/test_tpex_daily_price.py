@@ -239,3 +239,18 @@ def test_quotes_of_the_previous_day_mean_not_published_yet(
     with pytest.raises(SourceNotReadyError, match="still serves 20261027"):
         adapter.fetch("daily_price", DAY, DAY)
     assert RawTpex.objects.count() == 2
+
+
+@responses.activate
+@pytest.mark.django_db
+def test_managed_stocks_of_2010_come_from_the_managed_table(
+    january_2010: TradingDays, twse_limiter: RateLimiter, load_fixture: Callable[[str], Any]
+) -> None:
+    responses.post(OTC, json=load_fixture("tpex/daily_price/otc_20100104.json"))
+    responses.post(QUOTES, json=load_fixture("tpex/daily_price/daily_quotes_20100104.json"))
+    adapter = TpexAdapter(january_2010, twse_limiter)
+    day = date(2010, 1, 4)
+    frame = adapter.normalize("daily_price", adapter.fetch("daily_price", day, day))
+    rows = {row["stock_id"]: row for row in frame.to_dict("records")}
+    assert set(rows) == {"1107", "1336", "2381", "3293"}
+    assert (rows["1107"]["close"], rows["1107"]["volume"]) == (Decimal("0.95"), 192_185)

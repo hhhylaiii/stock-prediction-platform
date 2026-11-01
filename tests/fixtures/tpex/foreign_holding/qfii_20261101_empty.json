@@ -1,0 +1,35 @@
+{
+  "tables": [
+    {
+      "title": "櫃檯買賣股票僑外資及陸資持股比例排行表",
+      "date": "115/11/01",
+      "totalCount": 0,
+      "fields": [
+        "排行",
+        "代號",
+        "名稱",
+        "發行股數(A)",
+        "僑外資及陸資尚可投資股數B=A*F-C",
+        "僑外資及陸資持有股數(C)",
+        "僑外資及陸資尚可投資比率(D=B/A)",
+        "僑外資及陸資持股比率(E=C/A)",
+        "法令投資上限比率(F)",
+        "備註"
+      ],
+      "data": [],
+      "summary": null,
+      "notes": [
+        "A(發行股數--No. of shares issued) :以上櫃公司申報為準.",
+        "B(僑外資及陸資尚可投資股數--Available shares for OC/FI to invest) : B=A*F-C",
+        "C(全體僑外資及陸資持有股數--Currently shares OC/FI held) : 市場買賣之持有股數.",
+        "D(僑外資及陸資尚可投資比率--% of available investment for OC/FI) : D= B/A",
+        "E (全體僑外資及陸資持股比率--% of shares OC/FMI held):E=C/A",
+        "F(法令投資上限--Upper limit of regulated investment) : 法令投資上限百分比率",
+        "本表資料每日於18:00及22:00更新"
+      ]
+    }
+  ],
+  "template": "/template/insti/qfii",
+  "stat": "ok",
+  "date": "20261101"
+}

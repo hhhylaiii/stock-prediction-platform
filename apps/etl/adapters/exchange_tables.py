@@ -156,6 +156,7 @@ class DailyTable(NamedTuple):
     exchange: str = "TWSE"
     positional: tuple[tuple[str, str], ...] = ()
     consistent: Callable[[Mapping[Hashable, Any]], bool] | None = None
+    locate: Callable[[dict[str, Any]], dict[str, Any]] | None = None
 
     @property
     def where(self) -> str:
@@ -195,7 +196,10 @@ def source_rows(
             title.endswith(table.pending_title) for title in titles
         ):
             raise SourceNotReadyError(f"{table.where} for {day} lists {table.pending_title} only")
-    body = payload if table.title is None else find_table(payload, table.title)
+    if table.locate is not None:
+        body = table.locate(payload)
+    else:
+        body = payload if table.title is None else find_table(payload, table.title)
     if table.hints is not None and body.get("hints") != table.hints:
         raise SchemaChangedError(f"{table.where} units changed: {body.get('hints')!r}")
     if table.check is not None:

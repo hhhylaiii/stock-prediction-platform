@@ -1,10 +1,11 @@
 """Cleanup shared by every writer of shares_outstanding (SPEC §4)."""
 
 from collections.abc import Iterable
+from datetime import date
 
 from django.db import connection
 
-from apps.market.models import ShareChangeReason
+from apps.market.models import ShareChangeReason, SharesOutstanding
 
 DROP_REPEATED_COUNTS_SQL = """
 DELETE FROM shares_outstanding s
@@ -31,3 +32,14 @@ def drop_repeated_counts(stock_ids: Iterable[str]) -> int:
             DROP_REPEATED_COUNTS_SQL, {"stocks": stocks, "unknown": ShareChangeReason.UNKNOWN}
         )
         return int(cursor.rowcount)
+
+
+def latest_counts(before: date) -> dict[str, int]:
+    """The last shares_outstanding count of each stock effective before the given day."""
+    latest = (
+        SharesOutstanding.objects.filter(effective_date__lt=before)
+        .order_by("stock_id", "-effective_date")
+        .distinct("stock_id")
+        .values_list("stock_id", "shares")
+    )
+    return dict(latest)
