@@ -188,13 +188,13 @@ class TwseAdapter(BaseAdapter):
         if dataset == INDEX_DAILY:
             params = {"date": f"{day:%Y%m}01", "response": "json"}
             payload = self.client.get_json(MONTHLY_TRADING_PATH, params)
-            check_published(payload, "FMTQIK", day)
+            check_published(payload, "TWSE FMTQIK", day)
             self.save_raw(dataset, params, payload)
             return taiex_rows(payload, day)
         table = TABLES[dataset]
         params = {"date": day.strftime("%Y%m%d"), **table.params, "response": "json"}
         payload = self.client.get_json(table.path, params)
-        check_published(payload, table.label, day)
+        check_published(payload, table.where, day)
         self.save_raw(dataset, params, payload)
         return source_rows(payload, day, table, check_answer)
 
@@ -237,7 +237,7 @@ class TwseAdapter(BaseAdapter):
         )
         if stored is None:
             raise SourceNotReadyError(
-                f"TWSE daily_price for {day} is not loaded; institutional nets need its quotes"
+                f"TWSE daily_price for {day} is not loaded; chip rows need its quotes"
             )
         codes = quotes_frame(stored.payload, day)["證券代號"].astype(str).str.strip()
         return {code for code in codes if not is_foreign_currency_etf(code)}

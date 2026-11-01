@@ -95,7 +95,7 @@ def test_month_without_data_is_not_ready(
     adapter: TwseAdapter, load_fixture: Callable[[str], Any]
 ) -> None:
     responses.get(URL, json=load_fixture("twse/reference/fmtqik_202611.json"))
-    with pytest.raises(SourceNotReadyError):
+    with pytest.raises(SourceNotReadyError, match=r"^TWSE FMTQIK "):
         adapter.fetch("index_daily", DAY, DAY)
     assert RawTwse.objects.count() == 0
 

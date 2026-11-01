@@ -11,6 +11,7 @@ from django.core.management import call_command
 from django.utils import timezone
 
 from apps.etl.adapters.twse import TwseAdapter
+from apps.etl.adapters.twse_tables import TABLES
 from apps.etl.errors import SchemaChangedError, SourceNotReadyError
 from apps.etl.models import EtlRun, RawTwse
 from apps.etl.ratelimit import RateLimiter
@@ -386,7 +387,7 @@ def test_unpublished_day_raises_not_ready_and_keeps_no_raw(
     adapter: TwseAdapter, load_fixture: Callable[[str], Any], dataset: str
 ) -> None:
     responses.get(DATASETS[dataset][0], json=load_fixture(NOT_PUBLISHED[dataset]))
-    with pytest.raises(SourceNotReadyError):
+    with pytest.raises(SourceNotReadyError, match=rf"^TWSE {TABLES[dataset].label} "):
         adapter.fetch(dataset, DAY, DAY)
     assert RawTwse.objects.count() == 0
 
