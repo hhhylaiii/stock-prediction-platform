@@ -10,16 +10,18 @@ import requests
 from django.conf import settings
 
 from apps.etl.adapters.base import BaseAdapter
-from apps.etl.adapters.twse_tables import (
+from apps.etl.adapters.exchange_tables import (
     NO_DATA_STAT,
-    TABLES,
-    check_answer,
     check_published,
     find_table,
     is_foreign_currency_etf,
     share_changes,
     source_rows,
     standard_rows,
+)
+from apps.etl.adapters.twse_tables import (
+    TABLES,
+    check_answer,
     taiex_frame,
     taiex_rows,
 )
@@ -202,7 +204,7 @@ class TwseAdapter(BaseAdapter):
         payload = self.client.get_json(table.path, params)
         check_published(payload, table.label, day)
         self.save_raw(dataset, params, payload)
-        return source_rows(payload, day, table)
+        return source_rows(payload, day, table, check_answer)
 
     def _normalize_quotes(self, raw_df: pd.DataFrame) -> pd.DataFrame:
         missing = set(DAILY_QUOTES_COLUMNS) - set(raw_df.columns)

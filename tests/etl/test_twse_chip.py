@@ -313,7 +313,7 @@ def test_foreign_holding_out_of_range_is_dropped_with_a_warning(
     payload = load_fixture(DATASETS["foreign_holding"][2])
     next(row for row in payload["data"] if row[0] == "2330")[7] = 168.55
     responses.get(DATASETS["foreign_holding"][0], json=payload)
-    with caplog.at_level(logging.WARNING, logger="apps.etl.adapters.twse_tables"):
+    with caplog.at_level(logging.WARNING, logger="apps.etl.adapters.exchange_tables"):
         assert _load(adapter, "foreign_holding")["2330"]["fi_holding_pct"] is None
     assert "2330" in caplog.text
 
