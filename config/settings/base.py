@@ -124,6 +124,10 @@ ETL_RATE_LIMITS: dict[str, dict[str, float]] = {
 }
 ETL_MAX_CONSECUTIVE_REJECTIONS = env.int("ETL_MAX_CONSECUTIVE_REJECTIONS", default=20)
 
+RESEARCH_CACHE_DIR = Path(
+    env.str("RESEARCH_CACHE_DIR", default="") or BASE_DIR / "artifacts" / "predictions"
+)
+
 LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,

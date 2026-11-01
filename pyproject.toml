@@ -67,6 +67,10 @@ strict_equality = true
 module = ["environ", "environ.*"]
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+module = ["pyarrow", "pyarrow.*"]
+ignore_missing_imports = true
+
 [tool.django-stubs]
 django_settings_module = "config.settings.test"
 
