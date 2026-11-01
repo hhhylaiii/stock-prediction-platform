@@ -1,7 +1,6 @@
 """TWSE listed-market adapter using whole-market daily endpoints (SPEC §3, §8.6)."""
 
 import logging
-from collections.abc import Callable
 from datetime import date
 from typing import Any
 
@@ -15,10 +14,13 @@ from apps.etl.adapters.exchange_tables import (
     check_published,
     find_table,
     is_foreign_currency_etf,
+    parsed_quotes,
     quoted_only,
     share_changes,
     source_rows,
     standard_rows,
+    upsert_daily_prices,
+    upsert_index_rows,
 )
 from apps.etl.adapters.twse_tables import (
     TABLES,
@@ -28,20 +30,13 @@ from apps.etl.adapters.twse_tables import (
 )
 from apps.etl.client import SourceClient
 from apps.etl.errors import SchemaChangedError, SourceNotReadyError
-from apps.etl.exchange_rows import (
-    TWSE_LAYOUT,
-    OfficialDay,
-    official_days,
-    parse_count,
-    parse_price,
-)
+from apps.etl.exchange_rows import TWSE_LAYOUT, OfficialDay, official_days
 from apps.etl.models import RawTwse
 from apps.etl.ratelimit import RateLimiter
 from apps.etl.share_counts import drop_repeated_counts
 from apps.etl.upsert import upsert
-from apps.market.adjust import refresh_where_later_events
 from apps.market.calendar import TradingDays
-from apps.market.models import DailyChip, DailyPrice, IndexDaily, SharesOutstanding
+from apps.market.models import DailyChip, SharesOutstanding
 
 logger = logging.getLogger(__name__)
 TWSE_MIN_INTERVAL = 3.0
@@ -62,8 +57,6 @@ DAILY_QUOTES_COLUMNS = {
     "成交股數": "volume",
     "成交金額": "turnover",
 }
-PRICE_COLUMNS = ("open", "high", "low", "close")
-COUNT_COLUMNS = ("volume", "turnover")
 DAILY_PRICE = "daily_price"
 INDEX_DAILY = "index_daily"
 INSTITUTIONAL = "institutional"
@@ -178,14 +171,9 @@ class TwseAdapter(BaseAdapter):
     def upsert(self, dataset: str, frame: pd.DataFrame) -> int:
         self.require_dataset(dataset)
         if dataset == DAILY_PRICE:
-            return self._upsert_quotes(frame)
+            return upsert_daily_prices(frame)
         if dataset == INDEX_DAILY:
-            return upsert(
-                IndexDaily,
-                frame,
-                unique_fields=("index_id", "date"),
-                update_fields=("close", "volume"),
-            )
+            return upsert_index_rows(frame)
         table = TABLES[dataset]
         rows = upsert(
             table.model, frame, unique_fields=table.keys, update_fields=tuple(table.columns)
@@ -217,26 +205,9 @@ class TwseAdapter(BaseAdapter):
         codes = raw_df["證券代號"].astype(str).str.strip()
         local = raw_df.loc[~codes.map(is_foreign_currency_etf)]
         frame = local[list(DAILY_QUOTES_COLUMNS)].rename(columns=DAILY_QUOTES_COLUMNS)
-        converters: dict[str, Callable[[str], object]] = {
-            **dict.fromkeys(PRICE_COLUMNS, parse_price),
-            **dict.fromkeys(COUNT_COLUMNS, parse_count),
-        }
-        return frame.assign(
-            stock_id=frame["stock_id"].astype(str).str.strip(),
-            date=local["date"],
-            **{col: frame[col].map(convert) for col, convert in converters.items()},
+        return parsed_quotes(
+            frame.assign(stock_id=frame["stock_id"].astype(str).str.strip(), date=local["date"])
         )
-
-    def _upsert_quotes(self, frame: pd.DataFrame) -> int:
-        rows = upsert(
-            DailyPrice,
-            frame,
-            unique_fields=("stock_id", "date"),
-            update_fields=(*PRICE_COLUMNS, *COUNT_COLUMNS),
-        )
-        if not frame.empty:
-            refresh_where_later_events(frame["stock_id"].unique(), frame["date"].min())
-        return rows
 
     def _fetch_daily_quotes(self, day: date) -> pd.DataFrame:
         params = {"date": day.strftime("%Y%m%d"), "type": "ALLBUT0999", "response": "json"}

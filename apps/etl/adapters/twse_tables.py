@@ -7,6 +7,7 @@ import pandas as pd
 
 from apps.etl.adapters.exchange_tables import (
     DailyTable,
+    check_answered,
     find_table,
     is_fraction,
     is_percent,
@@ -15,10 +16,11 @@ from apps.etl.adapters.exchange_tables import (
     net_shares,
     percent,
     ratio,
+    row_of_day,
     shares,
     yield_fraction,
 )
-from apps.etl.errors import SchemaChangedError, SourceNotReadyError
+from apps.etl.errors import SchemaChangedError
 from apps.etl.exchange_rows import parse_count, parse_price
 from apps.etl.roc import parse_roc_date
 from apps.market.models import DailyValuation, IndexId, SharesOutstanding
@@ -31,17 +33,7 @@ INDEX_COLUMNS = ["index_id", "date", "close", "volume"]
 
 
 def check_answer(payload: dict[str, Any], day: date) -> None:
-    """The payload must be a successful answer for the requested day itself."""
-    stat = str(payload.get("stat", ""))
-    if stat != "OK":
-        raise SchemaChangedError(f"TWSE answered with unexpected stat {stat!r}")
-    requested = day.strftime("%Y%m%d")
-    answered = str(payload.get("date", ""))
-    if answered == requested:
-        return
-    if len(answered) == len(requested) and answered.isdigit() and answered < requested:
-        raise SourceNotReadyError(f"TWSE still serves {answered} when asked for {day}")
-    raise SchemaChangedError(f"TWSE answered for {answered!r} instead of {requested}")
+    check_answered(payload, day, "TWSE", "OK")
 
 
 def check_margin_lots(payload: dict[str, Any]) -> None:
@@ -165,13 +157,8 @@ def taiex_rows(payload: dict[str, Any], day: date) -> pd.DataFrame:
     ):
         raise SchemaChangedError("TWSE FMTQIK rows are malformed")
     by_day = {parse_roc_date(str(row[0])): row for row in rows}
-    if any(listed.replace(day=1) != day.replace(day=1) for listed in by_day):
-        raise SchemaChangedError(f"TWSE FMTQIK answered {day:%Y-%m} with days of another month")
-    if day in by_day:
-        return pd.DataFrame([by_day[day]], columns=list(MONTHLY_FIELDS)).assign(date=day)
-    if not by_day or day > max(by_day):
-        raise SourceNotReadyError(f"TWSE FMTQIK has no row for {day} yet")
-    raise SchemaChangedError(f"TWSE FMTQIK skips trading day {day}; the calendar may be wrong")
+    row = row_of_day(by_day, day, "TWSE FMTQIK")
+    return pd.DataFrame([row], columns=list(MONTHLY_FIELDS)).assign(date=day)
 
 
 def taiex_frame(raw_df: pd.DataFrame) -> pd.DataFrame:
