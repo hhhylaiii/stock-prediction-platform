@@ -9,8 +9,8 @@ from django.core.management.base import CommandError
 from apps.market.calendar import TradingDays
 from apps.market.models import DailyPrice, StockMaster, TradingCalendar
 from apps.research.labels import LABEL_COLUMNS, build_labels, write_labels
-from apps.research.management.commands.build_labels import _years
 from apps.research.models import LabelDaily
+from apps.research.ranges import years
 from tests.research.conftest import weekday_calendar
 
 CALENDAR = weekday_calendar(date(2016, 1, 1), date(2016, 12, 31))
@@ -266,7 +266,7 @@ def test_untraded_next_day_with_an_open_cannot_be_entered() -> None:
 
 
 def test_ranges_are_rebuilt_one_calendar_year_at_a_time() -> None:
-    assert list(_years(d("2015-12-28"), d("2017-01-05"))) == [
+    assert list(years(d("2015-12-28"), d("2017-01-05"))) == [
         (d("2015-12-28"), d("2015-12-31")),
         (d("2016-01-01"), d("2016-12-31")),
         (d("2017-01-01"), d("2017-01-05")),
