@@ -3,6 +3,7 @@ import logging
 
 import pytest
 import responses
+from django.core.management import call_command
 from django.test import override_settings
 
 from apps.etl.alerts import dispatch
@@ -62,7 +63,7 @@ def test_a_failing_webhook_is_logged_and_does_not_raise(
 @pytest.mark.django_db
 @pytest.mark.parametrize(("webhook", "broken"), [(WEBHOOK, False), ("", True)])
 def test_nothing_is_posted_for_clean_days_or_without_a_webhook(
-    calendar: TradingDays, webhook: str, broken: bool
+    calendar: TradingDays, webhook: str, broken: bool, caplog: pytest.LogCaptureFixture
 ) -> None:
     _two_clean_days()
     if broken:
@@ -70,3 +71,15 @@ def test_nothing_is_posted_for_clean_days_or_without_a_webhook(
     with override_settings(ALERT_WEBHOOK_URL=webhook):
         dispatch(run_checks(DAY, calendar))
     assert len(responses.calls) == 0
+    assert "webhook" not in caplog.text
+
+
+@responses.activate
+@pytest.mark.usefixtures("october_2026_in_db")
+@override_settings(ALERT_WEBHOOK_URL=WEBHOOK)
+def test_check_quality_command_sends_the_alerts() -> None:
+    responses.post(WEBHOOK, status=200)
+    _two_clean_days()
+    DailyPrice.objects.filter(date=DAY).delete()
+    call_command("check_quality", date="2026-10-28")
+    assert len(responses.calls) == 1
