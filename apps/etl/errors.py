@@ -15,3 +15,7 @@ class SchemaChangedError(SourceError):
 
 class SourceRequestError(SourceError):
     """The source refused the request (a 4xx other than 429); retrying will not help."""
+
+
+class RejectedStocksError(Exception):
+    """A per-stock run finished, or stopped, with stocks whose source data was unusable."""
