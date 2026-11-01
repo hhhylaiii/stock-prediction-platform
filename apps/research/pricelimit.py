@@ -7,7 +7,7 @@ import numpy as np
 import numpy.typing as npt
 import pandas as pd
 
-from apps.research.panel import require_sorted
+from apps.research.panel import REUSE_GAP, require_sorted
 
 LIMIT_CHANGE = date(2015, 6, 1)
 OLD_LIMIT = 0.07
@@ -46,10 +46,10 @@ def limit_down_price(reference: Prices, days: Iterable[date]) -> Prices:
 
 
 def apply_price_limits(panel: pd.DataFrame) -> pd.DataFrame:
-    """New panel with reference, limit prices and limit flags; rows must be sorted by date."""
+    """New panel with reference, limit prices and flags; closes over REUSE_GAP rows back expire."""
     require_sorted(panel)
     keys = [panel["stock_id"], panel["segment"]]
-    previous = panel["adj_close"].groupby(keys).shift(1).groupby(keys).ffill()
+    previous = panel["adj_close"].groupby(keys).shift(1).groupby(keys).ffill(limit=REUSE_GAP)
     reference = (previous / panel["adj_factor"]).mask(panel["age"] < NO_LIMIT_DAYS)
     values = reference.to_numpy(dtype=np.float64)
     up = pd.Series(limit_up_price(values, panel["date"]), index=panel.index)

@@ -251,6 +251,36 @@ def test_flags_do_not_depend_on_where_the_window_starts() -> None:
     assert late["limit_up_close"].sum() == 1
 
 
+def seed_gaps() -> None:
+    """1101 halts about 240 days before 2014-03-03; 1102 has bars without trades for a year."""
+    for stock_id in ("1101", "1102"):
+        StockMaster.objects.create(
+            stock_id=stock_id, name=stock_id, market="TWSE", industry="水泥工業"
+        )
+    halted = LONG.between(d("2013-04-01"), d("2014-02-28"))
+    idle = LONG.between(d("2013-04-01"), d("2014-03-31"))
+    rows = []
+    for day in LONG.between(d("2013-01-02"), d("2014-06-30")):
+        if day not in halted:
+            rows.append(DailyPrice(stock_id="1101", date=day, close=20, volume=1, turnover=1))
+        price = None if day in idle else 30
+        rows.append(DailyPrice(stock_id="1102", date=day, close=price, volume=0, turnover=0))
+    DailyPrice.objects.bulk_create(rows)
+
+
+@pytest.mark.django_db
+def test_long_halts_and_idle_spells_do_not_depend_on_where_the_window_starts() -> None:
+    seed_gaps()
+    full = load_universe_panel(LONG, d("2013-01-01"), d("2014-06-30"))
+    for start in (d("2014-03-03"), d("2014-04-01")):
+        late = load_universe_panel(LONG, start, d("2014-06-30"))
+        expected = full.loc[full["date"] >= start, CHECKED].reset_index(drop=True)
+        pd.testing.assert_frame_equal(late[CHECKED], expected)
+    resumed = full.set_index(["stock_id", "date"])
+    assert resumed.loc[("1101", d("2014-03-03")), "reference"] == 20.0
+    assert resumed["reference"].isna().loc[("1102", d("2014-04-01"))]
+
+
 @pytest.mark.django_db
 def test_window_near_the_calendar_start_warms_up_on_what_exists() -> None:
     seed_prices()
