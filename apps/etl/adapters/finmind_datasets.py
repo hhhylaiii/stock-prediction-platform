@@ -135,7 +135,7 @@ def dividend_events(
     events: dict[date, dict[str, Any]] = {}
 
     def event(day: date) -> dict[str, Any]:
-        return events.setdefault(day, {"cash": Decimal(0), "stock": Decimal(0), "factors": []})
+        return events.setdefault(day, {"cash": Decimal(0), "stock": Decimal(0), "factors": {}})
 
     for row in _checked(policy, POLICY_KEYS, "TaiwanStockDividend", stock_id):
         for kind, ex_key, keys in DIVIDEND_PARTS:
@@ -157,11 +157,17 @@ def dividend_events(
     ]
     for rows, required, label, after_key, before_key in sources:
         for row in _checked(rows, required, label, stock_id):
-            factor = _ratio(row, after_key, before_key, label)
-            event(_day(row["date"], label))["factors"].append(factor)
+            day = _day(row["date"], label)
+            factors = event(day)["factors"]
+            if label in factors:
+                logger.warning("%s %s: repeated %s rows, keeping the last", stock_id, day, label)
+            factors[label] = _ratio(row, after_key, before_key, label)
     records = []
     for ex_date in sorted(day for day in events if start <= day <= end):
         found = events[ex_date]
+        pays = found["cash"] > 0 or found["stock"] > 0
+        if pays and "TaiwanStockDividendResult" not in found["factors"]:
+            logger.warning("%s %s: no ex-right result, dividend not adjusted", stock_id, ex_date)
         factor = _combined(found["factors"], stock_id, ex_date)
         records.append(
             {
@@ -175,16 +181,15 @@ def dividend_events(
     return pd.DataFrame(records, columns=EVENT_COLUMNS, dtype=object)
 
 
-def _combined(factors: Sequence[float | None], stock_id: str, ex_date: date) -> float | None:
-    if not factors:
-        logger.warning("%s %s: no ex-right result, adj_factor left empty", stock_id, ex_date)
-        return None
+def _combined(factors: Mapping[str, float | None], stock_id: str, ex_date: date) -> float | None:
+    """Product of the usable factors of one day; None when no source gave one."""
+    usable = [factor for factor in factors.values() if factor is not None]
     if len(factors) > 1:
-        logger.warning("%s %s: %d ex-right sources on one day", stock_id, ex_date, len(factors))
+        logger.warning("%s %s: %s on one day", stock_id, ex_date, ", ".join(sorted(factors)))
+    if not usable:
+        return None
     product = 1.0
-    for factor in factors:
-        if factor is None:
-            return None
+    for factor in usable:
         product *= factor
     return product
 
