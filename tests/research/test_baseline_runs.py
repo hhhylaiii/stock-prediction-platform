@@ -19,7 +19,7 @@ from apps.research.holdout import HoldoutError
 from apps.research.management.commands import train
 from apps.research.metrics.ic import daily_rank_ic
 from apps.research.models import FeatureDaily, LabelDaily, ModelRun
-from apps.research.prediction_cache import fold_record, load_fold_predictions
+from apps.research.prediction_cache import fold_record, load_fold_predictions, missing_folds
 from apps.research.runs import feature_hash, lib_versions, load_model
 from apps.research.training import LINEAR_FEATURES, linear_inputs
 from apps.research.walkforward import Fold, WalkForwardConfig, generate_folds
@@ -124,6 +124,10 @@ def test_rank_folds_cache_ridge_scores_for_every_test_row(panel: Path) -> None:
     assert run.params["horizon"] == 20
     assert run.params["label"] == "fwd_rank_pct"
     assert run.params["fold"] == fold_record(fold)
+    weights = load_model("rank-wf1", run.run_id).coef_
+    assert run.params["coefficients"] == pytest.approx(
+        dict(zip(LINEAR_FEATURES, weights, strict=True))
+    )
     assert run.params["penalty"] in PENALTY_GRID
     assert set(run.params["cv_scores"]) == {str(penalty) for penalty in PENALTY_GRID}
     assert run.ic_mean is not None
@@ -214,6 +218,64 @@ def test_interval_folds_cache_probability_quantile_and_volatility_baselines(pane
     assert histq.params["quantiles"] == pytest.approx(expected)
 
 
+def test_a_fold_without_evaluation_labels_still_caches_its_scores(panel: Path) -> None:
+    fold = research()[-1]
+    LabelDaily.objects.filter(date__gte=fold.test_start).delete()
+
+    run_folds("rank", [fold], "rank-wf1", panel)
+
+    assert load_fold_predictions("rank-wf1", fold)["ridge_h20"].notna().all()
+    run = ModelRun.objects.get(run_id=f"rank-wf1.ridge.h20.f{fold.index:03d}")
+    assert (run.ic_mean, run.icir) == (None, None)
+
+
+def test_return_folds_read_only_their_test_period(
+    panel: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fold = research()[0]
+    reader = baseline_runs.read_partitions
+    ranges = []
+
+    def recorded(start: date, end: date, directory: Path) -> pd.DataFrame:
+        ranges.append((start, end))
+        return reader(start, end, directory)
+
+    monkeypatch.setattr(baseline_runs, "read_partitions", recorded)
+
+    run_folds("return", [fold], "return-wf1", panel)
+
+    assert ranges == [(fold.test_start, fold.test_end)]
+
+
+def test_rebuilt_partitions_rerun_their_cached_folds(panel: Path) -> None:
+    first, second = research()[:2]
+    run_folds("return", [first, second], "return-wf1", panel)
+    FeatureDaily.objects.filter(date=second.test_start).update(tech_ret_60d=0.5)
+    export_year(2016, panel)
+
+    assert run_folds("return", [first, second], "return-wf1", panel) == [
+        first.index,
+        second.index,
+    ]
+    assert run_folds("return", [first, second], "return-wf1", panel) == []
+
+
+def test_a_rerun_that_fails_leaves_its_fold_to_be_run_again(
+    panel: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fold = research()[0]
+    run_folds("return", [fold], "return-wf1", panel)
+
+    def broken(*args: Any, **kwargs: Any) -> Path:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(baseline_runs, "save_fold_predictions", broken)
+    with pytest.raises(OSError, match="disk full"):
+        run_folds("return", [fold], "return-wf1", panel, rerun=True)
+
+    assert missing_folds("return-wf1", [fold]) == [fold.index]
+
+
 def test_cached_folds_are_skipped_unless_rerun(panel: Path) -> None:
     first, second = research()[:2]
     run_folds("return", [first], "return-wf1", panel)
@@ -238,6 +300,7 @@ def test_holdout_folds_wait_for_the_phase_4_models(panel: Path) -> None:
         ("rank", "interval-wf1", "start with rank-"),
         ("trend", "trend-wf1", "scope"),
         ("rank", "rank-" + "x" * 40, "at most"),
+        ("rank", "rank-WF1", "lowercase"),
     ],
 )
 def test_run_keys_name_their_scope_and_leave_room_for_run_ids(
@@ -275,14 +338,26 @@ def test_command_runs_the_chosen_research_folds(command: Path) -> None:
     assert load_fold_predictions("return-wf1", research()[1]).notna().all().all()
 
 
-def test_command_runs_every_research_fold_by_default(command: Path) -> None:
+def test_command_runs_every_research_fold_by_default(command: Path, settings: Any) -> None:
+    settings.SHUFFLE_IC_LIMIT = 0.2
     out = StringIO()
 
     call_command("train", scope="return", run_key="return-wf1", stdout=out)
 
     indices = [fold.index for fold in folds() if not fold.holdout]
+    assert "shuffled OOS rank IC" in out.getvalue()
     assert f"return-wf1: ran folds {indices}, 0 cached" in out.getvalue()
     assert len(indices) == len(folds()) - 1
+
+
+def test_a_full_run_stops_when_the_shuffle_check_fails(command: Path, settings: Any) -> None:
+    settings.SHUFFLE_IC_LIMIT = 0.0
+
+    with pytest.raises(CommandError, match="label column"):
+        call_command("train", scope="return", run_key="return-wf1")
+    call_command("train", scope="return", run_key="return-wf1", folds="0", stdout=StringIO())
+
+    assert missing_folds("return-wf1", research()) == [fold.index for fold in research()[1:]]
 
 
 def test_command_refuses_holdout_and_unknown_folds(command: Path) -> None:
@@ -290,6 +365,11 @@ def test_command_refuses_holdout_and_unknown_folds(command: Path) -> None:
 
     with pytest.raises(CommandError, match=rf"holdout folds \[{held}\] wait"):
         call_command("train", scope="return", run_key="return-wf1", folds=str(held))
+    with pytest.raises(CommandError, match=r"folds \[99\] do not exist"):
+        call_command("train", scope="return", run_key="return-wf1", folds="99")
+    for written in ("3-1", "0-", "a"):
+        with pytest.raises(CommandError, match="indices like"):
+            call_command("train", scope="return", run_key="return-wf1", folds=written)
     with pytest.raises(CommandError, match="--scope and --run-key"):
         call_command("train", scope="return")
 
@@ -300,8 +380,17 @@ def test_command_shuffle_check_passes_and_fails_by_the_limit(command: Path, sett
     assert "shuffled OOS rank IC" in out.getvalue()
 
     settings.SHUFFLE_IC_LIMIT = 0.0
-    with pytest.raises(CommandError, match="leak"):
+    with pytest.raises(CommandError, match="label column"):
         call_command("train", shuffle_check=True)
+
+
+def test_a_shuffle_check_without_an_ic_fails(
+    command: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(train, "shuffle_check", lambda *args: float("nan"))
+
+    with pytest.raises(CommandError, match="no OOS day"):
+        call_command("train", shuffle_check=True, stdout=StringIO())
 
 
 def test_a_partition_rewritten_during_the_read_stops_the_fold(
