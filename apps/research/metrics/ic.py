@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass, fields
 import numpy as np
 import pandas as pd
 
-from apps.research.metrics.stats import newey_west_t
+from apps.research.metrics.stats import is_flat, newey_west_t
 from apps.research.walkforward import Fold
 
 DATE = "date"
@@ -60,7 +60,7 @@ def summarize_ic(ic: pd.Series, lag: int) -> ICSummary:
     n = int(values.size)
     mean = float(values.mean()) if n else math.nan
     std = float(values.std(ddof=1)) if n > 1 else math.nan
-    icir = mean / std if n > 1 and std > 0 else math.nan
+    icir = mean / std if n > 1 and not is_flat(std, mean) else math.nan
     positive = float((values > 0).mean()) if n else math.nan
     return ICSummary(mean, std, icir, newey_west_t(values, lag), positive, n)
 
@@ -83,9 +83,20 @@ def ic_by_fold(ic: pd.Series, folds: Iterable[Fold], lag: int) -> pd.DataFrame:
 
 
 def positive_fold_share(by_fold: pd.DataFrame) -> float:
-    """Share of folds with IC days whose mean IC is above zero."""
-    means = by_fold.loc[by_fold["n_days"] > 0, "mean"]
+    """Share of research folds with IC days whose mean IC is above zero."""
+    counted = ~by_fold["tuning"].astype(bool) & ~by_fold["holdout"].astype(bool)
+    means = by_fold.loc[counted & (by_fold["n_days"] > 0), "mean"]
     return float((means > 0).mean()) if len(means) else math.nan
+
+
+def research_ic(ic: pd.Series, folds: Iterable[Fold]) -> pd.Series:
+    """IC days that count toward research results: research folds, test_start to eval_end."""
+    days = pd.Index(ic.index)
+    keep = np.zeros(len(days), dtype=bool)
+    for fold in folds:
+        if fold.research:
+            keep |= (days >= fold.test_start) & (days <= fold.eval_end)
+    return ic[keep]
 
 
 def ic_by_year(ic: pd.Series, lag: int) -> pd.DataFrame:

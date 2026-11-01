@@ -12,6 +12,7 @@ from apps.research.metrics.ic import (
     neutralized_rank_ic,
     positive_fold_share,
     rank_ic_by_bucket,
+    research_ic,
     summarize_ic,
 )
 from apps.research.metrics.stats import newey_west_t
@@ -73,6 +74,13 @@ def test_summary_uses_newey_west_with_the_given_lag() -> None:
     assert summary.n_days == 5
 
 
+def test_summary_of_a_flat_series_has_no_icir() -> None:
+    summary = summarize_ic(pd.Series([0.2, 0.2, 0.2], index=[day(n) for n in range(3)]), lag=1)
+    assert summary.mean == pytest.approx(0.2)
+    assert math.isnan(summary.icir)
+    assert math.isnan(summary.nw_t)
+
+
 def test_summary_of_too_few_days_is_nan() -> None:
     summary = summarize_ic(pd.Series([0.1], index=[DAY]), lag=5)
     assert summary.n_days == 1
@@ -103,28 +111,46 @@ def test_by_fold_counts_test_days_through_eval_end_and_keeps_flags() -> None:
     values = [0.1, 0.3, 0.2, 0.9, -0.2, 0.4, 0.6, 0.5]
     ic = pd.Series(values, index=[day(n) for n in days])
     folds = [
-        make_fold(0, day(0), day(5), eval_end=day(3), tuning=True),
-        make_fold(1, day(10), day(15), holdout=True),
-        make_fold(2, day(20), day(25)),
+        make_fold(5, day(0), day(5), eval_end=day(3), tuning=True),
+        make_fold(6, day(10), day(15), holdout=True),
+        make_fold(9, day(20), day(25)),
     ]
     table = ic_by_fold(ic, folds, lag=1)
-    assert list(table.index) == [0, 1, 2]
+    assert list(table.index) == [5, 6, 9]
     assert list(table["tuning"]) == [True, False, False]
     assert list(table["holdout"]) == [False, True, False]
-    assert table.loc[0, "mean"] == pytest.approx(0.2)
-    assert table.loc[1, "mean"] == pytest.approx(0.8 / 3)
+    assert table.loc[5, "mean"] == pytest.approx(0.2)
+    assert table.loc[6, "mean"] == pytest.approx(0.8 / 3)
     expected_t = newey_west_t([-0.2, 0.4, 0.6], 1)
-    assert table.loc[1, "nw_t"] == pytest.approx(expected_t)
+    assert table.loc[6, "nw_t"] == pytest.approx(expected_t)
     assert expected_t != pytest.approx(newey_west_t([-0.2, 0.4, 0.6], 0))
     assert list(table["n_days"]) == [3, 3, 0]
     assert table["mean"].isna().tolist() == [False, False, True]
-    assert positive_fold_share(table) == 1.0
 
 
-def test_positive_fold_share_skips_folds_without_days() -> None:
-    table = pd.DataFrame({"mean": [0.1, -0.2, math.nan, 0.3], "n_days": [5, 5, 0, 5]})
+def test_positive_fold_share_counts_research_folds_with_days() -> None:
+    table = pd.DataFrame(
+        {
+            "mean": [0.1, -0.2, math.nan, 0.3, 0.5, 0.4],
+            "n_days": [5, 5, 0, 5, 5, 5],
+            "tuning": [False, False, False, False, True, False],
+            "holdout": [False, False, False, False, False, True],
+        }
+    )
     assert positive_fold_share(table) == pytest.approx(2 / 3)
     assert math.isnan(positive_fold_share(table.iloc[2:3]))
+    assert math.isnan(positive_fold_share(table.iloc[4:]))
+
+
+def test_research_ic_keeps_research_days_through_eval_end() -> None:
+    ic = pd.Series(range(12), index=[day(n) for n in range(12)], dtype=float)
+    folds = [
+        make_fold(0, day(0), day(2), tuning=True),
+        make_fold(1, day(3), day(6), eval_end=day(4)),
+        make_fold(2, day(7), day(9)),
+        make_fold(3, day(10), day(11), holdout=True),
+    ]
+    assert list(research_ic(ic, folds).index) == [day(3), day(4), day(7), day(8), day(9)]
 
 
 def test_empty_inputs_give_empty_tables_with_columns() -> None:
@@ -269,7 +295,8 @@ def test_buckets_are_cut_within_each_day() -> None:
 def test_rows_without_a_label_do_not_move_the_bucket_edges() -> None:
     base = one_day(list(range(9)), list(range(9))).assign(liq=range(10, 19))
     unlabeled = one_day([0.0] * 6, [math.nan] * 6).assign(liq=range(1, 7), stock_id=range(9, 15))
-    noisy = pd.concat([base, unlabeled]).assign(junk="x")
+    unscored = one_day([math.nan] * 6, [0.5] * 6).assign(liq=range(1, 7), stock_id=range(15, 21))
+    noisy = pd.concat([base, unlabeled, unscored]).assign(junk="x")
     expected = rank_ic_by_bucket(base, "s", "y", by="liq", min_stocks=3)
     pd.testing.assert_frame_equal(
         rank_ic_by_bucket(noisy, "s", "y", by="liq", min_stocks=3), expected
@@ -280,3 +307,10 @@ def test_rows_without_a_label_do_not_move_the_bucket_edges() -> None:
 def test_bucket_count_must_be_positive() -> None:
     with pytest.raises(ValueError, match="n_buckets"):
         rank_ic_by_bucket(one_day([1.0], [1.0]).assign(liq=1.0), "s", "y", by="liq", n_buckets=0)
+
+
+def test_bucketing_by_the_scored_column_itself_works() -> None:
+    frame = one_day(list(range(9)), list(range(9)))
+    table = rank_ic_by_bucket(frame, "s", "y", by="s", min_stocks=3)
+    assert table.columns.equals(pd.Index([1, 2, 3]))
+    assert table.notna().all().all()

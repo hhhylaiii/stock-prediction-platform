@@ -276,3 +276,20 @@ def test_eval_end_keeps_labels_out_of_the_next_era(
         assert long_calendar.shift(fold.eval_end, DEFAULT.embargo + 1) == era_start
     trimmed = {last_research.index, last_tuning.index}
     assert all(fold.eval_end == fold.test_end for fold in folds if fold.index not in trimmed)
+
+
+@pytest.mark.parametrize("first_test", [d("2015-11-01"), d("2024-08-01"), d("2014-04-01")])
+def test_eval_end_stops_before_the_next_era_when_folds_straddle_a_boundary(
+    first_test: date, long_calendar: TradingDays
+) -> None:
+    months = 6 if first_test.month == 4 else 3
+    config = WalkForwardConfig(first_test=first_test, test_months=months, step_months=months)
+    folds = generate_folds(long_calendar, LAST, config)
+    changes = [
+        (before, after)
+        for before, after in pairwise(folds)
+        if (before.tuning, before.holdout) != (after.tuning, after.holdout)
+    ]
+    assert changes
+    for before, after in changes:
+        assert long_calendar.shift(before.eval_end, DEFAULT.embargo) < after.test_start

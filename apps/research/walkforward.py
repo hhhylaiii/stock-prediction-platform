@@ -2,8 +2,9 @@
 
 from calendar import monthrange
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, timedelta
+from itertools import pairwise
 from typing import Literal
 
 import numpy as np
@@ -137,7 +138,18 @@ def generate_folds(
         if fold is not None:
             folds.append(fold)
         number += 1
-    return folds
+    return _trim_era_changes(calendar, config, folds)
+
+
+def _trim_era_changes(
+    calendar: TradingDays, config: WalkForwardConfig, folds: list[Fold]
+) -> list[Fold]:
+    trimmed = list(folds)
+    for position, (before, after) in enumerate(pairwise(folds)):
+        if (before.tuning, before.holdout) != (after.tuning, after.holdout):
+            edge = calendar.shift(after.test_start, -(config.embargo + 1))
+            trimmed[position] = replace(before, eval_end=min(before.eval_end, edge))
+    return trimmed
 
 
 def research_folds(folds: Iterable[Fold]) -> list[Fold]:

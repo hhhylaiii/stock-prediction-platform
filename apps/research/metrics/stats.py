@@ -6,6 +6,13 @@ import numpy as np
 import numpy.typing as npt
 import pandas as pd
 
+FLAT_TOLERANCE = 1e-12
+
+
+def is_flat(spread: float, level: float) -> bool:
+    """A spread this small next to the level is float noise around a constant series."""
+    return spread <= FLAT_TOLERANCE * max(1.0, abs(level))
+
 
 def newey_west_t(values: npt.ArrayLike, lag: int) -> float:
     """t of the mean with a Bartlett-kernel long-run variance; NaN when undefined."""
@@ -16,13 +23,14 @@ def newey_west_t(values: npt.ArrayLike, lag: int) -> float:
     n = series.size
     if n < 2:
         return math.nan
-    errors = series - series.mean()
+    mean = float(series.mean())
+    errors = series - mean
     variance = float(errors @ errors) / n
     for j in range(1, min(lag, n - 1) + 1):
         variance += 2 * (1 - j / (lag + 1)) * float(errors[j:] @ errors[:-j]) / n
-    if variance <= 0:
+    if variance <= 0 or is_flat(math.sqrt(variance), mean):
         return math.nan
-    return float(series.mean() / math.sqrt(variance / n))
+    return mean / math.sqrt(variance / n)
 
 
 def paired_nw_t(first: pd.Series, second: pd.Series, lag: int) -> float:

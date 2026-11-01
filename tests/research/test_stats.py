@@ -46,7 +46,9 @@ def test_nan_values_are_dropped() -> None:
     assert newey_west_t([1.0, math.nan, 2.0, 3.0, 4.0], lag=1) == pytest.approx(4.0)
 
 
-@pytest.mark.parametrize("values", [[], [1.0], [math.nan, 2.0], [3.0, 3.0, 3.0]])
+@pytest.mark.parametrize(
+    "values", [[], [1.0], [math.nan, 2.0], [3.0, 3.0, 3.0], [0.2, 0.2, 0.2, 0.2]]
+)
 def test_undefined_t_is_nan(values: list[float]) -> None:
     assert math.isnan(newey_west_t(values, lag=2))
 
