@@ -1,5 +1,6 @@
 """Values and per-stock monthly tables as TWSE and TPEx publish them."""
 
+import re
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from typing import Any, NamedTuple
@@ -8,6 +9,8 @@ from apps.etl.errors import SchemaChangedError
 from apps.etl.roc import parse_roc_date
 
 NO_TRADE_MARKERS = frozenset({"--", "---", ""})
+STOCK_CODE = re.compile(r"[0-9A-Z]{4,6}")
+SIGNS = ("+", "-")
 FIRST_DAY_MARK = "*"
 VOLUME_AT = 1
 CLOSE_AT = 6
@@ -30,6 +33,13 @@ class OfficialDay(NamedTuple):
     volume_unit: int
 
 
+def stock_code(text: Any) -> str:
+    code = str(text).strip()
+    if STOCK_CODE.fullmatch(code) is None:
+        raise SchemaChangedError(f"unexpected stock code {text!r}")
+    return code
+
+
 def parse_price(text: str) -> Decimal | None:
     cleaned = str(text).replace(",", "").strip()
     if cleaned in NO_TRADE_MARKERS:
@@ -45,6 +55,27 @@ def parse_count(text: str) -> int:
     if not cleaned.isdigit():
         raise SchemaChangedError(f"unexpected count value {text!r}")
     return int(cleaned)
+
+
+def parse_signed(text: str) -> int:
+    """A share count that may carry a sign, such as a net buy or sell."""
+    cleaned = str(text).replace(",", "").strip()
+    digits = cleaned[1:] if cleaned.startswith(SIGNS) else cleaned
+    if not (digits.isascii() and digits.isdecimal()):
+        raise SchemaChangedError(f"unexpected count value {text!r}")
+    return int(cleaned)
+
+
+def parse_percent(value: Any) -> float:
+    """A percentage sent either as a JSON number or as text."""
+    if isinstance(value, bool):
+        raise SchemaChangedError(f"unexpected percent value {value!r}")
+    if isinstance(value, int | float):
+        return float(value)
+    try:
+        return float(str(value).replace(",", "").strip())
+    except ValueError:
+        raise SchemaChangedError(f"unexpected percent value {value!r}") from None
 
 
 def official_days(

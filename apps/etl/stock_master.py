@@ -1,6 +1,5 @@
 """stock_master rows from current listings plus the official delisting lists (SPEC §5, §8.3)."""
 
-import re
 from collections.abc import Sequence
 from typing import Any
 
@@ -8,6 +7,7 @@ import pandas as pd
 
 from apps.etl.adapters.twse import is_foreign_currency_etf
 from apps.etl.errors import SchemaChangedError
+from apps.etl.exchange_rows import stock_code
 from apps.etl.roc import parse_roc_date
 from apps.market.models import Market
 
@@ -17,18 +17,10 @@ INFO_KEYS = frozenset({"industry_category", "stock_id", "stock_name", "type", "d
 INFO_MARKETS = {"twse": Market.TWSE, "tpex": Market.TPEX}
 EXCLUDED_INDUSTRIES = frozenset({"Index", "大盤", "所有證券"})
 AGGREGATE_INDUSTRIES = frozenset({"電子工業", "化學生技醫療", "創新板股票", "創新版股票"})
-STOCK_CODE = re.compile(r"[0-9A-Z]{4,6}")
 DELISTING_COLUMNS = ["stock_id", "name", "market", "delist_date"]
 MASTER_COLUMNS = ["stock_id", "name", "market", "industry", "delist_date"]
 COMPANY_SUFFIX = "股份有限公司"
 LISTED_DROP_LIMIT = 0.05
-
-
-def stock_code(text: Any) -> str:
-    code = str(text).strip()
-    if STOCK_CODE.fullmatch(code) is None:
-        raise SchemaChangedError(f"unexpected stock code {text!r}")
-    return code
 
 
 def check_listed_count(listed: int, previous: int | None) -> None:
