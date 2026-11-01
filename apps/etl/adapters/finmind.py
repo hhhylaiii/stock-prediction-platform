@@ -356,12 +356,12 @@ class FinmindAdapter(BaseAdapter):
 
 
 def _rows_from(raw_df: pd.DataFrame, finmind_dataset: str) -> list[dict[str, Any]]:
-    """Rows of one FinMind dataset; cells a row never had come back as None, not NaN."""
+    """Rows of one FinMind dataset; keys a row never had stay absent so key checks still fail."""
     if raw_df.empty:
         return []
     picked = raw_df.loc[raw_df[FROM_COLUMN] == finmind_dataset].drop(columns=FROM_COLUMN)
     return [
-        {str(key): None if _is_missing(value) else value for key, value in row.items()}
+        {str(key): value for key, value in row.items() if not _is_missing(value)}
         for row in picked.to_dict("records")
     ]
 

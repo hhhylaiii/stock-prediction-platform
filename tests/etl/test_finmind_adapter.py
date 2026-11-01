@@ -519,3 +519,22 @@ def test_statement_backfill_writes_one_row_per_quarter(mock: Callable[..., None]
     assert (q2.fin_type, q2.operating_cf) == ("consolidated", 813_979_318_000 - 436_311_108_000)
     assert q2.announce_date == date(2024, 9, 3)
     assert RawFinmind.objects.filter(dataset="balance_sheet").count() == 1
+
+
+@responses.activate
+def test_one_statement_losing_a_key_fails_the_batch(
+    mock: Callable[..., None], load_fixture: Callable[[str], Any]
+) -> None:
+    balance = load_fixture("finmind/balance_2330_2023_2024.json")["data"]
+    mock("TaiwanStockFinancialStatements", "income_2330_2023_2024", "2330", WITH_LOOKBACK)
+    mock(
+        "TaiwanStockBalanceSheet",
+        "balance_2330_2023_2024",
+        "2330",
+        WITH_LOOKBACK,
+        data=[{k: v for k, v in row.items() if k != "value"} for row in balance],
+    )
+    mock("TaiwanStockCashFlowsStatement", "cashflow_2330_2023_2024", "2330", WITH_LOOKBACK)
+    with pytest.raises(CommandError, match="value"):
+        _backfill("financial_statement", "2330", YEAR_2024)
+    assert FinancialStatement.objects.count() == 0
