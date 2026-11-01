@@ -98,7 +98,7 @@ def test_attention_at_the_start_of_the_calendar_queries_that_day(adapter: TwseAd
     first = date(2026, 10, 1)
     assert _events(adapter, "attention", first, first) == set()
     assert (_sent(0)["startDate"], _sent(0)["endDate"]) == ("20261001", "20261001")
-    assert RawTwse.objects.count() == 0
+    assert RawTwse.objects.count() == 1
 
 
 @responses.activate
@@ -259,7 +259,7 @@ def test_full_delivery_list_with_nothing_listed_is_not_ready(adapter: TwseAdapte
     responses.get(TWT85U, json=NO_DATA)
     with pytest.raises(SourceNotReadyError, match="TWT85U"):
         adapter.fetch("full_delivery", DAY, DAY)
-    assert RawTwse.objects.count() == 0
+    assert RawTwse.objects.count() == 1
 
 
 @responses.activate
@@ -378,13 +378,13 @@ def test_layout_change_is_a_schema_change_and_keeps_raw(
 @responses.activate
 @pytest.mark.django_db
 @pytest.mark.parametrize(("url", "dataset"), [(NOTICE, "attention"), (PUNISH, "disposition")])
-def test_empty_list_writes_nothing_and_keeps_no_raw(
+def test_empty_list_writes_nothing_and_keeps_the_answer_raw(
     adapter: TwseAdapter, url: str, dataset: str
 ) -> None:
     responses.get(url, json=NO_DATA)
     frame = adapter.normalize(dataset, adapter.fetch(dataset, DAY, DAY))
     assert adapter.upsert(dataset, frame) == 0
-    assert RawTwse.objects.count() == 0
+    assert RawTwse.objects.get().payload == NO_DATA
 
 
 @responses.activate

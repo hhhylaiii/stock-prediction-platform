@@ -8,18 +8,20 @@ from typing import Any
 from apps.etl.models import RawRecord
 
 
-def payload_hash(payload: Any) -> str:
-    canonical = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+def answer_hash(params: Mapping[str, Any], payload: Any) -> str:
+    """Hash of the request and its response, so equal answers to different requests both stay."""
+    answer = {"params": dict(params), "payload": payload}
+    canonical = json.dumps(answer, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def store_raw(
     raw_model: type[RawRecord], dataset: str, params: Mapping[str, Any], payload: Any
 ) -> RawRecord:
-    """Keep one row per distinct response; refetching the same payload adds nothing."""
+    """Keep one row per distinct answer; asking the same and hearing the same adds nothing."""
     record, _ = raw_model._default_manager.get_or_create(
         dataset=dataset,
-        source_hash=payload_hash(payload),
+        source_hash=answer_hash(params, payload),
         defaults={"request_params": dict(params), "payload": payload},
     )
     return record

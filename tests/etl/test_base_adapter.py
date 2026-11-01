@@ -7,7 +7,7 @@ import pytest
 from apps.etl.adapters.base import BaseAdapter
 from apps.etl.models import EtlRun, RawRecord, RawTwse
 from apps.etl.ratelimit import RateLimiter
-from apps.etl.raw import payload_hash
+from apps.etl.raw import answer_hash, store_raw
 from apps.etl.upsert import upsert
 from apps.market.calendar import CalendarError, NotATradingDayError, TradingDays
 from apps.market.models import DailyPrice
@@ -59,9 +59,24 @@ def adapter(october_2026_in_db: TradingDays, twse_limiter: RateLimiter) -> EchoA
     return EchoAdapter(october_2026_in_db, twse_limiter)
 
 
-def test_payload_hash_ignores_key_order() -> None:
-    assert payload_hash({"a": 1, "b": [1, 2]}) == payload_hash({"b": [1, 2], "a": 1})
-    assert payload_hash({"a": 1}) != payload_hash({"a": 2})
+def test_answer_hash_ignores_key_order_and_tells_requests_apart() -> None:
+    asked = {"date": "20261028", "response": "json"}
+    assert answer_hash(asked, {"a": 1, "b": [1, 2]}) == answer_hash(
+        dict(reversed(asked.items())), {"b": [1, 2], "a": 1}
+    )
+    assert answer_hash(asked, {"a": 1}) != answer_hash(asked, {"a": 2})
+    assert answer_hash(asked, {"a": 1}) != answer_hash({**asked, "date": "20261029"}, {"a": 1})
+
+
+@pytest.mark.django_db
+def test_the_same_answer_to_two_requests_is_kept_for_each() -> None:
+    empty = {"stat": "OK", "data": []}
+    for day in ("20261028", "20261029", "20261029"):
+        store_raw(RawTwse, "attention", {"date": day}, empty)
+    assert sorted(RawTwse.objects.values_list("request_params__date", flat=True)) == [
+        "20261028",
+        "20261029",
+    ]
 
 
 @pytest.mark.django_db
