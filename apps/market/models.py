@@ -104,7 +104,7 @@ class DailyPrice(models.Model):
 
 
 class DividendEvent(models.Model):
-    """Ex-right or ex-dividend event; adj_factor = reference price / previous close (SPEC §8.2)."""
+    """Ex-right, ex-dividend, capital reduction or split; adj_factor = reference ÷ prior close."""
 
     pk = models.CompositePrimaryKey("stock_id", "ex_date")
     stock_id = models.CharField(max_length=10)
