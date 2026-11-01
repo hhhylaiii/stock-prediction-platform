@@ -1,5 +1,6 @@
 """TPEx-specific tables and checks on top of the shared exchange table parsing (SPEC §8.6)."""
 
+import math
 import re
 from collections.abc import Callable, Hashable, Mapping, Sequence
 from datetime import date
@@ -9,6 +10,7 @@ import pandas as pd
 
 from apps.etl.adapters.dispositions import announced_events, list_rows, period_events
 from apps.etl.adapters.exchange_tables import (
+    BLANK_MARKERS,
     DailyTable,
     check_answered,
     find_table,
@@ -23,7 +25,7 @@ from apps.etl.adapters.exchange_tables import (
     shares,
     yield_fraction,
 )
-from apps.etl.errors import SchemaChangedError
+from apps.etl.errors import SchemaChangedError, SourceNotReadyError
 from apps.etl.exchange_rows import (
     parse_count,
     parse_percent,
@@ -91,6 +93,9 @@ FLAG = "Ｙ"
 NOT_AVAILABLE = "N/A"
 PERCENT_SIGN = "%"
 QFII_TITLE = "櫃檯買賣股票僑外資及陸資持股比例排行表"
+DAY_TRADE_SUMMARY_TITLE = "現股當沖交易統計資訊"
+DAY_TRADE_TOTAL = "當日沖銷交易總成交股數"
+DAY_TRADE_VOLUME = "當日沖銷交易成交股數"
 LISTED_COUNT = re.compile(r"總累計次數:\s*(\d+)")
 
 
@@ -274,16 +279,41 @@ def sbl_rolls_forward(row: Mapping[Hashable, Any]) -> bool:
 
 
 def published_ratio(values: Sequence[Any]) -> float | None:
-    """A ratio such as P/E; TPEx prints N/A where none is published."""
-    return None if [str(value).strip() for value in values] == [NOT_AVAILABLE] else ratio(values)
+    """A ratio such as P/E; N/A is TPEx's only mark for a missing one."""
+    (text,) = (str(value).strip() for value in values)
+    if text == NOT_AVAILABLE:
+        return None
+    if text in BLANK_MARKERS:
+        raise SchemaChangedError(f"unexpected ratio value {text!r}")
+    return ratio(values)
 
 
 def percent_text(values: Sequence[Any]) -> float:
     """A percentage printed with its sign, such as 30.29%."""
     (text,) = (str(value).strip() for value in values)
-    if not text.endswith(PERCENT_SIGN) or text == PERCENT_SIGN:
+    if not text.endswith(PERCENT_SIGN):
         raise SchemaChangedError(f"unexpected percent value {text!r}")
-    return parse_percent(text.removesuffix(PERCENT_SIGN))
+    number = parse_percent(text.removesuffix(PERCENT_SIGN))
+    if not math.isfinite(number):
+        raise SchemaChangedError(f"unexpected percent value {text!r}")
+    return number
+
+
+def check_day_trade_total(payload: dict[str, Any]) -> None:
+    """The stock rows must add up to the market total, which is zero before publishing."""
+    summary = find_table(payload, DAY_TRADE_SUMMARY_TITLE)
+    fields = [str(name).strip() for name in summary.get("fields") or []]
+    rows = summary.get("data") or []
+    if DAY_TRADE_TOTAL not in fields or len(rows) != 1:
+        raise SchemaChangedError(f"TPEx {DAY_TRADE_SUMMARY_TITLE} lost {DAY_TRADE_TOTAL}")
+    total = parse_count(rows[0][fields.index(DAY_TRADE_TOTAL)])
+    if total == 0:
+        raise SourceNotReadyError(f"TPEx {DAY_TRADE_TOTAL} is 0; the day is not published yet")
+    stocks = table_with(SECURITY_CODE)(payload)
+    column = [str(name).strip() for name in stocks.get("fields") or []].index(DAY_TRADE_VOLUME)
+    listed = sum(parse_count(row[column]) for row in stocks.get("data") or [])
+    if listed != total:
+        raise SchemaChangedError(f"TPEx 當日沖銷 rows add up to {listed}, not the total {total}")
 
 
 def table_with(field: str) -> Callable[[dict[str, Any]], dict[str, Any]]:
@@ -381,8 +411,9 @@ TABLES: dict[str, DailyTable] = {
         hints=None,
         code=SECURITY_CODE,
         name="證券名稱",
-        columns={"day_trade_volume": ("當日沖銷交易成交股數",)},
+        columns={"day_trade_volume": (DAY_TRADE_VOLUME,)},
         convert=shares,
+        check=check_day_trade_total,
         exchange=TPEX,
         locate=table_with(SECURITY_CODE),
     ),

@@ -98,7 +98,11 @@ def test_valuation_keeps_ratios_and_turns_yield_percent_into_a_fraction(
 
 @responses.activate
 @pytest.mark.django_db
-@pytest.mark.parametrize(("column", "text"), [(2, "-3.10"), (6, "0.00")], ids=["pe", "pb"])
+@pytest.mark.parametrize(
+    ("column", "text"),
+    [(2, "-3.10"), (6, "0.00"), (5, "100.00"), (5, "-0.50")],
+    ids=["pe", "pb", "yield-whole", "yield-negative"],
+)
 def test_valuation_out_of_range_is_dropped_with_a_warning(
     adapter: TpexAdapter,
     load_fixture: Callable[[str], Any],
@@ -110,13 +114,13 @@ def test_valuation_out_of_range_is_dropped_with_a_warning(
     next(row for row in payload["tables"][0]["data"] if row[0] == "6488")[column] = text
     with caplog.at_level(logging.WARNING, logger="apps.etl.adapters.exchange_tables"):
         rows = _valuation(adapter, payload)
-    assert rows["6488"]["pe" if column == 2 else "pb"] is None
+    assert rows["6488"][{2: "pe", 5: "dividend_yield", 6: "pb"}[column]] is None
     assert "TPEx afterTrading/peQryDate" in caplog.text
 
 
 @responses.activate
 @pytest.mark.django_db
-@pytest.mark.parametrize("text", ["虧損", "inf"])
+@pytest.mark.parametrize("text", ["虧損", "inf", "-", ""])
 def test_valuation_word_in_a_ratio_column_is_a_schema_change(
     adapter: TpexAdapter, load_fixture: Callable[[str], Any], text: str
 ) -> None:
@@ -210,6 +214,27 @@ def test_count_matching_an_earlier_backfill_row_adds_nothing(
     )
     _load_shares(adapter, load_fixture(HOLDING), DAY)
     assert ("6488", DAY) not in _shares_in_db()
+
+
+@responses.activate
+@pytest.mark.django_db
+def test_later_day_run_first_leaves_no_repeated_row(
+    adapter: TpexAdapter, load_fixture: Callable[[str], Any]
+) -> None:
+    _load_shares(adapter, load_fixture(HOLDING), NEXT)
+    _load_shares(adapter, load_fixture(HOLDING), DAY)
+    assert sorted(day for code, day in _shares_in_db() if code == "6488") == [DAY]
+
+
+@responses.activate
+@pytest.mark.django_db
+def test_zero_count_is_skipped_with_a_warning(
+    adapter: TpexAdapter, load_fixture: Callable[[str], Any], caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level(logging.WARNING, logger="apps.etl.adapters.exchange_tables"):
+        _load_shares(adapter, _set_count(load_fixture(HOLDING), "6488", "0"), DAY)
+    assert ("6488", DAY) not in _shares_in_db()
+    assert "6488" in caplog.text
 
 
 @responses.activate
