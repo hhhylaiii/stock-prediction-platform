@@ -133,9 +133,12 @@ class DatagovAdapter(BaseAdapter):
         )
         due = _period(_due_month(end))
         scored = frame[frame["score"].str.strip() != NOT_SCORED]["period"]
-        latest = max((_period(_month(value)) for value in scored), default="none")
+        latest = max((_period(_month(value)) for value in scored), default="")
         if latest < due:
-            raise SourceNotReadyError(f"data.gov.tw {SIGNAL_FILE} ends at {latest}; {due} is due")
+            shown = latest or "none"
+            raise SourceNotReadyError(
+                f"data.gov.tw {SIGNAL_FILE} scores end at {shown}; {due} is due"
+            )
         return frame
 
     def normalize(self, dataset: str, raw_df: pd.DataFrame) -> pd.DataFrame:

@@ -136,6 +136,17 @@ def test_a_run_needs_only_months_already_due(
 
 @responses.activate
 @pytest.mark.django_db
+def test_a_file_without_any_score_means_not_published_yet(
+    adapter: DatagovAdapter, meta: dict[str, Any], csv_text: str
+) -> None:
+    header, *rows = csv_text.splitlines(keepends=True)
+    unscored = [row for row in rows if row.rstrip().endswith(",-,-")]
+    with pytest.raises(SourceNotReadyError, match="none"):
+        _frame(adapter, meta, header + "".join(unscored))
+
+
+@responses.activate
+@pytest.mark.django_db
 def test_a_due_month_without_a_score_means_not_published_yet(
     adapter: DatagovAdapter, meta: dict[str, Any], csv_text: str
 ) -> None:
