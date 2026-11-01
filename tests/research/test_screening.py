@@ -175,7 +175,7 @@ def test_mean_daily_correlation_averages_each_day_spearman() -> None:
         ]
     )
     assert matrix.loc["tech_ret_20d", "tech_ret_1d"] == pytest.approx(expected)
-    assert float(matrix.loc["tech_ret_20d", "tech_ret_60d"]) > CORRELATION_CEILING
+    assert matrix.to_numpy()[0, 1] > CORRELATION_CEILING
     assert matrix.loc["tech_ret_1d", "tech_ret_1d"] == pytest.approx(1.0)
 
 
@@ -224,7 +224,7 @@ def stored(settings: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pa
     )
     frame = panel(days, seed=4)
     FeatureDaily.objects.bulk_create(
-        FeatureDaily(**row)
+        FeatureDaily(**{str(name): value for name, value in row.items()})
         for row in frame.drop(columns=["fwd_rank_pct", "untradable_t1"]).to_dict("records")
     )
     LabelDaily.objects.bulk_create(
