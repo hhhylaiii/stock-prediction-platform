@@ -255,6 +255,27 @@ def test_full_delivery_of_2010(
 
 @responses.activate
 @pytest.mark.django_db
+def test_full_delivery_list_with_nothing_listed_is_not_ready(adapter: TwseAdapter) -> None:
+    responses.get(TWT85U, json=NO_DATA)
+    with pytest.raises(SourceNotReadyError, match="TWT85U"):
+        adapter.fetch("full_delivery", DAY, DAY)
+    assert RawTwse.objects.count() == 0
+
+
+@responses.activate
+@pytest.mark.django_db
+def test_foreign_currency_lines_are_left_out(
+    adapter: TwseAdapter, load_fixture: Callable[[str], Any]
+) -> None:
+    payload = load_fixture("twse/disposition/notice_20261028.json")
+    payload["data"][0][1] = "00636K"
+    responses.get(NOTICE, json=payload)
+    events = _events(adapter, "attention", DAY, DAY)
+    assert {event[0] for event in events} == {"1303", "2897B", "9103", "911608"}
+
+
+@responses.activate
+@pytest.mark.django_db
 def test_full_delivery_of_the_previous_day_is_not_ready(
     adapter: TwseAdapter, load_fixture: Callable[[str], Any]
 ) -> None:
@@ -356,9 +377,7 @@ def test_layout_change_is_a_schema_change_and_keeps_raw(
 
 @responses.activate
 @pytest.mark.django_db
-@pytest.mark.parametrize(
-    ("url", "dataset"), [(NOTICE, "attention"), (PUNISH, "disposition"), (TWT85U, "full_delivery")]
-)
+@pytest.mark.parametrize(("url", "dataset"), [(NOTICE, "attention"), (PUNISH, "disposition")])
 def test_empty_list_writes_nothing_and_keeps_no_raw(
     adapter: TwseAdapter, url: str, dataset: str
 ) -> None:

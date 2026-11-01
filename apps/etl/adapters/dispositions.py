@@ -7,6 +7,7 @@ from typing import Any
 
 import pandas as pd
 
+from apps.etl.adapters.exchange_tables import is_foreign_currency_etf
 from apps.etl.errors import SchemaChangedError
 from apps.etl.exchange_rows import stock_code
 from apps.etl.roc import parse_roc_date
@@ -49,10 +50,11 @@ def list_rows(body: Mapping[str, Any], label: str, needed: Sequence[str]) -> lis
 
 
 def listed_code(record: Mapping[str, Any], field: str, label: str) -> str | None:
-    """The row's security code; None for a 'nothing listed today' placeholder row."""
+    """The row's code; None for a 'nothing listed today' placeholder or a foreign-currency line."""
     text = str(record[field]).strip()
     if text:
-        return stock_code(text)
+        code = stock_code(text)
+        return None if is_foreign_currency_etf(code) else code
     if any(PLACEHOLDER in str(value) for value in record.values()):
         return None
     raise SchemaChangedError(f"{label} has a row without a code: {record}")

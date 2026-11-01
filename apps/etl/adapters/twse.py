@@ -269,7 +269,9 @@ class TwseAdapter(BaseAdapter):
         params = {"date": f"{day:%Y%m%d}", "response": "json"}
         payload = self._listed(FULL_DELIVERY, FULL_DELIVERY_PATH, params)
         if payload is None:
-            return event_frame([])
+            raise SourceNotReadyError(
+                f"TWSE TWT85U for {day} lists nothing; the list is never empty"
+            )
         check_answer(payload, day)
         records = list_rows(payload, "TWSE TWT85U", (CODE_FIELD,))
         codes = [listed_code(record, CODE_FIELD, "TWSE TWT85U") for record in records]
