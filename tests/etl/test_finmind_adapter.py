@@ -94,6 +94,7 @@ def _mock_dividends(
     stock: str = "2884",
     policy: str = "dividend_2884",
     reductions: Any = None,
+    split_data: Any = None,
     **result: Any,
 ) -> None:
     policy_end = (date.fromisoformat(span[1]) + timedelta(days=30)).isoformat()
@@ -110,7 +111,8 @@ def _mock_dividends(
         span,
         data=reductions if reductions is not None else [],
     )
-    mock("TaiwanStockSplitPrice", "split_all", None, span)
+    splits = {} if split_data is None else {"data": split_data}
+    mock("TaiwanStockSplitPrice", "split_all", None, span, **splits)
 
 
 def test_finmind_is_registered() -> None:
@@ -397,3 +399,15 @@ def test_the_whole_market_split_list_is_fetched_once_per_run(mock: Callable[...,
     )
     split_calls = [c for c in responses.calls if "TaiwanStockSplitPrice" in str(c.request.url)]
     assert len(split_calls) == 1
+
+
+@responses.activate
+def test_a_split_list_without_stock_ids_is_a_schema_change(
+    mock: Callable[..., None], load_fixture: Callable[[str], Any]
+) -> None:
+    rows = load_fixture("finmind/split_all.json")["data"]
+    _mock_dividends(
+        mock, split_data=[{k: v for k, v in r.items() if k != "stock_id"} for r in rows]
+    )
+    with pytest.raises(CommandError, match="stock_id"):
+        _backfill("dividend_event", "2884", AUGUST)

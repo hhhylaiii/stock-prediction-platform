@@ -279,7 +279,10 @@ class FinmindAdapter(BaseAdapter):
                 start_date=start.isoformat(),
                 end_date=end.isoformat(),
             )
-        return [row for row in self._whole_market[key] if str(row.get("stock_id")) == stock_id]
+        rows = self._whole_market[key]
+        if any("stock_id" not in row for row in rows):
+            raise SchemaChangedError(f"FinMind {finmind_dataset} rows lost key stock_id")
+        return [row for row in rows if str(row["stock_id"]).strip() == stock_id]
 
     def _require_trading_days(self, days: pd.Series, dataset: str, stock_id: str) -> None:
         """SPEC §5 rejects a batch dated off the calendar; ex-dates may fall on closures."""
