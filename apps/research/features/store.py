@@ -16,6 +16,7 @@ from django.db import transaction
 from apps.etl.upsert import upsert
 from apps.research.features.build import FEATURE_COLUMNS, FRAME_COLUMNS, FRAME_TYPES
 from apps.research.models import FeatureDaily
+from apps.research.ranges import months, years
 
 KEYS = ["stock_id", "date"]
 PARTITION_FILE = "part-0.parquet"
@@ -46,22 +47,34 @@ def write_features(frame: pd.DataFrame, start: date, end: date) -> int:
         )
 
 
-def read_features(start: date, end: date) -> pd.DataFrame:
-    """feature_daily rows dated in [start, end], read a month at a time."""
-    parts = []
-    first = date(start.year, start.month, 1)
-    while first <= end:
-        after = date(first.year + first.month // 12, first.month % 12 + 1, 1)
-        rows = FeatureDaily.objects.filter(
-            date__gte=max(first, start), date__lt=after, date__lte=end
-        )
-        listed = list(rows.order_by("date", "stock_id").values_list(*FRAME_COLUMNS))
-        if listed:
-            parts.append(pd.DataFrame(listed, columns=FRAME_COLUMNS))
-        first = after
+def _typed(parts: list[pd.DataFrame]) -> pd.DataFrame:
     if not parts:
         return pd.DataFrame(columns=FRAME_COLUMNS).astype(FRAME_TYPES)
     return pd.concat(parts, ignore_index=True).astype(FRAME_TYPES)
+
+
+def read_features(start: date, end: date) -> pd.DataFrame:
+    """feature_daily rows dated in [start, end], read a month at a time."""
+    parts = []
+    for low, high in months(start, end):
+        rows = FeatureDaily.objects.filter(date__range=(low, high))
+        listed = list(rows.order_by("date", "stock_id").values_list(*FRAME_COLUMNS))
+        if listed:
+            parts.append(pd.DataFrame(listed, columns=FRAME_COLUMNS))
+    return _typed(parts)
+
+
+def read_partitions(start: date, end: date, directory: Path) -> pd.DataFrame:
+    """Rows dated in [start, end] from the yearly Parquet partitions export_year wrote."""
+    if not directory.is_dir():
+        raise FileNotFoundError(f"no feature partitions in {directory}; run build_features first")
+    parts = []
+    for low, high in years(start, end):
+        path = directory / f"year={low.year}" / PARTITION_FILE
+        if path.exists():
+            dated = [("date", ">=", low), ("date", "<=", high)]
+            parts.append(pq.read_table(path, filters=dated).to_pandas())
+    return _typed(parts)
 
 
 def export_year(year: int, directory: Path) -> Path | None:
