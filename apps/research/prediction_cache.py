@@ -44,7 +44,7 @@ def fold_path(run_key: str, index: int) -> Path:
     return Path(settings.RESEARCH_CACHE_DIR) / require_key(run_key) / f"fold-{index:03d}.parquet"
 
 
-def _record(fold: Fold) -> dict[str, object]:
+def fold_record(fold: Fold) -> dict[str, object]:
     return {
         name: value.isoformat() if isinstance(value, date) else value
         for name, value in asdict(fold).items()
@@ -80,7 +80,10 @@ def save_fold_predictions(
         raise HoldoutError(f"holdout fold {fold.index} of {run_key} is written once and exists")
     _check(fold, predictions)
     table = pa.Table.from_pandas(predictions, preserve_index=False)
-    metadata = {**(table.schema.metadata or {}), FOLD_METADATA: json.dumps(_record(fold)).encode()}
+    metadata = {
+        **(table.schema.metadata or {}),
+        FOLD_METADATA: json.dumps(fold_record(fold)).encode(),
+    }
     path.parent.mkdir(parents=True, exist_ok=True)
     handle, temporary = tempfile.mkstemp(dir=path.parent, prefix=f".{path.stem}-", suffix=".tmp")
     os.close(handle)
@@ -125,7 +128,7 @@ def load_fold_predictions(run_key: str, fold: Fold) -> pd.DataFrame:
         raise MissingFoldsError(run_key, [fold.index])
     table = pq.read_table(path)
     stored: dict[str, object] = json.loads((table.schema.metadata or {}).get(FOLD_METADATA, b"{}"))
-    expected = _record(fold)
+    expected = fold_record(fold)
     changed = sorted(
         name for name in expected.keys() | stored.keys() if stored.get(name) != expected.get(name)
     )
@@ -143,7 +146,7 @@ def missing_folds(run_key: str, folds: Iterable[Fold]) -> list[int]:
     return [
         fold.index
         for fold in folds
-        if _stored_record(fold_path(run_key, fold.index)) != _record(fold)
+        if _stored_record(fold_path(run_key, fold.index)) != fold_record(fold)
     ]
 
 

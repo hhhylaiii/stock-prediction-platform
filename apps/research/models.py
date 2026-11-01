@@ -44,6 +44,64 @@ class HoldoutRun(models.Model):
         return f"{self.scope} #{self.attempt} {self.run_key}"
 
 
+class ModelObjective(models.TextChoices):
+    RANK = "rank", "排名"
+    REGRESSION = "regression", "絕對報酬"
+    QUANTILE = "quantile", "分位數"
+    VOLATILITY = "volatility", "波動率"
+    CLASSIFICATION = "classification", "上漲機率"
+
+
+class ModelStatus(models.TextChoices):
+    CANDIDATE = "candidate", "候選"
+    ACTIVE = "active", "上線"
+    DEGRADED = "degraded", "降級"
+    RETIRED = "retired", "退役"
+
+
+class ModelRun(models.Model):
+    """One trained model: its window, parameters, features, versions and fold metrics (SPEC §7)."""
+
+    run_id = models.CharField(max_length=64, primary_key=True)
+    run_key = models.CharField(max_length=64, db_index=True)
+    model_type = models.CharField(max_length=32)
+    objective = models.CharField(max_length=16, choices=ModelObjective.choices)
+    version = models.CharField(max_length=32)
+    train_start = models.DateField()
+    train_end = models.DateField()
+    params = models.JSONField(default=dict, blank=True)
+    feature_list = models.JSONField(default=list, blank=True)
+    seed = models.IntegerField(null=True, blank=True)
+    lib_versions = models.JSONField(default=dict)
+    feature_hash = models.CharField(max_length=64)
+    status = models.CharField(
+        max_length=16, choices=ModelStatus.choices, default=ModelStatus.CANDIDATE
+    )
+    ic_mean = models.FloatField(null=True, blank=True)
+    icir = models.FloatField(null=True, blank=True)
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        db_table = "model_run"
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(objective__in=ModelObjective.values),
+                name="model_run_objective_known",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(status__in=ModelStatus.values), name="model_run_status_known"
+            ),
+            models.CheckConstraint(
+                condition=models.Q(train_start__lte=models.F("train_end")),
+                name="model_run_window_ordered",
+            ),
+            models.CheckConstraint(condition=finite("ic_mean", "icir"), name="model_run_finite"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.run_id} {self.status}"
+
+
 class LabelDaily(models.Model):
     """Forward labels per stock, day and horizon; vol and up_5pct sit on the 20-day rows."""
 

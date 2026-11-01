@@ -159,6 +159,7 @@ RESEARCH_CACHE_DIR = Path(
 FEATURE_PARQUET_DIR = Path(
     env.str("FEATURE_PARQUET_DIR", default="") or BASE_DIR / "artifacts" / "features"
 )
+MODEL_DIR = Path(env.str("MODEL_DIR", default="") or BASE_DIR / "artifacts" / "models")
 
 LOGGING = {
     "version": 1,

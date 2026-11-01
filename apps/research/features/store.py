@@ -64,15 +64,26 @@ def read_features(start: date, end: date) -> pd.DataFrame:
     return _typed(parts)
 
 
+def partition_path(directory: Path, year: int) -> Path:
+    """The year's partition file under directory."""
+    return directory / f"year={year}" / PARTITION_FILE
+
+
+def existing_partition(directory: Path, year: int) -> Path:
+    """The year's partition file, which must exist before training reads or hashes it."""
+    path = partition_path(directory, year)
+    if not path.exists():
+        raise FileNotFoundError(
+            f"no feature partition for {year} in {directory}; run build_features first"
+        )
+    return path
+
+
 def read_partitions(start: date, end: date, directory: Path) -> pd.DataFrame:
     """Rows dated in [start, end] from the yearly Parquet partitions export_year wrote."""
     parts = []
     for low, high in years(start, end):
-        path = directory / f"year={low.year}" / PARTITION_FILE
-        if not path.exists():
-            raise FileNotFoundError(
-                f"no feature partition for {low.year} in {directory}; run build_features first"
-            )
+        path = existing_partition(directory, low.year)
         dated = [("date", ">=", low), ("date", "<=", high)]
         parts.append(pq.read_table(path, filters=dated).to_pandas())
     return _typed(parts)
@@ -80,7 +91,7 @@ def read_partitions(start: date, end: date, directory: Path) -> pd.DataFrame:
 
 def export_year(year: int, directory: Path) -> Path | None:
     """Rewrite one year's partition from feature_daily; a year without rows has no partition."""
-    target = directory / f"year={year}" / PARTITION_FILE
+    target = partition_path(directory, year)
     frame = read_features(date(year, 1, 1), date(year, 12, 31))
     if frame.empty:
         shutil.rmtree(target.parent, ignore_errors=True)
