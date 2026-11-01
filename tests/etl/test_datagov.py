@@ -85,17 +85,17 @@ def test_fetch_reads_the_download_link_then_keeps_the_csv_as_raw(
 
 @responses.activate
 @pytest.mark.django_db
-def test_scores_become_monthly_values_announced_two_months_on(
+def test_scores_become_monthly_values_announced_mid_month_two_months_on(
     adapter: DatagovAdapter, meta: dict[str, Any], csv_text: str
 ) -> None:
     frame = _frame(adapter, meta, csv_text)
     assert set(frame["indicator_id"]) == {"business_signal"}
     assert _values(frame) == {
-        "1984-01": (42.0, date(1984, 3, 1)),
-        "1984-02": (39.0, date(1984, 4, 1)),
-        "2026-07": (41.0, date(2026, 9, 1)),
-        "2026-08": (40.0, date(2026, 10, 1)),
-        "2026-09": (41.0, date(2026, 11, 1)),
+        "1984-01": (42.0, date(1984, 3, 15)),
+        "1984-02": (39.0, date(1984, 4, 15)),
+        "2026-07": (41.0, date(2026, 9, 15)),
+        "2026-08": (40.0, date(2026, 10, 15)),
+        "2026-09": (41.0, date(2026, 11, 15)),
     }
 
 
@@ -111,7 +111,7 @@ def test_rerun_overwrites_a_revised_score_and_keeps_its_announce_date(
     adapter.upsert(DATASET, _frame(adapter, meta, revised))
     assert MacroIndicator.objects.count() == 5
     stored = MacroIndicator.objects.get(indicator_id="business_signal", period="2026-08")
-    assert (stored.value, stored.announce_date) == (39.0, date(2026, 10, 1))
+    assert (stored.value, stored.announce_date) == (39.0, date(2026, 10, 15))
 
 
 @responses.activate
@@ -120,17 +120,28 @@ def test_a_missing_expected_month_means_not_published_yet_and_keeps_raw(
     adapter: DatagovAdapter, meta: dict[str, Any], csv_text: str
 ) -> None:
     with pytest.raises(SourceNotReadyError, match="2026-10"):
-        _frame(adapter, meta, csv_text, end=date(2026, 12, 1))
+        _frame(adapter, meta, csv_text, end=date(2026, 12, 15))
     assert RawDatagov.objects.count() == 1
 
 
 @responses.activate
 @pytest.mark.django_db
-def test_a_run_before_the_month_turns_needs_only_months_already_due(
+@pytest.mark.parametrize("end", [date(2026, 12, 14), date(2026, 11, 15)])
+def test_a_run_needs_only_months_already_due(
+    adapter: DatagovAdapter, meta: dict[str, Any], csv_text: str, end: date
+) -> None:
+    frame = _frame(adapter, meta, csv_text, end=end)
+    assert "2026-09" in set(frame["period"])
+
+
+@responses.activate
+@pytest.mark.django_db
+def test_a_due_month_without_a_score_means_not_published_yet(
     adapter: DatagovAdapter, meta: dict[str, Any], csv_text: str
 ) -> None:
-    frame = _frame(adapter, meta, csv_text, end=date(2026, 11, 30))
-    assert "2026-09" in set(frame["period"])
+    text = csv_text.replace("105.9287826,41,紅", "105.9287826,-,-")
+    with pytest.raises(SourceNotReadyError, match="2026-09"):
+        _frame(adapter, meta, text, end=date(2026, 11, 15))
 
 
 @responses.activate

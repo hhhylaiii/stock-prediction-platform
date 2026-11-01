@@ -36,6 +36,7 @@ SCORE_RANGE = (9.0, 45.0)
 GOVERNMENT_HOST = ".gov.tw"
 MAX_FILE_BYTES = 10_000_000
 ANNOUNCE_LAG_MONTHS = 2
+ANNOUNCE_DAY = 15
 COLUMNS = ["indicator_id", "period", "value", "announce_date"]
 
 
@@ -130,8 +131,9 @@ class DatagovAdapter(BaseAdapter):
             columns=["period", "score"],
             dtype=object,
         )
-        due = _period(_shift_months(end.replace(day=1), -ANNOUNCE_LAG_MONTHS))
-        latest = max(_period(_month(value)) for value in frame["period"])
+        due = _period(_due_month(end))
+        scored = frame[frame["score"].str.strip() != NOT_SCORED]["period"]
+        latest = max((_period(_month(value)) for value in scored), default="none")
         if latest < due:
             raise SourceNotReadyError(f"data.gov.tw {SIGNAL_FILE} ends at {latest}; {due} is due")
         return frame
@@ -148,7 +150,7 @@ class DatagovAdapter(BaseAdapter):
                     "indicator_id": BUSINESS_SIGNAL,
                     "period": _period(month),
                     "value": _score(score),
-                    "announce_date": _shift_months(month, ANNOUNCE_LAG_MONTHS),
+                    "announce_date": _announced(month),
                 }
             )
         frame = pd.DataFrame(rows, columns=COLUMNS)
@@ -175,6 +177,17 @@ def _month(text: Any) -> date:
         return date(int(cleaned[:4]), int(cleaned[4:]), 1)
     except ValueError:
         raise SchemaChangedError(f"unexpected data.gov.tw period {text!r}") from None
+
+
+def _announced(month: date) -> date:
+    """Mid-month two months on: January figures have come out as late as 9 March."""
+    return _shift_months(month, ANNOUNCE_LAG_MONTHS).replace(day=ANNOUNCE_DAY)
+
+
+def _due_month(end: date) -> date:
+    """The latest month whose announce date has passed by end."""
+    month = _shift_months(end.replace(day=1), -ANNOUNCE_LAG_MONTHS)
+    return month if end.day >= ANNOUNCE_DAY else _shift_months(month, -1)
 
 
 def _period(month: date) -> str:
