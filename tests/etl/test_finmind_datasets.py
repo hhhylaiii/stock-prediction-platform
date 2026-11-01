@@ -351,3 +351,20 @@ def test_an_unusable_source_does_not_discard_the_others(rows: Callable[[str], Ro
     bad = [{**rows("capred_2412")[0], "PostReductionReferencePrice": 0.0}]
     event = dividend_events([], [result], "2412", reductions=bad).iloc[0]
     assert event["adj_factor"] == pytest.approx(749.5 / 753.0)
+
+
+@pytest.mark.parametrize(
+    ("name", "normalize", "changed"),
+    [
+        ("price_2330_202610", price_bars, "close"),
+        ("per_2330_202610", valuations, "PER"),
+        ("shareholding_2330_202610", share_counts, "NumberOfSharesIssued"),
+    ],
+)
+def test_a_day_sent_twice_is_a_schema_change(
+    rows: Callable[[str], Rows], name: str, normalize: Callable[..., pd.DataFrame], changed: str
+) -> None:
+    data = sorted(rows(name), key=lambda row: str(row["date"]))
+    twice = [*data, {**data[0], changed: data[0][changed] + 1}]
+    with pytest.raises(SchemaChangedError, match=f"repeated {data[0]['date']}"):
+        normalize(twice, "2330")

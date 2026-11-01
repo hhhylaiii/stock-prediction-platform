@@ -143,7 +143,17 @@ def price_bars(rows: Iterable[Row], stock_id: str) -> pd.DataFrame:
                 "turnover": _count(row["Trading_money"], "TaiwanStockPrice"),
             }
         )
+    _require_unique(records, "date", "TaiwanStockPrice")
     return pd.DataFrame(records, columns=PRICE_COLUMNS, dtype=object)
+
+
+def _require_unique(records: list[dict[str, Any]], key: str, label: str) -> None:
+    """A day sent twice would otherwise fail later in the upsert, stopping the whole batch."""
+    seen: set[Any] = set()
+    for record in records:
+        if record[key] in seen:
+            raise SchemaChangedError(f"FinMind {label} repeated {record[key]}")
+        seen.add(record[key])
 
 
 def _ratio(row: Row, after_key: str, before_key: str, label: str) -> float | None:
@@ -256,6 +266,7 @@ def valuations(rows: Iterable[Row], stock_id: str) -> pd.DataFrame:
                 "dividend_yield": fraction if fraction is not None and 0 <= fraction < 1 else None,
             }
         )
+    _require_unique(records, "date", "TaiwanStockPER")
     return pd.DataFrame(records, columns=VALUATION_COLUMNS, dtype=object)
 
 
@@ -281,6 +292,7 @@ def share_counts(rows: Iterable[Row], stock_id: str) -> pd.DataFrame:
                 "reason": ShareChangeReason.UNKNOWN,
             }
         )
+    _require_unique(records, "effective_date", "TaiwanStockShareholding")
     return pd.DataFrame(records, columns=SHARE_COLUMNS, dtype=object)
 
 
