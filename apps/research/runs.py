@@ -36,6 +36,8 @@ def lib_versions() -> dict[str, str]:
 
 def feature_hash(start: date, end: date, directory: Path) -> str:
     """SHA-256 of the yearly feature partitions that [start, end] reads, in year order."""
+    if start > end:
+        raise ValueError(f"start {start} is after end {end}")
     digest = hashlib.sha256()
     for low, _ in years(start, end):
         path = existing_partition(directory, low.year)
@@ -46,57 +48,84 @@ def feature_hash(start: date, end: date, directory: Path) -> str:
     return digest.hexdigest()
 
 
-def model_path(run_id: str) -> Path:
-    """Model file of run_id under MODEL_DIR."""
-    return Path(settings.MODEL_DIR) / f"{require_key(run_id)}{MODEL_SUFFIX}"
+def run_dir(run_key: str) -> Path:
+    """Directory of one run's model files under MODEL_DIR."""
+    return Path(settings.MODEL_DIR) / require_key(run_key)
 
 
-def save_model(run_id: str, model: Any) -> Path:
-    """Pickle model to its run_id file atomically."""
-    path = model_path(run_id)
+def model_path(run_key: str, run_id: str) -> Path:
+    """Model file named by run_id in its run's directory."""
+    return run_dir(run_key) / f"{require_key(run_id)}{MODEL_SUFFIX}"
+
+
+def load_model(run_key: str, run_id: str) -> Any:
+    """The model pickled for run_id; only load files this platform wrote."""
+    with model_path(run_key, run_id).open("rb") as handle:
+        return pickle.load(handle)  # noqa: S301
+
+
+def _pickled(path: Path, model: Any) -> str:
+    """Temporary file beside path holding the pickled model."""
     path.parent.mkdir(parents=True, exist_ok=True)
     handle, temporary = tempfile.mkstemp(dir=path.parent, prefix=f".{path.stem}-", suffix=".tmp")
     try:
         with os.fdopen(handle, "wb") as written:
             pickle.dump(model, written, protocol=pickle.HIGHEST_PROTOCOL)
-        os.replace(temporary, path)
-    finally:
+    except BaseException:
         Path(temporary).unlink(missing_ok=True)
-    return path
+        raise
+    return temporary
 
 
-def load_model(run_id: str) -> Any:
-    """The model pickled under run_id; only load files this platform wrote."""
-    with model_path(run_id).open("rb") as handle:
-        return pickle.load(handle)  # noqa: S301
+def _replaceable(run: ModelRun) -> None:
+    stored = ModelRun.objects.select_for_update().filter(run_id=run.run_id).first()
+    if stored is None:
+        return
+    if stored.run_key != run.run_key:
+        raise RunError(f"{run.run_id} belongs to run {stored.run_key}, not {run.run_key}")
+    if stored.status != ModelStatus.CANDIDATE:
+        raise RunError(f"{run.run_id} is {stored.status}; only candidates are rerun")
+    if HoldoutRun.objects.filter(run_key=run.run_key).exists():
+        raise RunError(f"{run.run_key} holds a holdout run; its rows are written once")
 
 
-def save_run(run: ModelRun) -> ModelRun:
-    """Insert run, or replace a candidate with its run_id; other statuses are never overwritten."""
-    require_key(run.run_id)
-    require_key(run.run_key)
+def record_run(run: ModelRun, model: Any | None = None) -> ModelRun:
+    """Write a candidate run with its model file, replacing only an unclaimed candidate."""
+    path = model_path(run.run_key, run.run_id)
+    if run.status != ModelStatus.CANDIDATE:
+        raise RunError(f"runs are recorded as candidates, not {run.status}")
     run.full_clean(validate_unique=False)
-    with transaction.atomic():
-        stored = ModelRun.objects.select_for_update().filter(run_id=run.run_id).first()
-        if stored is not None and stored.status != ModelStatus.CANDIDATE:
-            raise RunError(f"{run.run_id} is {stored.status}; only candidates are rerun")
-        run.save()
+    temporary = None if model is None else _pickled(path, model)
+    try:
+        with transaction.atomic():
+            _replaceable(run)
+            run.save()
+            if temporary is None:
+                path.unlink(missing_ok=True)
+            else:
+                os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            Path(temporary).unlink(missing_ok=True)
     return run
+
+
+def _remove(directory: Path) -> None:
+    if directory.exists():
+        shutil.rmtree(directory)
 
 
 def drop_run(run_key: str) -> int:
     """Delete a run's model_run rows, model files and cached predictions; holdout runs stay."""
-    require_key(run_key)
-    if HoldoutRun.objects.filter(run_key=run_key).exists():
-        raise RunError(f"{run_key} holds a holdout run, which is recorded once and kept")
-    rows = ModelRun.objects.filter(run_key=run_key)
-    kept = sorted(set(rows.exclude(status=ModelStatus.CANDIDATE).values_list("status", flat=True)))
-    if kept:
-        raise RunError(f"{run_key} has {', '.join(kept)} models; retire them by hand instead")
-    run_ids = list(rows.values_list("run_id", flat=True))
+    models, cache = run_dir(run_key), Path(settings.RESEARCH_CACHE_DIR) / run_key
     with transaction.atomic():
-        dropped, _ = rows.delete()
-    for run_id in run_ids:
-        model_path(run_id).unlink(missing_ok=True)
-    shutil.rmtree(Path(settings.RESEARCH_CACHE_DIR) / run_key, ignore_errors=True)
-    return dropped
+        if HoldoutRun.objects.filter(run_key=run_key).exists():
+            raise RunError(f"{run_key} holds a holdout run, which is recorded once and kept")
+        rows = list(ModelRun.objects.select_for_update().filter(run_key=run_key))
+        kept = sorted({row.status for row in rows if row.status != ModelStatus.CANDIDATE})
+        if kept:
+            raise RunError(f"{run_key} has {', '.join(kept)} models; retire them by hand instead")
+        ModelRun.objects.filter(run_id__in=[row.run_id for row in rows]).delete()
+    _remove(models)
+    _remove(cache)
+    return len(rows)

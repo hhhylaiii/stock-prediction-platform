@@ -23,8 +23,7 @@ from apps.research.runs import (
     lib_versions,
     load_model,
     model_path,
-    save_model,
-    save_run,
+    record_run,
 )
 
 pytestmark = pytest.mark.django_db
@@ -77,8 +76,8 @@ def run(run_id: str = "wf1.ridge.h20.f000", run_key: str = "wf1", **changes: Any
     return ModelRun(**{**fields, **changes})
 
 
-def test_a_run_keeps_every_spec_column_and_starts_as_a_candidate() -> None:
-    save_run(run())
+def test_a_run_keeps_every_spec_column_and_starts_as_a_candidate(artifacts: Path) -> None:
+    record_run(run())
 
     stored = ModelRun.objects.get(run_id="wf1.ridge.h20.f000")
     assert {field.name for field in ModelRun._meta.get_fields()} >= SPEC_COLUMNS
@@ -103,54 +102,109 @@ def test_a_run_keeps_every_spec_column_and_starts_as_a_candidate() -> None:
 def test_the_database_refuses_invalid_runs(changes: dict[str, Any]) -> None:
     with pytest.raises(IntegrityError), transaction.atomic():
         run(**changes).save()
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"objective": "ranking"},
+        {"train_start": d("2014-01-02")},
+        {"ic_mean": math.inf},
+        {"lib_versions": {}},
+    ],
+)
+def test_invalid_runs_are_refused_before_any_write(
+    artifacts: Path, changes: dict[str, Any]
+) -> None:
     with pytest.raises(ValidationError):
-        save_run(run(**changes))
+        record_run(run(**changes), {"weights": [1.0]})
+
+    assert not ModelRun.objects.exists()
+    assert not model_path("wf1", "wf1.ridge.h20.f000").exists()
 
 
-def test_rerunning_a_candidate_replaces_it() -> None:
-    save_run(run(ic_mean=0.01))
-    save_run(run(ic_mean=0.03, params={"penalty": 3.0}))
+@pytest.mark.parametrize("status", ["active", "degraded", "retired", "live"])
+def test_runs_are_recorded_only_as_candidates(artifacts: Path, status: str) -> None:
+    with pytest.raises(RunError, match="candidate"):
+        record_run(run(status=status))
+
+    assert not ModelRun.objects.exists()
+
+
+def test_rerunning_a_candidate_replaces_its_row_and_model(artifacts: Path) -> None:
+    record_run(run(ic_mean=0.01), {"weights": [1.0]})
+    record_run(run(ic_mean=0.03, params={"penalty": 3.0}), {"weights": [3.0]})
 
     stored = ModelRun.objects.get()
     assert stored.ic_mean == pytest.approx(0.03)
     assert stored.params == {"penalty": 3.0}
+    assert load_model("wf1", "wf1.ridge.h20.f000") == {"weights": [3.0]}
+
+
+def test_a_rerun_without_a_model_removes_the_old_file(artifacts: Path) -> None:
+    record_run(run(), {"weights": [1.0]})
+    record_run(run())
+
+    assert not model_path("wf1", "wf1.ridge.h20.f000").exists()
 
 
 @pytest.mark.parametrize("status", ["active", "degraded", "retired"])
-def test_runs_past_candidate_are_never_overwritten(status: str) -> None:
-    run(status=status).save()
+def test_runs_past_candidate_keep_their_row_and_model(artifacts: Path, status: str) -> None:
+    record_run(run(), {"weights": [1.0]})
+    ModelRun.objects.update(status=status)
 
     with pytest.raises(RunError, match=status):
-        save_run(run(ic_mean=0.5))
+        record_run(run(ic_mean=0.5), {"weights": [9.0]})
 
     assert ModelRun.objects.get().ic_mean == pytest.approx(0.02)
+    assert load_model("wf1", "wf1.ridge.h20.f000") == {"weights": [1.0]}
+
+
+def test_rows_of_a_holdout_run_are_written_once(artifacts: Path) -> None:
+    record_run(run(), {"weights": [1.0]})
+    claim_holdout("rank", "wf1", d("2025-03-31"))
+
+    record_run(run("wf1.ridge.h20.f001"), {"weights": [2.0]})
+    with pytest.raises(RunError, match="holdout"):
+        record_run(run(ic_mean=0.9), {"weights": [9.0]})
+
+    assert ModelRun.objects.get(run_id="wf1.ridge.h20.f000").ic_mean == pytest.approx(0.02)
+    assert load_model("wf1", "wf1.ridge.h20.f000") == {"weights": [1.0]}
+
+
+def test_a_run_id_stays_with_its_run_key(artifacts: Path) -> None:
+    record_run(run())
+
+    with pytest.raises(RunError, match="wf1"):
+        record_run(run(run_key="wf2"))
 
 
 @pytest.mark.parametrize("changes", [{"run_id": "../wf1"}, {"run_key": "WF 1"}])
-def test_run_ids_and_keys_must_be_plain_names(changes: dict[str, Any]) -> None:
+def test_run_ids_and_keys_must_be_plain_names(artifacts: Path, changes: dict[str, Any]) -> None:
     with pytest.raises(ValueError, match="lowercase"):
-        save_run(run(**changes))
+        record_run(run(**changes))
 
 
-def test_models_are_saved_under_their_run_id_and_load_back(artifacts: Path) -> None:
-    path = save_model("wf1.ridge.h20.f000", {"weights": [1.0, 2.0]})
-    save_model("wf1.ridge.h20.f000", {"weights": [3.0]})
+def test_models_live_under_their_run_key_and_run_id(artifacts: Path) -> None:
+    record_run(run(), {"weights": [1.0, 2.0]})
 
-    assert path == artifacts / "models" / "wf1.ridge.h20.f000.pkl"
-    assert path == model_path("wf1.ridge.h20.f000")
-    assert load_model("wf1.ridge.h20.f000") == {"weights": [3.0]}
+    path = model_path("wf1", "wf1.ridge.h20.f000")
+    assert path == artifacts / "models" / "wf1" / "wf1.ridge.h20.f000.pkl"
+    assert load_model("wf1", "wf1.ridge.h20.f000") == {"weights": [1.0, 2.0]}
     assert [item.name for item in path.parent.iterdir()] == [path.name]
 
 
-def test_model_paths_refuse_unsafe_run_ids(artifacts: Path) -> None:
+def test_model_paths_refuse_unsafe_names(artifacts: Path) -> None:
     with pytest.raises(ValueError, match="lowercase"):
-        model_path("../evil")
+        model_path("wf1", "../evil")
+    with pytest.raises(ValueError, match="lowercase"):
+        model_path("..", "wf1.ridge.h20.f000")
 
 
 def test_model_dir_follows_the_settings(settings: Any, tmp_path: Path) -> None:
     settings.MODEL_DIR = tmp_path / "elsewhere"
 
-    assert model_path("wf1.ridge.h20.f000").parent == tmp_path / "elsewhere"
+    assert model_path("wf1", "wf1.ridge.h20.f000").parent == tmp_path / "elsewhere" / "wf1"
 
 
 def feature(stock_id: str, day: date, value: float) -> FeatureDaily:
@@ -184,6 +238,11 @@ def test_feature_hash_needs_every_partition_of_the_range(tmp_path: Path) -> None
         feature_hash(d("2015-12-30"), d("2016-01-04"), tmp_path)
 
 
+def test_feature_hash_refuses_a_backward_range(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="after"):
+        feature_hash(d("2016-01-04"), d("2015-12-30"), tmp_path)
+
+
 def test_lib_versions_name_python_and_the_libraries() -> None:
     versions = lib_versions()
 
@@ -206,22 +265,22 @@ def test_drop_run_removes_its_rows_models_and_cached_predictions(artifacts: Path
         ("wf1.ridge.h20.f001", "wf1"),
         ("wf2.ridge.h20.f000", "wf2"),
     ]:
-        save_run(run(run_id, run_key))
-        save_model(run_id, {"run": run_id})
+        record_run(run(run_id, run_key), {"run": run_id})
+    orphan = model_path("wf1", "wf1.ridge.h20.f009")
+    orphan.write_bytes(b"left by an interrupted run")
     dropped, kept = cached(artifacts, "wf1"), cached(artifacts, "wf2")
 
     assert drop_run("wf1") == 2
 
     assert list(ModelRun.objects.values_list("run_id", flat=True)) == ["wf2.ridge.h20.f000"]
-    assert not model_path("wf1.ridge.h20.f000").exists()
-    assert not model_path("wf1.ridge.h20.f001").exists()
-    assert model_path("wf2.ridge.h20.f000").exists()
+    assert not (artifacts / "models" / "wf1").exists()
+    assert model_path("wf2", "wf2.ridge.h20.f000").exists()
     assert not dropped.parent.exists()
     assert kept.exists()
 
 
 def test_drop_run_keeps_a_run_with_a_holdout_claim(artifacts: Path) -> None:
-    save_run(run())
+    record_run(run(), {"run": 0})
     path = cached(artifacts, "wf1")
     claim_holdout("rank", "wf1", d("2025-03-31"))
 
@@ -229,24 +288,25 @@ def test_drop_run_keeps_a_run_with_a_holdout_claim(artifacts: Path) -> None:
         drop_run("wf1")
 
     assert ModelRun.objects.exists()
+    assert model_path("wf1", "wf1.ridge.h20.f000").exists()
     assert path.exists()
 
 
 def test_drop_run_keeps_a_run_past_candidate(artifacts: Path) -> None:
-    save_run(run())
-    run("wf1.ridge.h20.f001", status="active").save()
-    save_model("wf1.ridge.h20.f000", {"run": 0})
+    record_run(run(), {"run": 0})
+    record_run(run("wf1.ridge.h20.f001"))
+    ModelRun.objects.filter(run_id="wf1.ridge.h20.f001").update(status="active")
 
     with pytest.raises(RunError, match="active"):
         drop_run("wf1")
 
     assert ModelRun.objects.count() == 2
-    assert model_path("wf1.ridge.h20.f000").exists()
+    assert model_path("wf1", "wf1.ridge.h20.f000").exists()
 
 
 def test_drop_run_command_reports_and_refuses(artifacts: Path) -> None:
-    save_run(run())
-    save_run(run("wf3.ridge.h20.f000", "wf3"))
+    record_run(run())
+    record_run(run("wf3.ridge.h20.f000", "wf3"))
     claim_holdout("rank", "wf3", d("2025-03-31"))
     out = StringIO()
 
