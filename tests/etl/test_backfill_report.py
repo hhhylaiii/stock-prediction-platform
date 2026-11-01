@@ -37,17 +37,24 @@ def test_moves_past_the_limit_are_jumps_and_event_days_are_flagged() -> None:
     _series("3008", date(2016, 3, 1), [10.0, 15.0, *flat])
     _series("6488", date(2016, 3, 1), [20.0] * 6 + [10.0], factors=[0.5] * 6 + [1.0])
     _series("2412", date(2016, 3, 1), [*flat, 8.0])
-    jumps = price_jumps(date(2010, 1, 1), free_days=5, tolerance=0.001)
+    _series("2317", date(2016, 3, 1), [*flat, 11.0])
+    _series("2105", date(2015, 5, 25), [*flat[:5], 10.8])
+    _series("2106", date(2015, 5, 27), [*flat[:5], 10.8])
+    jumps = price_jumps(date(2010, 1, 1), free_days=5, tolerance=1e-6)
     assert [(jump.stock_id, jump.day, jump.event) for jump in jumps] == [
         ("2884", date(2016, 3, 7), True),
         ("1216", date(2014, 3, 3), False),
         ("2412", date(2016, 3, 7), False),
+        ("2603", date(2016, 3, 7), False),
         ("1101", date(2014, 3, 7), False),
+        ("2105", date(2015, 5, 30), False),
     ]
-    assert [jump.change for jump in jumps] == pytest.approx([0.3, 0.2, -0.2, 0.08])
-    assert [jump.stock_id for jump in price_jumps(date(2015, 1, 1), 5, 0.001)] == [
+    assert [jump.change for jump in jumps] == pytest.approx([0.3, 0.2, -0.2, 0.1005, 0.08, 0.08])
+    assert [jump.stock_id for jump in price_jumps(date(2015, 1, 1), 5, 1e-6)] == [
         "2884",
         "2412",
+        "2603",
+        "2105",
     ]
 
 

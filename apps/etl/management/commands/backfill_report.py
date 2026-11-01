@@ -12,14 +12,17 @@ from apps.etl.backfill_report import Jump, backfills, coverage, delisted_counts,
 
 FIRST_DAY = date(2010, 1, 1)
 NEW_LISTING_FREE_DAYS = 5
-LIMIT_TOLERANCE = 0.001
+LIMIT_TOLERANCE = 1e-6
 FUND_ROWS = 50
 DIVIDER = "| --- | --- | --- | --- | --- |"
 JUMP_HEADER = ["| stock | date | previous | adjusted | change | event day |", DIVIDER + " --- |"]
 
 
 class Command(BaseCommand):
-    help = "Report table coverage, delisted stocks, price jumps past the limit and backfill runs."
+    help = (
+        "Report table coverage, delisted stocks, price jumps past the limit and backfill runs; "
+        "run after load_listing_dates so emerging-market days are gone."
+    )
 
     def add_arguments(self, parser: ArgumentParser) -> None:
         parser.add_argument("--since", type=date.fromisoformat, default=FIRST_DAY)
@@ -56,7 +59,8 @@ def _jumps(since: date) -> str:
         "## Price jumps past the limit",
         "",
         f"Adjusted daily moves since {since} beyond the price limit (7% before 2015-06-01, "
-        f"10% after, plus {LIMIT_TOLERANCE:.1%}), skipping the first {NEW_LISTING_FREE_DAYS} "
+        f"10% after, plus {LIMIT_TOLERANCE:g} for float error), skipping the first "
+        f"{NEW_LISTING_FREE_DAYS} "
         "priced days of stocks that started trading inside the data. On an event day the "
         "adjustment factor itself is suspect.",
         "",
