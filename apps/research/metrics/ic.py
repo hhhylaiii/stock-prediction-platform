@@ -2,7 +2,7 @@
 
 import math
 from collections.abc import Iterable, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 
 import numpy as np
 import pandas as pd
@@ -23,8 +23,12 @@ class ICSummary:
     std: float
     icir: float
     nw_t: float
-    positive_share: float
+    positive_day_share: float
     n_days: int
+
+
+SUMMARY_COLUMNS = [field.name for field in fields(ICSummary)]
+FOLD_COLUMNS = ["fold", "test_start", "eval_end", "tuning", "holdout", *SUMMARY_COLUMNS]
 
 
 def _empty_ic() -> pd.Series:
@@ -62,27 +66,36 @@ def summarize_ic(ic: pd.Series, lag: int) -> ICSummary:
 
 
 def ic_by_fold(ic: pd.Series, folds: Iterable[Fold], lag: int) -> pd.DataFrame:
-    """One summary row per fold over its test period, keeping the tuning and holdout flags."""
+    """One summary row per fold over test_start..eval_end, keeping the tuning and holdout flags."""
     days = pd.Index(ic.index)
     rows = [
         {
             "fold": fold.index,
             "test_start": fold.test_start,
-            "test_end": fold.test_end,
+            "eval_end": fold.eval_end,
             "tuning": fold.tuning,
             "holdout": fold.holdout,
-            **asdict(summarize_ic(ic[(days >= fold.test_start) & (days <= fold.test_end)], lag)),
+            **asdict(summarize_ic(ic[(days >= fold.test_start) & (days <= fold.eval_end)], lag)),
         }
         for fold in folds
     ]
-    return pd.DataFrame(rows).set_index("fold")
+    return pd.DataFrame(rows, columns=FOLD_COLUMNS).set_index("fold")
+
+
+def positive_fold_share(by_fold: pd.DataFrame) -> float:
+    """Share of folds with IC days whose mean IC is above zero."""
+    means = by_fold.loc[by_fold["n_days"] > 0, "mean"]
+    return float((means > 0).mean()) if len(means) else math.nan
 
 
 def ic_by_year(ic: pd.Series, lag: int) -> pd.DataFrame:
     """One summary row per calendar year of the IC dates."""
     years = pd.Index([day.year for day in ic.index])
-    summaries = {int(year): asdict(summarize_ic(ic[years == year], lag)) for year in years.unique()}
-    return pd.DataFrame.from_dict(summaries, orient="index").sort_index()
+    rows = [
+        {"year": int(year), **asdict(summarize_ic(ic[years == year], lag))}
+        for year in sorted(years.unique())
+    ]
+    return pd.DataFrame(rows, columns=["year", *SUMMARY_COLUMNS]).set_index("year")
 
 
 def _residuals(
@@ -106,11 +119,7 @@ def neutralized_rank_ic(
     industry: str = "industry",
     min_stocks: int = MIN_STOCKS,
 ) -> pd.Series:
-    """Rank IC of the score residual after a daily regression on industry dummies and exposures.
-
-    Rows missing an industry or an exposure leave the day's regression; a score the exposures
-    explain fully has no residual, so that day drops out.
-    """
+    """Rank IC of score residuals from a daily regression on industry dummies and exposures."""
     columns = [score, label, *exposures]
     named = frame[industry].notna() & (frame[industry].astype(str).str.strip() != "")
     rows = frame.loc[named & frame[columns].notna().all(axis=1), [DATE, industry, *columns]]
@@ -135,8 +144,11 @@ def rank_ic_by_bucket(
     n_buckets: int = 3,
     min_stocks: int = MIN_STOCKS,
 ) -> pd.DataFrame:
-    """Daily rank IC inside equal-count buckets of by per date; bucket 1 holds the lowest values."""
-    rows = frame.loc[frame[by].notna()].reset_index(drop=True)
+    """Daily rank IC in equal-count buckets of by over rows with score and label; 1 is lowest."""
+    if n_buckets < 1:
+        raise ValueError("n_buckets must be at least 1")
+    needed = list(dict.fromkeys([DATE, score, label, by]))
+    rows = frame.loc[frame[[score, label, by]].notna().all(axis=1), needed].reset_index(drop=True)
     grouped = rows.groupby(DATE)[by]
     position = grouped.rank(method="first").astype(np.int64) - 1
     bucket = position * n_buckets // grouped.transform("size") + 1

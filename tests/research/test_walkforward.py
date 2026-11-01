@@ -39,7 +39,7 @@ def test_default_layout_rolls_quarterly_from_2014_to_the_last_date(folds: list[F
 
 def test_first_fold_boundaries_match_hand_count(folds: list[Fold]) -> None:
     first = folds[0]
-    assert first.train_start == d("2011-01-03")
+    assert first.train_start == d("2010-12-06")
     assert first.train_end == d("2013-12-03")
     assert first.valid_start == d("2013-06-04")
     assert first.fit_end == d("2013-05-06")
@@ -64,9 +64,9 @@ def test_test_periods_are_contiguous_and_disjoint(
         assert after.test_start == long_calendar.shift(before.test_end, 1)
 
 
-def test_rolling_window_starts_train_months_before_the_test_period(folds: list[Fold]) -> None:
+def test_rolling_window_covers_train_months_before_the_embargo(folds: list[Fold]) -> None:
     for fold in folds:
-        window_start = add_months(fold.test_start.replace(day=1), -DEFAULT.train_months)
+        window_start = add_months(fold.train_end, -DEFAULT.train_months) + timedelta(days=1)
         assert window_start <= fold.train_start < window_start + timedelta(days=4)
 
 
@@ -122,10 +122,18 @@ def test_research_folds_drop_tuning_and_holdout(folds: list[Fold]) -> None:
 
 def test_sixty_month_window_starts_in_2015(long_calendar: TradingDays) -> None:
     folds = generate_folds(long_calendar, LAST, WalkForwardConfig(train_months=60))
-    assert folds[0].test_start == d("2015-01-01")
-    assert folds[0].train_start == d("2010-01-01")
-    assert folds[0].index == 0
-    assert len(folds) == 48
+    assert folds[0].test_start == d("2015-04-01")
+    assert folds[0].index == 5
+    assert DEFAULT.data_start <= folds[0].train_start < d("2010-04-01")
+    assert len(folds) == 47
+
+
+def test_fold_numbers_follow_the_test_period_across_window_lengths(
+    folds: list[Fold], long_calendar: TradingDays
+) -> None:
+    sixty = generate_folds(long_calendar, LAST, WalkForwardConfig(train_months=60))
+    by_start = {fold.test_start: fold.index for fold in folds}
+    assert all(by_start[fold.test_start] == fold.index for fold in sixty)
 
 
 def test_expanding_window_always_starts_at_data_start(long_calendar: TradingDays) -> None:
@@ -146,8 +154,9 @@ def test_real_calendar_holidays_shift_every_boundary(twse_calendar: TradingDays)
 
 
 def test_last_date_is_snapped_to_a_trading_day(long_calendar: TradingDays) -> None:
-    folds = generate_folds(long_calendar, d("2026-11-01"))
-    assert folds[-1].test_end == d("2026-10-30")
+    folds = generate_folds(long_calendar, d("2022-01-02"))
+    assert folds[-1].test_start == d("2021-10-01")
+    assert folds[-1].test_end == d("2021-12-31")
 
 
 def test_last_date_before_first_test_is_refused(long_calendar: TradingDays) -> None:
@@ -172,6 +181,8 @@ def test_calendar_that_misses_the_training_window_is_refused(
         ({"valid_months": 36}, "valid_months"),
         ({"tuning_end": d("2025-01-01")}, "tuning_end"),
         ({"first_test": d("2009-12-01")}, "first_test"),
+        ({"window": "Expanding"}, "window"),
+        ({"test_months": 6}, "overlap"),
     ],
 )
 def test_invalid_config_is_refused(change: dict[str, Any], message: str) -> None:
@@ -211,7 +222,57 @@ def test_window_too_short_for_validation_is_refused(long_calendar: TradingDays) 
         generate_folds(long_calendar, LAST, WalkForwardConfig(train_months=7, valid_months=6))
 
 
-def test_embargo_longer_than_the_window_is_refused(long_calendar: TradingDays) -> None:
-    config = WalkForwardConfig(train_months=3, valid_months=1, embargo=80)
+def test_expanding_window_without_days_before_the_embargo_is_refused(
+    long_calendar: TradingDays,
+) -> None:
+    config = WalkForwardConfig(window="expanding", data_start=d("2013-12-20"))
     with pytest.raises(WalkForwardError, match="no training days"):
         generate_folds(long_calendar, LAST, config)
+
+
+def test_time_decay_refuses_a_non_positive_half_life() -> None:
+    with pytest.raises(WalkForwardError, match="half_life_months"):
+        time_decay_weights([d("2013-12-03")], d("2013-12-03"), half_life_months=0)
+
+
+def test_non_default_layout_keeps_every_boundary(long_calendar: TradingDays) -> None:
+    config = WalkForwardConfig(embargo=25, valid_months=3, test_months=3, step_months=6)
+    folds = generate_folds(long_calendar, LAST, config)
+    assert [fold.index for fold in folds[:3]] == [0, 1, 2]
+    for fold in folds[:-1]:
+        assert len(long_calendar.between(fold.train_end, fold.test_start)) == 27
+        assert len(long_calendar.between(fold.fit_end, fold.valid_start)) == 27
+        assert add_months(fold.train_end, -3) < fold.valid_start
+        assert fold.valid_start <= add_months(fold.train_end, -3) + timedelta(days=4)
+        assert fold.test_end < add_months(fold.test_start, 3)
+    for before, after in pairwise(folds):
+        months = (after.test_start.year - before.test_start.year) * 12
+        assert months + after.test_start.month - before.test_start.month == 6
+
+
+def test_month_end_start_stays_anchored(long_calendar: TradingDays) -> None:
+    config = WalkForwardConfig(first_test=d("2014-01-31"), test_months=1, step_months=1)
+    folds = generate_folds(long_calendar, d("2014-06-30"), config)
+    assert [fold.test_start for fold in folds] == [
+        d("2014-01-31"),
+        d("2014-02-28"),
+        d("2014-03-31"),
+        d("2014-04-30"),
+        d("2014-06-02"),
+        d("2014-06-30"),
+    ]
+    for before, after in pairwise(folds):
+        assert after.test_start == long_calendar.shift(before.test_end, 1)
+
+
+def test_eval_end_keeps_labels_out_of_the_next_era(
+    folds: list[Fold], long_calendar: TradingDays
+) -> None:
+    last_research = next(fold for fold in folds if fold.test_start == d("2024-10-01"))
+    last_tuning = next(fold for fold in folds if fold.test_start == d("2015-10-01"))
+    for fold, era_start in ((last_research, d("2025-01-01")), (last_tuning, d("2016-01-01"))):
+        assert fold.eval_end < fold.test_end
+        assert long_calendar.shift(fold.eval_end, DEFAULT.embargo) < era_start
+        assert long_calendar.shift(fold.eval_end, DEFAULT.embargo + 1) == era_start
+    trimmed = {last_research.index, last_tuning.index}
+    assert all(fold.eval_end == fold.test_end for fold in folds if fold.index not in trimmed)

@@ -66,3 +66,12 @@ def test_paired_t_uses_shared_index_and_flips_sign() -> None:
     assert forward > 2
     assert paired_nw_t(base, better, lag=5) == pytest.approx(-forward)
     assert forward == pytest.approx(newey_west_t((better - base).to_numpy(), lag=5))
+
+
+def test_paired_t_matches_by_label_not_by_position() -> None:
+    rng = np.random.default_rng(8)
+    first = pd.Series(rng.standard_normal(300) + 0.3, index=pd.RangeIndex(300))
+    second = pd.Series(rng.standard_normal(300), index=pd.RangeIndex(300))
+    shuffled = second.drop(150).sample(frac=1, random_state=0)
+    aligned = (first.drop(150) - second.drop(150)).to_numpy()
+    assert paired_nw_t(first, shuffled, lag=3) == pytest.approx(newey_west_t(aligned, lag=3))

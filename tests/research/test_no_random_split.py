@@ -7,7 +7,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 RANDOM_SPLIT = re.compile(
     r"KFold|ShuffleSplit|train_test_split|shuffle\s*=\s*True"
     r"|cross_val_(score|predict)|cross_validate|\b[A-Z]\w*CV\b"
-    r"|\b(lgb|lightgbm|xgb|xgboost)\.cv\b"
+    r"|\b(lgb|lightgbm|xgb|xgboost)\.cv\b|from\s+(lightgbm|xgboost)\s+import\s+[^\n]*\bcv\b"
+    r"|LeaveOne\w*Out|LeaveP\w*Out|PredefinedSplit|learning_curve|validation_curve"
+    r"|permutation_test_score|from\s+sklearn\.utils\s+import\s+[^\n]*\bshuffle\b"
 )
 
 
@@ -27,6 +29,15 @@ RANDOM_SPLIT = re.compile(
         "GridSearchCV(model, grid)",
         "lgb.cv(params, train_set)",
         "xgboost.cv(params, dtrain)",
+        "from lightgbm import Dataset, cv",
+        "LeaveOneOut()",
+        "LeaveOneGroupOut()",
+        "LeavePGroupsOut(2)",
+        "PredefinedSplit(fold)",
+        "learning_curve(model, x, y)",
+        "validation_curve(model, x, y)",
+        "permutation_test_score(model, x, y)",
+        "from sklearn.utils import resample, shuffle",
     ],
 )
 def test_guard_pattern_catches_random_splits(line: str) -> None:
