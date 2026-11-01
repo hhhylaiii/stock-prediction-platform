@@ -1,19 +1,24 @@
 """Adapter contract: fetch to raw, normalize to the standard schema, upsert (SPEC §5)."""
 
 import hashlib
+import logging
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from datetime import date
 from typing import Any, ClassVar
 
 import pandas as pd
+from django.db import transaction
 from django.utils import timezone
 
+from apps.etl.errors import RejectedStocksError, SourceError
 from apps.etl.models import EtlRun, RawRecord
 from apps.etl.ratelimit import RateLimiter
 from apps.etl.raw import store_raw
-from apps.etl.runs import tracked_run
+from apps.etl.runs import fail_on_rejections, stop_on_streak, tracked_run
 from apps.market.calendar import CalendarError, NotATradingDayError, TradingDays
+
+logger = logging.getLogger(__name__)
 
 
 def stock_list_digest(stock_ids: Iterable[str]) -> str:
@@ -90,8 +95,10 @@ class BaseAdapter(ABC):
         end: date,
         resume_after: str | None = None,
         selection: str | list[str] = "all",
+        rejected: Mapping[str, str] | None = None,
+        guard_streaks: bool = True,
     ) -> EtlRun:
-        """Fetch, normalize and upsert stock by stock; the checkpoint is the last finished stock."""
+        """Stock by stock; a stock with unusable source data is skipped and recorded."""
         self.require_dataset(dataset)
         if not self.per_stock:
             raise ValueError(f"{self.source} cannot fetch one stock at a time")
@@ -106,11 +113,41 @@ class BaseAdapter(ABC):
                 "digest": stock_list_digest(stock_ids),
                 "last_stock_id": resume_after,
             }
-            run.checkpoint = checkpoint
+            found = dict(rejected or {})
+            run.checkpoint = {**checkpoint, "rejected": found}
             run.save(update_fields=["checkpoint"])
+            streak: list[str] = []
             for stock_id in pending:
-                raw = self.fetch(dataset, start, end, stock_id)
-                run.rows += self.upsert(dataset, self.normalize(dataset, raw))
-                run.checkpoint = {**checkpoint, "last_stock_id": stock_id}
+                try:
+                    run.rows += self._load_stock(dataset, start, end, stock_id)
+                    streak = []
+                except SourceError as exc:
+                    found[stock_id] = f"{type(exc).__name__}: {exc}"
+                    streak.append(stock_id)
+                    logger.warning("%s %s: rejected %s", self.source, dataset, found[stock_id])
+                run.checkpoint = {**checkpoint, "last_stock_id": stock_id, "rejected": found}
                 run.save(update_fields=["rows", "checkpoint"])
+                try:
+                    stop_on_streak(streak if guard_streaks else [], found)
+                except RejectedStocksError:
+                    run.checkpoint = _before_streak(checkpoint, pending, streak, found)
+                    raise
+            run.checkpoint = {**run.checkpoint, "finished": True}
+            fail_on_rejections(found)
         return run
+
+    def _load_stock(self, dataset: str, start: date, end: date, stock_id: str) -> int:
+        raw = self.fetch(dataset, start, end, stock_id)
+        frame = self.normalize(dataset, raw)
+        with transaction.atomic():
+            return self.upsert(dataset, frame)
+
+
+def _before_streak(
+    checkpoint: dict[str, Any], pending: list[str], streak: list[str], found: dict[str, str]
+) -> dict[str, Any]:
+    """Rewind past a streak of rejections, likely an outage, so --resume fetches them again."""
+    first = pending.index(streak[0])
+    last = pending[first - 1] if first else checkpoint["last_stock_id"]
+    kept = {code: reason for code, reason in found.items() if code not in streak}
+    return {**checkpoint, "last_stock_id": last, "rejected": kept}

@@ -511,7 +511,7 @@ def test_refresh_keeps_a_date_whose_earlier_rows_are_already_gone(
 @responses.activate
 @pytest.mark.django_db
 def test_a_run_of_rejections_stops_asking(settings: Any) -> None:
-    settings.LISTING_MAX_CONSECUTIVE_REJECTIONS = 2
+    settings.ETL_MAX_CONSECUTIVE_REJECTIONS = 2
     for code in ("6488", "6489", "6490"):
         StockMaster.objects.create(stock_id=code, name=code, market=Market.TPEX)
         _prices(code, date(2015, 9, 25))

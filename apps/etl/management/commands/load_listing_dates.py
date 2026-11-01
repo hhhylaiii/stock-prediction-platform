@@ -5,7 +5,6 @@ from collections.abc import Callable
 from datetime import date
 from typing import Any
 
-from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 from django.db.models import Min, Q, QuerySet
@@ -15,11 +14,16 @@ from django.utils import timezone
 from apps.etl.adapters import limiter_for
 from apps.etl.adapters.tpex import TpexClient
 from apps.etl.adapters.twse import TwseClient
-from apps.etl.errors import SourceError
+from apps.etl.errors import RejectedStocksError, SourceError
 from apps.etl.listing import Outcome, Probe, first_listed_day
 from apps.etl.models import EtlRun
 from apps.etl.ratelimit import RetryableError
-from apps.etl.runs import failing_on_termination, tracked_run
+from apps.etl.runs import (
+    fail_on_rejections,
+    failing_on_termination,
+    stop_on_streak,
+    tracked_run,
+)
 from apps.market.models import DailyChip, DailyPrice, DailyValuation, Market, StockMaster
 
 DATASET = "list_date"
@@ -60,6 +64,8 @@ class Command(BaseCommand):
         ]
         try:
             self._run(chosen, todo, firsts)
+        except RejectedStocksError as exc:
+            raise CommandError(str(exc)) from exc
         except RetryableError as exc:
             raise CommandError(f"{type(exc).__name__}: {exc}") from exc
 
@@ -77,13 +83,13 @@ class Command(BaseCommand):
                 "settled": {},
                 "cleared": [],
             }
-            streak = 0
+            streak: list[str] = []
             for stock in todo:
                 probe = _probe(stock, twse, tpex)
                 rejected = self._settle(run, stock, firsts[stock.stock_id], probe)
-                streak = streak + 1 if rejected else 0
-                _stop_on_streak(streak, run.checkpoint["rejected"])
-            _fail_on_rejections(run.checkpoint["rejected"])
+                streak = [*streak, stock.stock_id] if rejected else []
+                stop_on_streak(streak, run.checkpoint["rejected"])
+            fail_on_rejections(run.checkpoint["rejected"])
 
     def _settle(self, run: EtlRun, stock: StockMaster, firsts: list[date], probe: Probe) -> bool:
         """Record one stock's outcome; True when it was rejected."""
@@ -161,18 +167,6 @@ def _settled() -> dict[str, str]:
     ):
         found |= {code: entry[0] for code, entry in checkpoint.get("settled", {}).items()}
     return found
-
-
-def _stop_on_streak(streak: int, rejected: dict[str, str]) -> None:
-    """Many rejections in a row look like a blocked source, so stop asking."""
-    if streak >= settings.LISTING_MAX_CONSECUTIVE_REJECTIONS:
-        raise CommandError(f"{streak} stocks rejected in a row; last: {list(rejected)[-1]}")
-
-
-def _fail_on_rejections(rejected: dict[str, str]) -> None:
-    if rejected:
-        noun = "stock" if len(rejected) == 1 else "stocks"
-        raise CommandError(f"{len(rejected)} {noun} rejected: {', '.join(sorted(rejected))}")
 
 
 def _probe(stock: StockMaster, twse: TwseClient, tpex: TpexClient) -> Probe:

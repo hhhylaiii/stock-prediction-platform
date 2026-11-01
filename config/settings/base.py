@@ -122,7 +122,7 @@ ETL_RATE_LIMITS: dict[str, dict[str, float]] = {
         "cooldown": env.float("FINMIND_COOLDOWN", default=3700.0),
     },
 }
-LISTING_MAX_CONSECUTIVE_REJECTIONS = env.int("LISTING_MAX_CONSECUTIVE_REJECTIONS", default=20)
+ETL_MAX_CONSECUTIVE_REJECTIONS = env.int("ETL_MAX_CONSECUTIVE_REJECTIONS", default=20)
 
 LOGGING = {
     "version": 1,

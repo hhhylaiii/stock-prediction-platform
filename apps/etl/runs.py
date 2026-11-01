@@ -1,13 +1,15 @@
 """etl_run bookkeeping shared by every ETL entry point (SPEC §5)."""
 
 import signal
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import date
 from types import FrameType
 
+from django.conf import settings
 from django.utils import timezone
 
+from apps.etl.errors import RejectedStocksError
 from apps.etl.models import EtlRun
 
 ERROR_TEXT_LIMIT = 4000
@@ -44,3 +46,22 @@ def failing_on_termination() -> Iterator[None]:
     finally:
         for signum, handler in previous.items():
             signal.signal(signum, handler)
+
+
+def stop_on_streak(streak: Sequence[str], rejected: Mapping[str, str]) -> None:
+    """Many rejections in a row look like a blocked source, so stop asking."""
+    if streak and len(streak) >= settings.ETL_MAX_CONSECUTIVE_REJECTIONS:
+        last = streak[-1]
+        raise RejectedStocksError(
+            f"{len(streak)} stocks rejected in a row; last: {last}: {rejected[last]}"
+        )
+
+
+def fail_on_rejections(rejected: Mapping[str, str]) -> None:
+    """Fail the run listing every rejected stock, with the reason of the first one."""
+    if rejected:
+        codes = sorted(rejected)
+        noun = "stock" if len(codes) == 1 else "stocks"
+        raise RejectedStocksError(
+            f"{len(codes)} {noun} rejected: {', '.join(codes)}; {codes[0]}: {rejected[codes[0]]}"
+        )
