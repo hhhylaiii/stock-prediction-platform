@@ -109,6 +109,10 @@ def retry_plan(source: str, dataset: str, run_id: int) -> Plan:
     earlier = EtlRun.objects.filter(run_id=run_id, source=source, dataset=dataset).first()
     if earlier is None:
         raise CommandError(f"no etl_run {run_id} of {source}/{dataset}")
+    if earlier.status == EtlRun.Status.FAILED and not earlier.checkpoint.get("finished"):
+        raise CommandError(f"etl_run {run_id} stopped before its last stock; --resume it first")
+    if earlier.status == EtlRun.Status.RUNNING:
+        raise CommandError(f"etl_run {run_id} is still marked running")
     rejected = sorted(earlier.checkpoint.get("rejected", {}))
     if not rejected:
         raise CommandError(f"etl_run {run_id} has no rejected stocks")

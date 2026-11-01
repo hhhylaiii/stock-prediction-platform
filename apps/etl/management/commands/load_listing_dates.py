@@ -83,12 +83,12 @@ class Command(BaseCommand):
                 "settled": {},
                 "cleared": [],
             }
-            streak = 0
+            streak: list[str] = []
             for stock in todo:
                 probe = _probe(stock, twse, tpex)
                 rejected = self._settle(run, stock, firsts[stock.stock_id], probe)
-                streak = streak + 1 if rejected else 0
-                stop_on_streak(streak, stock.stock_id)
+                streak = [*streak, stock.stock_id] if rejected else []
+                stop_on_streak(streak, run.checkpoint["rejected"])
             fail_on_rejections(run.checkpoint["rejected"])
 
     def _settle(self, run: EtlRun, stock: StockMaster, firsts: list[date], probe: Probe) -> bool:

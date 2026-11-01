@@ -10,7 +10,7 @@ from django.core.management.base import CommandError
 
 from apps.etl.adapters import ADAPTERS
 from apps.etl.adapters.base import BaseAdapter
-from apps.etl.errors import SchemaChangedError
+from apps.etl.errors import SchemaChangedError, SourceRequestError
 from apps.etl.models import EtlRun, RawRecord, RawTwse
 from apps.etl.ratelimit import RetryableError
 from apps.etl.upsert import upsert
@@ -30,6 +30,8 @@ class StockEchoAdapter(BaseAdapter):
     per_stock = True
     fail_on: ClassVar[str | None] = None
     reject_on: ClassVar[frozenset[str]] = frozenset()
+    refuse_on: ClassVar[frozenset[str]] = frozenset()
+    explode_on: ClassVar[str | None] = None
     interrupt_on: ClassVar[str | None] = None
     terminate_on: ClassVar[str | None] = None
     calls: ClassVar[list[tuple[str, date, date]]] = []
@@ -43,6 +45,8 @@ class StockEchoAdapter(BaseAdapter):
             raise RetryableError(f"boom on {stock_id}")
         if stock_id in self.reject_on:
             raise SchemaChangedError(f"bad rows for {stock_id}")
+        if stock_id in self.refuse_on:
+            raise SourceRequestError(f"refused {stock_id}")
         if stock_id == self.interrupt_on:
             raise KeyboardInterrupt
         if stock_id == self.terminate_on:
@@ -53,7 +57,10 @@ class StockEchoAdapter(BaseAdapter):
         return raw_df
 
     def upsert(self, dataset: str, frame: pd.DataFrame) -> int:
-        return upsert(DailyPrice, frame, ("stock_id", "date"), ("volume", "turnover"))
+        written = upsert(DailyPrice, frame, ("stock_id", "date"), ("volume", "turnover"))
+        if frame["stock_id"].iloc[0] == self.explode_on:
+            raise ValueError(f"broke after writing {self.explode_on}")
+        return written
 
 
 @pytest.fixture(autouse=True)
@@ -72,6 +79,8 @@ def echo_adapter(monkeypatch: pytest.MonkeyPatch, october_2026: TradingDays, set
     monkeypatch.setattr(StockEchoAdapter, "calls", [])
     monkeypatch.setattr(StockEchoAdapter, "fail_on", None)
     monkeypatch.setattr(StockEchoAdapter, "reject_on", frozenset())
+    monkeypatch.setattr(StockEchoAdapter, "refuse_on", frozenset())
+    monkeypatch.setattr(StockEchoAdapter, "explode_on", None)
     monkeypatch.setattr(StockEchoAdapter, "interrupt_on", None)
     monkeypatch.setattr(StockEchoAdapter, "terminate_on", None)
     monkeypatch.setattr("apps.etl.adapters.TradingDays.from_db", lambda: october_2026)
@@ -380,17 +389,29 @@ def _rejected_run() -> EtlRun:
 
 
 @pytest.mark.usefixtures("stocks")
-def test_a_rejected_stock_is_skipped_and_the_run_fails_with_the_list() -> None:
+def test_rejected_stocks_are_skipped_and_the_run_fails_with_the_list() -> None:
     StockEchoAdapter.reject_on = frozenset({"2317"})
-    with pytest.raises(CommandError, match="1 stock rejected: 2317"):
+    StockEchoAdapter.refuse_on = frozenset({"3454"})
+    with pytest.raises(CommandError, match="2 stocks rejected: 2317, 3454; 2317: Schema"):
         _backfill()
     assert _fetched() == ["1101", "2317", "2330", "3454"]
-    assert sorted(DailyPrice.objects.values_list("stock_id", flat=True)) == ["1101", "2330", "3454"]
+    assert sorted(DailyPrice.objects.values_list("stock_id", flat=True)) == ["1101", "2330"]
     run = EtlRun.objects.get()
-    assert (run.status, run.rows, run.checkpoint["last_stock_id"]) == ("failed", 3, "3454")
-    assert run.checkpoint["rejected"] == {"2317": "SchemaChangedError: bad rows for 2317"}
+    assert (run.status, run.rows, run.checkpoint["last_stock_id"]) == ("failed", 2, "3454")
+    assert run.checkpoint["rejected"] == {
+        "2317": "SchemaChangedError: bad rows for 2317",
+        "3454": "SourceRequestError: refused 3454",
+    }
     assert run.checkpoint["finished"] is True
     assert "2317" in run.error
+
+
+@pytest.mark.usefixtures("stocks")
+def test_a_stock_that_breaks_mid_upsert_leaves_no_rows() -> None:
+    StockEchoAdapter.explode_on = "2317"
+    with pytest.raises(CommandError, match="broke after writing 2317"):
+        _backfill()
+    assert list(DailyPrice.objects.values_list("stock_id", flat=True)) == ["1101"]
 
 
 @pytest.mark.usefixtures("stocks")
@@ -447,6 +468,8 @@ def test_retry_rejected_reruns_only_those_stocks_over_the_same_range() -> None:
         (["--retry-rejected", "999"], "no etl_run 999 of echo/daily_price"),
         (["--retry-rejected", "1", "--resume"], "takes its range and stocks"),
         (["--retry-rejected", "1", "--from", "2010-01-01"], "takes its range and stocks"),
+        (["--retry-rejected", "1", "--to", "2010-12-31"], "takes its range and stocks"),
+        (["--retry-rejected", "1", "--stock", "2330"], "takes its range and stocks"),
         ([], "--from is required"),
     ],
 )
@@ -472,12 +495,82 @@ def test_retry_needs_a_run_with_rejections() -> None:
 
 
 @pytest.mark.usefixtures("stocks")
-def test_a_run_of_rejections_stops_the_backfill(settings: Any) -> None:
+def test_a_run_of_rejections_stops_and_rewinds_so_resume_fetches_them(settings: Any) -> None:
     settings.ETL_MAX_CONSECUTIVE_REJECTIONS = 2
-    StockEchoAdapter.reject_on = frozenset({"1101", "2317", "2330"})
-    with pytest.raises(CommandError, match="2 stocks rejected in a row; last: 2317"):
+    StockEchoAdapter.reject_on = frozenset({"2317", "2330", "3454"})
+    match = "2 stocks rejected in a row; last: 2330: SchemaChangedError: bad rows for 2330"
+    with pytest.raises(CommandError, match=match):
         _backfill()
-    assert _fetched() == ["1101", "2317"]
+    assert _fetched() == ["1101", "2317", "2330"]
     run = EtlRun.objects.get()
-    assert (run.status, run.checkpoint["last_stock_id"]) == ("failed", "2317")
+    assert (run.status, run.checkpoint["last_stock_id"]) == ("failed", "1101")
+    assert run.checkpoint["rejected"] == {}
     assert "finished" not in run.checkpoint
+    StockEchoAdapter.reject_on = frozenset()
+    StockEchoAdapter.calls.clear()
+    _backfill("--resume")
+    assert _fetched() == ["2317", "2330", "3454"]
+
+
+@pytest.mark.usefixtures("stocks")
+def test_a_rejection_streak_rewinds_to_the_resume_point(settings: Any) -> None:
+    settings.ETL_MAX_CONSECUTIVE_REJECTIONS = 2
+    StockEchoAdapter.fail_on = "2317"
+    with pytest.raises(CommandError):
+        _backfill()
+    StockEchoAdapter.fail_on = None
+    StockEchoAdapter.reject_on = frozenset({"2317", "2330"})
+    with pytest.raises(CommandError, match="in a row"):
+        _backfill("--resume")
+    assert EtlRun.objects.latest("run_id").checkpoint["last_stock_id"] == "1101"
+
+
+@pytest.mark.usefixtures("stocks")
+def test_one_good_stock_between_rejections_resets_the_streak(settings: Any) -> None:
+    settings.ETL_MAX_CONSECUTIVE_REJECTIONS = 2
+    StockEchoAdapter.reject_on = frozenset({"1101", "2330"})
+    with pytest.raises(CommandError, match="2 stocks rejected: 1101, 2330"):
+        _backfill()
+    assert _fetched() == ["1101", "2317", "2330", "3454"]
+
+
+@pytest.mark.usefixtures("stocks")
+def test_rejections_survive_a_resume_that_fails_at_once() -> None:
+    StockEchoAdapter.reject_on = frozenset({"1101"})
+    StockEchoAdapter.fail_on = "2330"
+    with pytest.raises(CommandError, match="boom"):
+        _backfill()
+    StockEchoAdapter.reject_on = frozenset()
+    with pytest.raises(CommandError, match="boom"):
+        _backfill("--resume")
+    StockEchoAdapter.fail_on = None
+    with pytest.raises(CommandError, match="1 stock rejected: 1101"):
+        _backfill("--resume")
+
+
+@pytest.mark.usefixtures("stocks")
+def test_retry_refuses_a_run_that_stopped_early_or_is_running() -> None:
+    StockEchoAdapter.reject_on = frozenset({"1101"})
+    StockEchoAdapter.fail_on = "2330"
+    with pytest.raises(CommandError):
+        _backfill()
+    stopped = EtlRun.objects.get()
+    with pytest.raises(CommandError, match="stopped before its last stock; --resume it first"):
+        _retry(stopped.run_id)
+    EtlRun.objects.filter(run_id=stopped.run_id).update(status=EtlRun.Status.RUNNING)
+    with pytest.raises(CommandError, match="still marked running"):
+        _retry(stopped.run_id)
+
+
+@pytest.mark.usefixtures("stocks")
+def test_retry_only_takes_runs_of_the_same_dataset() -> None:
+    other = EtlRun.objects.create(
+        source="echo",
+        dataset="daily_chip",
+        start_date=START,
+        end_date=END,
+        status=EtlRun.Status.FAILED,
+        checkpoint={"finished": True, "rejected": {"2317": "x"}},
+    )
+    with pytest.raises(CommandError, match=f"no etl_run {other.run_id} of echo/daily_price"):
+        _retry(other.run_id)
