@@ -1,0 +1,197 @@
+{
+ "help": "",
+ "success": true,
+ "result": {
+  "categoryService": "I00",
+  "categoryDataset": "A",
+  "datasetId": 6099,
+  "identifier": "A41000000G-000011",
+  "title": "景氣指標及燈號",
+  "description": "景氣指標、景氣對策信號(燈號及綜合判斷分數)",
+  "type": "rawData",
+  "license": "1",
+  "cost": "free",
+  "dataProvider": "F123734274",
+  "publisherOID": "2.16.886.101.20003.20069",
+  "publisherContactName": "簡先生",
+  "publisherContactPhone": "02-23165300#5871",
+  "publisherContactEmail": "scchien@ndc.gov.tw",
+  "updateFrequency": {
+   "regularupdate": "1",
+   "Frequency": "1",
+   "unittime": "月"
+  },
+  "dataQuality": "無(白名單)",
+  "coverageStartedDate": "1982-01-01",
+  "coverageEndedDate": "",
+  "publishedDate": "2013-04-03",
+  "modifiedDate": "2024-08-28 13:58:02",
+  "spatialCoverage": "臺灣",
+  "language": "zh",
+  "relatedUrl": "http://www.ndc.gov.tw/Content_List.aspx?n=A9DCC80FC8CC7601",
+  "notes": "",
+  "apiDocUrl": "",
+  "distribution": [
+   {
+    "resourceDescription": "每月發布時回溯修正領先、同時及落後指標的歷史資料。",
+    "resourceField": [
+     {
+      "name": "Date",
+      "description": ""
+     },
+     {
+      "name": "工業生產指數(Index2021=100)",
+      "description": ""
+     },
+     {
+      "name": "電力(企業)總用電量(十億度)",
+      "description": ""
+     },
+     {
+      "name": "製造業銷售量指數(Index2021=100)",
+      "description": ""
+     },
+     {
+      "name": "批發",
+      "description": ""
+     },
+     {
+      "name": "零售及餐飲業營業額(十億元)",
+      "description": ""
+     },
+     {
+      "name": "工業及服務業加班工時(小時)",
+      "description": ""
+     },
+     {
+      "name": "海關出口值(十億元)",
+      "description": ""
+     },
+     {
+      "name": "機械及電機設備進口值(十億元)",
+      "description": ""
+     },
+     {
+      "name": "領先指標綜合指數",
+      "description": ""
+     },
+     {
+      "name": "領先指標不含趨勢指數",
+      "description": ""
+     },
+     {
+      "name": "同時指標綜合指數",
+      "description": ""
+     },
+     {
+      "name": "同時指標不含趨勢指數",
+      "description": ""
+     },
+     {
+      "name": "落後指標綜合指數",
+      "description": ""
+     },
+     {
+      "name": "落後指標不含趨勢指數",
+      "description": ""
+     },
+     {
+      "name": "景氣對策信號綜合分數",
+      "description": ""
+     },
+     {
+      "name": "景氣對策信號",
+      "description": ""
+     },
+     {
+      "name": "貨幣總計數M1B(百萬元)",
+      "description": ""
+     },
+     {
+      "name": "股價指數(Index1966=100)",
+      "description": ""
+     },
+     {
+      "name": "失業率(%)",
+      "description": ""
+     },
+     {
+      "name": "製造業單位產出勞動成本指數(2021=100)",
+      "description": ""
+     },
+     {
+      "name": "五大銀行新承做放款平均利率(年息百分比)",
+      "description": ""
+     },
+     {
+      "name": "全體金融機構放款與投資(10億元)",
+      "description": ""
+     },
+     {
+      "name": "製造業存貨價值(千元)",
+      "description": ""
+     },
+     {
+      "name": "外銷訂單動向指數(以家數計)",
+      "description": ""
+     },
+     {
+      "name": "工業及服務業受僱員工淨進入率(%)",
+      "description": ""
+     },
+     {
+      "name": "建築物開工樓地板面積(住宅類住宅",
+      "description": ""
+     },
+     {
+      "name": "商業辦公",
+      "description": ""
+     },
+     {
+      "name": "工業倉儲)(千平方公尺)",
+      "description": ""
+     },
+     {
+      "name": "名目半導體設備進口(新臺幣百萬元)",
+      "description": ""
+     }
+    ],
+    "qcLevel": "",
+    "resourceFormat": "ZIP",
+    "resourceCharacterEncoding": "UTF-8",
+    "resourceQualityCheckTime": "2026-06-01 08:17:31",
+    "resourceDownloadUrl": "https://ws.ndc.gov.tw/Download.ashx?u=LzAwMS9hZG1pbmlzdHJhdG9yLzEwL3JlbGZpbGUvNTc4MS82MzkyL2VhMjM1YmQ5LWQwNTItNGE2OS1hYmZjLWQ1Yzc4NWQzZDBlMi56aXA%3d&n=5pmv5rCj5oyH5qiZ5Y%2bK54eI6JmfLnppcA%3d%3d&icon=.zip",
+    "resourceAmount": 2556,
+    "resourceNotes": "",
+    "resourceRequestMethod": "",
+    "resourceOasUrl": "",
+    "resourceRequestParameters": [],
+    "resourcePathParameters": []
+   }
+  ],
+  "keyword": [
+   "AI-Ready Data 詮釋資料框架指標",
+   "景氣",
+   "指標",
+   "燈號",
+   "政府統計"
+  ],
+  "en": {
+   "title": "Economic indicators and signals",
+   "description": "Business indicators, economic policy signals (traffic lights and overall assessment scores)",
+   "publisherContactName": "簡先生",
+   "publisherContactPhone": "02-23165300#5871",
+   "publisherContactEmail": [
+    "scchien@ndc.gov.tw"
+   ],
+   "updateFrequency": "Every 1 month",
+   "cost": "free",
+   "keyword": [
+    "Government statistics",
+    "Traffic light",
+    "Index",
+    "Economic situation"
+   ]
+  }
+ }
+}

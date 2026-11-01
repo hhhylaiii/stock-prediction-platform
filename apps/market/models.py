@@ -320,9 +320,9 @@ class IndexId(models.TextChoices):
 
 
 class IndexDaily(models.Model):
-    """Daily close of market series; US series keep their own US trading date (SPEC §6).
+    """Daily close of market series, each on its own exchange's date (SPEC §6, §8.9).
 
-    US rows exist only on US trading days, never as carried copies; TSM_ADR holds the raw close.
+    USDTWD uses London dates; rows exist only on traded days and TSM_ADR holds the raw close.
     """
 
     pk = models.CompositePrimaryKey("index_id", "date")

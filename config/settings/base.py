@@ -97,6 +97,12 @@ TPEX_TIMEOUT = env.float("TPEX_TIMEOUT", default=30.0)
 FINMIND_BASE_URL = env.str("FINMIND_BASE_URL", default="https://api.finmindtrade.com")
 FINMIND_TIMEOUT = env.float("FINMIND_TIMEOUT", default=60.0)
 FINMIND_API_TOKEN = env.str("FINMIND_API_TOKEN", default="")
+TDCC_BASE_URL = env.str("TDCC_BASE_URL", default="https://opendata.tdcc.com.tw")
+TDCC_TIMEOUT = env.float("TDCC_TIMEOUT", default=60.0)
+YAHOO_BASE_URL = env.str("YAHOO_BASE_URL", default="https://query1.finance.yahoo.com")
+YAHOO_TIMEOUT = env.float("YAHOO_TIMEOUT", default=30.0)
+DATAGOV_BASE_URL = env.str("DATAGOV_BASE_URL", default="https://data.gov.tw")
+DATAGOV_TIMEOUT = env.float("DATAGOV_TIMEOUT", default=60.0)
 ETL_RATE_LIMITS: dict[str, dict[str, float]] = {
     "twse": {
         "min_interval": env.float("TWSE_MIN_INTERVAL", default=3.5),
@@ -120,6 +126,27 @@ ETL_RATE_LIMITS: dict[str, dict[str, float]] = {
         "backoff_base": env.float("FINMIND_BACKOFF_BASE", default=10.0),
         "backoff_max": env.float("FINMIND_BACKOFF_MAX", default=300.0),
         "cooldown": env.float("FINMIND_COOLDOWN", default=3700.0),
+    },
+    "tdcc": {
+        "min_interval": env.float("TDCC_MIN_INTERVAL", default=3.0),
+        "max_retries": env.int("TDCC_MAX_RETRIES", default=4),
+        "backoff_base": env.float("TDCC_BACKOFF_BASE", default=5.0),
+        "backoff_max": env.float("TDCC_BACKOFF_MAX", default=120.0),
+        "cooldown": env.float("TDCC_COOLDOWN", default=900.0),
+    },
+    "yahoo": {
+        "min_interval": env.float("YAHOO_MIN_INTERVAL", default=2.0),
+        "max_retries": env.int("YAHOO_MAX_RETRIES", default=4),
+        "backoff_base": env.float("YAHOO_BACKOFF_BASE", default=5.0),
+        "backoff_max": env.float("YAHOO_BACKOFF_MAX", default=120.0),
+        "cooldown": env.float("YAHOO_COOLDOWN", default=900.0),
+    },
+    "datagov": {
+        "min_interval": env.float("DATAGOV_MIN_INTERVAL", default=2.0),
+        "max_retries": env.int("DATAGOV_MAX_RETRIES", default=4),
+        "backoff_base": env.float("DATAGOV_BACKOFF_BASE", default=5.0),
+        "backoff_max": env.float("DATAGOV_BACKOFF_MAX", default=120.0),
+        "cooldown": env.float("DATAGOV_COOLDOWN", default=900.0),
     },
 }
 ETL_MAX_CONSECUTIVE_REJECTIONS = env.int("ETL_MAX_CONSECUTIVE_REJECTIONS", default=20)
