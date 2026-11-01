@@ -14,6 +14,7 @@ import pyarrow.parquet as pq
 from django.conf import settings
 
 from apps.research.holdout import (
+    SPEC_HOLDOUT_START,
     HoldoutError,
     HoldoutTicket,
     authorize_folds,
@@ -75,7 +76,7 @@ def save_fold_predictions(
     path = fold_path(run_key, fold.index)
     authorize_folds([fold], run_key, ticket)
     once = is_holdout(fold)
-    if once and path.exists():
+    if (once and path.exists()) or _holds_holdout(path):
         raise HoldoutError(f"holdout fold {fold.index} of {run_key} is written once and exists")
     _check(fold, predictions)
     table = pa.Table.from_pandas(predictions, preserve_index=False)
@@ -101,6 +102,11 @@ def _publish(temporary: str, path: Path, once: bool) -> None:
         os.link(temporary, path)
     except FileExistsError as error:
         raise HoldoutError(f"holdout fold file {path.name} appeared while writing") from error
+
+
+def _holds_holdout(path: Path) -> bool:
+    stored = _stored_record(path) or {}
+    return bool(stored.get("holdout")) or str(stored.get("test_end", "")) >= str(SPEC_HOLDOUT_START)
 
 
 def _stored_record(path: Path) -> dict[str, object] | None:

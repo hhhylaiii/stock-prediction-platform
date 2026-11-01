@@ -1,5 +1,6 @@
 import re
 import threading
+from dataclasses import replace
 from datetime import date
 
 import pytest
@@ -177,6 +178,14 @@ def test_ticket_of_another_scope_is_refused(folds: list[Fold]) -> None:
 
     with pytest.raises(HoldoutError, match="holdout_run"):
         authorize_folds(folds, "shared-v1", HoldoutTicket("interval", "shared-v1", 1, LAST))
+
+
+@pytest.mark.django_db
+def test_ticket_with_a_later_last_date_than_recorded_is_refused(folds: list[Fold]) -> None:
+    ticket = claim_holdout("rank", "rank-v1", date(2025, 6, 30))
+
+    with pytest.raises(HoldoutError, match="holdout_run"):
+        authorize_folds(folds, "rank-v1", replace(ticket, last_date=LAST))
 
 
 @pytest.mark.django_db

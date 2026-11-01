@@ -253,6 +253,22 @@ def test_holdout_fold_written_meanwhile_is_kept(
     assert [path.name for path in target.parent.iterdir()] == [target.name]
 
 
+@pytest.mark.django_db
+def test_research_fold_of_another_layout_cannot_replace_a_holdout_file(
+    long_calendar: TradingDays, folds: list[Fold]
+) -> None:
+    shifted = generate_folds(long_calendar, LAST, WalkForwardConfig(first_test=date(2015, 1, 1)))
+    holdout = next(fold for fold in shifted if fold.holdout)
+    ticket = claim_holdout("rank", RUN, LAST)
+    save_fold_predictions(RUN, holdout, predictions(holdout, 0.1), ticket)
+    research = next(fold for fold in folds if fold.index == holdout.index)
+
+    assert not research.holdout
+    with pytest.raises(HoldoutError, match="written once"):
+        save_fold_predictions(RUN, research, predictions(research, 0.9))
+    assert load_fold_predictions(RUN, holdout)["score"].iloc[0] == 0.1
+
+
 def test_holdout_fold_with_a_moved_start_still_needs_a_ticket(
     long_calendar: TradingDays,
 ) -> None:
