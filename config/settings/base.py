@@ -3,6 +3,7 @@
 from pathlib import Path
 
 import environ
+from celery.schedules import crontab
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
@@ -85,7 +86,73 @@ CELERY_RESULT_BACKEND = env.str("CELERY_RESULT_BACKEND", default="")
 CELERY_TIMEZONE = TIME_ZONE
 CELERY_TASK_ACKS_LATE = True
 CELERY_WORKER_PREFETCH_MULTIPLIER = 1
-CELERY_BEAT_SCHEDULE: dict[str, dict[str, object]] = {}
+CELERY_WORKER_CONCURRENCY = env.int("CELERY_WORKER_CONCURRENCY", default=1)
+CELERY_BROKER_TRANSPORT_OPTIONS = {
+    "visibility_timeout": env.int("CELERY_VISIBILITY_TIMEOUT", default=43200)
+}
+ETL_NOT_READY_COUNTDOWN = env.int("ETL_NOT_READY_COUNTDOWN", default=1800)
+ETL_NOT_READY_RETRIES = env.int("ETL_NOT_READY_RETRIES", default=6)
+ETL_CATCHUP_LOOKBACK_DAYS = env.int("ETL_CATCHUP_LOOKBACK_DAYS", default=14)
+
+
+ETL_AT = {
+    name: env.str(f"ETL_AT_{name}", default=default)
+    for name, default in (
+        ("PREPARE_DAY", "15:10"),
+        ("PRICES", "15:30"),
+        ("REFRESH_MASTER", "16:00"),
+        ("AFTERNOON", "16:30"),
+        ("QFII", "18:30"),
+        ("NIGHT", "21:30"),
+        ("NOTICES_AGAIN", "22:40"),
+        ("CHECK_QUALITY", "22:50"),
+        ("US_CLOSE", "05:30"),
+        ("WEEKLY_HOLDING", "10:00"),
+        ("BUSINESS_SIGNAL", "10:00"),
+    )
+}
+
+
+def _at(name: str, **fields: str) -> crontab:
+    """A crontab in TIME_ZONE at the HH:MM of ETL_AT[name]."""
+    hour, minute = ETL_AT[name].split(":")
+    return crontab(hour=hour, minute=minute, **fields)
+
+
+CELERY_BEAT_SCHEDULE: dict[str, dict[str, object]] = {
+    "etl-prepare-day": {"task": "etl.prepare_day", "schedule": _at("PREPARE_DAY")},
+    "etl-prices": {
+        "task": "etl.run_batch",
+        "schedule": _at("PRICES"),
+        "args": ("prices",),
+    },
+    "etl-refresh-master": {
+        "task": "etl.refresh_master",
+        "schedule": _at("REFRESH_MASTER"),
+    },
+    "etl-afternoon": {
+        "task": "etl.run_batch",
+        "schedule": _at("AFTERNOON"),
+        "args": ("afternoon",),
+    },
+    "etl-qfii": {"task": "etl.run_batch", "schedule": _at("QFII"), "args": ("qfii",)},
+    "etl-night": {"task": "etl.run_batch", "schedule": _at("NIGHT"), "args": ("night",)},
+    "etl-notices-again": {
+        "task": "etl.run_batch",
+        "schedule": _at("NOTICES_AGAIN"),
+        "args": ("notices",),
+    },
+    "etl-check-quality": {"task": "etl.check_quality", "schedule": _at("CHECK_QUALITY")},
+    "etl-us-close": {"task": "etl.us_close", "schedule": _at("US_CLOSE")},
+    "etl-weekly-holding": {
+        "task": "etl.weekly_holding",
+        "schedule": _at("WEEKLY_HOLDING", day_of_week="sat"),
+    },
+    "etl-business-signal": {
+        "task": "etl.business_signal",
+        "schedule": _at("BUSINESS_SIGNAL", day_of_month="15"),
+    },
+}
 
 TWSE_BASE_URL = env.str("TWSE_BASE_URL", default="https://www.twse.com.tw")
 TWSE_TIMEOUT = env.float("TWSE_TIMEOUT", default=30.0)
