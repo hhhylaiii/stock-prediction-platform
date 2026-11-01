@@ -69,6 +69,23 @@ def test_saved_predictions_read_back_equal(research: list[Fold], cache_dir: Path
     assert type(loaded["date"].iloc[0]) is date
 
 
+def test_index_is_not_kept(research: list[Fold]) -> None:
+    chosen = research[:2]
+    for fold in chosen:
+        save_fold_predictions(RUN, fold, predictions(fold).set_axis([5, 9, 11]))
+
+    assert isinstance(load_fold_predictions(RUN, chosen[0]).index, pd.RangeIndex)
+    assert load_predictions(RUN, chosen).index.tolist() == list(range(6))
+
+
+def test_empty_predictions_are_refused(research: list[Fold]) -> None:
+    fold = research[0]
+
+    with pytest.raises(ValueError, match="no predictions"):
+        save_fold_predictions(RUN, fold, predictions(fold).iloc[0:0])
+    assert missing_folds(RUN, [fold]) == [fold.index]
+
+
 def test_saving_again_replaces_the_fold(research: list[Fold]) -> None:
     fold = research[0]
     save_fold_predictions(RUN, fold, predictions(fold, 0.1))
@@ -110,6 +127,17 @@ def test_missing_folds_are_listed_together(research: list[Fold]) -> None:
     with pytest.raises(MissingFoldsError, match=re.escape(str(absent))) as raised:
         load_predictions(RUN, chosen)
     assert raised.value.folds == absent
+
+
+def test_folds_cached_for_other_boundaries_count_as_missing(research: list[Fold]) -> None:
+    fold = research[0]
+    save_fold_predictions(RUN, fold, predictions(fold))
+    moved = replace(fold, train_start=date(2012, 1, 2))
+
+    assert missing_folds(RUN, [fold]) == []
+    assert missing_folds(RUN, [moved]) == [fold.index]
+    with pytest.raises(FoldMismatchError):
+        load_predictions(RUN, [moved])
 
 
 def test_missing_single_fold_names_it(research: list[Fold]) -> None:
@@ -194,6 +222,47 @@ def test_holdout_fold_is_written_with_a_recorded_ticket(folds: list[Fold]) -> No
     assert load_fold_predictions(RUN, fold)["stock_id"].tolist() == ["2330", "2317", "2330"]
 
 
+@pytest.mark.django_db
+def test_holdout_fold_is_written_once(folds: list[Fold]) -> None:
+    fold = next(fold for fold in folds if fold.holdout)
+    ticket = claim_holdout("rank", RUN)
+    save_fold_predictions(RUN, fold, predictions(fold, 0.1), ticket)
+
+    with pytest.raises(HoldoutError, match="written once"):
+        save_fold_predictions(RUN, fold, predictions(fold, 0.9), ticket)
+    assert load_fold_predictions(RUN, fold)["score"].iloc[0] == 0.1
+
+
+@pytest.mark.django_db
+def test_holdout_fold_written_meanwhile_is_kept(
+    folds: list[Fold], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fold = next(fold for fold in folds if fold.holdout)
+    ticket = claim_holdout("rank", RUN)
+    target = fold_path(RUN, fold.index)
+    write = prediction_cache.pq.write_table
+
+    def racing(table: object, where: str, *args: object, **kwargs: object) -> None:
+        write(table, where, *args, **kwargs)
+        target.write_bytes(b"other")
+
+    monkeypatch.setattr(prediction_cache.pq, "write_table", racing)
+    with pytest.raises(HoldoutError, match="appeared"):
+        save_fold_predictions(RUN, fold, predictions(fold), ticket)
+    assert target.read_bytes() == b"other"
+    assert [path.name for path in target.parent.iterdir()] == [target.name]
+
+
+def test_holdout_fold_with_a_moved_start_still_needs_a_ticket(
+    long_calendar: TradingDays,
+) -> None:
+    moved = generate_folds(long_calendar, LAST, WalkForwardConfig(holdout_start=date(2099, 1, 1)))
+    fold = next(fold for fold in moved if fold.test_end >= date(2025, 1, 1))
+
+    with pytest.raises(HoldoutError):
+        save_fold_predictions(RUN, fold, predictions(fold))
+
+
 @pytest.mark.parametrize("run_key", ["../escape", "a/b", ".."])
 def test_run_key_with_path_characters_is_refused(
     research: list[Fold], cache_dir: Path, run_key: str
@@ -213,7 +282,8 @@ def test_failed_write_keeps_the_old_file_and_no_temporary(
     original = predictions(fold, 0.1)
     save_fold_predictions(RUN, fold, original)
 
-    def broken(*args: object, **kwargs: object) -> None:
+    def broken(table: object, where: str, *args: object, **kwargs: object) -> None:
+        Path(where).write_bytes(b"PAR1")
         raise OSError("disk full")
 
     monkeypatch.setattr(prediction_cache.pq, "write_table", broken)

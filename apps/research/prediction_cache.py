@@ -13,7 +13,13 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from django.conf import settings
 
-from apps.research.holdout import HoldoutTicket, authorize_folds, require_key
+from apps.research.holdout import (
+    HoldoutError,
+    HoldoutTicket,
+    authorize_folds,
+    is_holdout,
+    require_key,
+)
 from apps.research.walkforward import Fold
 
 KEYS = ["date", "stock_id"]
@@ -45,6 +51,8 @@ def _record(fold: Fold) -> dict[str, object]:
 
 
 def _check(fold: Fold, predictions: pd.DataFrame) -> None:
+    if predictions.empty:
+        raise ValueError(f"fold {fold.index} has no predictions")
     absent = [column for column in KEYS if column not in predictions.columns]
     if absent:
         raise ValueError(f"predictions need the columns {absent}")
@@ -66,6 +74,9 @@ def save_fold_predictions(
     """Write one fold's predictions atomically, without the index; holdout folds need a ticket."""
     path = fold_path(run_key, fold.index)
     authorize_folds([fold], run_key, ticket)
+    once = is_holdout(fold)
+    if once and path.exists():
+        raise HoldoutError(f"holdout fold {fold.index} of {run_key} is written once and exists")
     _check(fold, predictions)
     table = pa.Table.from_pandas(predictions, preserve_index=False)
     metadata = {**(table.schema.metadata or {}), FOLD_METADATA: json.dumps(_record(fold)).encode()}
@@ -74,11 +85,29 @@ def save_fold_predictions(
     os.close(handle)
     try:
         pq.write_table(table.replace_schema_metadata(metadata), temporary)
-        os.replace(temporary, path)
-    except BaseException:
+        _publish(temporary, path, once)
+    finally:
         Path(temporary).unlink(missing_ok=True)
-        raise
     return path
+
+
+def _publish(temporary: str, path: Path, once: bool) -> None:
+    if not once:
+        os.replace(temporary, path)
+        return
+    try:
+        os.link(temporary, path)
+    except FileExistsError as error:
+        raise HoldoutError(f"holdout fold file {path.name} appeared while writing") from error
+
+
+def _stored_record(path: Path) -> dict[str, object] | None:
+    if not path.exists():
+        return None
+    record: dict[str, object] = json.loads(
+        (pq.read_schema(path).metadata or {}).get(FOLD_METADATA, b"{}")
+    )
+    return record
 
 
 def load_fold_predictions(run_key: str, fold: Fold) -> pd.DataFrame:
@@ -87,7 +116,7 @@ def load_fold_predictions(run_key: str, fold: Fold) -> pd.DataFrame:
     if not path.exists():
         raise MissingFoldsError(run_key, [fold.index])
     table = pq.read_table(path)
-    stored = json.loads((table.schema.metadata or {}).get(FOLD_METADATA, b"{}"))
+    stored: dict[str, object] = json.loads((table.schema.metadata or {}).get(FOLD_METADATA, b"{}"))
     expected = _record(fold)
     changed = sorted(
         name for name in expected.keys() | stored.keys() if stored.get(name) != expected.get(name)
@@ -101,14 +130,18 @@ def load_fold_predictions(run_key: str, fold: Fold) -> pd.DataFrame:
 
 
 def missing_folds(run_key: str, folds: Iterable[Fold]) -> list[int]:
-    """Indices of the folds that have no cached predictions."""
-    return [fold.index for fold in folds if not fold_path(run_key, fold.index).exists()]
+    """Folds to (re)run: no cache file, or one written for other fold boundaries."""
+    return [
+        fold.index
+        for fold in folds
+        if _stored_record(fold_path(run_key, fold.index)) != _record(fold)
+    ]
 
 
 def load_predictions(run_key: str, folds: Iterable[Fold]) -> pd.DataFrame:
     """Cached predictions of the folds stacked with a fold column; names every missing fold."""
     chosen = list(folds)
-    absent = missing_folds(run_key, chosen)
+    absent = [fold.index for fold in chosen if not fold_path(run_key, fold.index).exists()]
     if absent:
         raise MissingFoldsError(run_key, absent)
     if not chosen:

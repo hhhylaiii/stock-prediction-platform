@@ -8,9 +8,10 @@ from django.db import IntegrityError, transaction
 from django.db.models import Max
 
 from apps.research.models import HoldoutRun
-from apps.research.walkforward import Fold
+from apps.research.walkforward import Fold, WalkForwardConfig
 
-KEY_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", re.ASCII)
+KEY_PATTERN = re.compile(r"[a-z0-9][a-z0-9_.-]{0,63}", re.ASCII)
+SPEC_HOLDOUT_START = WalkForwardConfig().holdout_start
 
 
 class HoldoutError(RuntimeError):
@@ -28,7 +29,7 @@ def require_key(value: str) -> str:
     """Return value if it is a plain name that is safe as one path segment."""
     if not KEY_PATTERN.fullmatch(value):
         raise ValueError(
-            f"{value!r} must be 1 to 64 ASCII letters, digits, '_', '.' or '-', "
+            f"{value!r} must be 1 to 64 lowercase ASCII letters, digits, '_', '.' or '-', "
             "starting with a letter or digit"
         )
     return value
@@ -50,12 +51,12 @@ def claim_holdout(
         raise HoldoutError("a forced holdout rerun needs a reason")
     attempt = _last_attempt(scope) + 1 if force else 1
     try:
-        with transaction.atomic():
+        with transaction.atomic(durable=True):
             HoldoutRun.objects.create(scope=scope, attempt=attempt, run_key=run_key, reason=note)
     except IntegrityError as error:
+        hint = "another claim took it first" if force else "rerun only with force and a reason"
         raise HoldoutError(
-            f"holdout attempt {attempt} for {scope} is already recorded; "
-            "rerun only with force and a reason"
+            f"holdout attempt {attempt} for {scope} is already recorded; {hint}"
         ) from error
     return HoldoutTicket(scope, run_key, attempt)
 
@@ -65,9 +66,14 @@ def holdout_claimed(scope: str) -> bool:
     return HoldoutRun.objects.filter(scope=scope).exists()
 
 
+def is_holdout(fold: Fold) -> bool:
+    """Holdout by its flag or by the SPEC holdout start, whatever config made the fold."""
+    return fold.holdout or fold.test_end >= SPEC_HOLDOUT_START
+
+
 def authorize_folds(folds: Iterable[Fold], run_key: str, ticket: HoldoutTicket | None) -> None:
-    """Refuse holdout folds unless ticket is a recorded claim for run_key."""
-    holdout = [fold.index for fold in folds if fold.holdout]
+    """Refuse holdout folds unless ticket is the latest recorded claim of its scope for run_key."""
+    holdout = [fold.index for fold in folds if is_holdout(fold)]
     if not holdout:
         return
     if ticket is None or ticket.run_key != run_key:
@@ -79,3 +85,5 @@ def authorize_folds(folds: Iterable[Fold], run_key: str, ticket: HoldoutTicket |
         raise HoldoutError(
             f"no holdout_run row for {ticket.scope} attempt {ticket.attempt} and {run_key}"
         )
+    if ticket.attempt != _last_attempt(ticket.scope):
+        raise HoldoutError(f"attempt {ticket.attempt} of {ticket.scope} has been superseded")
