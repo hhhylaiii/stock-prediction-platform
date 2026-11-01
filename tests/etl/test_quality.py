@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from datetime import date
 from decimal import Decimal
 
@@ -6,13 +7,20 @@ from django.core.management import CommandError, call_command
 
 from apps.etl.models import DataQualityLog
 from apps.etl.quality import CHECKS, run_checks, should_run_prediction
-from apps.market.calendar import TradingDays
-from apps.market.models import DailyChip, DailyPrice, DailyValuation, DividendEvent, StockMaster
+from apps.market.calendar import NotATradingDayError, OutsideCalendarError, TradingDays
+from apps.market.models import (
+    DailyChip,
+    DailyPrice,
+    DailyValuation,
+    DividendEvent,
+    IndexDaily,
+    StockMaster,
+)
 
 PREV = date(2026, 10, 27)
 DAY = date(2026, 10, 28)
 CODES = [f"{1100 + n}" for n in range(100)]
-WEBHOOK = "https://hooks.example.test/alerts"
+EARLIER = date(2026, 10, 22)
 ERROR = DataQualityLog.Severity.ERROR
 WARNING = DataQualityLog.Severity.WARNING
 INFO = DataQualityLog.Severity.INFO
@@ -38,11 +46,28 @@ def _valuations(day: date, codes: list[str]) -> None:
     )
 
 
+def _indices(day: date) -> None:
+    us_day = date.fromordinal(day.toordinal() - 1)
+    IndexDaily.objects.bulk_create(
+        [
+            *(
+                IndexDaily(index_id=name, date=day, close=Decimal(100))
+                for name in ("TAIEX", "TPEX")
+            ),
+            *(
+                IndexDaily(index_id=name, date=us_day, close=Decimal(100))
+                for name in ("SOX", "TSM_ADR", "USDTWD")
+            ),
+        ]
+    )
+
+
 def _two_clean_days() -> None:
     for day in (PREV, DAY):
         _prices(day, CODES)
         _chips(day, CODES)
         _valuations(day, CODES)
+    _indices(DAY)
 
 
 def _results(day: date = DAY) -> dict[tuple[str, str], DataQualityLog]:
@@ -73,8 +98,8 @@ def test_clean_days_pass_every_check_and_allow_the_prediction(calendar: TradingD
 @pytest.mark.django_db
 @pytest.mark.parametrize(
     ("kept", "severity"),
-    [(94, WARNING), (96, INFO), (0, ERROR)],
-    ids=["six-percent", "four-percent", "empty"],
+    [(94, WARNING), (95, INFO), (96, INFO), (0, ERROR)],
+    ids=["six-percent", "five-percent", "four-percent", "empty"],
 )
 def test_a_day_with_a_different_stock_count_is_flagged(
     calendar: TradingDays, kept: int, severity: str
@@ -89,7 +114,18 @@ def test_a_day_with_a_different_stock_count_is_flagged(
 
 
 @pytest.mark.django_db
-def test_tables_empty_on_both_days_are_not_an_error(calendar: TradingDays) -> None:
+def test_a_table_that_stays_empty_keeps_blocking_the_prediction(calendar: TradingDays) -> None:
+    _two_clean_days()
+    _prices(EARLIER, CODES)
+    DailyPrice.objects.filter(date__in=[PREV, DAY]).delete()
+    run_checks(DAY, calendar)
+    assert _severity("row_count", "daily_price") == ERROR
+    assert _severity("missing_values", "daily_price") == ERROR
+    assert not should_run_prediction(DAY)
+
+
+@pytest.mark.django_db
+def test_tables_never_loaded_are_not_an_error(calendar: TradingDays) -> None:
     for day in (PREV, DAY):
         _prices(day, CODES)
     run_checks(DAY, calendar)
@@ -122,15 +158,18 @@ def test_rows_gone_since_yesterday_count_as_missing_but_delisted_ones_do_not(
     run_checks(DAY, calendar)
     row = _results()[("missing_values", "daily_price")]
     assert row.severity == WARNING
-    assert row.detail["columns"] == {"row": {"missing": 2, "population": 99}}
+    assert row.detail["columns"]["row"] == {"missing": 2, "population": 99}
 
 
 @pytest.mark.django_db
-def test_a_missing_close_is_no_trade_not_a_gap(calendar: TradingDays) -> None:
+@pytest.mark.parametrize(("emptied", "severity"), [(5, INFO), (6, WARNING), (100, ERROR)])
+def test_missing_closes_only_count_beyond_the_no_trade_level(
+    calendar: TradingDays, emptied: int, severity: str
+) -> None:
     _two_clean_days()
-    DailyPrice.objects.filter(date=DAY, stock_id__in=CODES[:5]).update(close=None)
+    DailyPrice.objects.filter(date=DAY, stock_id__in=CODES[:emptied]).update(close=None)
     run_checks(DAY, calendar)
-    assert _severity("missing_values", "daily_price") == INFO
+    assert _severity("missing_values", "daily_price") == severity
 
 
 @pytest.mark.django_db
@@ -150,6 +189,29 @@ def test_a_column_that_went_empty_since_yesterday_is_flagged(
     row = _results()[("missing_values", table)]
     assert row.severity == WARNING
     assert row.detail["columns"][column] == {"missing": 2, "population": 100}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(("emptied", "severity"), [(50, WARNING), (51, ERROR)])
+def test_a_column_mostly_gone_means_its_dataset_failed(
+    calendar: TradingDays, emptied: int, severity: str
+) -> None:
+    _two_clean_days()
+    DailyChip.objects.filter(date=DAY, stock_id__in=CODES[:emptied]).update(margin_balance=None)
+    run_checks(DAY, calendar)
+    assert _severity("missing_values", "daily_chip") == severity
+    assert should_run_prediction(DAY) is (severity != ERROR)
+
+
+@pytest.mark.django_db
+def test_a_column_that_stays_empty_keeps_failing(calendar: TradingDays) -> None:
+    _two_clean_days()
+    _chips(EARLIER, CODES)
+    DailyChip.objects.filter(date__in=[PREV, DAY]).update(margin_balance=None)
+    run_checks(DAY, calendar)
+    gap = _results()[("missing_values", "daily_chip")].detail["columns"]["margin_balance"]
+    assert gap == {"missing": 100, "population": 100}
+    assert not should_run_prediction(DAY)
 
 
 @pytest.mark.django_db
@@ -177,17 +239,17 @@ def test_rows_on_a_closed_day_since_the_last_session_are_an_error(
     calendar: TradingDays, model: type[DailyPrice | DailyChip | DailyValuation], table: str
 ) -> None:
     _two_clean_days()
-    holiday = date(2026, 10, 26)
-    if model is DailyPrice:
-        _prices(holiday, CODES[:1])
-    elif model is DailyChip:
-        _chips(holiday, CODES[:1])
-    else:
-        _valuations(holiday, CODES[:1])
+    for holiday in (date(2026, 10, 23), date(2026, 10, 26)):
+        if model is DailyPrice:
+            _prices(holiday, CODES[:1])
+        elif model is DailyChip:
+            _chips(holiday, CODES[:1])
+        else:
+            _valuations(holiday, CODES[:1])
     run_checks(PREV, calendar)
     row = DataQualityLog.objects.get(date=PREV, check_name="trading_calendar")
     assert row.severity == ERROR
-    assert row.detail["rows"] == {table: {"2026-10-26": 1}}
+    assert row.detail["rows"] == {table: {"2026-10-23": 1, "2026-10-26": 1}}
     assert not should_run_prediction(PREV)
 
 
@@ -246,3 +308,45 @@ def test_check_quality_refuses_a_closed_day() -> None:
 def test_check_quality_needs_a_loaded_calendar() -> None:
     with pytest.raises(CommandError, match="trading_calendar is empty"):
         call_command("check_quality", date="2026-10-28")
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("day", "error"),
+    [(date(2026, 10, 25), NotATradingDayError), (date(2026, 11, 2), OutsideCalendarError)],
+)
+def test_checks_refuse_a_closed_or_uncovered_day(
+    calendar: TradingDays, day: date, error: type[Exception]
+) -> None:
+    with pytest.raises(error):
+        run_checks(day, calendar)
+    assert not DataQualityLog.objects.exists()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("change", "stale"),
+    [
+        (lambda: None, set()),
+        (lambda: IndexDaily.objects.filter(index_id="TAIEX").delete(), {"TAIEX"}),
+        (
+            lambda: IndexDaily.objects.filter(index_id="SOX").update(date=date(2026, 10, 23)),
+            {"SOX"},
+        ),
+        (
+            lambda: IndexDaily.objects.filter(index_id="USDTWD").update(date=date(2026, 10, 24)),
+            set(),
+        ),
+        (lambda: IndexDaily.objects.all().delete(), {"TAIEX", "TPEX", "SOX", "TSM_ADR", "USDTWD"}),
+    ],
+    ids=["fresh", "taiex-missing", "sox-five-days", "usdtwd-four-days", "none-loaded"],
+)
+def test_market_series_that_stopped_updating_are_flagged(
+    calendar: TradingDays, change: Callable[[], object], stale: set[str]
+) -> None:
+    _two_clean_days()
+    change()
+    run_checks(DAY, calendar)
+    row = DataQualityLog.objects.get(date=DAY, check_name="index_freshness")
+    assert set(row.detail["stale"]) == stale
+    assert row.severity == (WARNING if stale else INFO)

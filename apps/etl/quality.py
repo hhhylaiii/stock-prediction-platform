@@ -8,18 +8,37 @@ from typing import Any
 from django.db import models, transaction
 
 from apps.etl.models import DataQualityLog
-from apps.market.calendar import OutsideCalendarError, TradingDays
-from apps.market.models import DailyChip, DailyPrice, DailyValuation, DividendEvent, StockMaster
+from apps.market.calendar import NotATradingDayError, OutsideCalendarError, TradingDays
+from apps.market.models import (
+    DailyChip,
+    DailyPrice,
+    DailyValuation,
+    DividendEvent,
+    IndexDaily,
+    IndexId,
+    StockMaster,
+)
 
 Severity = DataQualityLog.Severity
 ROW_COUNT = "row_count"
 BIG_MOVE = "big_move"
 MISSING = "missing_values"
 CALENDAR = "trading_calendar"
-CHECKS = (ROW_COUNT, BIG_MOVE, MISSING, CALENDAR)
+FRESHNESS = "index_freshness"
+CHECKS = (ROW_COUNT, BIG_MOVE, MISSING, CALENDAR, FRESHNESS)
 ROW_CHANGE_LIMIT = 0.05
 BIG_MOVE_LIMIT = Decimal("0.10")
 MISSING_LIMIT = 0.01
+MISSING_ERROR_LIMIT = 0.5
+NO_TRADE_LIMIT = 0.05
+BASELINE_DAYS = timedelta(days=31)
+STALE_AFTER_DAYS = {
+    IndexId.TAIEX.value: 0,
+    IndexId.TPEX.value: 0,
+    IndexId.SOX.value: 4,
+    IndexId.TSM_ADR.value: 4,
+    IndexId.USDTWD.value: 4,
+}
 RATIO_DIGITS = 4
 ROW = "row"
 TABLES: dict[str, type[models.Model]] = {
@@ -28,7 +47,7 @@ TABLES: dict[str, type[models.Model]] = {
     "daily_valuation": DailyValuation,
 }
 MISSING_COLUMNS: dict[str, tuple[str, ...]] = {
-    "daily_price": (ROW,),
+    "daily_price": (ROW, "close"),
     "daily_chip": (
         "fi_net",
         "it_net",
@@ -43,16 +62,20 @@ MISSING_COLUMNS: dict[str, tuple[str, ...]] = {
     ),
     "daily_valuation": ("pb", "dividend_yield"),
 }
+COLUMN_LIMITS = {("daily_price", "close"): NO_TRADE_LIMIT}
 
 
 def run_checks(day: date, calendar: TradingDays) -> list[DataQualityLog]:
-    """Run the four checks for a trading day, replacing their earlier results for it."""
+    """Run every check for a trading day, replacing their earlier results for it."""
+    if not calendar.is_trading_day(day):
+        raise NotATradingDayError(f"{day} is not a trading day")
     previous = _previous_session(calendar, day)
     found = [
         *row_count_results(day, previous),
         big_move_result(day, previous),
-        *missing_results(day, previous),
+        *missing_results(day),
         calendar_result(day, previous, calendar),
+        freshness_result(day),
     ]
     with transaction.atomic():
         DataQualityLog.objects.filter(date=day, check_name__in=CHECKS).delete()
@@ -76,10 +99,10 @@ def row_count_results(day: date, previous: date | None) -> list[DataQualityLog]:
     for table, model in TABLES.items():
         count = model._default_manager.filter(date=day).count()
         before = None if previous is None else model._default_manager.filter(date=previous).count()
-        if not before:
-            severity = Severity.INFO
-        elif count == 0:
+        if count == 0 and _baseline(model, ROW, day) is not None:
             severity = Severity.ERROR
+        elif not before:
+            severity = Severity.INFO
         elif abs(count - before) / before > ROW_CHANGE_LIMIT:
             severity = Severity.WARNING
         else:
@@ -106,20 +129,25 @@ def big_move_result(day: date, previous: date | None) -> DataQualityLog:
     return _result(day, BIG_MOVE, Severity.INFO, detail)
 
 
-def missing_results(day: date, previous: date | None) -> list[DataQualityLog]:
-    """Per column, stocks that had a value the previous session and none today."""
+def missing_results(day: date) -> list[DataQualityLog]:
+    """Per column, stocks valued on its last filled day but not today; most gone is an error."""
     delisted = set(
         StockMaster.objects.filter(delist_date__lte=day).values_list("stock_id", flat=True)
     )
     results = []
     for table, columns in MISSING_COLUMNS.items():
         model = TABLES[table]
-        gaps = {column: _gap(model, column, day, previous, delisted) for column in columns}
-        over = any(
-            gap["population"] and gap["missing"] / gap["population"] > MISSING_LIMIT
-            for gap in gaps.values()
-        )
-        severity = Severity.WARNING if over else Severity.INFO
+        gaps = {column: _gap(model, column, day, delisted) for column in columns}
+        shares = {column: _share(gap) for column, gap in gaps.items()}
+        if any(share > MISSING_ERROR_LIMIT for share in shares.values()):
+            severity = Severity.ERROR
+        elif any(
+            share > COLUMN_LIMITS.get((table, column), MISSING_LIMIT)
+            for column, share in shares.items()
+        ):
+            severity = Severity.WARNING
+        else:
+            severity = Severity.INFO
         results.append(_result(day, MISSING, severity, {"table": table, "columns": gaps}))
     return results
 
@@ -142,6 +170,23 @@ def calendar_result(day: date, previous: date | None, calendar: TradingDays) -> 
     return _result(day, CALENDAR, severity, {"rows": rows})
 
 
+def freshness_result(day: date) -> DataQualityLog:
+    """Market series whose latest close is older than allowed; US series trail by a day or more."""
+    recent = (
+        IndexDaily.objects.filter(date__lte=day, date__gt=day - BASELINE_DAYS)
+        .values("index_id")
+        .annotate(latest=models.Max("date"))
+    )
+    latest = {entry["index_id"]: entry["latest"] for entry in recent}
+    stale = {
+        index_id: latest[index_id].isoformat() if index_id in latest else None
+        for index_id, allowed in STALE_AFTER_DAYS.items()
+        if index_id not in latest or (day - latest[index_id]).days > allowed
+    }
+    severity = Severity.WARNING if stale else Severity.INFO
+    return _result(day, FRESHNESS, severity, {"stale": stale})
+
+
 def _previous_session(calendar: TradingDays, day: date) -> date | None:
     try:
         return calendar.shift(day, -1)
@@ -154,18 +199,26 @@ def _closes(day: date) -> dict[str, Decimal]:
     return {code: close for code, close in rows if close}
 
 
-def _gap(
-    model: type[models.Model],
-    column: str,
-    day: date,
-    previous: date | None,
-    delisted: set[str],
-) -> dict[str, int]:
-    if previous is None:
+def _gap(model: type[models.Model], column: str, day: date, delisted: set[str]) -> dict[str, int]:
+    baseline = _baseline(model, column, day)
+    if baseline is None:
         return {"missing": 0, "population": 0}
-    before = _codes_with(model, column, previous) - delisted
+    before = _codes_with(model, column, baseline) - delisted
     missing = before - _codes_with(model, column, day)
     return {"missing": len(missing), "population": len(before)}
+
+
+def _share(gap: dict[str, int]) -> float:
+    return gap["missing"] / gap["population"] if gap["population"] else 0.0
+
+
+def _baseline(model: type[models.Model], column: str, day: date) -> date | None:
+    """The latest earlier day within a month on which the column had any value."""
+    rows = model._default_manager.filter(date__lt=day, date__gte=day - BASELINE_DAYS)
+    if column != ROW:
+        rows = rows.filter(**{f"{column}__isnull": False})
+    found: date | None = rows.aggregate(latest=models.Max("date"))["latest"]
+    return found
 
 
 def _codes_with(model: type[models.Model], column: str, day: date) -> set[str]:
