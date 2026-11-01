@@ -99,7 +99,7 @@ def record_run(run: ModelRun, model: Any | None = None) -> ModelRun:
     run.full_clean(validate_unique=False)
     temporary = None if model is None else _pickled(path, model)
     try:
-        with transaction.atomic():
+        with transaction.atomic(durable=True):
             _replaceable(run)
             run.save()
             if temporary is None:
@@ -120,7 +120,7 @@ def _remove(directory: Path) -> None:
 def drop_run(run_key: str) -> int:
     """Delete a run's model_run rows, model files and cached predictions; holdout runs stay."""
     models, cache = run_dir(run_key), Path(settings.RESEARCH_CACHE_DIR) / run_key
-    with transaction.atomic():
+    with transaction.atomic(durable=True):
         if HoldoutRun.objects.filter(run_key=run_key).exists():
             raise RunError(f"{run_key} holds a holdout run, which is recorded once and kept")
         rows = list(ModelRun.objects.select_for_update().filter(run_key=run_key))

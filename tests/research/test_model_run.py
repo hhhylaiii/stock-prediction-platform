@@ -172,6 +172,15 @@ def test_rows_of_a_holdout_run_are_written_once(artifacts: Path) -> None:
     assert load_model("wf1", "wf1.ridge.h20.f000") == {"weights": [1.0]}
 
 
+@pytest.mark.django_db(transaction=True)
+def test_a_run_inside_an_outer_transaction_is_refused(artifacts: Path) -> None:
+    with pytest.raises(RuntimeError, match="durable"), transaction.atomic():
+        record_run(run(), {"weights": [1.0]})
+
+    assert not ModelRun.objects.exists()
+    assert not model_path("wf1", "wf1.ridge.h20.f000").exists()
+
+
 def test_a_run_id_stays_with_its_run_key(artifacts: Path) -> None:
     record_run(run())
 
@@ -301,6 +310,17 @@ def test_drop_run_keeps_a_run_past_candidate(artifacts: Path) -> None:
         drop_run("wf1")
 
     assert ModelRun.objects.count() == 2
+    assert model_path("wf1", "wf1.ridge.h20.f000").exists()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_drop_run_inside_an_outer_transaction_is_refused(artifacts: Path) -> None:
+    record_run(run(), {"run": 0})
+
+    with pytest.raises(RuntimeError, match="durable"), transaction.atomic():
+        drop_run("wf1")
+
+    assert ModelRun.objects.exists()
     assert model_path("wf1", "wf1.ridge.h20.f000").exists()
 
 
