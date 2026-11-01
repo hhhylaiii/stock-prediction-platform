@@ -276,6 +276,37 @@ def test_chip_rows_of_codes_not_quoted_that_day_are_skipped(
 
 @responses.activate
 @pytest.mark.django_db
+@pytest.mark.usefixtures("quotes_loaded")
+def test_t86_rows_of_codes_not_quoted_that_day_are_skipped(
+    adapter: TwseAdapter, load_fixture: Callable[[str], Any]
+) -> None:
+    payload = load_fixture(DATASETS["institutional"][2])
+    payload["data"].append(["009831", *payload["data"][0][1:]])
+    payload["total"] = len(payload["data"])
+    responses.get(DATASETS["institutional"][0], json=payload)
+    assert "009831" not in _load(adapter, "institutional")
+
+
+@responses.activate
+@pytest.mark.django_db
+def test_quotes_answered_for_the_day_count_whatever_day_was_asked(
+    adapter: TwseAdapter, serve: Callable[[str], dict[str, Any]], load_fixture: Callable[[str], Any]
+) -> None:
+    payload = load_fixture(QUOTES_FIXTURE)
+    table = next(t for t in payload["tables"] if "每日收盤行情" in (t.get("title") or ""))
+    table["data"].append(QUIET_QUOTE + QUIET_QUOTE_TAIL)
+    RawTwse.objects.create(
+        dataset="daily_price",
+        source_hash="quotes-asked-on-20261029",
+        request_params={"date": "20261029", "type": "ALLBUT0999", "response": "json"},
+        payload=payload,
+    )
+    serve("institutional")
+    assert _load(adapter, "institutional")["1213"]["fi_net"] == 0
+
+
+@responses.activate
+@pytest.mark.django_db
 @pytest.mark.parametrize("dataset", ["margin", "sbl", "foreign_holding", "day_trade"])
 def test_chip_datasets_wait_for_the_days_quotes(
     adapter: TwseAdapter, serve: Callable[[str], dict[str, Any]], dataset: str

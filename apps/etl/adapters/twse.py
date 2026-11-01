@@ -229,9 +229,9 @@ class TwseAdapter(BaseAdapter):
         return dict(latest)
 
     def _quoted_codes(self, day: date) -> set[str]:
-        """Local-currency codes in the MI_INDEX quotes that daily_price stored for the day."""
+        """Local-currency codes of the latest stored MI_INDEX quotes answered for the day."""
         stored = (
-            RawTwse.objects.filter(dataset=DAILY_PRICE, request_params__date=f"{day:%Y%m%d}")
+            RawTwse.objects.filter(dataset=DAILY_PRICE, payload__date=f"{day:%Y%m%d}")
             .order_by("-fetched_at")
             .first()
         )
