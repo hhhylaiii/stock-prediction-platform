@@ -194,7 +194,7 @@ def _require_trading_days(bars: pd.DataFrame, calendar: TradingDays) -> None:
 def load_price_panel(
     calendar: TradingDays, start: date, end: date, stock_ids: Sequence[str] | None = None
 ) -> pd.DataFrame:
-    """Common-stock bars on every trading day of each listing in [start, end], halted days empty."""
+    """Common-stock bars on each listing's trading days; days without a close carry no prices."""
     start, end = max(start, calendar.start), min(end, calendar.end)
     segments = _segments(calendar, stock_ids)
     columns, rows = _fetch(BARS_SQL, {**_filters(stock_ids), "start": start, "end": end})
@@ -205,6 +205,8 @@ def load_price_panel(
     panel["has_bar"] = panel["has_bar"].eq("both")
     for column in (*PRICE_COLUMNS, "volume", "turnover", "adj_factor"):
         panel[column] = panel[column].astype("float64")
+    for column in ("open", "high", "low"):
+        panel[column] = panel[column].where(panel["close"].notna())
     for column in PRICE_COLUMNS:
         panel[f"adj_{column}"] = panel[column] * panel["adj_factor"]
     panel["segment"] = panel["segment"].astype("int64")
