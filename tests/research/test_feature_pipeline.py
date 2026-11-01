@@ -10,7 +10,16 @@ from django.core.management import call_command
 from django.core.management.base import CommandError
 
 from apps.market.calendar import TradingDays
-from apps.market.models import DailyPrice, StockMaster, TradingCalendar
+from apps.market.models import (
+    DailyChip,
+    DailyPrice,
+    DailyValuation,
+    IndexDaily,
+    SharesOutstanding,
+    StockMaster,
+    TradingCalendar,
+    WeeklyHolding,
+)
 from apps.research.features.build import FRAME_COLUMNS, build_feature_frame
 from apps.research.features.registry import feature_names
 from apps.research.features.store import export_year, write_features
@@ -62,6 +71,41 @@ def listed(stock_id: str, start: str, end: str, step: float = 0.1) -> None:
     )
 
 
+def taiex_close(k: int) -> float:
+    return 8_000.0 + 50.0 * k
+
+
+def inputs(stock_id: str) -> None:
+    """Shares, daily chips, two adjacent TDCC weeks, one valuation day and TAIEX closes."""
+    SharesOutstanding.objects.create(
+        stock_id=stock_id, effective_date=d("2015-01-02"), shares=1_000_000
+    )
+    DailyChip.objects.bulk_create(
+        DailyChip(stock_id=stock_id, date=day, fi_net=1_000 * day.day)
+        for day in CALENDAR.between(d("2015-12-01"), d("2016-03-31"))
+    )
+    WeeklyHolding.objects.bulk_create(
+        WeeklyHolding(
+            stock_id=stock_id,
+            data_date=d(data_date),
+            level=level,
+            holders=holders + level - 1,
+            shares=1,
+            pct=big if level == 12 else 100.0 - big if level == 1 else 0.0,
+            publish_date=d(data_date) + timedelta(days=3),
+        )
+        for data_date, big, holders in [("2016-02-19", 30.0, 1_000), ("2016-02-26", 32.5, 1_100)]
+        for level in (1, 12)
+    )
+    DailyValuation.objects.create(
+        stock_id=stock_id, date=d("2016-03-02"), pe=10.0, pb=2.0, dividend_yield=0.03
+    )
+    IndexDaily.objects.bulk_create(
+        IndexDaily(index_id="TAIEX", date=day, close=taiex_close(k))
+        for k, day in enumerate(CALENDAR.between(d("2015-12-01"), d("2016-03-31")))
+    )
+
+
 def stored() -> pd.DataFrame:
     rows = FeatureDaily.objects.order_by("date", "stock_id").values_list(*FRAME_COLUMNS)
     frame = pd.DataFrame(list(rows), columns=FRAME_COLUMNS)
@@ -97,9 +141,26 @@ def test_the_frame_has_one_row_per_listed_stock_and_trading_day_in_range() -> No
     assert frame.loc[frame["stock_id"] == "2330", "in_universe"].all()
 
 
+def test_every_input_group_reaches_the_frame() -> None:
+    listed("2330", "2015-06-01", "2016-04-29")
+    inputs("2330")
+
+    frame = build_feature_frame(CALENDAR, d("2016-03-01"), d("2016-04-15"))
+
+    row = frame[frame["date"] == d("2016-03-02")].iloc[0]
+    assert row["chip_fi_net_1d"] == pytest.approx(2_000 / 1_000_000)
+    assert row["chip_fi_net_5d"] == pytest.approx((25 + 26 + 29 + 1 + 2) * 1_000 / 1_000_000)
+    assert row["chip_big_holder_pct_chg_1w"] == pytest.approx(2.5)
+    assert row["chip_holder_count_chg_1w"] == pytest.approx((1_100 + 1_111) / (1_000 + 1_011) - 1)
+    assert row["fund_bp"] == pytest.approx(0.5)
+    k = len(CALENDAR.between(d("2015-12-01"), d("2016-03-02"))) - 1
+    assert row["mkt_taiex_ret_5d"] == pytest.approx(taiex_close(k) / taiex_close(k - 5) - 1)
+
+
 def test_a_later_start_gives_the_same_features() -> None:
     listed("2330", "2013-01-02", "2016-03-31")
     listed("1101", "2014-06-02", "2016-03-31", step=-0.05)
+    inputs("2330")
 
     late = build_feature_frame(CALENDAR, d("2016-03-01"), d("2016-03-31"))
     early = build_feature_frame(CALENDAR, d("2015-06-01"), d("2016-03-31"))
@@ -107,6 +168,8 @@ def test_a_later_start_gives_the_same_features() -> None:
     march = early[early["date"] >= d("2016-03-01")].reset_index(drop=True)
     pd.testing.assert_frame_equal(late, march)
     assert late["tech_high_52w_gap"].notna().all()
+    mine = late[late["stock_id"] == "2330"]
+    assert mine[["chip_fi_net_20d", "mkt_taiex_ret_20d"]].notna().all().all()
 
 
 def test_writing_replaces_the_range_and_leaves_other_days() -> None:
