@@ -166,6 +166,22 @@ def test_us_closes_go_stale_after_seven_days() -> None:
     assert math.isnan(gap[d("2016-03-11")])
 
 
+def test_usdtwd_goes_stale_seven_days_after_the_taipei_date() -> None:
+    days = weekdays("2016-03-01", 9)
+    closes = pd.concat(
+        [
+            series("TSM_ADR", dict.fromkeys(days, 25.0)),
+            series("USDTWD", {day: 32.0 for day in days if day <= d("2016-03-03")}),
+        ]
+    )
+    tsmc = pd.Series(160.0, index=days)
+
+    gap = market_features(days, closes, tsmc, no_signal()).set_index("date")["mkt_tsm_adr_gap"]
+
+    assert gap[d("2016-03-10")] == pytest.approx(25 * 32 / 5 / 160 - 1)
+    assert math.isnan(gap[d("2016-03-11")])
+
+
 def test_business_signal_goes_stale_after_62_days() -> None:
     days = [d("2016-03-29"), d("2016-03-30")]
     signal = pd.DataFrame(
