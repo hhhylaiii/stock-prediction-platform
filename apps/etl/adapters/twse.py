@@ -34,6 +34,7 @@ from apps.etl.exchange_rows import (
 )
 from apps.etl.models import RawTwse
 from apps.etl.ratelimit import RateLimiter
+from apps.etl.share_counts import drop_repeated_counts
 from apps.etl.upsert import upsert
 from apps.market.adjust import refresh_where_later_events
 from apps.market.calendar import TradingDays
@@ -180,9 +181,12 @@ class TwseAdapter(BaseAdapter):
                 update_fields=("close", "volume"),
             )
         table = TABLES[dataset]
-        return upsert(
+        rows = upsert(
             table.model, frame, unique_fields=table.keys, update_fields=tuple(table.columns)
         )
+        if dataset == SHARES_OUTSTANDING:
+            drop_repeated_counts(frame["stock_id"])
+        return rows
 
     def _fetch_day(self, dataset: str, day: date) -> pd.DataFrame:
         if dataset == DAILY_PRICE:

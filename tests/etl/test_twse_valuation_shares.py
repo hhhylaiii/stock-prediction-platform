@@ -89,7 +89,12 @@ def test_valuation_keeps_ratios_and_turns_yield_percent_into_a_fraction(
 @pytest.mark.django_db
 @pytest.mark.parametrize(
     ("column", "value", "dropped"),
-    [(5, "0.00", "pe"), (6, "-1.20", "pb"), (3, "100.00", "dividend_yield")],
+    [
+        (5, "0.00", "pe"),
+        (6, "-1.20", "pb"),
+        (3, "100.00", "dividend_yield"),
+        (3, "-0.50", "dividend_yield"),
+    ],
 )
 def test_valuation_out_of_range_is_dropped_with_a_warning(
     adapter: TwseAdapter,
@@ -258,6 +263,17 @@ def test_negative_count_is_a_schema_change_and_keeps_raw(
         _load_shares(adapter, payload, DAY)
     assert RawTwse.objects.count() == 1
     assert not SharesOutstanding.objects.exists()
+
+
+@responses.activate
+@pytest.mark.django_db
+def test_later_day_run_first_leaves_no_repeated_row(
+    adapter: TwseAdapter, load_fixture: Callable[[str], Any]
+) -> None:
+    _load_shares(adapter, load_fixture(SHARES[NEXT]), NEXT)
+    _load_shares(adapter, load_fixture(SHARES[DAY]), DAY)
+    assert sorted(day for code, day in _shares_in_db() if code == "2330") == [DAY]
+    assert _shares_in_db()[("2368", NEXT)] == 532_451_280
 
 
 @responses.activate
