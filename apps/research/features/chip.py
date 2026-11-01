@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 
 from apps.market.models import DailyChip, WeeklyHolding
-from apps.research.features.common import feature_frame, ratio, rolling, shifted
+from apps.research.features.common import carried, feature_frame, ratio, rolling, shifted
 from apps.research.features.registry import Group, feature_names
 from apps.research.panel import require_sorted
 
@@ -38,8 +38,7 @@ def _flow(panel: pd.DataFrame, column: str) -> pd.Series:
 
 def _balance(panel: pd.DataFrame, column: str) -> pd.Series:
     """Balances with halted days carrying the last known value."""
-    carried = panel[column].groupby([panel["stock_id"], panel["segment"]], sort=False).ffill()
-    return panel[column].where(panel["has_bar"].astype(bool), carried)
+    return panel[column].where(panel["has_bar"].astype(bool), carried(panel[column], panel))
 
 
 def _net(panel: pd.DataFrame, column: str, days: int) -> pd.Series:

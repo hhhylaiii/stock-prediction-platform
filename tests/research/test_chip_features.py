@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 
 from apps.research.features.chip import chip_features, holding_changes
+from apps.research.features.inputs import FEATURE_WARMUP
 from apps.research.features.registry import Group, feature_names
 from tests.research.feature_panels import at, listing, rising
 
@@ -136,3 +137,21 @@ def test_weekly_changes_pass_through() -> None:
 
     assert at(chip_features(panel), "2330", 1, "chip_big_holder_pct_chg_1w") == 1.5
     assert np.isnan(at(chip_features(panel), "2330", 0, "chip_big_holder_pct_chg_1w"))
+
+
+def test_later_load_start_gives_the_same_values_across_a_long_halt() -> None:
+    start, n = 300, 300 + FEATURE_WARMUP + 140
+    closes = rising(n)
+    closes[start - 10 : start + 590] = [NAN] * 600
+    margin = [NAN if math.isnan(close) else 1_000.0 + k for k, close in enumerate(closes)]
+    full_panel = listing("2330", closes, start=date(2012, 1, 2)).assign(
+        **chips(n, margin_balance=margin)
+    )
+    late_panel = full_panel.iloc[start:].reset_index(drop=True)
+
+    full, late = chip_features(full_panel), chip_features(late_panel)
+
+    pd.testing.assert_frame_equal(
+        full.iloc[start + FEATURE_WARMUP :].reset_index(drop=True),
+        late.iloc[FEATURE_WARMUP:].reset_index(drop=True),
+    )
