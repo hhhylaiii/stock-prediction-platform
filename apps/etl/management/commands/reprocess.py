@@ -26,7 +26,7 @@ class Command(BaseCommand):
         if start is None or end is None or start > end:
             raise CommandError(f"--start {start} must not be after --end {end}")
         try:
-            run = reprocess(
+            run, later = reprocess(
                 options["source"], options["dataset"], start, end, TradingDays.from_db()
             )
         except (ValueError, CalendarError, SourceError) as exc:
@@ -35,3 +35,5 @@ class Command(BaseCommand):
             f"etl_run {run.run_id} {run.status}: {run.rows} rows rebuilt "
             f"{options['source']}/{options['dataset']} {start}..{end}"
         )
+        if later:
+            self.stdout.write(f"later fetched days rebuilt: {', '.join(map(str, later))}")
