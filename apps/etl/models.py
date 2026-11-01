@@ -59,6 +59,45 @@ class RawTpex(RawRecord):
         ]
 
 
+class RawTdcc(RawRecord):
+    class Meta:
+        db_table = "raw_tdcc"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["dataset", "source_hash"], name="raw_tdcc_dataset_hash_uniq"
+            )
+        ]
+        indexes = [
+            models.Index(fields=["dataset", "fetched_at"], name="raw_tdcc_dataset_fetched_idx")
+        ]
+
+
+class RawYahoo(RawRecord):
+    class Meta:
+        db_table = "raw_yahoo"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["dataset", "source_hash"], name="raw_yahoo_dataset_hash_uniq"
+            )
+        ]
+        indexes = [
+            models.Index(fields=["dataset", "fetched_at"], name="raw_yahoo_dataset_fetched_idx")
+        ]
+
+
+class RawDatagov(RawRecord):
+    class Meta:
+        db_table = "raw_datagov"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["dataset", "source_hash"], name="raw_datagov_dataset_hash_uniq"
+            )
+        ]
+        indexes = [
+            models.Index(fields=["dataset", "fetched_at"], name="raw_datagov_ds_fetched_idx")
+        ]
+
+
 class EtlRun(models.Model):
     """One ETL execution with its outcome and a checkpoint for resuming."""
 

@@ -49,6 +49,10 @@ class SourceClient:
     def post_json(self, path: str, data: Mapping[str, str]) -> dict[str, Any]:
         return self.limiter.call(lambda: self._send("POST", path, data=dict(data)))
 
+    def get_content(self, url: str, params: Mapping[str, str]) -> bytes:
+        """The body of a GET to an absolute URL, for sources that answer with files."""
+        return self.limiter.call(lambda: self._receive("GET", url, params=dict(params)).content)
+
     def save_raw(self, dataset: str, params: Mapping[str, Any], payload: Any) -> RawRecord:
         return store_raw(self.raw_model, dataset, params, payload)
 
@@ -59,23 +63,7 @@ class SourceClient:
         """Hook for sources that report errors inside a 200 response."""
 
     def _send(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
-        try:
-            response = self.session.request(
-                method,
-                f"{self.base_url}{path}",
-                timeout=self.timeout,
-                headers=self.headers(),
-                **kwargs,
-            )
-        except requests.RequestException as exc:
-            raise RetryableError(f"{self.label} request failed: {exc}") from exc
-        status = response.status_code
-        if status in self.throttle_statuses:
-            raise ThrottledError(f"{self.label} returned {status}")
-        if status >= 500:
-            raise RetryableError(f"{self.label} returned {status}")
-        if status >= 400:
-            raise SourceRequestError(f"{self.label} refused the request with {status}")
+        response = self._receive(method, f"{self.base_url}{path}", **kwargs)
         try:
             payload = response.json(parse_constant=_reject_constant)
         except ValueError:
@@ -86,3 +74,19 @@ class SourceClient:
             raise SchemaChangedError(f"{self.label} returned JSON that is not an object")
         self.check_payload(payload)
         return payload
+
+    def _receive(self, method: str, url: str, **kwargs: Any) -> requests.Response:
+        try:
+            response = self.session.request(
+                method, url, timeout=self.timeout, headers=self.headers(), **kwargs
+            )
+        except requests.RequestException as exc:
+            raise RetryableError(f"{self.label} request failed: {exc}") from exc
+        status = response.status_code
+        if status in self.throttle_statuses:
+            raise ThrottledError(f"{self.label} returned {status}")
+        if status >= 500:
+            raise RetryableError(f"{self.label} returned {status}")
+        if status >= 400:
+            raise SourceRequestError(f"{self.label} refused the request with {status}")
+        return response
