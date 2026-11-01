@@ -11,7 +11,11 @@ from django.db import models
 from apps.etl.errors import SchemaChangedError, SourceNotReadyError
 from apps.etl.exchange_rows import parse_count, parse_percent, parse_price, parse_signed, stock_code
 from apps.etl.roc import parse_roc_date
-from apps.market.models import DailyChip, IndexId
+from apps.market.models import (
+    DailyChip,
+    DailyValuation,
+    IndexId,
+)
 
 logger = logging.getLogger(__name__)
 NO_DATA_STAT = "沒有符合條件的資料"
@@ -24,7 +28,9 @@ MARGIN_LOT_ROWS = ("融資(交易單位)", "融券(交易單位)")
 MONTHLY_UNIT_HINT = "單位：元、股"
 MONTHLY_FIELDS = ("日期", "成交股數", "成交金額", "成交筆數", "發行量加權股價指數", "漲跌點數")
 INDEX_COLUMNS = ["index_id", "date", "close", "volume"]
-Converter = Callable[[Sequence[Any]], int | float]
+BLANK_MARKERS = frozenset({"-", "--", ""})
+PERCENT = 100.0
+Converter = Callable[[Sequence[Any]], int | float | None]
 
 
 def is_foreign_currency_etf(code: str) -> bool:
@@ -84,6 +90,34 @@ def percent(values: Sequence[Any]) -> float:
     return sum(parse_percent(value) for value in values)
 
 
+def ratio(values: Sequence[Any]) -> float | None:
+    """A published ratio such as P/E; TWSE prints '-' where none is published."""
+    (text,) = (str(value).replace(",", "").strip() for value in values)
+    if text in BLANK_MARKERS:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        raise SchemaChangedError(f"unexpected ratio value {text!r}") from None
+
+
+def yield_fraction(values: Sequence[Any]) -> float | None:
+    published = ratio(values)
+    return None if published is None else published / PERCENT
+
+
+def is_percent(value: float) -> bool:
+    return 0 <= value <= PERCENT
+
+
+def is_fraction(value: float) -> bool:
+    return 0 <= value < 1
+
+
+def is_positive(value: float) -> bool:
+    return value > 0
+
+
 def check_margin_lots(payload: dict[str, Any]) -> None:
     """MI_MARGN counts stock margin in 交易單位 (1,000 shares); its summary table says so."""
     summary = find_table(payload, MARGIN_SUMMARY_TITLE)
@@ -105,9 +139,10 @@ class DailyTable(NamedTuple):
     columns: Mapping[str, tuple[str, ...]]
     convert: Converter
     model: type[models.Model] = DailyChip
-    bounds: Mapping[str, tuple[float, float]] = {}
+    valid: Mapping[str, Callable[[float], bool]] = {}
     check: Callable[[dict[str, Any]], None] | None = None
     pending_title: str | None = None
+    converters: Mapping[str, Converter] = {}
 
 
 TABLES: dict[str, DailyTable] = {
@@ -164,7 +199,7 @@ TABLES: dict[str, DailyTable] = {
         name="證券名稱",
         columns={"fi_holding_pct": ("全體外資及陸資持股比率",)},
         convert=percent,
-        bounds={"fi_holding_pct": (0.0, 100.0)},
+        valid={"fi_holding_pct": is_percent},
     ),
     "day_trade": DailyTable(
         label="TWTB4U",
@@ -177,6 +212,20 @@ TABLES: dict[str, DailyTable] = {
         columns={"day_trade_volume": ("當日沖銷交易成交股數",)},
         convert=shares,
         pending_title="當日沖銷交易標的",
+    ),
+    "daily_valuation": DailyTable(
+        label="BWIBBU_d",
+        path="/rwd/zh/afterTrading/BWIBBU_d",
+        params={"selectType": "ALL"},
+        title=None,
+        hints=None,
+        code="證券代號",
+        name="證券名稱",
+        columns={"pe": ("本益比",), "pb": ("股價淨值比",), "dividend_yield": ("殖利率(%)",)},
+        convert=ratio,
+        model=DailyValuation,
+        valid={"pe": is_positive, "pb": is_positive, "dividend_yield": is_fraction},
+        converters={"dividend_yield": yield_fraction},
     ),
 }
 
@@ -260,21 +309,22 @@ def standard_rows(raw_df: pd.DataFrame, table: DailyTable) -> pd.DataFrame:
             raise SchemaChangedError(f"TWSE {table.label} repeated {code} on {row['date']}")
         seen.add(key)
         values = {
-            column: table.convert([row[name] for name in names])
+            column: table.converters.get(column, table.convert)([row[name] for name in names])
             for column, names in table.columns.items()
         }
-        records.append({"stock_id": code, "date": row["date"], **_bounded(values, table, key)})
+        records.append({"stock_id": code, "date": row["date"], **_validated(values, table, key)})
     if not records:
         raise SourceNotReadyError(f"TWSE {table.label} has no stock rows yet")
     return pd.DataFrame(records, columns=["stock_id", "date", *table.columns], dtype=object)
 
 
-def _bounded(
-    values: dict[str, int | float], table: DailyTable, key: tuple[str, date]
+def _validated(
+    values: dict[str, int | float | None], table: DailyTable, key: tuple[str, date]
 ) -> dict[str, int | float | None]:
-    kept: dict[str, int | float | None] = dict(values)
-    for column, (low, high) in table.bounds.items():
-        if not low <= values[column] <= high:
+    kept = dict(values)
+    for column, accepts in table.valid.items():
+        value = values[column]
+        if value is not None and not accepts(value):
             logger.warning(
                 "TWSE %s %s %s: %s %s out of range, dropped",
                 table.label,
