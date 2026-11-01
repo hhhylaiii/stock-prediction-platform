@@ -85,6 +85,8 @@ def save_fold_predictions(
     os.close(handle)
     try:
         pq.write_table(table.replace_schema_metadata(metadata), temporary)
+        with open(temporary, "rb") as written:
+            os.fsync(written.fileno())
         _publish(temporary, path, once)
     finally:
         Path(temporary).unlink(missing_ok=True)
@@ -123,7 +125,8 @@ def load_fold_predictions(run_key: str, fold: Fold) -> pd.DataFrame:
     )
     if changed:
         raise FoldMismatchError(
-            f"fold {fold.index} of {run_key} was cached with different {changed}; rerun it"
+            f"fold {fold.index} of {run_key} was cached with different {changed}; "
+            "rebuild the folds it was written with"
         )
     frame: pd.DataFrame = table.to_pandas()
     return frame
