@@ -14,6 +14,7 @@ from apps.research.walkforward import Fold
 QUANTILE_COLUMNS: Mapping[float, str] = MappingProxyType({0.1: "q10", 0.5: "q50", 0.9: "q90"})
 FOLD_COLUMNS = ["fold", "test_start", "eval_end", "tuning", "holdout", "mean", "n_days"]
 RELIABILITY_COLUMNS = ["lower", "upper", "mean_prob", "frac_positive", "n_rows"]
+BUCKET_COLUMNS = [DATE, "bucket", "coverage", "width"]
 
 Values = npt.NDArray[np.float64]
 
@@ -22,6 +23,11 @@ def _rows(frame: pd.DataFrame, columns: Sequence[str]) -> pd.DataFrame:
     needed = list(dict.fromkeys([DATE, *columns]))
     keep = frame[list(columns)].notna().all(axis=1)
     return frame.loc[keep, needed].reset_index(drop=True)
+
+
+def shared_rows(frame: pd.DataFrame, columns: Sequence[str]) -> pd.DataFrame:
+    """Rows where every listed column has a value, so a model and its baseline share rows."""
+    return frame.loc[frame[list(columns)].notna().all(axis=1)]
 
 
 def _by_day(rows: pd.DataFrame, values: npt.ArrayLike, name: str) -> pd.Series:
@@ -73,23 +79,31 @@ def daily_width(frame: pd.DataFrame, lower: str, upper: str) -> pd.Series:
 
 
 def coverage_by_bucket(
-    frame: pd.DataFrame, label: str, lower: str, upper: str, by: str, n_buckets: int = 5
+    frame: pd.DataFrame,
+    label: str,
+    lower: str,
+    upper: str,
+    by: str = "tech_vol_20d",
+    n_buckets: int = 5,
 ) -> pd.DataFrame:
-    """Mean daily coverage and width in equal-count daily buckets of by; 1 is lowest."""
+    """Coverage and width per day and equal-count daily bucket of by; 1 is lowest."""
     if n_buckets < 1:
         raise ValueError("n_buckets must be at least 1")
     rows = _rows(frame, [label, lower, upper, by])
+    if rows.empty:
+        return pd.DataFrame(columns=BUCKET_COLUMNS)
     grouped = rows.groupby(DATE)[by]
     position = grouped.rank(method="first").astype(np.int64) - 1
-    bucket = position * n_buckets // grouped.transform("size") + 1
-    table = {
-        number: {
-            "coverage": daily_coverage(rows[bucket == number], label, lower, upper).mean(),
-            "width": daily_width(rows[bucket == number], lower, upper).mean(),
+    inside = (rows[label] >= rows[lower]) & (rows[label] <= rows[upper])
+    table = pd.DataFrame(
+        {
+            DATE: rows[DATE],
+            "bucket": position * n_buckets // grouped.transform("size") + 1,
+            "coverage": inside.astype(np.float64),
+            "width": rows[upper] - rows[lower],
         }
-        for number in range(1, n_buckets + 1)
-    }
-    return pd.DataFrame.from_dict(table, orient="index").rename_axis("bucket")
+    )
+    return table.groupby([DATE, "bucket"], sort=True).mean().reset_index()[BUCKET_COLUMNS]
 
 
 def daily_absolute_error(frame: pd.DataFrame, label: str, predicted: str) -> pd.Series:
@@ -105,8 +119,9 @@ def daily_squared_error(frame: pd.DataFrame, label: str, predicted: str) -> pd.S
 
 
 def daily_direction_hits(frame: pd.DataFrame, label: str, predicted: str) -> pd.Series:
-    """Per-day share of rows whose prediction has the label's sign; zero is its own sign."""
+    """Per-day share of rows whose prediction has the label's sign; flat labels skipped."""
     rows = _rows(frame, [label, predicted])
+    rows = rows[rows[label] != 0]
     hits = np.sign(rows[label].to_numpy(np.float64)) == np.sign(
         rows[predicted].to_numpy(np.float64)
     )
@@ -135,6 +150,7 @@ def daily_auc(
     """Per-day ROC AUC with ties as half; days without both outcomes or enough rows skipped."""
     rows = _rows(frame, [label, prob])
     _require_binary(rows[label])
+    _require_probability(rows[prob])
     keys = rows[DATE]
     positive = rows[label].astype(bool)
     ranks = rows.groupby(DATE)[prob].rank()
@@ -149,6 +165,8 @@ def daily_auc(
 
 def reliability_table(frame: pd.DataFrame, label: str, prob: str, n_bins: int = 10) -> pd.DataFrame:
     """Pooled calibration table over equal-width probability bins; bin 1 starts at 0."""
+    if n_bins < 1:
+        raise ValueError("n_bins must be at least 1")
     rows = _rows(frame, [label, prob])
     _require_binary(rows[label])
     _require_probability(rows[prob])

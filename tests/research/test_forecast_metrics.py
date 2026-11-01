@@ -21,6 +21,7 @@ from apps.research.metrics.forecast import (
     mean_by_fold,
     pinball_loss,
     reliability_table,
+    shared_rows,
 )
 from apps.research.walkforward import generate_folds
 
@@ -64,11 +65,11 @@ def test_daily_pinball_sums_the_three_quantiles_and_averages_per_day() -> None:
 
 
 def test_coverage_counts_the_bounds_as_inside() -> None:
-    frame = interval_frame().assign(y=[0.05, -0.2, 0.3, NAN, 0.1])
+    frame = interval_frame().assign(y=[0.05, -0.1, 0.3, NAN, 0.1])
 
     coverage = daily_coverage(frame, "y", "q10", "q90")
 
-    assert coverage.to_dict() == {D1: 0.5, D2: 0.5}
+    assert coverage.to_dict() == {D1: 1.0, D2: 0.5}
 
 
 def test_width_uses_rows_with_both_bounds() -> None:
@@ -79,23 +80,30 @@ def test_width_uses_rows_with_both_bounds() -> None:
     np.testing.assert_allclose(width.to_numpy(), [0.3, 0.2])
 
 
-def test_coverage_by_bucket_splits_each_day_by_volatility() -> None:
+def bucket_day(day: date, scale: float) -> pd.DataFrame:
     covered = [True, True, True, False, False, False, True, True, True, False]
-    frame = pd.DataFrame(
+    return pd.DataFrame(
         {
-            "date": [D1] * 10,
-            "vol": np.arange(10.0, 0.0, -1.0),
+            "date": [day] * 10,
+            "tech_vol_20d": np.arange(10.0, 0.0, -1.0) * scale,
             "y": [0.0 if hit else 1.0 for hit in covered],
             "q10": [-0.1 * (n + 1) for n in range(10)],
             "q90": [0.1] * 10,
         }
     )
 
-    table = coverage_by_bucket(frame, "y", "q10", "q90", by="vol")
 
-    assert table.index.tolist() == [1, 2, 3, 4, 5]
-    np.testing.assert_allclose(table["coverage"].to_numpy(), [0.5, 1.0, 0.0, 0.5, 1.0])
-    np.testing.assert_allclose(table["width"].to_numpy(), [1.05, 0.85, 0.65, 0.45, 0.25])
+def test_coverage_by_bucket_splits_each_day_by_volatility() -> None:
+    frame = pd.concat([bucket_day(D1, 1.0), bucket_day(D2, 100.0)], ignore_index=True)
+
+    table = coverage_by_bucket(frame, "y", "q10", "q90")
+
+    assert list(table.columns) == ["date", "bucket", "coverage", "width"]
+    for day in (D1, D2):
+        part = table[table["date"] == day]
+        assert part["bucket"].tolist() == [1, 2, 3, 4, 5]
+        np.testing.assert_allclose(part["coverage"].to_numpy(), [0.5, 1.0, 0.0, 0.5, 1.0])
+        np.testing.assert_allclose(part["width"].to_numpy(), [1.05, 0.85, 0.65, 0.45, 0.25])
 
 
 def test_coverage_by_bucket_ignores_rows_without_the_bucket_value() -> None:
@@ -130,15 +138,26 @@ def test_errors_and_direction_per_day() -> None:
 
     np.testing.assert_allclose(daily_absolute_error(frame, "y", "pred").to_numpy(), [0.175, 0.15])
     np.testing.assert_allclose(daily_squared_error(frame, "y", "pred").to_numpy(), [0.04625, 0.025])
+
+
+def test_direction_skips_flat_labels_and_zero_predictions_miss() -> None:
+    frame = pd.DataFrame(
+        {
+            "date": [D1, D1, D1, D2, D2],
+            "y": [0.1, 0.2, 0.0, -0.3, 0.1],
+            "pred": [0.05, -0.1, 0.3, -0.1, 0.0],
+        }
+    )
+
     assert daily_direction_hits(frame, "y", "pred").tolist() == [0.5, 0.5]
 
 
 def test_qlike_is_zero_when_right_and_skips_non_positive_volatility() -> None:
     frame = pd.DataFrame(
         {
-            "date": [D1, D2, D2, D2],
-            "realized": [0.2, 0.4, 0.0, 0.3],
-            "predicted": [0.2, 0.2, 0.2, 0.0],
+            "date": [D1, D2, D2, D2, D2],
+            "realized": [0.2, 0.4, 0.0, 0.3, 0.3],
+            "predicted": [0.2, 0.2, 0.2, 0.0, -0.2],
         }
     )
 
@@ -162,7 +181,7 @@ def test_probability_metrics_check_their_inputs(
 ) -> None:
     frame = pd.DataFrame({"date": [D1, D1], "up": labels, "prob": probs})
 
-    for metric in (daily_brier, reliability_table):
+    for metric in (daily_brier, reliability_table, daily_auc):
         with pytest.raises(ValueError, match=message):
             metric(frame, "up", "prob")
 
@@ -206,6 +225,13 @@ def test_reliability_table_and_ece() -> None:
     assert expected_calibration_error(table) == pytest.approx(0.166)
 
 
+def test_reliability_needs_a_bin() -> None:
+    frame = pd.DataFrame({"date": [D1], "up": [1], "prob": [0.5]})
+
+    with pytest.raises(ValueError, match="n_bins"):
+        reliability_table(frame, "up", "prob", n_bins=0)
+
+
 def test_ece_of_no_rows_is_nan() -> None:
     empty = pd.DataFrame({"date": [], "up": [], "prob": []})
 
@@ -221,6 +247,9 @@ def test_mean_by_fold_uses_test_start_through_eval_end(long_calendar: TradingDay
 
     row = table.loc[trimmed.index]
     assert (row["mean"], row["n_days"], row["tuning"]) == (2.0, 2, trimmed.tuning)
+    last = folds[-1]
+    flags = mean_by_fold(pd.Series({last.test_start: 1.0}), [last]).loc[last.index]
+    assert (bool(flags["holdout"]), bool(flags["tuning"])) == (True, False)
     assert list(table.columns) == ["test_start", "eval_end", "tuning", "holdout", "mean", "n_days"]
 
 
@@ -229,3 +258,24 @@ def test_metrics_of_no_rows_are_empty() -> None:
 
     assert daily_pinball(empty, "y").empty
     assert daily_coverage(empty, "y", "q10", "q90").empty
+    assert list(coverage_by_bucket(empty, "y", "q10", "q90", by="q50").columns) == [
+        "date",
+        "bucket",
+        "coverage",
+        "width",
+    ]
+
+
+def test_shared_rows_keep_rows_every_compared_column_scores() -> None:
+    frame = pd.DataFrame(
+        {
+            "date": [D1, D1, D1],
+            "y": [0.1, 0.2, NAN],
+            "model": [0.0, NAN, 0.1],
+            "base": [0.0, 0.1, 0.1],
+        }
+    )
+
+    kept = shared_rows(frame, ["y", "model", "base"])
+
+    assert kept.index.tolist() == [0]
