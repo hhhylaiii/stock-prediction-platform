@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
+from pytest_django import DjangoAssertNumQueries
 
 from apps.market.models import StockMaster
 from apps.research.features.store import export_year, read_features, read_partitions
@@ -82,14 +83,17 @@ def test_training_rows_are_tradable_universe_rows_with_a_label(tmp_path: Path) -
     assert "ind_sector_id" not in LINEAR_FEATURES
 
 
-def test_reading_spans_months_and_keeps_both_ends() -> None:
+def test_reading_spans_months_and_keeps_both_ends(
+    django_assert_num_queries: DjangoAssertNumQueries,
+) -> None:
     FeatureDaily.objects.bulk_create(
         feature(stock, day, 1.0)
         for stock in ("1101", "2330")
         for day in [d("2016-03-29"), *DAYS, d("2016-04-04")]
     )
 
-    frame = read_features(DAYS[0], DAYS[-1])
+    with django_assert_num_queries(2):
+        frame = read_features(DAYS[0], DAYS[-1])
 
     assert sorted(set(frame["date"])) == DAYS
     assert len(frame) == 6
@@ -128,13 +132,21 @@ def test_partitions_are_read_across_years_and_keep_both_ends(tmp_path: Path) -> 
     assert frame["tech_ret_1d"].dtype == "float64"
 
 
-def test_partitions_of_years_without_rows_read_as_typed_empty_frames(tmp_path: Path) -> None:
-    tmp_path.joinpath("year=2016").mkdir()
+def test_a_range_without_rows_reads_as_a_typed_empty_frame(tmp_path: Path) -> None:
+    FeatureDaily.objects.create(stock_id="1101", date=d("2016-01-04"), in_universe=True)
 
-    frame = read_partitions(DAYS[0], DAYS[-1], tmp_path)
+    frame = read_partitions(DAYS[0], DAYS[-1], exported(tmp_path, 2016))
 
     assert frame.empty
     assert frame["tech_ret_1d"].dtype == "float64"
+
+
+def test_a_year_without_a_partition_is_an_error(tmp_path: Path) -> None:
+    FeatureDaily.objects.create(stock_id="1101", date=d("2016-01-04"), in_universe=True)
+    exported(tmp_path, 2016)
+
+    with pytest.raises(FileNotFoundError, match=r"2015.*build_features"):
+        read_partitions(d("2015-12-30"), d("2016-01-04"), tmp_path)
 
 
 def test_a_missing_partition_directory_is_an_error(tmp_path: Path) -> None:
@@ -155,14 +167,17 @@ def test_training_reads_the_exported_partitions(tmp_path: Path) -> None:
     assert rows["stock_id"].tolist() == ["1101", "2330"]
 
 
-def test_labels_are_read_across_months_and_keep_both_ends() -> None:
+def test_labels_are_read_across_months_and_keep_both_ends(
+    django_assert_num_queries: DjangoAssertNumQueries,
+) -> None:
     LabelDaily.objects.bulk_create(
         label(stock, day, 0.5, False)
         for stock in ("2330", "1101")
         for day in [d("2016-03-29"), *DAYS, d("2016-04-04")]
     )
 
-    labels = load_labels(DAYS[0], DAYS[-1], 20)
+    with django_assert_num_queries(2):
+        labels = load_labels(DAYS[0], DAYS[-1], 20)
 
     assert labels["date"].tolist() == [day for day in DAYS for _ in range(2)]
     assert labels["stock_id"].tolist() == ["1101", "2330"] * 3
@@ -191,9 +206,9 @@ def test_only_the_model_targets_and_their_horizons_are_accepted(
     [("fwd_rank_pct", 5), ("fwd_ret_open", 5), ("fwd_vol_20d", 20), ("fwd_up_5pct", 20)],
 )
 def test_model_targets_load(target: str, horizon: int, tmp_path: Path) -> None:
-    tmp_path.joinpath("year=2016").mkdir()
+    FeatureDaily.objects.create(stock_id="1101", date=d("2016-01-04"), in_universe=True)
 
-    rows = load_training_set(DAYS[0], DAYS[-1], horizon, target, tmp_path)
+    rows = load_training_set(DAYS[0], DAYS[-1], horizon, target, exported(tmp_path, 2016))
 
     assert rows.empty
 

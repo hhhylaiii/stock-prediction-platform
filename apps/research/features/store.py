@@ -38,12 +38,12 @@ def write_features(frame: pd.DataFrame, start: date, end: date) -> int:
         raise ValueError(f"features fall outside {start}..{end}")
     values = [column for column in FRAME_COLUMNS if column not in KEYS]
     finite = _finite(frame)
-    months = pd.to_datetime(finite["date"]).dt.to_period("M")
+    month = pd.to_datetime(finite["date"]).dt.to_period("M")
     with transaction.atomic():
         FeatureDaily.objects.filter(date__range=(start, end)).delete()
         return sum(
             upsert(FeatureDaily, part, unique_fields=KEYS, update_fields=values)
-            for _, part in finite.groupby(months, sort=True)
+            for _, part in finite.groupby(month, sort=True)
         )
 
 
@@ -66,14 +66,15 @@ def read_features(start: date, end: date) -> pd.DataFrame:
 
 def read_partitions(start: date, end: date, directory: Path) -> pd.DataFrame:
     """Rows dated in [start, end] from the yearly Parquet partitions export_year wrote."""
-    if not directory.is_dir():
-        raise FileNotFoundError(f"no feature partitions in {directory}; run build_features first")
     parts = []
     for low, high in years(start, end):
         path = directory / f"year={low.year}" / PARTITION_FILE
-        if path.exists():
-            dated = [("date", ">=", low), ("date", "<=", high)]
-            parts.append(pq.read_table(path, filters=dated).to_pandas())
+        if not path.exists():
+            raise FileNotFoundError(
+                f"no feature partition for {low.year} in {directory}; run build_features first"
+            )
+        dated = [("date", ">=", low), ("date", "<=", high)]
+        parts.append(pq.read_table(path, filters=dated).to_pandas())
     return _typed(parts)
 
 

@@ -1,4 +1,4 @@
-"""Training rows of the linear baselines: tradable universe rows with a label (SPEC §6, §7)."""
+"""Tradable universe rows with a label, and the linear baselines' inputs (SPEC §6, §7)."""
 
 from datetime import date
 from pathlib import Path
@@ -8,19 +8,11 @@ from django.conf import settings
 
 from apps.research.features.store import read_partitions
 from apps.research.features.transforms import STOCK_LEVEL, fill_with_flags, standardize
-from apps.research.labels import HORIZONS, VOL_DAYS
+from apps.research.labels import HORIZONS, LABEL_FIELDS, VOL_DAYS
 from apps.research.models import LabelDaily
 from apps.research.ranges import months
 
 KEYS = ["stock_id", "date"]
-LABEL_FIELDS = [
-    "fwd_ret",
-    "fwd_ret_open",
-    "fwd_rank_pct",
-    "fwd_vol_20d",
-    "fwd_up_5pct",
-    "untradable_t1",
-]
 LINEAR_FEATURES = [*STOCK_LEVEL, *(f"{name}_missing" for name in STOCK_LEVEL)]
 TARGET_HORIZONS = {
     "fwd_rank_pct": HORIZONS,

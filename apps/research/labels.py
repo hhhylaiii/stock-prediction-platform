@@ -30,6 +30,7 @@ LABEL_COLUMNS = [
     "fwd_up_5pct",
     "untradable_t1",
 ]
+LABEL_FIELDS = [name for name in LABEL_COLUMNS if name not in ("stock_id", "date", "horizon")]
 
 
 def _ahead(values: pd.Series, keys: list[pd.Series], steps: int, ended: pd.Series) -> pd.Series:

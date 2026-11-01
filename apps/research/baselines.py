@@ -11,7 +11,7 @@ import numpy.typing as npt
 import pandas as pd
 from sklearn.linear_model import LogisticRegression, Ridge
 
-from apps.research.labels import LABEL_COLUMNS
+from apps.research.labels import LABEL_FIELDS
 from apps.research.metrics.forecast import daily_brier
 from apps.research.metrics.ic import daily_rank_ic
 from apps.research.walkforward import Fold
@@ -24,7 +24,6 @@ INTERVAL_HORIZON = 20
 TRAILING_DAYS = 60
 QUANTILES = {"q10": 0.1, "q50": 0.5, "q90": 0.9}
 LOGISTIC_ITERATIONS = 1_000
-LABEL_FIELDS = [name for name in LABEL_COLUMNS if name not in ("stock_id", "date", "horizon")]
 Values = npt.NDArray[np.float64]
 Scorer = Callable[[pd.DataFrame, Values, str], float]
 
