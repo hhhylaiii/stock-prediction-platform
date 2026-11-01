@@ -120,14 +120,27 @@ def test_valuation_out_of_range_is_dropped_with_a_warning(
 
 @responses.activate
 @pytest.mark.django_db
+@pytest.mark.parametrize("column", [2, 5, 6], ids=["pe", "yield", "pb"])
 @pytest.mark.parametrize("text", ["虧損", "inf", "-", ""])
 def test_valuation_word_in_a_ratio_column_is_a_schema_change(
-    adapter: TpexAdapter, load_fixture: Callable[[str], Any], text: str
+    adapter: TpexAdapter, load_fixture: Callable[[str], Any], text: str, column: int
 ) -> None:
     payload = load_fixture(VALUATION)
-    payload["tables"][0]["data"][0][2] = text
+    payload["tables"][0]["data"][0][column] = text
     with pytest.raises(SchemaChangedError, match="ratio"):
         _valuation(adapter, payload)
+
+
+@responses.activate
+@pytest.mark.django_db
+@pytest.mark.parametrize("column", [2, 5, 6], ids=["pe", "yield", "pb"])
+def test_valuation_not_available_in_any_ratio_column_is_missing(
+    adapter: TpexAdapter, load_fixture: Callable[[str], Any], column: int
+) -> None:
+    payload = load_fixture(VALUATION)
+    next(row for row in payload["tables"][0]["data"] if row[0] == "6488")[column] = "N/A"
+    rows = _valuation(adapter, payload)
+    assert rows["6488"][{2: "pe", 5: "dividend_yield", 6: "pb"}[column]] is None
 
 
 @responses.activate

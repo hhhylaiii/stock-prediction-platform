@@ -279,18 +279,24 @@ def test_foreign_holding_out_of_range_is_dropped_with_a_warning(
 @responses.activate
 @pytest.mark.django_db
 @pytest.mark.parametrize(
-    ("summary", "error"),
-    [("3,186,000", SchemaChangedError), ("0", SourceNotReadyError)],
-    ids=["sum-differs", "nothing-yet"],
+    ("change", "error"),
+    [
+        (lambda t: t[0]["data"][0].__setitem__(0, "3,186,000"), SchemaChangedError),
+        (lambda t: t[0]["data"][0].__setitem__(0, "0"), SourceNotReadyError),
+        (lambda t: t[0].__setitem__("data", []), SourceNotReadyError),
+        (lambda t: t[0]["fields"].__setitem__(0, "總成交股數"), SchemaChangedError),
+        (lambda t: t[1]["fields"].__setitem__(3, "成交股數"), SchemaChangedError),
+    ],
+    ids=["sum-differs", "nothing-yet", "summary-empty", "total-renamed", "volume-renamed"],
 )
 def test_day_trade_rows_must_add_up_to_the_market_total(
     adapter: TpexAdapter,
     load_fixture: Callable[[str], Any],
-    summary: str,
+    change: Callable[[list[dict[str, Any]]], None],
     error: type[Exception],
 ) -> None:
     payload = load_fixture(DATASETS["day_trade"][2])
-    payload["tables"][0]["data"][0][0] = summary
+    change(payload["tables"])
     responses.post(DATASETS["day_trade"][0], json=payload)
     with pytest.raises(error, match="當日沖銷"):
         adapter.fetch("day_trade", DAY, DAY)

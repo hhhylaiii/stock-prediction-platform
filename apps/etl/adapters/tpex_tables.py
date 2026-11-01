@@ -11,6 +11,7 @@ import pandas as pd
 from apps.etl.adapters.dispositions import announced_events, list_rows, period_events
 from apps.etl.adapters.exchange_tables import (
     BLANK_MARKERS,
+    PERCENT,
     DailyTable,
     check_answered,
     find_table,
@@ -23,7 +24,6 @@ from apps.etl.adapters.exchange_tables import (
     ratio,
     row_of_day,
     shares,
-    yield_fraction,
 )
 from apps.etl.errors import SchemaChangedError, SourceNotReadyError
 from apps.etl.exchange_rows import (
@@ -288,6 +288,12 @@ def published_ratio(values: Sequence[Any]) -> float | None:
     return ratio(values)
 
 
+def published_yield(values: Sequence[Any]) -> float | None:
+    """A dividend yield printed in percent, under the same missing-value rule as P/E."""
+    published = published_ratio(values)
+    return None if published is None else published / PERCENT
+
+
 def percent_text(values: Sequence[Any]) -> float:
     """A percentage printed with its sign, such as 30.29%."""
     (text,) = (str(value).strip() for value in values)
@@ -304,13 +310,16 @@ def check_day_trade_total(payload: dict[str, Any]) -> None:
     summary = find_table(payload, DAY_TRADE_SUMMARY_TITLE)
     fields = [str(name).strip() for name in summary.get("fields") or []]
     rows = summary.get("data") or []
-    if DAY_TRADE_TOTAL not in fields or len(rows) != 1:
+    if DAY_TRADE_TOTAL not in fields or len(rows) > 1:
         raise SchemaChangedError(f"TPEx {DAY_TRADE_SUMMARY_TITLE} lost {DAY_TRADE_TOTAL}")
-    total = parse_count(rows[0][fields.index(DAY_TRADE_TOTAL)])
+    total = parse_count(rows[0][fields.index(DAY_TRADE_TOTAL)]) if rows else 0
     if total == 0:
         raise SourceNotReadyError(f"TPEx {DAY_TRADE_TOTAL} is 0; the day is not published yet")
     stocks = table_with(SECURITY_CODE)(payload)
-    column = [str(name).strip() for name in stocks.get("fields") or []].index(DAY_TRADE_VOLUME)
+    stock_fields = [str(name).strip() for name in stocks.get("fields") or []]
+    if DAY_TRADE_VOLUME not in stock_fields:
+        raise SchemaChangedError(f"TPEx 當日沖銷 rows lost {DAY_TRADE_VOLUME}")
+    column = stock_fields.index(DAY_TRADE_VOLUME)
     listed = sum(parse_count(row[column]) for row in stocks.get("data") or [])
     if listed != total:
         raise SchemaChangedError(f"TPEx 當日沖銷 rows add up to {listed}, not the total {total}")
@@ -429,7 +438,7 @@ TABLES: dict[str, DailyTable] = {
         convert=published_ratio,
         model=DailyValuation,
         valid={"pe": is_positive, "pb": is_positive, "dividend_yield": is_fraction},
-        converters={"dividend_yield": yield_fraction},
+        converters={"dividend_yield": published_yield},
         exchange=TPEX,
         locate=table_with("股票代號"),
     ),
