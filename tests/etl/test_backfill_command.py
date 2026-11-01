@@ -389,7 +389,9 @@ def _rejected_run() -> EtlRun:
 
 
 @pytest.mark.usefixtures("stocks")
-def test_rejected_stocks_are_skipped_and_the_run_fails_with_the_list() -> None:
+def test_rejected_stocks_are_skipped_and_the_run_fails_with_the_list(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     StockEchoAdapter.reject_on = frozenset({"2317"})
     StockEchoAdapter.refuse_on = frozenset({"3454"})
     with pytest.raises(CommandError, match="2 stocks rejected: 2317, 3454; 2317: Schema"):
@@ -404,6 +406,7 @@ def test_rejected_stocks_are_skipped_and_the_run_fails_with_the_list() -> None:
     }
     assert run.checkpoint["finished"] is True
     assert "2317" in run.error
+    assert "echo daily_price: rejected SourceRequestError: refused 3454" in caplog.text
 
 
 @pytest.mark.usefixtures("stocks")
@@ -574,3 +577,32 @@ def test_retry_only_takes_runs_of_the_same_dataset() -> None:
     )
     with pytest.raises(CommandError, match=f"no etl_run {other.run_id} of echo/daily_price"):
         _retry(other.run_id)
+
+
+@pytest.mark.usefixtures("stocks")
+def test_a_streak_keeps_the_rejections_before_it(settings: Any) -> None:
+    settings.ETL_MAX_CONSECUTIVE_REJECTIONS = 2
+    StockEchoAdapter.reject_on = frozenset({"1101", "2330", "3454"})
+    with pytest.raises(CommandError, match="in a row"):
+        _backfill()
+    run = EtlRun.objects.get()
+    assert run.checkpoint["last_stock_id"] == "2317"
+    assert list(run.checkpoint["rejected"]) == ["1101"]
+    StockEchoAdapter.reject_on = frozenset()
+    StockEchoAdapter.calls.clear()
+    with pytest.raises(CommandError, match="1 stock rejected: 1101"):
+        _backfill("--resume")
+    assert _fetched() == ["2330", "3454"]
+
+
+@pytest.mark.usefixtures("stocks")
+def test_retrying_rejections_ignores_the_streak_limit(settings: Any) -> None:
+    settings.ETL_MAX_CONSECUTIVE_REJECTIONS = 2
+    StockEchoAdapter.reject_on = frozenset({"1101", "2330"})
+    with pytest.raises(CommandError, match="2 stocks rejected: 1101, 2330"):
+        _backfill()
+    StockEchoAdapter.calls.clear()
+    with pytest.raises(CommandError, match="2 stocks rejected: 1101, 2330"):
+        _retry(EtlRun.objects.get().run_id)
+    assert _fetched() == ["1101", "2330"]
+    assert EtlRun.objects.latest("run_id").checkpoint["finished"] is True

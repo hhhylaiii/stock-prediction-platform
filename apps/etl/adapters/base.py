@@ -1,6 +1,7 @@
 """Adapter contract: fetch to raw, normalize to the standard schema, upsert (SPEC §5)."""
 
 import hashlib
+import logging
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from datetime import date
@@ -16,6 +17,8 @@ from apps.etl.ratelimit import RateLimiter
 from apps.etl.raw import store_raw
 from apps.etl.runs import fail_on_rejections, stop_on_streak, tracked_run
 from apps.market.calendar import CalendarError, NotATradingDayError, TradingDays
+
+logger = logging.getLogger(__name__)
 
 
 def stock_list_digest(stock_ids: Iterable[str]) -> str:
@@ -93,6 +96,7 @@ class BaseAdapter(ABC):
         resume_after: str | None = None,
         selection: str | list[str] = "all",
         rejected: Mapping[str, str] | None = None,
+        guard_streaks: bool = True,
     ) -> EtlRun:
         """Stock by stock; a stock with unusable source data is skipped and recorded."""
         self.require_dataset(dataset)
@@ -120,10 +124,11 @@ class BaseAdapter(ABC):
                 except SourceError as exc:
                     found[stock_id] = f"{type(exc).__name__}: {exc}"
                     streak.append(stock_id)
+                    logger.warning("%s %s: rejected %s", self.source, dataset, found[stock_id])
                 run.checkpoint = {**checkpoint, "last_stock_id": stock_id, "rejected": found}
                 run.save(update_fields=["rows", "checkpoint"])
                 try:
-                    stop_on_streak(streak, found)
+                    stop_on_streak(streak if guard_streaks else [], found)
                 except RejectedStocksError:
                     run.checkpoint = _before_streak(checkpoint, pending, streak, found)
                     raise

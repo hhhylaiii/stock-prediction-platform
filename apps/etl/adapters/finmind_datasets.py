@@ -273,6 +273,8 @@ def valuations(rows: Iterable[Row], stock_id: str) -> pd.DataFrame:
 def share_counts(rows: Iterable[Row], stock_id: str) -> pd.DataFrame:
     """TaiwanStockShareholding → shares_outstanding, one row per change of shares issued."""
     checked = checked_rows(rows, SHARE_KEYS, "TaiwanStockShareholding", stock_id)
+    days = [{"date": parse_day(row["date"], "TaiwanStockShareholding")} for row in checked]
+    _require_unique(days, "date", "TaiwanStockShareholding")
     records: list[dict[str, Any]] = []
     for row in sorted(checked, key=lambda item: str(item["date"])):
         shares = row["NumberOfSharesIssued"]
@@ -292,7 +294,6 @@ def share_counts(rows: Iterable[Row], stock_id: str) -> pd.DataFrame:
                 "reason": ShareChangeReason.UNKNOWN,
             }
         )
-    _require_unique(records, "effective_date", "TaiwanStockShareholding")
     return pd.DataFrame(records, columns=SHARE_COLUMNS, dtype=object)
 
 

@@ -173,6 +173,7 @@ class Command(BaseCommand):
                     resume_after=plan.after,
                     selection=plan.selection,
                     rejected=plan.rejected,
+                    guard_streaks=retry is None,
                 )
         except RejectedStocksError as exc:
             raise CommandError(str(exc)) from exc

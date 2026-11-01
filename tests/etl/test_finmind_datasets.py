@@ -368,3 +368,14 @@ def test_a_day_sent_twice_is_a_schema_change(
     twice = [*data, {**data[0], changed: data[0][changed] + 1}]
     with pytest.raises(SchemaChangedError, match=f"repeated {data[0]['date']}"):
         normalize(twice, "2330")
+
+
+def test_a_share_day_repeated_after_an_unchanged_count_is_a_schema_change() -> None:
+    base = {"stock_id": "2330", "stock_name": "台積電"}
+    rows = [
+        {**base, "date": "2026-10-01", "NumberOfSharesIssued": 100},
+        {**base, "date": "2026-10-02", "NumberOfSharesIssued": 100},
+        {**base, "date": "2026-10-02", "NumberOfSharesIssued": 120},
+    ]
+    with pytest.raises(SchemaChangedError, match="repeated 2026-10-02"):
+        share_counts(rows, "2330")
