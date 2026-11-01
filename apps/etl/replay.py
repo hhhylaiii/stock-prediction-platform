@@ -1,10 +1,11 @@
 """Rebuild standard rows from stored raw responses without calling the source (SPEC §4, §5)."""
 
 import json
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from datetime import date
 from typing import Any
 
+import pandas as pd
 import requests
 from django.conf import settings
 from django.db import transaction
@@ -21,6 +22,10 @@ from apps.market.models import DispositionEvent, Market, SharesOutstanding, Stoc
 REPLAYABLE = {"twse": Market.TWSE.value, "tpex": Market.TPEX.value}
 SHARES = "shares_outstanding"
 DAY_EVENTS = frozenset({"attention", "full_delivery"})
+
+
+class MissingRawError(SourceNotReadyError):
+    """No stored raw answers the request with exactly these parameters."""
 
 
 class ReplaySession(requests.Session):
@@ -43,7 +48,7 @@ class ReplaySession(requests.Session):
             .first()
         )
         if stored is None:
-            raise SourceNotReadyError(f"no stored raw for {self.dataset} {dict(params)}")
+            raise MissingRawError(f"no stored raw for {self.dataset} {dict(params)}")
         response = requests.Response()
         response.status_code = 200
         response.url = url
@@ -72,15 +77,29 @@ def reprocess(source: str, dataset: str, start: date, end: date, calendar: Tradi
     spans = list(adapter.units(dataset, start, end))
     with tracked_run(source, dataset, start, end) as run:
         run.checkpoint = {"kind": "reprocess"}
-        for first, last in spans:
-            raw = adapter.fetch(dataset, first, last)
-            frame = adapter.normalize(dataset, raw)
-            with transaction.atomic():
-                _clear(source, dataset, first, last)
-                run.rows += adapter.upsert(dataset, frame)
-            run.checkpoint = {"kind": "reprocess", "last_date": last.isoformat()}
-            run.save(update_fields=["rows", "checkpoint"])
+        for span in spans:
+            for first, last, frame in _replayed(adapter, dataset, *span):
+                with transaction.atomic():
+                    _clear(source, dataset, first, last)
+                    run.rows += adapter.upsert(dataset, frame)
+                run.checkpoint = {"kind": "reprocess", "last_date": last.isoformat()}
+                run.save(update_fields=["rows", "checkpoint"])
     return run
+
+
+def _replayed(
+    adapter: BaseAdapter, dataset: str, first: date, last: date
+) -> Iterator[tuple[date, date, pd.DataFrame]]:
+    """The span as one stored answer, else day by day as daily runs stored a monthly dataset."""
+    try:
+        raw = adapter.fetch(dataset, first, last)
+    except MissingRawError:
+        if first == last:
+            raise
+        for day in adapter.trading_days(first, last):
+            yield day, day, adapter.normalize(dataset, adapter.fetch(dataset, day, day))
+        return
+    yield first, last, adapter.normalize(dataset, raw)
 
 
 def _clear(source: str, dataset: str, first: date, last: date) -> None:

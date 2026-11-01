@@ -14,12 +14,15 @@ from apps.etl.models import EtlRun, RawTwse
 from apps.etl.ratelimit import RateLimiter
 from apps.etl.replay import reprocess
 from apps.market.calendar import TradingDays
-from apps.market.models import DailyPrice, SharesOutstanding, StockMaster
+from apps.market.models import DailyPrice, DispositionEvent, SharesOutstanding, StockMaster
 
 TWSE = "https://www.twse.com.tw/rwd/zh"
 TPEX = "https://www.tpex.org.tw/www/zh-tw"
 DAY = date(2026, 10, 28)
+NEXT = date(2026, 10, 29)
 LATER = date(2026, 10, 30)
+NOTICE = f"{TWSE}/announcement/notice"
+TWT85U = "https://www.twse.com.tw/exchangeReport/TWT85U"
 
 
 @pytest.fixture
@@ -121,6 +124,47 @@ def test_share_rows_of_the_day_are_cleared_before_they_are_rebuilt(
     reprocess("twse", "shares_outstanding", LATER, LATER, october_2026)
     after = set(SharesOutstanding.objects.values_list("stock_id", "effective_date", "shares"))
     assert after == rebuilt | {("6488", LATER, 7)}
+
+
+@responses.activate
+@pytest.mark.django_db
+def test_a_monthly_dataset_fetched_day_by_day_replays_day_by_day(
+    twse: TwseAdapter, october_2026: TradingDays, load_fixture: Callable[[str], Any]
+) -> None:
+    for day in (DAY, NEXT):
+        responses.get(NOTICE, json=load_fixture("twse/disposition/notice_20261028.json"))
+        twse.run("attention", day, day)
+    events = set(DispositionEvent.objects.values_list("stock_id", "start_date", "type"))
+    DispositionEvent.objects.all().delete()
+    responses.reset()
+    run = reprocess("twse", "attention", DAY, NEXT, october_2026)
+    assert set(DispositionEvent.objects.values_list("stock_id", "start_date", "type")) == events
+    assert (run.status, run.checkpoint["last_date"]) == ("success", "2026-10-29")
+    assert len(responses.calls) == 0
+
+
+@responses.activate
+@pytest.mark.django_db
+def test_day_events_of_the_market_are_cleared_before_they_are_rebuilt(
+    twse: TwseAdapter, october_2026: TradingDays, load_fixture: Callable[[str], Any]
+) -> None:
+    StockMaster.objects.bulk_create(
+        StockMaster(stock_id=code, name=code, market="TWSE") for code in ("1213", "9999")
+    )
+    StockMaster.objects.create(stock_id="6488", name="6488", market="TPEx")
+    responses.get(TWT85U, json=load_fixture("twse/disposition/twt85u_20261028.json"))
+    twse.run("full_delivery", DAY, DAY)
+    rebuilt = set(DispositionEvent.objects.values_list("stock_id", "type"))
+    for code, kind in (
+        ("9999", "full_delivery"),
+        ("6488", "full_delivery"),
+        ("9999", "disposition"),
+    ):
+        DispositionEvent.objects.create(stock_id=code, start_date=DAY, type=kind, end_date=DAY)
+    responses.reset()
+    reprocess("twse", "full_delivery", DAY, DAY, october_2026)
+    left = set(DispositionEvent.objects.values_list("stock_id", "type"))
+    assert left == rebuilt | {("6488", "full_delivery"), ("9999", "disposition")}
 
 
 @pytest.mark.django_db
