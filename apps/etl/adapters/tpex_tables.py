@@ -6,6 +6,7 @@ from typing import Any
 
 import pandas as pd
 
+from apps.etl.adapters.dispositions import announced_events, list_rows, period_events
 from apps.etl.adapters.exchange_tables import (
     DailyTable,
     check_answered,
@@ -67,6 +68,14 @@ SBL_SOURCE_FIELDS = (
     "備註",
 )
 SBL_GROUPS = ("", "", *("融券",) * 6, *("借券賣出",) * 6, "")
+SECURITY_CODE = "證券代號"
+ATTENTION_TITLE = "上櫃公布注意有價證券"
+ATTENTION_FIELDS = (SECURITY_CODE, "公告日期")
+DISPOSAL_TITLE = "上櫃處置有價證券"
+DISPOSAL_FIELDS = (SECURITY_CODE, "公布日期", "處置起訖時間")
+ALTERED_TITLE = "變更交易、分盤交易、管理股票與停止交易資訊"
+ALTERED_FLAGS = ("變更交易", "屬管理股票")
+FLAG = "Ｙ"
 
 
 def check_answer(payload: dict[str, Any], day: date) -> None:
@@ -166,6 +175,33 @@ def index_frame(raw_df: pd.DataFrame) -> pd.DataFrame:
             {"index_id": IndexId.TPEX.value, "date": row["date"], "close": close, "volume": None}
         )
     return pd.DataFrame(records, columns=INDEX_COLUMNS, dtype=object)
+
+
+def attention_events(payload: dict[str, Any], window: tuple[date, date]) -> list[dict[str, Any]]:
+    table = find_table(payload, ATTENTION_TITLE)
+    records = list_rows(table, "TPEx attention", ATTENTION_FIELDS)
+    return announced_events(records, ATTENTION_FIELDS, "TPEx attention", window)
+
+
+def disposal_events(payload: dict[str, Any], window: tuple[date, date]) -> list[dict[str, Any]]:
+    table = find_table(payload, DISPOSAL_TITLE)
+    records = list_rows(table, "TPEx disposal", DISPOSAL_FIELDS)
+    return period_events(records, DISPOSAL_FIELDS, "TPEx disposal", window)
+
+
+def full_delivery_codes(payload: dict[str, Any], day: date) -> list[str]:
+    """Codes under 變更交易 or listed as 管理股票 that day; suspended-only rows are left out."""
+    check_answer(payload, day)
+    table = find_table(payload, ALTERED_TITLE)
+    codes = []
+    for record in list_rows(table, "TPEx chtm", (SECURITY_CODE, *ALTERED_FLAGS)):
+        code = stock_code(record[SECURITY_CODE])
+        flags = {str(record[name]).strip() for name in ALTERED_FLAGS}
+        if not flags <= {"", FLAG}:
+            raise SchemaChangedError(f"TPEx chtm {code} has an unexpected flag {sorted(flags)}")
+        if FLAG in flags:
+            codes.append(code)
+    return codes
 
 
 def check_margin_lots(payload: dict[str, Any]) -> None:

@@ -9,6 +9,20 @@ import requests
 from django.conf import settings
 
 from apps.etl.adapters.base import BaseAdapter
+from apps.etl.adapters.dispositions import (
+    ATTENTION,
+    DISPOSITION,
+    FULL_DELIVERY,
+    announced_events,
+    day_events,
+    event_frame,
+    list_rows,
+    listed_code,
+    period_events,
+    previous_session,
+    standard_events,
+    upsert_events,
+)
 from apps.etl.adapters.exchange_tables import (
     NO_DATA_STAT,
     check_published,
@@ -45,6 +59,12 @@ SUSPEND_LISTING_PATH = "/rwd/zh/company/suspendListing"
 HOLIDAY_SCHEDULE_PATH = "/rwd/zh/holidaySchedule/holidaySchedule"
 MONTHLY_TRADING_PATH = "/rwd/zh/afterTrading/FMTQIK"
 STOCK_DAY_PATH = "/rwd/zh/afterTrading/STOCK_DAY"
+NOTICE_PATH = "/rwd/zh/announcement/notice"
+PUNISH_PATH = "/rwd/zh/announcement/punish"
+FULL_DELIVERY_PATH = "/exchangeReport/TWT85U"
+NOTICE_FIELDS = ("證券代號", "日期")
+PUNISH_FIELDS = ("證券代號", "公布日期", "處置起迄時間")
+CODE_FIELD = "證券代號"
 STOCK_DAY_FIRST_MONTH = date(2010, 1, 1)
 DAILY_QUOTES_TITLE = "每日收盤行情"
 DAILY_QUOTES_UNIT_HINT = "單位：元、股"
@@ -61,6 +81,7 @@ DAILY_PRICE = "daily_price"
 INDEX_DAILY = "index_daily"
 INSTITUTIONAL = "institutional"
 SHARES_OUTSTANDING = "shares_outstanding"
+EVENT_DATASETS = frozenset({ATTENTION, DISPOSITION, FULL_DELIVERY})
 
 
 def quotes_frame(payload: dict[str, Any], day: date) -> pd.DataFrame:
@@ -134,7 +155,8 @@ class TwseClient(SourceClient):
 class TwseAdapter(BaseAdapter):
     source = "twse"
     raw_model = RawTwse
-    datasets = frozenset({DAILY_PRICE, INDEX_DAILY, *TABLES})
+    datasets = frozenset({DAILY_PRICE, INDEX_DAILY, *TABLES, *EVENT_DATASETS})
+    monthly_datasets = frozenset({INDEX_DAILY, ATTENTION, DISPOSITION})
 
     def __init__(
         self,
@@ -149,11 +171,14 @@ class TwseAdapter(BaseAdapter):
         self, dataset: str, start: date, end: date, stock_id: str | None = None
     ) -> pd.DataFrame:
         self.require_dataset(dataset)
-        frames = [self._fetch_day(dataset, day) for day in self.trading_days(start, end)]
+        spans = self.units(dataset, start, end)
+        frames = [self._fetch_span(dataset, first, last) for first, last in spans]
         return pd.concat(frames, ignore_index=True)
 
     def normalize(self, dataset: str, raw_df: pd.DataFrame) -> pd.DataFrame:
         self.require_dataset(dataset)
+        if dataset in EVENT_DATASETS:
+            return standard_events(raw_df)
         if dataset == DAILY_PRICE:
             return self._normalize_quotes(raw_df)
         if dataset == INDEX_DAILY:
@@ -170,6 +195,8 @@ class TwseAdapter(BaseAdapter):
 
     def upsert(self, dataset: str, frame: pd.DataFrame) -> int:
         self.require_dataset(dataset)
+        if dataset in EVENT_DATASETS:
+            return upsert_events(frame)
         if dataset == DAILY_PRICE:
             return upsert_daily_prices(frame)
         if dataset == INDEX_DAILY:
@@ -182,21 +209,81 @@ class TwseAdapter(BaseAdapter):
             drop_repeated_counts(frame["stock_id"])
         return rows
 
+    def _fetch_span(self, dataset: str, first: date, last: date) -> pd.DataFrame:
+        if dataset == INDEX_DAILY:
+            return self._fetch_taiex(first, last)
+        if dataset == ATTENTION:
+            return self._fetch_attention(first, last)
+        if dataset == DISPOSITION:
+            return self._fetch_disposition(first, last)
+        return self._fetch_day(dataset, first)
+
     def _fetch_day(self, dataset: str, day: date) -> pd.DataFrame:
         if dataset == DAILY_PRICE:
             return self._fetch_daily_quotes(day)
-        if dataset == INDEX_DAILY:
-            params = {"date": f"{day:%Y%m}01", "response": "json"}
-            payload = self.client.get_json(MONTHLY_TRADING_PATH, params)
-            check_published(payload, "TWSE FMTQIK", day)
-            self.save_raw(dataset, params, payload)
-            return taiex_rows(payload, day)
+        if dataset == FULL_DELIVERY:
+            return self._fetch_full_delivery(day)
         table = TABLES[dataset]
         params = {"date": day.strftime("%Y%m%d"), **table.params, "response": "json"}
         payload = self.client.get_json(table.path, params)
         check_published(payload, table.where, day)
         self.save_raw(dataset, params, payload)
         return source_rows(payload, day, table, check_answer)
+
+    def _fetch_taiex(self, first: date, last: date) -> pd.DataFrame:
+        """FMTQIK rows of the span's trading days from one monthly request."""
+        params = {"date": f"{first:%Y%m}01", "response": "json"}
+        payload = self.client.get_json(MONTHLY_TRADING_PATH, params)
+        check_published(payload, "TWSE FMTQIK", last)
+        self.save_raw(INDEX_DAILY, params, payload)
+        days = self.calendar.between(first, last)
+        return pd.concat([taiex_rows(payload, day) for day in days], ignore_index=True)
+
+    def _fetch_attention(self, first: date, last: date) -> pd.DataFrame:
+        """Attention notices announced in the span or on the session before it."""
+        window = (previous_session(self.calendar, first), last)
+        params = {
+            "querytype": "1",
+            "startDate": f"{window[0]:%Y%m%d}",
+            "endDate": f"{last:%Y%m%d}",
+            "response": "json",
+        }
+        payload = self._listed(ATTENTION, NOTICE_PATH, params)
+        if payload is None:
+            return event_frame([])
+        records = list_rows(payload, "TWSE notice", NOTICE_FIELDS)
+        return event_frame(announced_events(records, NOTICE_FIELDS, "TWSE notice", window))
+
+    def _fetch_disposition(self, first: date, last: date) -> pd.DataFrame:
+        """Disposition periods overlapping the span; TWSE matches on the period itself."""
+        params = {"startDate": f"{first:%Y%m%d}", "endDate": f"{last:%Y%m%d}", "response": "json"}
+        payload = self._listed(DISPOSITION, PUNISH_PATH, params)
+        if payload is None:
+            return event_frame([])
+        records = list_rows(payload, "TWSE punish", PUNISH_FIELDS)
+        return event_frame(period_events(records, PUNISH_FIELDS, "TWSE punish", (first, last)))
+
+    def _fetch_full_delivery(self, day: date) -> pd.DataFrame:
+        """The day's TWT85U 變更交易 list, published before the session opens."""
+        params = {"date": f"{day:%Y%m%d}", "response": "json"}
+        payload = self._listed(FULL_DELIVERY, FULL_DELIVERY_PATH, params)
+        if payload is None:
+            return event_frame([])
+        check_answer(payload, day)
+        records = list_rows(payload, "TWSE TWT85U", (CODE_FIELD,))
+        codes = [listed_code(record, CODE_FIELD, "TWSE TWT85U") for record in records]
+        return event_frame(day_events([code for code in codes if code], day, FULL_DELIVERY))
+
+    def _listed(self, dataset: str, path: str, params: dict[str, str]) -> dict[str, Any] | None:
+        """An answered list, kept raw; None when TWSE says nothing matched."""
+        payload = self.client.get_json(path, params)
+        stat = str(payload.get("stat", ""))
+        if NO_DATA_STAT in stat:
+            return None
+        self.save_raw(dataset, params, payload)
+        if stat != "OK":
+            raise SchemaChangedError(f"TWSE {path} answered with stat {stat!r}")
+        return payload
 
     def _normalize_quotes(self, raw_df: pd.DataFrame) -> pd.DataFrame:
         missing = set(DAILY_QUOTES_COLUMNS) - set(raw_df.columns)

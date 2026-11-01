@@ -8,6 +8,16 @@ import requests
 from django.conf import settings
 
 from apps.etl.adapters.base import BaseAdapter
+from apps.etl.adapters.dispositions import (
+    ATTENTION,
+    DISPOSITION,
+    FULL_DELIVERY,
+    day_events,
+    event_frame,
+    previous_session,
+    standard_events,
+    upsert_events,
+)
 from apps.etl.adapters.exchange_tables import (
     check_published,
     parsed_quotes,
@@ -18,8 +28,12 @@ from apps.etl.adapters.exchange_tables import (
     upsert_index_rows,
 )
 from apps.etl.adapters.tpex_tables import (
+    OK_STAT,
     TABLES,
+    attention_events,
     check_answer,
+    disposal_events,
+    full_delivery_codes,
     index_frame,
     index_rows,
     quote_rows,
@@ -40,10 +54,15 @@ DEFAULT_PAGE_SIZE = 1000
 OTC_QUOTES_PATH = "/www/zh-tw/afterTrading/otc"
 DAILY_QUOTES_PATH = "/www/zh-tw/afterTrading/dailyQuotes"
 INDEX_PATH = "/www/zh-tw/indexInfo/inx"
+ATTENTION_PATH = "/www/zh-tw/bulletin/attention"
+DISPOSAL_PATH = "/www/zh-tw/bulletin/disposal"
+ALTERED_PATH = "/www/zh-tw/afterTrading/chtm"
+WHOLE_MARKET = {"type": "all", "code": "", "cate": ""}
 QUOTED_TYPE = "EW"
 DAILY_PRICE = "daily_price"
 INDEX_DAILY = "index_daily"
 INSTITUTIONAL = "institutional"
+EVENT_DATASETS = frozenset({ATTENTION, DISPOSITION, FULL_DELIVERY})
 
 
 class TpexClient(SourceClient):
@@ -127,10 +146,15 @@ def _day_form(day: date, **params: str) -> dict[str, str]:
     return {"date": f"{day:%Y/%m/%d}", **params, "response": "json"}
 
 
+def _range_form(first: date, last: date) -> dict[str, str]:
+    return {"startDate": f"{first:%Y/%m/%d}", "endDate": f"{last:%Y/%m/%d}"}
+
+
 class TpexAdapter(BaseAdapter):
     source = "tpex"
     raw_model = RawTpex
-    datasets = frozenset({DAILY_PRICE, INDEX_DAILY, *TABLES})
+    datasets = frozenset({DAILY_PRICE, INDEX_DAILY, *TABLES, *EVENT_DATASETS})
+    monthly_datasets = frozenset({INDEX_DAILY, ATTENTION, DISPOSITION})
 
     def __init__(
         self,
@@ -145,11 +169,14 @@ class TpexAdapter(BaseAdapter):
         self, dataset: str, start: date, end: date, stock_id: str | None = None
     ) -> pd.DataFrame:
         self.require_dataset(dataset)
-        frames = [self._fetch_day(dataset, day) for day in self.trading_days(start, end)]
+        spans = self.units(dataset, start, end)
+        frames = [self._fetch_span(dataset, first, last) for first, last in spans]
         return pd.concat(frames, ignore_index=True)
 
     def normalize(self, dataset: str, raw_df: pd.DataFrame) -> pd.DataFrame:
         self.require_dataset(dataset)
+        if dataset in EVENT_DATASETS:
+            return standard_events(raw_df)
         if dataset == DAILY_PRICE:
             return parsed_quotes(raw_df)
         if dataset == INDEX_DAILY:
@@ -162,6 +189,8 @@ class TpexAdapter(BaseAdapter):
 
     def upsert(self, dataset: str, frame: pd.DataFrame) -> int:
         self.require_dataset(dataset)
+        if dataset in EVENT_DATASETS:
+            return upsert_events(frame)
         if dataset == DAILY_PRICE:
             return upsert_daily_prices(frame)
         if dataset == INDEX_DAILY:
@@ -171,15 +200,40 @@ class TpexAdapter(BaseAdapter):
             table.model, frame, unique_fields=table.keys, update_fields=tuple(table.columns)
         )
 
+    def _fetch_span(self, dataset: str, first: date, last: date) -> pd.DataFrame:
+        if dataset == INDEX_DAILY:
+            form = {"date": f"{first:%Y/%m}/01", "response": "json"}
+            payload = self._published(dataset, INDEX_PATH, form, last)
+            days = self.calendar.between(first, last)
+            return pd.concat([index_rows(payload, day) for day in days], ignore_index=True)
+        if dataset == ATTENTION:
+            window = (previous_session(self.calendar, first), last)
+            form = {**_range_form(*window), **WHOLE_MARKET, "order": "date", "response": "json"}
+            return event_frame(
+                attention_events(self._answered(dataset, ATTENTION_PATH, form), window)
+            )
+        if dataset == DISPOSITION:
+            form = {
+                **_range_form(first, last),
+                **WHOLE_MARKET,
+                "reason": "-1",
+                "measure": "-1",
+                "order": "date",
+                "response": "json",
+            }
+            payload = self._answered(dataset, DISPOSAL_PATH, form)
+            return event_frame(disposal_events(payload, (first, last)))
+        return self._fetch_day(dataset, first)
+
     def _fetch_day(self, dataset: str, day: date) -> pd.DataFrame:
+        if dataset == FULL_DELIVERY:
+            payload = self._answered(dataset, ALTERED_PATH, _day_form(day))
+            return event_frame(day_events(full_delivery_codes(payload, day), day, FULL_DELIVERY))
         if dataset == DAILY_PRICE:
             otc_form = _day_form(day, type=QUOTED_TYPE)
             otc = self._published(DAILY_PRICE, OTC_QUOTES_PATH, otc_form, day)
             quotes = self._published(DAILY_PRICE, DAILY_QUOTES_PATH, _day_form(day), day)
             return quote_rows(otc, quotes, day)
-        if dataset == INDEX_DAILY:
-            form = {"date": f"{day:%Y/%m}/01", "response": "json"}
-            return index_rows(self._published(dataset, INDEX_PATH, form, day), day)
         table = TABLES[dataset]
         payload = self._published(dataset, table.path, _day_form(day, **table.params), day)
         return source_rows(payload, day, table, check_answer)
@@ -191,6 +245,14 @@ class TpexAdapter(BaseAdapter):
         payload = self.client.post_json(path, form)
         check_published(payload, f"TPEx {path.removeprefix('/www/zh-tw/')}", day)
         self.save_raw(dataset, form, payload)
+        return payload
+
+    def _answered(self, dataset: str, path: str, form: dict[str, str]) -> dict[str, Any]:
+        """The answer to a list request, kept raw; an empty list is a valid answer."""
+        payload = self.client.post_json(path, form)
+        self.save_raw(dataset, form, payload)
+        if payload.get("stat") != OK_STAT:
+            raise SchemaChangedError(f"TPEx {path} answered with stat {payload.get('stat')!r}")
         return payload
 
     def _quoted_codes(self, day: date) -> set[str]:

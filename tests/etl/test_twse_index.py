@@ -127,3 +127,20 @@ def test_fetch_command_writes_taiex_once_when_rerun(
     taiex = IndexDaily.objects.get()
     assert (taiex.index_id, taiex.date, taiex.close) == ("TAIEX", DAY, Decimal("47035.5800"))
     assert list(EtlRun.objects.values_list("status", "rows")) == [("success", 1)] * 2
+
+
+@responses.activate
+@pytest.mark.usefixtures("october_2026_in_db")
+def test_fetch_command_backfills_a_month_in_one_request(
+    payload: dict[str, Any], october_2026: TradingDays, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("apps.etl.ratelimit.time.sleep", lambda seconds: None)
+    responses.get(URL, json=payload)
+    call_command(
+        "fetch", source="twse", dataset="index_daily", start="2026-10-01", end="2026-10-30"
+    )
+    assert len(responses.calls) == 1
+    october = october_2026.between(date(2026, 10, 1), date(2026, 10, 30))
+    assert list(IndexDaily.objects.order_by("date").values_list("date", flat=True)) == list(october)
+    run = EtlRun.objects.get()
+    assert (run.rows, run.checkpoint) == (len(october), {"last_date": "2026-10-30"})
