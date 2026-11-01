@@ -23,7 +23,8 @@ from apps.market.models import IndexId
 TPEX = "TPEx"
 OK_STAT = "ok"
 QUOTED_TITLE = "上櫃股票每日收盤行情(不含定價)"
-QUOTE_TITLES = ("上櫃股票行情", "管理股票")
+MANAGED_TITLE = "管理股票"
+QUOTE_TITLES = ("上櫃股票行情", MANAGED_TITLE)
 CODE_FIELD = "代號"
 QUOTE_COLUMNS = {
     "開盤": "open",
@@ -112,6 +113,10 @@ def quote_rows(otc: dict[str, Any], quotes: dict[str, Any], day: date) -> pd.Dat
                 raise SchemaChangedError(f"TPEx {title} rows do not match its fields")
             record = dict(zip(fields, row, strict=True))
             code = str(record[CODE_FIELD]).strip()
+            if title == MANAGED_TITLE and code not in codes:
+                raise SchemaChangedError(
+                    f"TPEx managed stock {code} on {day} is not in the EW list"
+                )
             if code in codes and code in found:
                 raise SchemaChangedError(f"TPEx daily quotes repeat {code} on {day}")
             found[code] = record
@@ -190,9 +195,9 @@ def sbl_rolls_forward(row: Mapping[Hashable, Any]) -> bool:
     short = [parse_count(row[f"融券{field}"]) for field in ("前日餘額", "賣出", "買進", "現券")]
     lent = [parse_count(row[f"借券賣出{field}"]) for field in ("前日餘額", "當日賣出", "當日還券")]
     adjusted = parse_signed(row["借券賣出當日調整數額"])
-    return short[0] + short[1] - short[2] - short[3] == parse_count(row["融券當日餘額"]) and lent[
-        0
-    ] + lent[1] - lent[2] + adjusted == parse_count(row["借券賣出當日餘額"])
+    short_holds = short[0] + short[1] - short[2] - short[3] == parse_count(row["融券當日餘額"])
+    lent_holds = lent[0] + lent[1] - lent[2] + adjusted == parse_count(row["借券賣出當日餘額"])
+    return short_holds and lent_holds
 
 
 def _same(*names: str) -> tuple[tuple[str, str], ...]:
