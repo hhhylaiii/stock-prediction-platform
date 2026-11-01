@@ -1,10 +1,12 @@
 from collections.abc import Callable
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
+from zoneinfo import ZoneInfo
 
 import pytest
 import responses
+import time_machine
 from django.core.management import call_command
 from django.core.management.base import CommandError
 from responses import matchers
@@ -21,7 +23,13 @@ from apps.etl.catchup import (
 )
 from apps.etl.models import DataQualityLog, EtlRun, RawTwse
 from apps.market.calendar import TradingDays
-from apps.market.models import DailyChip, DailyPrice, SharesOutstanding, StockMaster
+from apps.market.models import (
+    DailyChip,
+    DailyPrice,
+    IndexDaily,
+    SharesOutstanding,
+    StockMaster,
+)
 
 MI_INDEX = "https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX"
 MI_QFIIS = "https://www.twse.com.tw/rwd/zh/fund/MI_QFIIS"
@@ -95,6 +103,14 @@ def test_a_chip_day_is_done_only_for_the_dataset_whose_columns_are_filled() -> N
     assert missing_days(jobs["institutional"], DAYS) == DAYS
 
 
+def test_an_index_day_is_done_when_the_market_index_has_a_row() -> None:
+    IndexDaily.objects.create(index_id="TPEX", date=DAYS[0], close=1)
+    IndexDaily.objects.create(index_id="TAIEX", date=DAYS[1], close=1)
+    jobs = {job.key: job for job in JOBS}
+    assert missing_days(jobs["tpex/index_daily"], DAYS) == DAYS[1:]
+    assert missing_days(jobs["twse/index_daily"], DAYS) == [DAYS[0], DAYS[2]]
+
+
 def test_every_daily_exchange_dataset_is_caught_up_and_share_counts_are_rebuilt() -> None:
     keys = {job.key: job for job in JOBS}
     for source in ("twse", "tpex"):
@@ -121,6 +137,7 @@ def test_missing_days_are_fetched_in_order_and_checked_again(
     asked = [parse_qs(urlsplit(str(call.request.url)).query)["date"] for call in responses.calls]
     assert asked == [["20261028"], ["20261029"]]
     assert set(DataQualityLog.objects.values_list("date", flat=True)) == set(DAYS[1:])
+    assert report.lines()[-1] == "checked quality again: 2026-10-28, 2026-10-29"
 
 
 @responses.activate
@@ -227,9 +244,10 @@ def test_catchup_command_fails_when_a_step_failed(capsys: pytest.CaptureFixture[
     [
         ({"since": "2026-10-29", "until": "2026-10-27"}, "must not be after"),
         ({"since": "2026-10-27", "source": "finmind"}, "no catch-up job"),
-        ({"since": "2026-10-27", "until": "2026-12-01"}, "after today"),
+        ({"since": "2026-10-27", "until": "2026-10-30"}, "after today"),
     ],
 )
+@time_machine.travel(datetime(2026, 10, 29, 20, tzinfo=ZoneInfo("Asia/Taipei")), tick=False)
 def test_catchup_command_rejects_bad_options(options: dict[str, str], message: str) -> None:
     with pytest.raises(CommandError, match=message):
         call_command("catchup", **options)
