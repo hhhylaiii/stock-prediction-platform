@@ -65,3 +65,23 @@ def fail_on_rejections(rejected: Mapping[str, str]) -> None:
         raise RejectedStocksError(
             f"{len(codes)} {noun} rejected: {', '.join(codes)}; {codes[0]}: {rejected[codes[0]]}"
         )
+
+
+def covered_days(source: str, dataset: str, days: Sequence[date]) -> set[date]:
+    """Days inside a successful run, or inside the checkpointed part of an unfinished one."""
+    if not days:
+        return set()
+    runs = EtlRun.objects.filter(
+        source=source, dataset=dataset, start_date__lte=max(days), end_date__gte=min(days)
+    ).values_list("start_date", "end_date", "status", "checkpoint")
+    spans = [
+        (start, _done_until(end, status, checkpoint)) for start, end, status, checkpoint in runs
+    ]
+    return {day for day in days for start, until in spans if until and start <= day <= until}
+
+
+def _done_until(end: date, status: str, checkpoint: dict[str, object]) -> date | None:
+    if status == EtlRun.Status.SUCCESS:
+        return end
+    last = checkpoint.get("last_date")
+    return date.fromisoformat(last) if isinstance(last, str) else None
