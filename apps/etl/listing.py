@@ -1,13 +1,11 @@
 """First day a stock traded on TWSE or TPEx, so emerging-market rows stay out (SPEC §1, §8.6)."""
 
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from datetime import date
 from enum import StrEnum
-from typing import NamedTuple
+from typing import NamedTuple, Protocol
 
 MONTHS = 12
-Probe = Callable[[date], list[date] | None]
-Ask = Callable[[date], list[date]]
 
 
 class Outcome(StrEnum):
@@ -15,11 +13,20 @@ class Outcome(StrEnum):
     EARLIER = "listed_before_prices"
     UNKNOWN = "unanswerable"
     MISSING = "no official trading day up to the last price"
+    FIRST_PRICE = "first_price_after_empty_month"
 
 
 class Listing(NamedTuple):
     outcome: Outcome
     day: date | None = None
+
+
+class Probe(Protocol):
+    def __call__(self, month: date, every: bool = False) -> list[date] | None: ...
+
+
+class Ask(Protocol):
+    def __call__(self, month: date, every: bool = False) -> list[date]: ...
 
 
 class _UnanswerableError(Exception):
@@ -29,8 +36,8 @@ class _UnanswerableError(Exception):
 def first_listed_day(firsts: Sequence[date], probe: Probe) -> Listing:
     """Search only months with prices; firsts holds each such month's first price day, ascending."""
 
-    def ask(month: date) -> list[date]:
-        days = probe(month)
+    def ask(month: date, every: bool = False) -> list[date]:
+        days = probe(month, every)
         if days is None:
             raise _UnanswerableError
         return days
@@ -45,12 +52,14 @@ def first_listed_day(firsts: Sequence[date], probe: Probe) -> Listing:
 
 
 def _first_month(first_price: date, days: list[date], ask: Ask) -> Listing:
-    """Prices before the first official day of their month are emerging trades."""
+    """Prices before the month's first day on either market are emerging trades."""
     if days[0] > first_price:
-        return Listing(Outcome.LISTED, days[0])
+        days = ask(_month(first_price), every=True)
+        if days[0] > first_price:
+            return Listing(Outcome.LISTED, days[0])
     if ask(_shift(_month(first_price), -1)):
         return Listing(Outcome.EARLIER)
-    return Listing(Outcome.LISTED, days[0])
+    return Listing(Outcome.FIRST_PRICE, days[0])
 
 
 def _later_month(firsts: Sequence[date], ask: Ask) -> Listing:
@@ -58,8 +67,7 @@ def _later_month(firsts: Sequence[date], ask: Ask) -> Listing:
     empty, step, last = 0, 1, len(firsts) - 1
     while empty < last:
         index = min(empty + step, last)
-        found = ask(_month(firsts[index]))
-        if found:
+        if ask(_month(firsts[index])):
             break
         empty, step = index, step * 2
     else:
@@ -67,12 +75,11 @@ def _later_month(firsts: Sequence[date], ask: Ask) -> Listing:
     listed = index
     while listed - empty > 1:
         middle = (empty + listed) // 2
-        days = ask(_month(firsts[middle]))
-        if days:
-            listed, found = middle, days
+        if ask(_month(firsts[middle])):
+            listed = middle
         else:
             empty = middle
-    return Listing(Outcome.LISTED, found[0])
+    return Listing(Outcome.LISTED, ask(_month(firsts[listed]), every=True)[0])
 
 
 def _month(day: date) -> date:

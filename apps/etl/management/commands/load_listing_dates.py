@@ -5,6 +5,7 @@ from collections.abc import Callable
 from datetime import date
 from typing import Any
 
+from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 from django.db.models import Min, Q, QuerySet
@@ -23,6 +24,7 @@ from apps.market.models import DailyChip, DailyPrice, DailyValuation, Market, St
 
 DATASET = "list_date"
 MARKET_ROWS = (DailyPrice, DailyValuation, DailyChip)
+UNSETTLED = (Outcome.EARLIER, Outcome.UNKNOWN)
 Lookup = Callable[[str, date], list[date] | None]
 
 
@@ -34,36 +36,57 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser: ArgumentParser) -> None:
         parser.add_argument("--stock", action="append", dest="stocks")
-        parser.add_argument("--refresh", action="store_true")
+        parser.add_argument(
+            "--refresh",
+            action="store_true",
+            help="also recheck stocks that already have a list_date",
+        )
 
     def handle(self, *args: Any, **options: Any) -> None:
         chosen = StockMaster.objects.order_by("stock_id")
         if options["stocks"]:
             chosen = chosen.filter(stock_id__in=options["stocks"])
-        self._drop_after_delisting(chosen)
-        refresh = options["refresh"]
-        stocks = chosen if refresh else chosen.filter(list_date__isnull=True)
+        stocks = chosen if options["refresh"] else chosen.filter(list_date__isnull=True)
         firsts = _price_months(stocks)
-        settled = {} if refresh else _settled()
+        settled = _settled()
         todo = [
             stock
             for stock in stocks
             if stock.stock_id in firsts
-            and settled.get(stock.stock_id) != firsts[stock.stock_id][0].isoformat()
+            and (
+                stock.list_date is not None
+                or settled.get(stock.stock_id) != firsts[stock.stock_id][0].isoformat()
+            )
         ]
-        today = timezone.localdate()
-        start = min((days[0] for days in firsts.values()), default=today)
-        clients = (TwseClient.build(limiter_for("twse")), TpexClient.build(limiter_for("tpex")))
         try:
-            with failing_on_termination(), tracked_run("twse_tpex", DATASET, start, today) as run:
-                run.checkpoint = {"rejected": {}, "settled": {}, "cleared": []}
-                for stock in todo:
-                    self._settle(run, stock, firsts[stock.stock_id], _probe(stock, *clients))
-                _fail_on_rejections(run.checkpoint["rejected"])
+            self._run(chosen, todo, firsts)
         except RetryableError as exc:
             raise CommandError(f"{type(exc).__name__}: {exc}") from exc
 
-    def _settle(self, run: EtlRun, stock: StockMaster, firsts: list[date], probe: Probe) -> None:
+    def _run(
+        self, chosen: QuerySet[StockMaster], todo: list[StockMaster], firsts: dict[str, list[date]]
+    ) -> None:
+        today = timezone.localdate()
+        start = min((days[0] for days in firsts.values()), default=today)
+        twse, tpex = TwseClient.build(limiter_for("twse")), TpexClient.build(limiter_for("tpex"))
+        with failing_on_termination(), tracked_run("twse_tpex", DATASET, start, today) as run:
+            run.checkpoint = {
+                "delisting_dropped": self._drop_after_delisting(chosen),
+                "listed": {},
+                "rejected": {},
+                "settled": {},
+                "cleared": [],
+            }
+            streak = 0
+            for stock in todo:
+                probe = _probe(stock, twse, tpex)
+                rejected = self._settle(run, stock, firsts[stock.stock_id], probe)
+                streak = streak + 1 if rejected else 0
+                _stop_on_streak(streak, run.checkpoint["rejected"])
+            _fail_on_rejections(run.checkpoint["rejected"])
+
+    def _settle(self, run: EtlRun, stock: StockMaster, firsts: list[date], probe: Probe) -> bool:
+        """Record one stock's outcome; True when it was rejected."""
         code, progress = stock.stock_id, run.checkpoint
         try:
             listing = first_listed_day(firsts, probe)
@@ -71,23 +94,25 @@ class Command(BaseCommand):
             progress["rejected"][code] = f"{type(exc).__name__}: {exc}"
         else:
             if listing.outcome is Outcome.LISTED and listing.day is not None:
-                self._set(stock, listing.day)
+                progress["listed"][code] = [listing.day.isoformat(), self._set(stock, listing.day)]
                 run.rows += 1
             elif listing.outcome is Outcome.MISSING:
                 progress["rejected"][code] = str(listing.outcome)
             else:
                 progress["settled"][code] = [firsts[0].isoformat(), str(listing.outcome)]
-                if stock.list_date is not None:
+                if listing.outcome in UNSETTLED and stock.list_date is not None:
                     self._clear(stock)
                     progress["cleared"].append(code)
         run.save(update_fields=["checkpoint", "rows"])
+        return code in progress["rejected"]
 
-    def _set(self, stock: StockMaster, listed: date) -> None:
+    def _set(self, stock: StockMaster, listed: date) -> int:
         with transaction.atomic():
             stock.list_date = listed
             stock.save(update_fields=["list_date"])
             dropped = _drop(Q(stock_id=stock.stock_id, date__lt=listed))
         self.stdout.write(f"{stock.stock_id}: listed {listed}, dropped {dropped} earlier rows")
+        return dropped
 
     def _clear(self, stock: StockMaster) -> None:
         old, stock.list_date = stock.list_date, None
@@ -97,11 +122,14 @@ class Command(BaseCommand):
             "FinMind backfill of daily_price, daily_valuation and daily_chip for it"
         )
 
-    def _drop_after_delisting(self, stocks: QuerySet[StockMaster]) -> None:
+    def _drop_after_delisting(self, stocks: QuerySet[StockMaster]) -> dict[str, int]:
+        dropped = {}
         for stock in stocks.filter(delist_date__isnull=False):
-            dropped = _drop(Q(stock_id=stock.stock_id, date__gte=stock.delist_date))
-            if dropped:
-                self.stdout.write(f"{stock.stock_id}: dropped {dropped} rows from delisting on")
+            count = _drop(Q(stock_id=stock.stock_id, date__gte=stock.delist_date))
+            if count:
+                dropped[stock.stock_id] = count
+                self.stdout.write(f"{stock.stock_id}: dropped {count} rows from delisting on")
+        return dropped
 
 
 def _drop(rows: Q) -> int:
@@ -109,9 +137,9 @@ def _drop(rows: Q) -> int:
 
 
 def _price_months(stocks: QuerySet[StockMaster]) -> dict[str, list[date]]:
-    """First traded day of every month with prices, per stock."""
+    """First traded day of every month with prices, per stock; traded means a close (SPEC §4)."""
     rows = (
-        DailyPrice.objects.filter(stock_id__in=stocks.values("stock_id"), volume__gt=0)
+        DailyPrice.objects.filter(stock_id__in=stocks.values("stock_id"), close__isnull=False)
         .annotate(month=TruncMonth("date"))
         .values("stock_id", "month")
         .annotate(first=Min("date"))
@@ -124,7 +152,7 @@ def _price_months(stocks: QuerySet[StockMaster]) -> dict[str, list[date]]:
 
 
 def _settled() -> dict[str, str]:
-    """Stocks an earlier run found listed before, or unanswerable from, the same first price."""
+    """First price day each settled stock was judged from; a new first price means a recheck."""
     found: dict[str, str] = {}
     for checkpoint in (
         EtlRun.objects.filter(dataset=DATASET)
@@ -135,6 +163,12 @@ def _settled() -> dict[str, str]:
     return found
 
 
+def _stop_on_streak(streak: int, rejected: dict[str, str]) -> None:
+    """Many rejections in a row look like a blocked source, so stop asking."""
+    if streak >= settings.LISTING_MAX_CONSECUTIVE_REJECTIONS:
+        raise CommandError(f"{streak} stocks rejected in a row; last: {list(rejected)[-1]}")
+
+
 def _fail_on_rejections(rejected: dict[str, str]) -> None:
     if rejected:
         noun = "stock" if len(rejected) == 1 else "stocks"
@@ -142,18 +176,26 @@ def _fail_on_rejections(rejected: dict[str, str]) -> None:
 
 
 def _probe(stock: StockMaster, twse: TwseClient, tpex: TpexClient) -> Probe:
-    """Ask the current market first, then the other; None when no market could answer."""
+    """Current market first; every=True merges both; None when a needed market can't answer."""
     lookups: list[Lookup] = [twse.stock_month, tpex.stock_month]
     if stock.market == Market.TPEX:
         lookups.reverse()
+    seen: dict[tuple[int, date], list[date] | None] = {}
 
-    def probe(month: date) -> list[date] | None:
+    def ask(at: int, month: date) -> list[date] | None:
+        if (at, month) not in seen:
+            seen[at, month] = lookups[at](stock.stock_id, month)
+        return seen[at, month]
+
+    def probe(month: date, every: bool = False) -> list[date] | None:
         answers = []
-        for lookup in lookups:
-            days = lookup(stock.stock_id, month)
-            if days:
+        for at in range(len(lookups)):
+            days = ask(at, month)
+            if days and not every:
                 return days
             answers.append(days)
-        return None if None in answers else []
+        if None in answers:
+            return None
+        return sorted(day for days in answers for day in days or [])
 
     return probe
