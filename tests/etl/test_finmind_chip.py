@@ -132,6 +132,7 @@ def test_foreign_holding_at_the_bounds_is_kept(october: dict[str, Rows], ratio: 
         ("institutional", "name"),
         ("margin", "MarginPurchaseLimit"),
         ("lending", "SBLShortSalesCurrentDayBalance"),
+        ("lending", "MarginShortSalesCurrentDayBalance"),
         ("holding", "ForeignInvestmentSharesRatio"),
     ],
 )
@@ -177,3 +178,21 @@ def test_dealer_columns_are_filled_only_after_the_dealer_split(
     day = _day(frame, date(2014, 11, 27))
     assert (day["fi_net"], day["it_net"]) == (0, 0)
     assert (day["dealer_self_net"], day["dealer_hedge_net"]) == (None, None)
+
+
+def test_lending_rows_that_disagree_with_the_short_balance_are_dropped(
+    rows: Callable[[str], Rows], caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level(logging.WARNING, logger="apps.etl.adapters.finmind_datasets"):
+        frame = chip_rows([], rows("margin_2330_202603"), rows("sbl_2330_202603"), [], "2330")
+    assert _day(frame, date(2026, 3, 10))["sbl_short_balance"] is None
+    assert _day(frame, date(2026, 3, 9))["sbl_short_balance"] == 2_372_680
+    assert _day(frame, date(2026, 3, 11))["sbl_short_balance"] == 2_381_680
+    assert "2330 2026-03-10: lending row misaligned" in caplog.text
+
+
+def test_lending_rows_are_kept_when_the_margin_row_is_missing(
+    rows: Callable[[str], Rows],
+) -> None:
+    frame = chip_rows([], [], rows("sbl_2330_202603"), [], "2330")
+    assert _day(frame, date(2026, 3, 10))["sbl_short_balance"] == 15_495_000

@@ -62,7 +62,13 @@ LOTS = {
     "ShortSaleTodayBalance": "short_balance",
 }
 MARGIN_KEYS = ("date", "stock_id", *LOTS)
-LENDING_KEYS = ("date", "stock_id", "SBLShortSalesCurrentDayBalance")
+LENDING_KEYS = (
+    "date",
+    "stock_id",
+    "SBLShortSalesCurrentDayBalance",
+    "MarginShortSalesCurrentDayBalance",
+)
+LENDING_SHORT = "lending_short_balance"
 HOLDING_KEYS = ("date", "stock_id", "ForeignInvestmentSharesRatio")
 CHIP_COLUMNS = [
     "stock_id",
@@ -307,6 +313,7 @@ def chip_rows(
                 raise SchemaChangedError(f"FinMind {label} repeated {day}")
             filled.add(day)
             days.setdefault(day, {}).update(columns(row, label))
+    _drop_misaligned_lending(days, stock_id)
     _zero_quiet_days(days, starts, stock_id)
     records = [{"stock_id": stock_id, "date": day, **days[day]} for day in sorted(days)]
     frame = pd.DataFrame(records, columns=CHIP_COLUMNS, dtype=object)
@@ -316,7 +323,7 @@ def chip_rows(
 def _fill_investors(
     days: dict[date, dict[str, Any]], rows: Iterable[Row], stock_id: str
 ) -> dict[str, date]:
-    """Net shares per investor column; returns the first day the source covers each column."""
+    """Net shares per investor column; returns each column's first day in this response."""
     label = "TaiwanStockInstitutionalInvestorsBuySell"
     seen: set[tuple[date, str]] = set()
     starts: dict[str, date] = {}
@@ -362,7 +369,21 @@ def _lots(row: Row, label: str) -> dict[str, Any]:
 
 
 def _lending(row: Row, label: str) -> dict[str, Any]:
-    return {"sbl_short_balance": _balance(row["SBLShortSalesCurrentDayBalance"], label)}
+    return {
+        "sbl_short_balance": _balance(row["SBLShortSalesCurrentDayBalance"], label),
+        LENDING_SHORT: _balance(row["MarginShortSalesCurrentDayBalance"], label),
+    }
+
+
+def _drop_misaligned_lending(days: dict[date, dict[str, Any]], stock_id: str) -> None:
+    """A lending row whose short balance disagrees with the margin dataset is misaligned."""
+    for day, columns in days.items():
+        short = columns.pop(LENDING_SHORT, None)
+        if short is not None and columns.get("short_balance") not in (None, short):
+            logger.warning(
+                "%s %s: lending row misaligned, sbl_short_balance dropped", stock_id, day
+            )
+            columns["sbl_short_balance"] = None
 
 
 def _holding(row: Row, label: str) -> dict[str, Any]:
