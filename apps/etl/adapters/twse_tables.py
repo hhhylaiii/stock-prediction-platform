@@ -15,6 +15,8 @@ from apps.market.models import (
     DailyChip,
     DailyValuation,
     IndexId,
+    ShareChangeReason,
+    SharesOutstanding,
 )
 
 logger = logging.getLogger(__name__)
@@ -28,6 +30,7 @@ MARGIN_LOT_ROWS = ("融資(交易單位)", "融券(交易單位)")
 MONTHLY_UNIT_HINT = "單位：元、股"
 MONTHLY_FIELDS = ("日期", "成交股數", "成交金額", "成交筆數", "發行量加權股價指數", "漲跌點數")
 INDEX_COLUMNS = ["index_id", "date", "close", "volume"]
+SHARE_COLUMNS = ["stock_id", "effective_date", "shares", "reason"]
 BLANK_MARKERS = frozenset({"-", "--", ""})
 PERCENT = 100.0
 Converter = Callable[[Sequence[Any]], int | float | None]
@@ -143,6 +146,7 @@ class DailyTable(NamedTuple):
     check: Callable[[dict[str, Any]], None] | None = None
     pending_title: str | None = None
     converters: Mapping[str, Converter] = {}
+    keys: tuple[str, str] = ("stock_id", "date")
 
 
 TABLES: dict[str, DailyTable] = {
@@ -226,6 +230,20 @@ TABLES: dict[str, DailyTable] = {
         model=DailyValuation,
         valid={"pe": is_positive, "pb": is_positive, "dividend_yield": is_fraction},
         converters={"dividend_yield": yield_fraction},
+    ),
+    "shares_outstanding": DailyTable(
+        label="MI_QFIIS",
+        path="/rwd/zh/fund/MI_QFIIS",
+        params={"selectType": "ALLBUT0999"},
+        title=None,
+        hints="單位:股",
+        code="證券代號",
+        name="證券名稱",
+        columns={"shares": ("發行股數",)},
+        convert=shares,
+        model=SharesOutstanding,
+        valid={"shares": is_positive},
+        keys=("stock_id", "effective_date"),
     ),
 }
 
@@ -335,6 +353,26 @@ def _validated(
             )
             kept[column] = None
     return kept
+
+
+def share_changes(frame: pd.DataFrame, latest: Mapping[str, int]) -> pd.DataFrame:
+    """Days on which shares issued differ from the last known count, in date order."""
+    known = dict(latest)
+    records = []
+    for row in frame.sort_values(["date", "stock_id"]).to_dict("records"):
+        code, count = str(row["stock_id"]), row["shares"]
+        if count is None or known.get(code) == count:
+            continue
+        known[code] = count
+        records.append(
+            {
+                "stock_id": code,
+                "effective_date": row["date"],
+                "shares": count,
+                "reason": ShareChangeReason.UNKNOWN.value,
+            }
+        )
+    return pd.DataFrame(records, columns=SHARE_COLUMNS, dtype=object)
 
 
 def taiex_rows(payload: dict[str, Any], day: date) -> pd.DataFrame:

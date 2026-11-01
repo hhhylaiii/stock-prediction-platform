@@ -4,12 +4,14 @@ from datetime import date
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+import pandas as pd
 import pytest
 import responses
+from django.core.management import call_command
 
 from apps.etl.adapters.twse import TwseAdapter
 from apps.etl.errors import SchemaChangedError, SourceNotReadyError
-from apps.etl.models import RawTwse
+from apps.etl.models import EtlRun, RawTwse
 from apps.etl.ratelimit import RateLimiter
 from apps.market.calendar import TradingDays
 from apps.market.models import DailyValuation, SharesOutstanding
@@ -155,3 +157,97 @@ def test_valuation_upsert_is_idempotent(
     tsmc = DailyValuation.objects.get(stock_id="2330", date=DAY)
     assert (tsmc.pe, tsmc.pb) == (28.11, 9.78)
     assert DailyValuation.objects.count() == 4
+
+
+@responses.activate
+@pytest.mark.django_db
+def test_first_snapshot_writes_every_local_currency_count(
+    adapter: TwseAdapter, load_fixture: Callable[[str], Any]
+) -> None:
+    assert _load_shares(adapter, load_fixture(SHARES[DAY]), DAY) == 3
+    assert _shares_in_db() == {
+        ("0050", DAY): 23_267_000_000,
+        ("2330", DAY): 25_932_370_067,
+        ("2368", DAY): 517_016_714,
+    }
+    assert set(SharesOutstanding.objects.values_list("reason", flat=True)) == {"unknown"}
+
+
+@responses.activate
+@pytest.mark.django_db
+def test_later_snapshot_writes_only_changed_and_new_counts(
+    adapter: TwseAdapter, load_fixture: Callable[[str], Any]
+) -> None:
+    _load_shares(adapter, load_fixture(SHARES[DAY]), DAY)
+    assert _load_shares(adapter, load_fixture(SHARES[NEXT]), NEXT) == 3
+    later = {key: shares for key, shares in _shares_in_db().items() if key[1] == NEXT}
+    assert later == {
+        ("0050", NEXT): 23_455_000_000,
+        ("2368", NEXT): 532_451_280,
+        ("7867", NEXT): 106_200_000,
+    }
+
+
+@responses.activate
+@pytest.mark.django_db
+def test_rerunning_a_day_changes_nothing(
+    adapter: TwseAdapter, load_fixture: Callable[[str], Any]
+) -> None:
+    _load_shares(adapter, load_fixture(SHARES[DAY]), DAY)
+    for _ in range(2):
+        _load_shares(adapter, load_fixture(SHARES[NEXT]), NEXT)
+    assert SharesOutstanding.objects.count() == 6
+
+
+@responses.activate
+@pytest.mark.django_db
+def test_count_matching_an_earlier_backfill_row_adds_nothing(
+    adapter: TwseAdapter, load_fixture: Callable[[str], Any]
+) -> None:
+    SharesOutstanding.objects.create(
+        stock_id="2330", effective_date=date(2026, 5, 26), shares=25_932_370_067
+    )
+    _load_shares(adapter, load_fixture(SHARES[DAY]), DAY)
+    assert ("2330", DAY) not in _shares_in_db()
+
+
+@responses.activate
+@pytest.mark.django_db
+def test_range_compares_each_day_with_the_one_before(
+    adapter: TwseAdapter, load_fixture: Callable[[str], Any]
+) -> None:
+    frames = []
+    for day in (DAY, NEXT):
+        responses.get(HOLDING_URL, json=load_fixture(SHARES[day]))
+        frames.append(adapter.fetch("shares_outstanding", day, day))
+    rows = adapter.normalize("shares_outstanding", pd.concat(frames, ignore_index=True))
+    written = {(row["stock_id"], row["effective_date"]) for row in rows.to_dict("records")}
+    assert ("2330", NEXT) not in written
+    assert {("2330", DAY), ("2368", DAY), ("2368", NEXT), ("7867", NEXT)} <= written
+
+
+@responses.activate
+@pytest.mark.django_db
+def test_zero_count_is_skipped_with_a_warning(
+    adapter: TwseAdapter, load_fixture: Callable[[str], Any], caplog: pytest.LogCaptureFixture
+) -> None:
+    payload = load_fixture(SHARES[DAY])
+    next(row for row in payload["data"] if row[0] == "2368")[3] = "0"
+    with caplog.at_level(logging.WARNING, logger="apps.etl.adapters.twse_tables"):
+        _load_shares(adapter, payload, DAY)
+    assert ("2368", DAY) not in _shares_in_db()
+    assert "2368" in caplog.text
+
+
+@responses.activate
+@pytest.mark.usefixtures("october_2026_in_db")
+def test_fetch_command_writes_share_changes(
+    load_fixture: Callable[[str], Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("apps.etl.ratelimit.time.sleep", lambda seconds: None)
+    for day in (DAY, NEXT):
+        responses.get(HOLDING_URL, json=load_fixture(SHARES[day]))
+        call_command("fetch", source="twse", dataset="shares_outstanding", date=day.isoformat())
+    runs = EtlRun.objects.filter(dataset="shares_outstanding").order_by("run_id")
+    assert list(runs.values_list("status", "rows")) == [("success", 3), ("success", 3)]
+    assert SharesOutstanding.objects.filter(stock_id="2368").count() == 2
