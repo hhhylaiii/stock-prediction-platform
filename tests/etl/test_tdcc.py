@@ -1,3 +1,4 @@
+import logging
 from collections.abc import Callable
 from datetime import date
 from pathlib import Path
@@ -13,12 +14,22 @@ from apps.etl.errors import SchemaChangedError, SourceNotReadyError, SourceReque
 from apps.etl.models import EtlRun, RawTdcc
 from apps.etl.ratelimit import RateLimiter, RetryableError
 from apps.market.calendar import NotATradingDayError, TradingDays
-from apps.market.models import WeeklyHolding
+from apps.market.models import Market, StockMaster, WeeklyHolding
 
 URL = "https://opendata.tdcc.com.tw/getOD.ashx"
 FIXTURE = "tdcc/tdcc_1-5_20261030.csv"
 DAY = date(2026, 10, 30)
 DATASET = "weekly_holding"
+LISTED = {"2330": Market.TWSE, "6488": Market.TPEX, "00631L": Market.TWSE, "00625K": Market.TWSE}
+
+pytestmark = pytest.mark.usefixtures("listed")
+
+
+@pytest.fixture
+def listed(db: None) -> None:
+    StockMaster.objects.bulk_create(
+        StockMaster(stock_id=code, name=code, market=market) for code, market in LISTED.items()
+    )
 
 
 @pytest.fixture
@@ -88,12 +99,46 @@ def test_every_code_keeps_seventeen_levels_as_published(
 
 @responses.activate
 @pytest.mark.django_db
-def test_codes_are_trimmed_and_foreign_currency_lines_dropped(
+def test_only_listed_local_currency_codes_are_kept(
+    adapter: TdccAdapter, csv_text: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level(logging.WARNING, logger="apps.etl.adapters.tdcc"):
+        frame = _frame(adapter, csv_text)
+    assert set(frame["stock_id"]) == {"2330", "6488", "00631L"}
+    assert len(frame) == 3 * 17
+    assert "1 code" in caplog.text
+
+
+@responses.activate
+@pytest.mark.parametrize(
+    ("delisted", "kept"),
+    [(date(2026, 10, 30), False), (date(2026, 10, 31), True)],
+    ids=["delisted-that-day", "delisted-later"],
+)
+def test_a_code_counts_as_listed_until_its_delisting_day(
+    adapter: TdccAdapter, csv_text: str, delisted: date, kept: bool
+) -> None:
+    StockMaster.objects.filter(stock_id="6488").update(delist_date=delisted)
+    frame = _frame(adapter, csv_text)
+    assert ("6488" in set(frame["stock_id"])) is kept
+
+
+@responses.activate
+def test_a_week_without_any_listed_code_is_a_schema_change(
     adapter: TdccAdapter, csv_text: str
 ) -> None:
-    frame = _frame(adapter, csv_text)
-    assert set(frame["stock_id"]) == {"1238", "2330", "6488", "00631L"}
-    assert len(frame) == 4 * 17
+    StockMaster.objects.all().delete()
+    with pytest.raises(SchemaChangedError, match="stock_master"):
+        _frame(adapter, csv_text)
+
+
+@responses.activate
+def test_a_range_reaching_an_earlier_week_means_that_week_is_gone(
+    adapter: TdccAdapter, csv_text: str
+) -> None:
+    _serve(csv_text)
+    with pytest.raises(SourceRequestError, match="2026-10-22"):
+        adapter.fetch(DATASET, date(2026, 10, 19), DAY)
 
 
 @responses.activate
@@ -103,7 +148,7 @@ def test_upsert_writes_each_level_once_and_reruns_add_nothing(
 ) -> None:
     adapter.upsert(DATASET, _frame(adapter, csv_text))
     adapter.upsert(DATASET, _frame(adapter, csv_text))
-    assert WeeklyHolding.objects.count() == 4 * 17
+    assert WeeklyHolding.objects.count() == 3 * 17
     stored = WeeklyHolding.objects.get(stock_id="00631L", data_date=DAY, level=16)
     assert (stored.holders, stored.shares, stored.pct) == (1, 1500000, 0.01)
 
@@ -181,11 +226,21 @@ def test_a_data_date_off_the_calendar_is_a_schema_change(
         (lambda text: _edit(text, "6488", 3, 2, "4"), "levels"),
         (lambda text: _edit(text, "6488", 3, 3, '"1,234"'), "count"),
         (lambda text: _edit(text, "6488", 3, 3, "-1"), "count"),
+        (lambda text: _edit(text, "6488", 3, 3, "²"), "count"),
         (lambda text: _edit(text, "6488", 3, 5, "abc"), "percent"),
         (lambda text: _edit(text, "6488", 3, 5, "100.01"), "percent"),
         (lambda text: _edit(text, "6488", 3, 1, "64 88"), "code"),
     ],
-    ids=["level-18", "level-repeated", "comma", "negative", "percent-word", "percent-over", "code"],
+    ids=[
+        "level-18",
+        "level-repeated",
+        "comma",
+        "negative",
+        "superscript",
+        "percent-word",
+        "percent-over",
+        "code",
+    ],
 )
 def test_bad_values_are_schema_changes(
     adapter: TdccAdapter, csv_text: str, change: Callable[[str], str], message: str
@@ -237,8 +292,8 @@ def test_fetch_command_writes_the_week(csv_text: str, monkeypatch: pytest.Monkey
     _serve(csv_text)
     call_command("fetch", source="tdcc", dataset=DATASET, date="2026-10-30")
     run = EtlRun.objects.get()
-    assert (run.status, run.rows, run.checkpoint) == ("success", 68, {"last_date": "2026-10-30"})
-    assert WeeklyHolding.objects.filter(data_date=DAY).count() == 68
+    assert (run.status, run.rows, run.checkpoint) == ("success", 51, {"last_date": "2026-10-30"})
+    assert WeeklyHolding.objects.filter(data_date=DAY).count() == 51
 
 
 @responses.activate

@@ -2,6 +2,7 @@
 
 import csv
 import io
+import logging
 import math
 from collections import defaultdict
 from collections.abc import Hashable, Iterator
@@ -11,6 +12,7 @@ from typing import NamedTuple
 import pandas as pd
 import requests
 from django.conf import settings
+from django.db.models import Q
 
 from apps.etl.adapters.base import BaseAdapter
 from apps.etl.adapters.exchange_tables import is_foreign_currency_etf
@@ -21,7 +23,9 @@ from apps.etl.models import RawTdcc
 from apps.etl.ratelimit import RateLimiter
 from apps.etl.upsert import upsert
 from apps.market.calendar import TradingDays
-from apps.market.models import WeeklyHolding
+from apps.market.models import StockMaster, WeeklyHolding
+
+logger = logging.getLogger(__name__)
 
 TDCC_MIN_INTERVAL = 1.0
 HOLDING_PATH = "/getOD.ashx"
@@ -107,7 +111,18 @@ class TdccAdapter(BaseAdapter):
             by_code[record.stock_id].append(record)
         for code, levels in by_code.items():
             _check_levels(code, levels)
-        kept = [record for record in records if not is_foreign_currency_etf(record.stock_id)]
+        week = min(record.data_date for record in records)
+        listed = _listed_codes(week)
+        kept = [
+            record
+            for record in records
+            if record.stock_id in listed and not is_foreign_currency_etf(record.stock_id)
+        ]
+        if not kept:
+            raise SchemaChangedError(f"no TDCC code is listed in stock_master on {week}")
+        unlisted = set(by_code) - listed
+        if unlisted:
+            logger.warning("TDCC %s: %d code(s) not listed on either exchange", week, len(unlisted))
         frame = pd.DataFrame(kept, columns=COLUMNS)
         frame["publish_date"] = frame["data_date"] + PUBLISH_DELAY
         return frame
@@ -134,6 +149,14 @@ class TdccAdapter(BaseAdapter):
             )
         if not self.calendar.is_trading_day(week):
             raise SchemaChangedError(f"TDCC data date {week} is not a trading day")
+        this_week = week.isocalendar()[:2]
+        earlier = [
+            day for day in self.calendar.between(start, week) if day.isocalendar()[:2] < this_week
+        ]
+        if earlier:
+            raise SourceRequestError(
+                f"TDCC only serves the latest week ({week}); the week of {earlier[-1]} is gone"
+            )
 
 
 def _day(text: str) -> date:
@@ -161,7 +184,7 @@ def _level(row: dict[Hashable, object]) -> Level:
 
 def _count(text: object) -> int:
     cleaned = str(text).strip()
-    if not cleaned.isdigit():
+    if not (cleaned.isascii() and cleaned.isdigit()):
         raise SchemaChangedError(f"unexpected TDCC count {text!r}")
     return int(cleaned)
 
@@ -174,6 +197,12 @@ def _percent(text: object) -> float:
     if not math.isfinite(number) or not 0 <= number <= MAX_PERCENT:
         raise SchemaChangedError(f"unexpected TDCC percent {text!r}")
     return number
+
+
+def _listed_codes(week: date) -> set[str]:
+    """Codes on either exchange that day; emerging-market stocks stay out (SPEC §8.6)."""
+    trading = Q(delist_date__isnull=True) | Q(delist_date__gt=week)
+    return set(StockMaster.objects.filter(trading).values_list("stock_id", flat=True))
 
 
 def _check_levels(code: str, records: list[Level]) -> None:
