@@ -150,6 +150,8 @@ ETL_RATE_LIMITS: dict[str, dict[str, float]] = {
     },
 }
 ETL_MAX_CONSECUTIVE_REJECTIONS = env.int("ETL_MAX_CONSECUTIVE_REJECTIONS", default=20)
+ALERT_WEBHOOK_URL = env.str("ALERT_WEBHOOK_URL", default="")
+ALERT_TIMEOUT = env.float("ALERT_TIMEOUT", default=10.0)
 
 RESEARCH_CACHE_DIR = Path(
     env.str("RESEARCH_CACHE_DIR", default="") or BASE_DIR / "artifacts" / "predictions"

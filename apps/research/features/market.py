@@ -29,15 +29,17 @@ def _closes(index_closes: pd.DataFrame, index_id: str) -> pd.Series:
     return pd.Series(rows["close"].astype("float64").to_numpy(), index=pd.Index(rows["date"]))
 
 
-def _asof(values: pd.Series, days: Sequence[date], stale: pd.Timedelta) -> np.ndarray:
-    """Latest value dated on or before each day, NaN when older than stale."""
+def _asof(
+    values: pd.Series, days: Sequence[date], stale: pd.Timedelta, before: bool = False
+) -> np.ndarray:
+    """Latest value dated on or before each day (strictly before if before), NaN past stale."""
     left = pd.DataFrame({"on": pd.to_datetime(pd.Series(list(days), dtype="object"))})
     if values.empty:
         return np.full(len(left), np.nan)
     right = pd.DataFrame(
         {"on": pd.to_datetime(pd.Series(values.index, dtype="object")), "value": values.to_numpy()}
     )
-    merged = pd.merge_asof(left, right, on="on", tolerance=stale)
+    merged = pd.merge_asof(left, right, on="on", tolerance=stale, allow_exact_matches=not before)
     return merged["value"].to_numpy(dtype=np.float64)
 
 
@@ -55,19 +57,22 @@ def market_features(
     tsmc_close: pd.Series,
     signal: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Market features per Taipei trading day; US series count their own trading days."""
+    """Market features per Taipei trading day; US series count their own trading days.
+
+    USDTWD bars are London-dated and close after the 06:00 run, so day t sees them to t-1.
+    """
     grid = pd.Index(list(days))
     taiex = _closes(index_closes, IndexId.TAIEX).reindex(grid)
     sox = _closes(index_closes, IndexId.SOX)
     usd = _closes(index_closes, IndexId.USDTWD)
     adr = _asof(_closes(index_closes, IndexId.TSM_ADR), days, US_STALE)
-    rate = _asof(usd, days, US_STALE)
+    rate = _asof(usd, days, US_STALE, before=True)
     local = tsmc_close.astype("float64").reindex(grid).to_numpy()
     columns = {
         **{f"mkt_taiex_ret_{n}d": (taiex / taiex.shift(n) - 1).to_numpy() for n in TAIEX_DAYS},
         "mkt_sox_ret_5d": _asof(sox / sox.shift(SOX_DAYS) - 1, days, US_STALE),
         "mkt_tsm_adr_gap": adr * rate / ADR_SHARES / local - 1,
-        "mkt_usdtwd_chg_20d": _asof(usd / usd.shift(USDTWD_DAYS) - 1, days, US_STALE),
+        "mkt_usdtwd_chg_20d": _asof(usd / usd.shift(USDTWD_DAYS) - 1, days, US_STALE, before=True),
         "mkt_business_signal": _signal(signal, days),
     }
     names = feature_names(Group.MARKET)

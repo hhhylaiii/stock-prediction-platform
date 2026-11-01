@@ -54,7 +54,7 @@ def test_taiex_returns_count_trading_days() -> None:
 
 
 def test_us_series_use_their_own_trading_days_up_to_the_taipei_date() -> None:
-    days = weekdays("2016-05-02", 25)
+    days = weekdays("2016-04-25", 30)
     us_days = [day for day in days if day != d("2016-05-30")]
     closes = pd.concat(
         [
@@ -74,8 +74,26 @@ def test_us_series_use_their_own_trading_days_up_to_the_taipei_date() -> None:
         (700 + 10 * after) / (700 + 10 * (after - 5)) - 1
     )
     assert value(features, d("2016-05-31"), "mkt_usdtwd_chg_20d") == pytest.approx(
-        (32 + 0.1 * after) / (32 + 0.1 * (after - 20)) - 1
+        (32 + 0.1 * memorial) / (32 + 0.1 * (memorial - 20)) - 1
     )
+
+
+def test_usdtwd_waits_a_day_for_its_london_close() -> None:
+    days = weekdays("2016-03-01", 25)
+    rates = {day: 32.0 + 0.1 * k for k, day in enumerate(days)}
+    closes = pd.concat([series("TSM_ADR", dict.fromkeys(days, 25.0)), series("USDTWD", rates)])
+    tsmc = pd.Series(160.0, index=days)
+    moved = pd.concat([closes, series("USDTWD", {days[22]: 99.0})]).drop_duplicates(
+        ["index_id", "date"], keep="last"
+    )
+
+    features = market_features(days, closes, tsmc, no_signal())
+    shifted = market_features(days, moved, tsmc, no_signal())
+
+    assert value(features, days[22], "mkt_usdtwd_chg_20d") == pytest.approx(34.1 / 32.1 - 1)
+    assert value(features, days[22], "mkt_tsm_adr_gap") == pytest.approx(25 * 34.1 / 5 / 160 - 1)
+    pd.testing.assert_frame_equal(features.iloc[:23], shifted.iloc[:23])
+    assert value(shifted, days[23], "mkt_tsm_adr_gap") == pytest.approx(25 * 99 / 5 / 160 - 1)
 
 
 def test_adr_gap_converts_one_adr_to_five_shares() -> None:
@@ -83,16 +101,16 @@ def test_adr_gap_converts_one_adr_to_five_shares() -> None:
     closes = pd.concat(
         [
             series("TSM_ADR", dict.fromkeys(days, 25.0)),
-            series("USDTWD", dict.fromkeys(days, 32.0)),
+            series("USDTWD", {d("2016-02-29"): 31.0, days[0]: 32.0, days[1]: 33.0}),
         ]
     )
     tsmc = pd.Series([150.0, NAN, 160.0], index=days)
 
     gap = market_features(days, closes, tsmc, no_signal())["mkt_tsm_adr_gap"].tolist()
 
-    assert gap[0] == pytest.approx(25 * 32 / 5 / 150 - 1)
+    assert gap[0] == pytest.approx(25 * 31 / 5 / 150 - 1)
     assert math.isnan(gap[1])
-    assert gap[2] == pytest.approx(25 * 32 / 5 / 160 - 1)
+    assert gap[2] == pytest.approx(25 * 33 / 5 / 160 - 1)
 
 
 def test_business_signal_waits_for_its_announcement() -> None:
@@ -148,6 +166,22 @@ def test_us_closes_go_stale_after_seven_days() -> None:
     assert math.isnan(gap[d("2016-03-11")])
 
 
+def test_usdtwd_goes_stale_seven_days_after_the_taipei_date() -> None:
+    days = weekdays("2016-03-01", 9)
+    closes = pd.concat(
+        [
+            series("TSM_ADR", dict.fromkeys(days, 25.0)),
+            series("USDTWD", {day: 32.0 for day in days if day <= d("2016-03-03")}),
+        ]
+    )
+    tsmc = pd.Series(160.0, index=days)
+
+    gap = market_features(days, closes, tsmc, no_signal()).set_index("date")["mkt_tsm_adr_gap"]
+
+    assert gap[d("2016-03-10")] == pytest.approx(25 * 32 / 5 / 160 - 1)
+    assert math.isnan(gap[d("2016-03-11")])
+
+
 def test_business_signal_goes_stale_after_62_days() -> None:
     days = [d("2016-03-29"), d("2016-03-30")]
     signal = pd.DataFrame(
@@ -184,12 +218,12 @@ def test_loaded_series_are_warm_from_the_first_day() -> None:
     market = load_market_features(CALENDAR, d("2016-05-02"), d("2016-05-03"))
 
     first = days.index(d("2016-05-02"))
-    rate = 32 + 0.1 * first
+    rate = 32 + 0.1 * (first - 1)
     assert value(market, d("2016-05-02"), "mkt_taiex_ret_20d") == pytest.approx(
         (8_000 + first) / (8_000 + first - 20) - 1
     )
     assert value(market, d("2016-05-02"), "mkt_usdtwd_chg_20d") == pytest.approx(
-        rate / (32 + 0.1 * (first - 20)) - 1
+        rate / (32 + 0.1 * (first - 21)) - 1
     )
     assert value(market, d("2016-05-02"), "mkt_tsm_adr_gap") == pytest.approx(
         25 * rate / 5 / 160 - 1
