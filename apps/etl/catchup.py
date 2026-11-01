@@ -13,12 +13,13 @@ from django.utils import timezone
 from apps.etl.adapters import build_adapter
 from apps.etl.adapters.dispositions import ATTENTION, DISPOSITION, FULL_DELIVERY
 from apps.etl.adapters.exchange_tables import DailyTable
+from apps.etl.adapters.tpex import QUOTED_TYPE as TPEX_QUOTED_TYPE
 from apps.etl.adapters.tpex_tables import TABLES as TPEX_TABLES
 from apps.etl.adapters.twse_tables import TABLES as TWSE_TABLES
 from apps.etl.adapters.yahoo import SERIES
 from apps.etl.alerts import dispatch
 from apps.etl.errors import SourceError, SourceNotReadyError
-from apps.etl.models import DataQualityLog
+from apps.etl.models import DataQualityLog, RawTpex, RawTwse
 from apps.etl.quality import run_checks
 from apps.etl.ratelimit import RetryableError
 from apps.etl.replay import rebuild_after
@@ -95,6 +96,22 @@ def rows_present(model: type[models.Model], market: str, columns: Iterable[str] 
     return present
 
 
+def quotes_present(market: str) -> Presence:
+    """Days with the market's rows and the exchange's own quotes stored, which chip rows read."""
+    rows = rows_present(DailyPrice, market)
+    raw_model = RawTwse if market == Market.TWSE.value else RawTpex
+    extra = {} if market == Market.TWSE.value else {"request_params__type": TPEX_QUOTED_TYPE}
+
+    def present(days: Sequence[date]) -> set[date]:
+        asked = {f"{day:%Y%m%d}": day for day in days}
+        stored = raw_model.objects.filter(
+            dataset="daily_price", payload__date__in=list(asked), **extra
+        ).values_list("payload__date", flat=True)
+        return rows(days) & {asked[key] for key in stored if key in asked}
+
+    return present
+
+
 def index_present(index_id: str) -> Presence:
     def present(days: Sequence[date]) -> set[date]:
         rows = IndexDaily.objects.filter(index_id=index_id, date__in=days)
@@ -115,7 +132,7 @@ def _exchange_jobs(
     source: str, market: str, index_id: str, tables: dict[str, DailyTable]
 ) -> list[Job]:
     return [
-        Job(source, "daily_price", rows_present(DailyPrice, market)),
+        Job(source, "daily_price", quotes_present(market)),
         Job(source, "index_daily", index_present(index_id)),
         *(_table_job(source, market, dataset, table) for dataset, table in tables.items()),
         *(Job(source, dataset) for dataset in (ATTENTION, DISPOSITION, FULL_DELIVERY)),
@@ -131,6 +148,15 @@ JOBS: tuple[Job, ...] = (
 
 def select_jobs(source: str | None = None, dataset: str | None = None) -> list[Job]:
     return [job for job in JOBS if source in (None, job.source) and dataset in (None, job.dataset)]
+
+
+def plan_catch_up(
+    since: date, until: date, calendar: TradingDays, jobs: Sequence[Job] = JOBS
+) -> dict[str, list[str]]:
+    """The days each job would fetch, without fetching anything."""
+    days = calendar.between(since, until)
+    planned = {job.key: missing_days(job, days) for job in jobs}
+    return {key: [day.isoformat() for day in found] for key, found in planned.items() if found}
 
 
 def missing_days(job: Job, days: Sequence[date]) -> list[date]:
@@ -184,11 +210,15 @@ def _dated(outcomes: dict[str, JobOutcome], name: str) -> dict[str, list[str]]:
 
 
 def _catch_up_job(job: Job, days: Sequence[date], calendar: TradingDays) -> JobOutcome:
-    adapter = build_adapter(job.source, calendar)
+    try:
+        adapter = build_adapter(job.source, calendar)
+        missing = missing_days(job, days)
+    except Exception as exc:
+        return JobOutcome([], [], {}, {f"{job.key} setup": _failure(job, "setup", exc)})
     written: list[date] = []
     not_ready: dict[str, str] = {}
     failed: dict[str, str] = {}
-    for day in missing_days(job, days):
+    for day in missing:
         try:
             adapter.run(job.dataset, day, day)
         except SourceNotReadyError as exc:

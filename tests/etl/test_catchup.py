@@ -1,3 +1,4 @@
+import logging
 from collections.abc import Callable
 from datetime import date, datetime
 from typing import Any
@@ -23,6 +24,7 @@ from apps.etl.catchup import (
     select_jobs,
 )
 from apps.etl.models import DataQualityLog, EtlRun, RawTwse
+from apps.etl.raw import store_raw
 from apps.market.calendar import TradingDays
 from apps.market.models import (
     DailyChip,
@@ -68,6 +70,13 @@ def _serve(url: str, payload: dict[str, Any], day: date, **params: str) -> None:
 
 def _serve_prices(load_fixture: Callable[[str], Any], day: date) -> None:
     _serve(MI_INDEX, load_fixture(PRICES), day, type="ALLBUT0999")
+
+
+def _quoted(load_fixture: Callable[[str], Any], day: date) -> None:
+    """A day whose TWSE quotes are stored and written, as a daily run leaves it."""
+    params = {"date": f"{day:%Y%m%d}", "type": "ALLBUT0999", "response": "json"}
+    store_raw(RawTwse, "daily_price", params, {**load_fixture(PRICES), "date": params["date"]})
+    DailyPrice.objects.create(stock_id="2330", date=day, volume=1, turnover=1)
 
 
 def _run(source: str, dataset: str, start: date, end: date, **fields: Any) -> EtlRun:
@@ -162,13 +171,17 @@ def test_a_day_not_published_yet_is_reported_and_others_go_on(
 
 @responses.activate
 def test_a_broken_answer_is_a_failure_that_does_not_stop_other_jobs(
-    october_2026_in_db: TradingDays, load_fixture: Callable[[str], Any]
+    october_2026_in_db: TradingDays,
+    load_fixture: Callable[[str], Any],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     responses.get(MI_INDEX, json={"stat": "OK", "date": "20261027", "tables": [{"x": 1}]})
     _serve(MI_QFIIS, load_fixture(SHARES), DAYS[0], selectType="ALLBUT0999")
-    report = catch_up(DAYS[0], DAYS[0], october_2026_in_db, [PRICE_JOB, SHARE_JOB])
+    with caplog.at_level(logging.ERROR, logger="apps.etl.catchup"):
+        report = catch_up(DAYS[0], DAYS[0], october_2026_in_db, [PRICE_JOB, SHARE_JOB])
     assert list(report.failed) == ["twse/daily_price 2026-10-27"]
     assert report.written == {"twse/shares_outstanding": ["2026-10-27"]}
+    assert [(row.levelname, bool(row.exc_info)) for row in caplog.records] == [("ERROR", False)]
 
 
 @responses.activate
@@ -246,6 +259,7 @@ def test_an_unexpected_error_fails_its_job_only(
     october_2026_in_db: TradingDays,
     load_fixture: Callable[[str], Any],
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     original = TwseAdapter.normalize
 
@@ -257,13 +271,18 @@ def test_an_unexpected_error_fails_its_job_only(
     monkeypatch.setattr(TwseAdapter, "normalize", normalize)
     _serve_prices(load_fixture, DAYS[0])
     _serve(MI_QFIIS, load_fixture(SHARES), DAYS[0], selectType="ALLBUT0999")
-    report = catch_up(DAYS[0], DAYS[0], october_2026_in_db, [PRICE_JOB, SHARE_JOB])
+    with caplog.at_level(logging.ERROR, logger="apps.etl.catchup"):
+        report = catch_up(DAYS[0], DAYS[0], october_2026_in_db, [PRICE_JOB, SHARE_JOB])
     assert report.failed == {"twse/daily_price 2026-10-27": "ValueError: duplicate keys"}
     assert report.written == {"twse/shares_outstanding": ["2026-10-27"]}
+    assert [bool(row.exc_info) for row in caplog.records] == [True]
 
 
-def test_catchup_command_prints_the_report(capsys: pytest.CaptureFixture[str]) -> None:
-    DailyPrice.objects.create(stock_id="2330", date=DAYS[0], volume=1, turnover=1)
+@responses.activate
+def test_catchup_command_prints_the_report(
+    capsys: pytest.CaptureFixture[str], load_fixture: Callable[[str], Any]
+) -> None:
+    _quoted(load_fixture, DAYS[0])
     call_command(
         "catchup", since="2026-10-27", until="2026-10-27", source="twse", dataset="daily_price"
     )
@@ -294,11 +313,39 @@ def test_catchup_command_rejects_bad_options(options: dict[str, str], message: s
         call_command("catchup", **options)
 
 
+@responses.activate
 @time_machine.travel(EVENING, tick=False)
 def test_catchup_command_stops_at_the_session_before_today(
-    capsys: pytest.CaptureFixture[str],
+    capsys: pytest.CaptureFixture[str], load_fixture: Callable[[str], Any]
 ) -> None:
     for day in DAYS[:2]:
-        DailyPrice.objects.create(stock_id="2330", date=day, volume=1, turnover=1)
+        _quoted(load_fixture, day)
     call_command("catchup", since="2026-10-27", source="twse", dataset="daily_price")
     assert capsys.readouterr().out.strip() == "nothing to catch up"
+
+
+def test_a_price_day_written_without_the_exchanges_quotes_is_fetched_again(
+    load_fixture: Callable[[str], Any],
+) -> None:
+    jobs = {job.key: job for job in JOBS}
+    DailyPrice.objects.create(stock_id="2330", date=DAYS[0], volume=1, turnover=1)
+    _quoted(load_fixture, DAYS[1])
+    assert missing_days(jobs["twse/daily_price"], DAYS) == [DAYS[0], DAYS[2]]
+
+
+@responses.activate
+def test_a_dry_run_lists_the_missing_days_and_fetches_nothing(
+    capsys: pytest.CaptureFixture[str], load_fixture: Callable[[str], Any]
+) -> None:
+    _quoted(load_fixture, DAYS[0])
+    call_command(
+        "catchup",
+        since="2026-10-27",
+        until="2026-10-29",
+        source="twse",
+        dataset="daily_price",
+        dry_run=True,
+    )
+    assert capsys.readouterr().out.strip() == "missing twse/daily_price: 2026-10-28, 2026-10-29"
+    assert len(responses.calls) == 0
+    assert not EtlRun.objects.exists()
