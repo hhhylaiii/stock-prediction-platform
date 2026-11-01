@@ -295,6 +295,18 @@ def test_foreign_holding_keeps_percent_and_drops_foreign_currency_etf(
 
 @responses.activate
 @pytest.mark.django_db
+@pytest.mark.parametrize("edge", [0.0, 100.0])
+def test_foreign_holding_keeps_both_ends_of_the_percent_range(
+    adapter: TwseAdapter, load_fixture: Callable[[str], Any], edge: float
+) -> None:
+    payload = load_fixture(DATASETS["foreign_holding"][2])
+    next(row for row in payload["data"] if row[0] == "2330")[7] = edge
+    responses.get(DATASETS["foreign_holding"][0], json=payload)
+    assert _load(adapter, "foreign_holding")["2330"]["fi_holding_pct"] == edge
+
+
+@responses.activate
+@pytest.mark.django_db
 def test_foreign_holding_out_of_range_is_dropped_with_a_warning(
     adapter: TwseAdapter, load_fixture: Callable[[str], Any], caplog: pytest.LogCaptureFixture
 ) -> None:

@@ -11,7 +11,6 @@ import pandas as pd
 import requests
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
-from django.db import connection
 from django.utils import timezone
 
 from apps.etl.adapters.base import BaseAdapter
@@ -27,6 +26,7 @@ from apps.etl.client import SourceClient
 from apps.etl.errors import SchemaChangedError, SourceRequestError
 from apps.etl.models import RawFinmind
 from apps.etl.ratelimit import RateLimiter, ThrottledError
+from apps.etl.share_counts import drop_repeated_counts
 from apps.etl.upsert import insert_missing, upsert
 from apps.market.adjust import refresh_adj_factor, refresh_where_later_events
 from apps.market.calendar import TradingDays
@@ -37,7 +37,6 @@ from apps.market.models import (
     DividendEvent,
     FinancialStatement,
     MonthlyRevenue,
-    ShareChangeReason,
     SharesOutstanding,
     StockMaster,
 )
@@ -186,19 +185,6 @@ LOOKBACK = {
 }
 EVENT_FIELDS = ("cash_dividend", "stock_dividend")
 FROM_COLUMN = "_finmind_dataset"
-DROP_REPEATED_COUNTS_SQL = """
-DELETE FROM shares_outstanding s
-USING (
-    SELECT effective_date, shares,
-           LAG(shares) OVER (ORDER BY effective_date) AS previous
-    FROM shares_outstanding
-    WHERE stock_id = %(stock)s
-) ordered
-WHERE s.stock_id = %(stock)s
-  AND s.effective_date = ordered.effective_date
-  AND ordered.shares = ordered.previous
-  AND s.reason = %(unknown)s
-"""
 
 
 class FinmindAdapter(BaseAdapter):
@@ -316,11 +302,7 @@ class FinmindAdapter(BaseAdapter):
             return insert_missing(FinancialStatement, frame, keys)
         if dataset == "shares_outstanding":
             rows = insert_missing(SharesOutstanding, frame, ("stock_id", "effective_date"))
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    DROP_REPEATED_COUNTS_SQL,
-                    {"stock": stock_id, "unknown": ShareChangeReason.UNKNOWN},
-                )
+            drop_repeated_counts([stock_id])
             return rows
         with_factor = frame["adj_factor"].notna()
         rows = upsert(

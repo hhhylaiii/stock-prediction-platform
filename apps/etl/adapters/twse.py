@@ -17,6 +17,7 @@ from apps.etl.adapters.twse_tables import (
     check_published,
     find_table,
     is_foreign_currency_etf,
+    share_changes,
     source_rows,
     standard_rows,
     taiex_frame,
@@ -33,10 +34,11 @@ from apps.etl.exchange_rows import (
 )
 from apps.etl.models import RawTwse
 from apps.etl.ratelimit import RateLimiter
+from apps.etl.share_counts import drop_repeated_counts
 from apps.etl.upsert import upsert
 from apps.market.adjust import refresh_where_later_events
 from apps.market.calendar import TradingDays
-from apps.market.models import DailyPrice, IndexDaily
+from apps.market.models import DailyPrice, IndexDaily, SharesOutstanding
 
 logger = logging.getLogger(__name__)
 TWSE_MIN_INTERVAL = 3.0
@@ -62,6 +64,7 @@ COUNT_COLUMNS = ("volume", "turnover")
 DAILY_PRICE = "daily_price"
 INDEX_DAILY = "index_daily"
 INSTITUTIONAL = "institutional"
+SHARES_OUTSTANDING = "shares_outstanding"
 
 
 def quotes_frame(payload: dict[str, Any], day: date) -> pd.DataFrame:
@@ -162,6 +165,8 @@ class TwseAdapter(BaseAdapter):
         frame = standard_rows(raw_df, TABLES[dataset])
         if dataset == INSTITUTIONAL:
             return self._zero_quiet_stocks(frame, sorted(set(raw_df["date"])))
+        if dataset == SHARES_OUTSTANDING:
+            return share_changes(frame, self._latest_shares(min(raw_df["date"])))
         return frame
 
     def upsert(self, dataset: str, frame: pd.DataFrame) -> int:
@@ -176,12 +181,12 @@ class TwseAdapter(BaseAdapter):
                 update_fields=("close", "volume"),
             )
         table = TABLES[dataset]
-        return upsert(
-            table.model,
-            frame,
-            unique_fields=("stock_id", "date"),
-            update_fields=tuple(table.columns),
+        rows = upsert(
+            table.model, frame, unique_fields=table.keys, update_fields=tuple(table.columns)
         )
+        if dataset == SHARES_OUTSTANDING:
+            drop_repeated_counts(frame["stock_id"])
+        return rows
 
     def _fetch_day(self, dataset: str, day: date) -> pd.DataFrame:
         if dataset == DAILY_PRICE:
@@ -252,6 +257,16 @@ class TwseAdapter(BaseAdapter):
         )
         zeros = pd.DataFrame(quiet, columns=frame.columns, dtype=object)
         return pd.concat([frame, zeros], ignore_index=True) if quiet else frame
+
+    def _latest_shares(self, before: date) -> dict[str, int]:
+        """The last shares_outstanding count of each stock effective before the given day."""
+        latest = (
+            SharesOutstanding.objects.filter(effective_date__lt=before)
+            .order_by("stock_id", "-effective_date")
+            .distinct("stock_id")
+            .values_list("stock_id", "shares")
+        )
+        return dict(latest)
 
     def _quoted_codes(self, day: date) -> set[str]:
         """Local-currency codes in the MI_INDEX quotes that daily_price stored for the day."""
