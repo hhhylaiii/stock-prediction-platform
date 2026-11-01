@@ -88,7 +88,7 @@ DIVIDEND_PLACES = Decimal("0.00000001")
 PERCENT = 100.0
 
 
-def _checked(rows: Iterable[Row], keys: Sequence[str], label: str, stock_id: str) -> list[Row]:
+def checked_rows(rows: Iterable[Row], keys: Sequence[str], label: str, stock_id: str) -> list[Row]:
     checked = []
     for row in rows:
         missing = [key for key in keys if key not in row]
@@ -100,7 +100,7 @@ def _checked(rows: Iterable[Row], keys: Sequence[str], label: str, stock_id: str
     return checked
 
 
-def _day(value: Any, label: str) -> date:
+def parse_day(value: Any, label: str) -> date:
     try:
         return date.fromisoformat(str(value).strip())
     except ValueError:
@@ -108,7 +108,7 @@ def _day(value: Any, label: str) -> date:
 
 
 def _optional_day(value: Any, label: str) -> date | None:
-    return _day(value, label) if str(value or "").strip() else None
+    return parse_day(value, label) if str(value or "").strip() else None
 
 
 def _decimal(value: Any, label: str) -> Decimal:
@@ -130,12 +130,12 @@ def _count(value: Any, label: str) -> int:
 def price_bars(rows: Iterable[Row], stock_id: str) -> pd.DataFrame:
     """TaiwanStockPrice → daily_price; OHLC of 0 marks a day without trades."""
     records = []
-    for row in _checked(rows, PRICE_KEYS, "TaiwanStockPrice", stock_id):
+    for row in checked_rows(rows, PRICE_KEYS, "TaiwanStockPrice", stock_id):
         prices = [_decimal(row[key], "TaiwanStockPrice") for key in ("open", "max", "min", "close")]
         records.append(
             {
                 "stock_id": stock_id,
-                "date": _day(row["date"], "TaiwanStockPrice"),
+                "date": parse_day(row["date"], "TaiwanStockPrice"),
                 **dict(
                     zip(("open", "high", "low", "close"), (p or None for p in prices), strict=True)
                 ),
@@ -172,7 +172,7 @@ def dividend_events(
     def event(day: date) -> dict[str, Any]:
         return events.setdefault(day, {"cash": Decimal(0), "stock": Decimal(0), "factors": {}})
 
-    for row in _checked(policy, POLICY_KEYS, "TaiwanStockDividend", stock_id):
+    for row in checked_rows(policy, POLICY_KEYS, "TaiwanStockDividend", stock_id):
         for kind, ex_key, keys in DIVIDEND_PARTS:
             ex_date = _optional_day(row[ex_key], "TaiwanStockDividend")
             if ex_date is None:
@@ -191,8 +191,8 @@ def dividend_events(
         (splits, SPLIT_KEYS, "TaiwanStockSplitPrice", "after_price", "before_price"),
     ]
     for rows, required, label, after_key, before_key in sources:
-        for row in _checked(rows, required, label, stock_id):
-            day = _day(row["date"], label)
+        for row in checked_rows(rows, required, label, stock_id):
+            day = parse_day(row["date"], label)
             factors = event(day)["factors"]
             if label in factors:
                 logger.warning("%s %s: repeated %s rows, keeping the last", stock_id, day, label)
@@ -244,13 +244,13 @@ def _positive(value: float | None) -> float | None:
 def valuations(rows: Iterable[Row], stock_id: str) -> pd.DataFrame:
     """TaiwanStockPER → daily_valuation; 0 means not published (losses), yield % → fraction."""
     records = []
-    for row in _checked(rows, VALUATION_KEYS, "TaiwanStockPER", stock_id):
+    for row in checked_rows(rows, VALUATION_KEYS, "TaiwanStockPER", stock_id):
         dividend_yield = _number(row["dividend_yield"], "TaiwanStockPER")
         fraction = dividend_yield / PERCENT if dividend_yield is not None else None
         records.append(
             {
                 "stock_id": stock_id,
-                "date": _day(row["date"], "TaiwanStockPER"),
+                "date": parse_day(row["date"], "TaiwanStockPER"),
                 "pe": _positive(_number(row["PER"], "TaiwanStockPER")),
                 "pb": _positive(_number(row["PBR"], "TaiwanStockPER")),
                 "dividend_yield": fraction if fraction is not None and 0 <= fraction < 1 else None,
@@ -261,7 +261,7 @@ def valuations(rows: Iterable[Row], stock_id: str) -> pd.DataFrame:
 
 def share_counts(rows: Iterable[Row], stock_id: str) -> pd.DataFrame:
     """TaiwanStockShareholding → shares_outstanding, one row per change of shares issued."""
-    checked = _checked(rows, SHARE_KEYS, "TaiwanStockShareholding", stock_id)
+    checked = checked_rows(rows, SHARE_KEYS, "TaiwanStockShareholding", stock_id)
     records: list[dict[str, Any]] = []
     for row in sorted(checked, key=lambda item: str(item["date"])):
         shares = row["NumberOfSharesIssued"]
@@ -276,7 +276,7 @@ def share_counts(rows: Iterable[Row], stock_id: str) -> pd.DataFrame:
         records.append(
             {
                 "stock_id": stock_id,
-                "effective_date": _day(row["date"], "TaiwanStockShareholding"),
+                "effective_date": parse_day(row["date"], "TaiwanStockShareholding"),
                 "shares": shares,
                 "reason": ShareChangeReason.UNKNOWN,
             }
@@ -307,8 +307,8 @@ def chip_rows(
     ]
     for rows, required, label, columns in parts:
         filled: set[date] = set()
-        for row in _checked(rows, required, label, stock_id):
-            day = _day(row["date"], label)
+        for row in checked_rows(rows, required, label, stock_id):
+            day = parse_day(row["date"], label)
             if day in filled:
                 raise SchemaChangedError(f"FinMind {label} repeated {day}")
             filled.add(day)
@@ -327,11 +327,11 @@ def _fill_investors(
     label = "TaiwanStockInstitutionalInvestorsBuySell"
     seen: set[tuple[date, str]] = set()
     starts: dict[str, date] = {}
-    for row in _checked(rows, INSTITUTIONAL_KEYS, label, stock_id):
+    for row in checked_rows(rows, INSTITUTIONAL_KEYS, label, stock_id):
         name = str(row["name"])
         if name not in INVESTOR_COLUMNS:
             raise SchemaChangedError(f"FinMind {label} has an unknown investor type {name!r}")
-        day = _day(row["date"], label)
+        day = parse_day(row["date"], label)
         if (day, name) in seen:
             raise SchemaChangedError(f"FinMind {label} repeated {name} on {day}")
         seen.add((day, name))

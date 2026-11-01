@@ -20,7 +20,9 @@ from apps.market.models import (
     DailyPrice,
     DailyValuation,
     DividendEvent,
+    FinancialStatement,
     Market,
+    MonthlyRevenue,
     ShareChangeReason,
     SharesOutstanding,
     StockMaster,
@@ -477,3 +479,62 @@ def test_chip_dates_missing_from_the_calendar_reject_the_batch(
     with pytest.raises(CommandError, match="2013-08-17 is not a trading day"):
         _backfill("daily_chip", "2884", AUGUST)
     assert DailyChip.objects.count() == 0
+
+
+YEAR_2024 = ("2024-01-01", "2024-12-31")
+WITH_LOOKBACK = ("2022-12-31", "2024-12-31")
+
+
+@responses.activate
+def test_revenue_backfill_fetches_a_year_earlier_for_growth(mock: Callable[..., None]) -> None:
+    mock("TaiwanStockMonthRevenue", "revenue_2330_2023_2024", "2330", WITH_LOOKBACK)
+    _backfill("monthly_revenue", "2330", YEAR_2024)
+    january = MonthlyRevenue.objects.get(stock_id="2330", period="2024-01")
+    assert january.yoy == pytest.approx(215_785_127_000 / 200_050_544_000 - 1)
+    assert january.announce_date == date(2024, 2, 13)
+    assert MonthlyRevenue.objects.count() == 12
+    assert EtlRun.objects.get(dataset="monthly_revenue").rows == 12
+
+
+@responses.activate
+def test_revenue_backfill_keeps_dates_from_the_primary_source(mock: Callable[..., None]) -> None:
+    MonthlyRevenue.objects.create(
+        stock_id="2330", period="2024-01", revenue=1, announce_date=date(2024, 2, 6)
+    )
+    mock("TaiwanStockMonthRevenue", "revenue_2330_2023_2024", "2330", WITH_LOOKBACK)
+    _backfill("monthly_revenue", "2330", YEAR_2024)
+    kept = MonthlyRevenue.objects.get(stock_id="2330", period="2024-01")
+    assert (kept.revenue, kept.announce_date) == (1, date(2024, 2, 6))
+
+
+@responses.activate
+def test_statement_backfill_writes_one_row_per_quarter(mock: Callable[..., None]) -> None:
+    mock("TaiwanStockFinancialStatements", "income_2330_2023_2024", "2330", WITH_LOOKBACK)
+    mock("TaiwanStockBalanceSheet", "balance_2330_2023_2024", "2330", WITH_LOOKBACK)
+    mock("TaiwanStockCashFlowsStatement", "cashflow_2330_2023_2024", "2330", WITH_LOOKBACK)
+    _backfill("financial_statement", "2330", YEAR_2024)
+    periods = FinancialStatement.objects.order_by("period").values_list("period", flat=True)
+    assert list(periods) == ["2024-Q1", "2024-Q2", "2024-Q3", "2024-Q4"]
+    q2 = FinancialStatement.objects.get(period="2024-Q2")
+    assert (q2.fin_type, q2.operating_cf) == ("consolidated", 813_979_318_000 - 436_311_108_000)
+    assert q2.announce_date == date(2024, 9, 3)
+    assert RawFinmind.objects.filter(dataset="balance_sheet").count() == 1
+
+
+@responses.activate
+def test_one_statement_losing_a_key_fails_the_batch(
+    mock: Callable[..., None], load_fixture: Callable[[str], Any]
+) -> None:
+    balance = load_fixture("finmind/balance_2330_2023_2024.json")["data"]
+    mock("TaiwanStockFinancialStatements", "income_2330_2023_2024", "2330", WITH_LOOKBACK)
+    mock(
+        "TaiwanStockBalanceSheet",
+        "balance_2330_2023_2024",
+        "2330",
+        WITH_LOOKBACK,
+        data=[{k: v for k, v in row.items() if k != "value"} for row in balance],
+    )
+    mock("TaiwanStockCashFlowsStatement", "cashflow_2330_2023_2024", "2330", WITH_LOOKBACK)
+    with pytest.raises(CommandError, match="value"):
+        _backfill("financial_statement", "2330", YEAR_2024)
+    assert FinancialStatement.objects.count() == 0
