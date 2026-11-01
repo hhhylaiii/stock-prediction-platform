@@ -1,11 +1,11 @@
 """Per-day transforms of SPEC §6 處理步驟 3–5, with parameters from the day's universe only."""
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
-from pandas.core.groupby import DataFrameGroupBy
+from pandas.api.typing import DataFrameGroupBy
 
 from apps.research.features.registry import FEATURES
 
@@ -18,36 +18,62 @@ STOCK_LEVEL = [
 ]
 
 
-def _by_day(
-    frame: pd.DataFrame, columns: Sequence[str], stat: Callable[[DataFrameGroupBy], pd.DataFrame]
-) -> pd.DataFrame:
-    """A statistic of the universe rows of each day, repeated on every row of that day."""
+def _universe_days(frame: pd.DataFrame, columns: Sequence[str]) -> DataFrameGroupBy:
+    """The universe rows of the columns, grouped by day."""
     inside = frame[list(columns)].where(frame["in_universe"].astype(bool), axis=0)
-    daily = stat(inside.groupby(frame["date"]))
-    return daily.reindex(frame["date"]).set_axis(frame.index)
+    return inside.groupby(frame["date"])
+
+
+def _per_row(daily: pd.DataFrame, name: str, frame: pd.DataFrame) -> np.ndarray:
+    """One column of a per-day table, repeated on every row of its day."""
+    return daily[name].reindex(frame["date"]).to_numpy(dtype=np.float64)
 
 
 def winsorize(frame: pd.DataFrame, columns: Sequence[str] = STOCK_LEVEL) -> pd.DataFrame:
     """New frame clipped at the day's 1% and 99% universe quantiles.
 
-    A bound that would flatten every universe value is skipped, so rare flags and counts survive.
+    A bound that would flatten every universe value falls back to the universe extreme instead.
     """
-    low = _by_day(frame, columns, lambda days: days.quantile(LOW))
-    high = _by_day(frame, columns, lambda days: days.quantile(HIGH))
-    smallest = _by_day(frame, columns, lambda days: days.min())
-    largest = _by_day(frame, columns, lambda days: days.max())
-    lower, upper = low.where(low < largest), high.where(high > smallest)
-    return frame.assign(**{name: frame[name].clip(lower[name], upper[name]) for name in columns})
+    days = _universe_days(frame, columns)
+    low, high = days.quantile(LOW), days.quantile(HIGH)
+    smallest, largest = days.min(), days.max()
+    lower, upper = low.where(low < largest, smallest), high.where(high > smallest, largest)
+    return frame.assign(
+        **{
+            name: frame[name].clip(
+                pd.Series(_per_row(lower, name, frame), index=frame.index),
+                pd.Series(_per_row(upper, name, frame), index=frame.index),
+            )
+            for name in columns
+        }
+    )
+
+
+def _scored(values: np.ndarray, center: np.ndarray, scale: np.ndarray) -> np.ndarray:
+    """(x − mean) / std, 0 where the day has no spread, NaN where x or the mean is missing."""
+    with np.errstate(invalid="ignore"):
+        scored = np.where(np.isnan(scale), 0.0, (values - center) / scale)
+    return np.where(np.isnan(values) | np.isnan(center), np.nan, scored)
 
 
 def zscore(frame: pd.DataFrame, columns: Sequence[str] = STOCK_LEVEL) -> pd.DataFrame:
     """New frame scored by the universe mean and sample std; a day without spread scores 0."""
-    mean = _by_day(frame, columns, lambda days: days.mean())
-    std = _by_day(frame, columns, lambda days: days.std())
-    spread = std > 0
-    scored = ((frame[list(columns)] - mean) / std.where(spread)).where(spread, 0.0)
-    known = frame[list(columns)].notna() & mean.notna()
-    return frame.assign(**{name: scored[name].where(known[name]) for name in columns})
+    days = _universe_days(frame, columns)
+    mean, std = days.mean(), days.std()
+    scale = std.where(std > 0)
+    return frame.assign(
+        **{
+            name: pd.Series(
+                _scored(
+                    frame[name].to_numpy(dtype=np.float64),
+                    _per_row(mean, name, frame),
+                    _per_row(scale, name, frame),
+                ),
+                index=frame.index,
+            )
+            for name in columns
+        }
+    )
 
 
 def standardize(frame: pd.DataFrame, columns: Sequence[str] = STOCK_LEVEL) -> pd.DataFrame:
@@ -57,8 +83,13 @@ def standardize(frame: pd.DataFrame, columns: Sequence[str] = STOCK_LEVEL) -> pd
 
 def fill_with_flags(frame: pd.DataFrame, columns: Sequence[str] = STOCK_LEVEL) -> pd.DataFrame:
     """Fill gaps of z-scored columns with the day's universe median (0 if none) and flag them."""
-    median = _by_day(frame, columns, lambda days: days.median()).fillna(0.0)
-    filled = frame.assign(**{name: frame[name].fillna(median[name]) for name in columns})
+    median = _universe_days(frame, columns).median().fillna(0.0)
+    filled = frame.assign(
+        **{
+            name: frame[name].fillna(pd.Series(_per_row(median, name, frame), index=frame.index))
+            for name in columns
+        }
+    )
     flags = {f"{name}_missing": frame[name].isna().astype(np.int8) for name in columns}
     return pd.concat([filled, pd.DataFrame(flags, index=frame.index)], axis=1)
 

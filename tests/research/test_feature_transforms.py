@@ -87,17 +87,26 @@ def test_zscore_is_zero_when_the_day_has_no_spread() -> None:
     assert scored.iloc[[3, 6, 7]].isna().all()
 
 
-@pytest.mark.parametrize("value", [1.0, 3.0])
-def test_a_rare_flag_or_count_survives_winsorize(value: float) -> None:
-    values = [0.0] * 995 + [value] * 5
+@pytest.mark.parametrize(("common", "rare"), [(0.0, 1.0), (0.0, 3.0), (1.0, 0.0)])
+def test_a_rare_flag_or_count_survives_winsorize(common: float, rare: float) -> None:
+    values = [common] * 995 + [rare] * 5
     frame = day_frame(values, [True] * 1_000)
 
     scored = standardize(frame, ["x"])["x"]
+    mean, std = np.mean(values), np.std(values, ddof=1)
 
-    assert scored.iloc[-5:].tolist() == pytest.approx(
-        [(value - value * 0.005) / np.std(values, ddof=1)] * 5
-    )
-    assert scored.iloc[0] < 0
+    assert scored.iloc[-5:].tolist() == pytest.approx([(rare - mean) / std] * 5)
+    assert scored.iloc[0] == pytest.approx((common - mean) / std)
+
+
+def test_a_skipped_bound_still_caps_rows_outside_the_universe_at_the_universe_extremes() -> None:
+    values = [0.0] * 995 + [1.0] * 5 + [7.0, -4.0]
+    frame = day_frame(values, [True] * 1_000 + [False, False])
+
+    clipped = winsorize(frame, ["x"])["x"]
+
+    assert clipped.iloc[-2:].tolist() == [1.0, 0.0]
+    assert clipped.iloc[995:1_000].tolist() == [1.0] * 5
 
 
 def test_standardize_scores_the_clipped_values() -> None:
