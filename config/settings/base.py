@@ -160,6 +160,7 @@ FEATURE_PARQUET_DIR = Path(
     env.str("FEATURE_PARQUET_DIR", default="") or BASE_DIR / "artifacts" / "features"
 )
 MODEL_DIR = Path(env.str("MODEL_DIR", default="") or BASE_DIR / "artifacts" / "models")
+SHUFFLE_IC_LIMIT = env.float("SHUFFLE_IC_LIMIT", default=0.02)
 
 LOGGING = {
     "version": 1,
