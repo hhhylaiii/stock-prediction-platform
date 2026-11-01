@@ -4,7 +4,13 @@ import pandas as pd
 import pytest
 
 from apps.market.models import DailyPrice, StockMaster
-from apps.research.panel import PANEL_COLUMNS, listing_segments, load_price_panel
+from apps.research.panel import (
+    PANEL_COLUMNS,
+    REUSE_GAP,
+    listing_segments,
+    load_price_panel,
+    require_sorted,
+)
 from tests.research.conftest import weekday_calendar
 
 CALENDAR = weekday_calendar(date(2013, 1, 1), date(2014, 12, 31))
@@ -66,22 +72,49 @@ def test_missing_days_inside_a_listing_are_filled_as_halted() -> None:
     assert panel.loc[~panel["has_bar"], ["close", "volume", "adj_factor"]].isna().all().all()
 
 
-def test_gap_longer_than_twenty_trading_days_starts_a_new_listing() -> None:
+def test_gap_longer_than_the_reuse_gap_starts_a_new_listing() -> None:
     stock("5450")
     stock("2330")
-    first, second = days("2014-01-02", "2014-01-31"), days("2014-03-04", "2014-03-14")
+    first = days("2013-01-02", "2013-01-31")
+    reused_from = CALENDAR.shift(first[-1], REUSE_GAP + 2)
+    halted_from = CALENDAR.shift(first[-1], REUSE_GAP + 1)
+    second = CALENDAR.between(reused_from, CALENDAR.shift(reused_from, 9))
     bars("5450", first + second)
-    gap = len(CALENDAR.between(first[-1], second[0])) - 2
-    assert gap == 21
-    bars("2330", days("2014-01-02", "2014-01-31") + days("2014-03-03", "2014-03-14"))
-    panel = load_price_panel(CALENDAR, d("2014-01-01"), d("2014-12-31"))
+    bars("2330", first + CALENDAR.between(halted_from, second[-1]))
+    panel = load_price_panel(CALENDAR, d("2013-01-01"), d("2014-12-31"))
     reused, halted = panel_of("5450", panel), panel_of("2330", panel)
     assert reused["segment"].unique().tolist() == [1, 2]
     assert reused.loc[reused["date"] == second[0], "age"].item() == 0
     assert reused.loc[reused["date"] == second[1], "age"].item() == 1
     assert len(reused) == len(first) + len(second)
     assert halted["segment"].unique().tolist() == [1]
-    assert halted["has_bar"].sum() == len(first) + 10
+    assert (~halted["has_bar"]).sum() == REUSE_GAP
+
+
+def test_halted_days_after_the_last_bar_run_to_delisting_or_the_data_end() -> None:
+    stock("1111", delist_date=d("2014-03-20"))
+    stock("2222")
+    stock("2330")
+    bars("1111", days("2014-03-03", "2014-03-05"))
+    bars("2222", days("2014-03-03", "2014-03-05"))
+    bars("2330", days("2014-03-03", "2014-03-31"))
+    panel = load_price_panel(CALENDAR, d("2014-03-01"), d("2014-04-30"))
+    delisted, suspended = panel_of("1111", panel), panel_of("2222", panel)
+    assert delisted["date"].tolist() == list(days("2014-03-03", "2014-03-19"))
+    assert suspended["date"].tolist() == list(days("2014-03-03", "2014-03-31"))
+    assert suspended["has_bar"].sum() == 3
+
+
+def test_halted_days_before_the_first_bar_start_at_the_listing_day() -> None:
+    stock("6488", list_date=d("2014-03-03"))
+    stock("2330", list_date=d("2012-06-01"))
+    bars("2330", days("2014-02-03", "2014-03-14"))
+    bars("6488", days("2014-03-10", "2014-03-14"))
+    panel = load_price_panel(CALENDAR, d("2014-01-01"), d("2014-12-31"))
+    late = panel_of("6488", panel)
+    assert late["date"].tolist() == list(days("2014-03-03", "2014-03-14"))
+    assert late["age"].tolist() == list(range(10))
+    assert panel_of("2330", panel)["date"].iloc[0] == d("2014-02-03")
 
 
 def test_age_counts_trading_days_from_the_listing_day() -> None:
@@ -151,14 +184,14 @@ def test_empty_range_gives_an_empty_frame_with_the_columns() -> None:
 
 def test_segments_report_first_and_last_day_per_listing() -> None:
     stock("5450")
-    bars("5450", days("2014-01-02", "2014-01-10") + days("2014-06-02", "2014-06-06"))
+    bars("5450", days("2013-01-02", "2013-01-10") + days("2014-06-02", "2014-06-06"))
     segments = listing_segments(CALENDAR)
     assert segments[["stock_id", "segment", "first_day", "last_day"]].to_dict("records") == [
         {
             "stock_id": "5450",
             "segment": 1,
-            "first_day": d("2014-01-02"),
-            "last_day": d("2014-01-10"),
+            "first_day": d("2013-01-02"),
+            "last_day": d("2013-01-10"),
         },
         {
             "stock_id": "5450",
@@ -178,7 +211,16 @@ def test_bar_on_a_closed_day_is_refused() -> None:
 
 def test_listings_outside_the_window_are_skipped() -> None:
     stock("5450")
-    bars("5450", days("2014-01-02", "2014-01-10") + days("2014-06-02", "2014-06-06"))
+    bars("5450", days("2013-01-02", "2013-01-10") + days("2014-06-02", "2014-06-06"))
     panel = load_price_panel(CALENDAR, d("2014-03-03"), d("2014-06-03"))
     assert panel["date"].tolist() == list(days("2014-06-02", "2014-06-03"))
     assert panel["segment"].unique().tolist() == [2]
+
+
+def test_unsorted_or_repeated_rows_are_refused() -> None:
+    frame = pd.DataFrame({"stock_id": ["2330", "2330"], "date": [d("2014-03-04"), d("2014-03-03")]})
+    with pytest.raises(ValueError, match="sorted"):
+        require_sorted(frame)
+    with pytest.raises(ValueError, match="unique"):
+        require_sorted(frame.assign(date=d("2014-03-03")))
+    require_sorted(frame.iloc[::-1])

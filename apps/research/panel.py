@@ -1,7 +1,7 @@
 """Research price panel: common stocks on a trading-day grid per listing, adjusted on read."""
 
 from collections.abc import Sequence
-from datetime import date
+from datetime import date, timedelta
 from itertools import groupby
 from operator import itemgetter
 from typing import Any, NamedTuple
@@ -15,7 +15,7 @@ from apps.market.calendar import NotATradingDayError, TradingDays
 COMMON_STOCK_PATTERN = "^[1-9][0-9]{3}$"
 DEPOSITARY_PREFIX = "91%"
 DEPOSITARY_INDUSTRY = "存託憑證"
-REUSE_GAP = 20
+REUSE_GAP = 250
 PRICE_COLUMNS = ("open", "high", "low", "close")
 PANEL_COLUMNS = (
     "stock_id",
@@ -33,7 +33,7 @@ PANEL_COLUMNS = (
 )
 BREAKS_SQL = """
 WITH bars AS (
-    SELECT p.stock_id, p.date, m.market, m.industry, m.list_date,
+    SELECT p.stock_id, p.date, m.market, m.industry, m.list_date, m.delist_date,
            LAG(p.date) OVER (PARTITION BY p.stock_id ORDER BY p.date) AS previous,
            MAX(p.date) OVER (PARTITION BY p.stock_id) AS last_day
     FROM daily_price p
@@ -45,7 +45,7 @@ WITH bars AS (
       AND (m.delist_date IS NULL OR p.date < m.delist_date)
       AND (%(stocks)s::text[] IS NULL OR p.stock_id = ANY(%(stocks)s::text[]))
 )
-SELECT stock_id, previous, date, last_day, market, industry, list_date
+SELECT stock_id, previous, date, last_day, market, industry, list_date, delist_date
 FROM bars
 WHERE previous IS NULL OR date - previous > %(gap)s
 ORDER BY stock_id, date
@@ -67,7 +67,7 @@ WHERE p.date BETWEEN %(start)s AND %(end)s
 
 
 class Segment(NamedTuple):
-    """One listing of a stock; listing_day is None when it predates the first bar on file."""
+    """Trading days one listing spans; listing_day is None when it predates the data."""
 
     stock_id: str
     segment: int
@@ -93,11 +93,18 @@ def _filters(stock_ids: Sequence[str] | None) -> dict[str, Any]:
     }
 
 
-def _data_start() -> date | None:
+def _data_range() -> tuple[date | None, date | None]:
     with connection.cursor() as cursor:
-        cursor.execute("SELECT MIN(date) FROM daily_price")
-        first: date | None = cursor.fetchone()[0]
-        return first
+        cursor.execute("SELECT MIN(date), MAX(date) FROM daily_price")
+        first, last = cursor.fetchone()
+        return first, last
+
+
+def require_sorted(panel: pd.DataFrame) -> None:
+    """Refuse panels whose rows are not in date order within each stock or repeat a day."""
+    ascending = panel.groupby("stock_id", sort=False)["date"].is_monotonic_increasing.all()
+    if not ascending or panel.duplicated(["stock_id", "date"]).any():
+        raise ValueError("panel rows must be unique and sorted by date within each stock")
 
 
 def _split(calendar: TradingDays, rows: list[tuple[Any, ...]]) -> list[tuple[date, date]]:
@@ -111,19 +118,34 @@ def _split(calendar: TradingDays, rows: list[tuple[Any, ...]]) -> list[tuple[dat
     return list(zip(starts, ends, strict=True))
 
 
+def _span(
+    number: int, bars: list[tuple[date, date]], row: tuple[Any, ...], data: tuple[date, date]
+) -> tuple[date, date, date | None]:
+    first_bar, last_bar = bars[number - 1]
+    list_date, delist_date = row[6], row[7]
+    first_day, last_day = first_bar, last_bar
+    listing_day: date | None = first_bar
+    if number == 1 and list_date is not None:
+        first_day, listing_day = max(list_date, data[0]), list_date
+    elif number == 1 and first_bar == data[0]:
+        listing_day = None
+    if number == len(bars):
+        last_day = data[1] if delist_date is None else delist_date - timedelta(days=1)
+    return first_day, last_day, listing_day
+
+
 def _segments(calendar: TradingDays, stock_ids: Sequence[str] | None) -> list[Segment]:
     _, breaks = _fetch(BREAKS_SQL, {**_filters(stock_ids), "gap": REUSE_GAP})
-    data_start = _data_start()
+    data = _data_range()
+    if data[0] is None or data[1] is None:
+        return []
     segments = []
     for stock_id, group in groupby(breaks, key=itemgetter(0)):
         rows = list(group)
-        _, _, _, _, market, industry, list_date = rows[0]
-        for number, (first_day, last_day) in enumerate(_split(calendar, rows), start=1):
-            listing_day: date | None = first_day
-            if number == 1 and list_date is not None:
-                listing_day = list_date
-            elif number == 1 and first_day == data_start:
-                listing_day = None
+        bars = _split(calendar, rows)
+        for number in range(1, len(bars) + 1):
+            first_day, last_day, listing_day = _span(number, bars, rows[0], (data[0], data[1]))
+            market, industry = rows[0][4], rows[0][5]
             segments.append(
                 Segment(stock_id, number, first_day, last_day, listing_day, market, industry)
             )

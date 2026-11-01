@@ -4,13 +4,14 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from apps.market.models import DispositionEvent
+from apps.market.models import DailyPrice, DispositionEvent, StockMaster
 from apps.research.universe import (
     EXCLUSIONS,
     MIN_MEDIAN_TURNOVER,
     apply_universe,
     event_days,
     load_disposition_events,
+    load_universe_panel,
 )
 from tests.research.conftest import weekday_calendar
 
@@ -199,3 +200,66 @@ def test_load_disposition_events_keeps_only_overlapping_periods() -> None:
     loaded = load_disposition_events(d("2014-03-10"), d("2014-04-30"))
     assert sorted(loaded["stock_id"]) == ["2317", "2330"]
     assert list(loaded.columns) == ["stock_id", "type", "start_date", "end_date"]
+
+
+def test_events_entirely_before_the_calendar_are_ignored() -> None:
+    days = event_days(
+        events(("2330", "disposition", "2012-01-02", "2012-02-01")), CALENDAR, d("2014-12-31")
+    )
+    assert days.empty
+
+
+def test_unsorted_panel_is_refused() -> None:
+    with pytest.raises(ValueError, match="sorted"):
+        apply_universe(panel().iloc[::-1], NO_EVENTS, CALENDAR)
+
+
+LONG = weekday_calendar(date(2013, 1, 1), date(2014, 12, 31))
+CHECKED = ["in_universe", "illiquid", "turnover_med_20d", "reference", "limit_up", "limit_up_close"]
+
+
+def seed_prices() -> None:
+    StockMaster.objects.create(stock_id="2330", name="2330", market="TWSE", industry="半導體業")
+    trading = LONG.between(d("2013-01-02"), d("2014-06-30"))
+    closes = [100.0 * 1.001**i for i in range(len(trading))]
+    closes[-10] = round(closes[-11] * 1.1 - 0.4, 0)
+    DailyPrice.objects.bulk_create(
+        DailyPrice(
+            stock_id="2330",
+            date=day,
+            open=close,
+            high=close,
+            low=close,
+            close=close,
+            volume=100_000,
+            turnover=int(close * 100_000) if i % 7 else 1_000,
+            adj_factor=0.9 if day < d("2014-04-01") else 1.0,
+        )
+        for i, (day, close) in enumerate(zip(trading, closes, strict=True))
+    )
+
+
+@pytest.mark.django_db
+def test_flags_do_not_depend_on_where_the_window_starts() -> None:
+    seed_prices()
+    full = load_universe_panel(LONG, d("2013-01-01"), d("2014-06-30"))
+    late = load_universe_panel(LONG, d("2014-05-05"), d("2014-06-30"))
+    expected = full.loc[full["date"] >= d("2014-05-05"), CHECKED].reset_index(drop=True)
+    assert late["date"].iloc[0] == d("2014-05-05")
+    pd.testing.assert_frame_equal(late[CHECKED], expected)
+    assert late["in_universe"].all()
+    assert late["limit_up_close"].sum() == 1
+
+
+@pytest.mark.django_db
+def test_window_near_the_calendar_start_warms_up_on_what_exists() -> None:
+    seed_prices()
+    early = load_universe_panel(LONG, d("2013-02-01"), d("2013-03-29"))
+    assert early["date"].iloc[0] == d("2013-02-01")
+    assert early["in_universe"].iloc[0] == (early["age"].iloc[0] >= 60)
+
+
+@pytest.mark.django_db
+def test_window_without_trading_days_is_empty() -> None:
+    seed_prices()
+    assert load_universe_panel(LONG, d("2014-07-05"), d("2014-07-06")).empty

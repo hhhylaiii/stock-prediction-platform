@@ -50,6 +50,7 @@ def test_tick_size_follows_the_price_band(price: float, tick: float) -> None:
         (10.6, AFTER, 9.54),
         (55.5, AFTER, 49.95),
         (1150.0, AFTER, 1035.0),
+        (2.2, AFTER, 1.98),
     ],
 )
 def test_limit_down_rounds_up_to_the_tick(reference: float, day: date, expected: float) -> None:
@@ -58,7 +59,7 @@ def test_limit_down_rounds_up_to_the_tick(reference: float, day: date, expected:
 
 @pytest.mark.parametrize(
     ("reference", "expected"),
-    [(45.5, 50.0), (9.2, 10.1), (998.0, 1095.0), (9.09, 9.99)],
+    [(45.5, 50.0), (9.2, 10.1), (998.0, 1095.0), (9.09, 9.99), (1.9, 2.09)],
 )
 def test_limit_up_uses_the_tick_of_the_limit_price_band(reference: float, expected: float) -> None:
     assert limit_up_price(np.array([reference]), [AFTER])[0] == pytest.approx(expected)
@@ -95,6 +96,21 @@ def test_ex_date_reference_is_the_adjusted_previous_close() -> None:
     assert result.loc[1, "reference"] == pytest.approx(95.0)
     assert result.loc[1, "limit_up"] == pytest.approx(104.5)
     assert result.loc[1, "limit_up_close"]
+
+
+def test_reference_is_on_the_raw_price_scale_before_later_events() -> None:
+    result = apply_price_limits(bars(close=[100.0, 110.0], adj_factor=[0.5, 0.5]))
+    assert result.loc[1, "reference"] == pytest.approx(100.0)
+    assert result.loc[1, "limit_up"] == pytest.approx(110.0)
+    assert result.loc[1, "limit_up_close"]
+    ex_date = apply_price_limits(bars(close=[100.0, 104.5], adj_factor=[0.475, 0.5]))
+    assert ex_date.loc[1, "reference"] == pytest.approx(95.0)
+    assert ex_date.loc[1, "limit_up_close"]
+
+
+def test_unsorted_panel_is_refused() -> None:
+    with pytest.raises(ValueError, match="sorted"):
+        apply_price_limits(bars(close=[100.0, 110.0]).iloc[::-1])
 
 
 def test_reference_carries_the_last_close_over_days_without_trades() -> None:
@@ -155,6 +171,7 @@ def test_limit_up_by_era_and_tick() -> None:
         assert result.loc[key, "limit_up"] == pytest.approx(limit)
         assert result.loc[key, "limit_up_close"] == flagged
     assert result.loc[("3085", d("2015-03-09")), "limit_up_open"]
-    era = bars(close=[10.45, 11.15, 10.45, 11.15], date=[BEFORE, BEFORE, AFTER, AFTER])
+    era_days = [d("2015-05-28"), BEFORE, AFTER, d("2015-06-02")]
+    era = bars(close=[10.45, 11.15, 10.45, 11.15], date=era_days)
     era = era.assign(segment=[1, 1, 2, 2], age=1_000)
     assert apply_price_limits(era)["limit_up_close"].tolist() == [False, True, False, False]
