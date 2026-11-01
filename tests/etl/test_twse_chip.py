@@ -1,13 +1,14 @@
 import copy
 import logging
 from collections.abc import Callable
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 import pytest
 import responses
 from django.core.management import call_command
+from django.utils import timezone
 
 from apps.etl.adapters.twse import TwseAdapter
 from apps.etl.errors import SchemaChangedError, SourceNotReadyError
@@ -154,6 +155,31 @@ def test_stock_quoted_but_missing_from_t86_nets_zero(
     assert {key: rows["1213"][key] for key in ("fi_net", "it_net")} == {"fi_net": 0, "it_net": 0}
     assert (rows["1213"]["dealer_self_net"], rows["1213"]["dealer_hedge_net"]) == (0, 0)
     assert set(rows) == {"0050", "00647L", "00682U", "1101", "1213", "2317", "2330"}
+
+
+@responses.activate
+@pytest.mark.django_db
+def test_zero_fill_uses_the_latest_quotes_stored_for_the_day(
+    adapter: TwseAdapter,
+    serve: Callable[[str], dict[str, Any]],
+    load_fixture: Callable[[str], Any],
+) -> None:
+    stale = load_fixture(QUOTES_FIXTURE)
+    RawTwse.objects.create(
+        dataset="daily_price",
+        source_hash="quotes-stale",
+        request_params={"date": "20261028", "type": "ALLBUT0999", "response": "json"},
+        payload={**stale, "date": "20261027"},
+        fetched_at=timezone.now() - timedelta(hours=2),
+    )
+    RawTwse.objects.create(
+        dataset="daily_price",
+        source_hash="quotes-20261028",
+        request_params={"date": "20261028", "type": "ALLBUT0999", "response": "json"},
+        payload=load_fixture(QUOTES_FIXTURE),
+    )
+    serve("institutional")
+    assert _load(adapter, "institutional")["00647L"]["fi_net"] == 0
 
 
 @responses.activate
@@ -357,8 +383,66 @@ def test_lending_without_column_groups_is_a_schema_change(
     payload = load_fixture(DATASETS["sbl"][2])
     payload["groups"] = []
     responses.get(DATASETS["sbl"][0], json=payload)
-    with pytest.raises(SchemaChangedError):
+    with pytest.raises(SchemaChangedError, match="repeated columns"):
         adapter.fetch("sbl", DAY, DAY)
+
+
+@responses.activate
+@pytest.mark.django_db
+def test_repeated_field_name_is_a_schema_change(
+    adapter: TwseAdapter, load_fixture: Callable[[str], Any]
+) -> None:
+    payload = load_fixture(DATASETS["institutional"][2])
+    payload["fields"][3] = payload["fields"][4]
+    responses.get(DATASETS["institutional"][0], json=payload)
+    with pytest.raises(SchemaChangedError, match="repeated columns"):
+        adapter.fetch("institutional", DAY, DAY)
+
+
+@responses.activate
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("dataset", "rename"),
+    [("institutional", ("data", "rows")), ("margin", ("tables", "tableList"))],
+)
+def test_renamed_payload_key_is_a_schema_change_and_keeps_raw(
+    adapter: TwseAdapter,
+    load_fixture: Callable[[str], Any],
+    dataset: str,
+    rename: tuple[str, str],
+) -> None:
+    payload = load_fixture(DATASETS[dataset][2])
+    old, new = rename
+    payload[new] = payload.pop(old)
+    responses.get(DATASETS[dataset][0], json=payload)
+    with pytest.raises(SchemaChangedError):
+        adapter.fetch(dataset, DAY, DAY)
+    assert RawTwse.objects.count() == 1
+
+
+@responses.activate
+@pytest.mark.django_db
+def test_day_trade_list_without_volumes_is_not_ready(
+    adapter: TwseAdapter, load_fixture: Callable[[str], Any]
+) -> None:
+    payload = load_fixture(NOT_PUBLISHED["day_trade"])
+    payload["date"] = "20261028"
+    payload["tables"][0]["data"] = [["2330", "台積電", ""]]
+    responses.get(DATASETS["day_trade"][0], json=payload)
+    with pytest.raises(SourceNotReadyError, match="當日沖銷交易標的"):
+        adapter.fetch("day_trade", DAY, DAY)
+
+
+@responses.activate
+@pytest.mark.django_db
+def test_only_a_total_row_is_not_ready(
+    adapter: TwseAdapter, load_fixture: Callable[[str], Any]
+) -> None:
+    payload = load_fixture(DATASETS["sbl"][2])
+    payload["data"] = [row for row in payload["data"] if not row[0]]
+    responses.get(DATASETS["sbl"][0], json=payload)
+    with pytest.raises(SourceNotReadyError, match="no stock rows"):
+        adapter.normalize("sbl", adapter.fetch("sbl", DAY, DAY))
 
 
 @responses.activate

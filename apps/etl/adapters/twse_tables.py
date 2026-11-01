@@ -59,8 +59,13 @@ def check_published(payload: dict[str, Any], label: str, day: date) -> None:
     if NO_DATA_STAT in stat or AFTER_LATEST_STAT in stat:
         raise SourceNotReadyError(f"TWSE {label} for {day} not available: {stat}")
     bodies = payload.get("tables", [payload])
-    if stat == "OK" and not any(isinstance(body, dict) and body.get("data") for body in bodies):
+    if stat == "OK" and isinstance(bodies, list) and bodies and all(map(_blank, bodies)):
         raise SourceNotReadyError(f"TWSE {label} for {day} has no rows yet")
+
+
+def _blank(body: Any) -> bool:
+    """An empty placeholder table; a missing or renamed data key is a layout change instead."""
+    return isinstance(body, dict) and (not body or body.get("data") == [])
 
 
 def net_shares(values: Sequence[Any]) -> int:
@@ -102,6 +107,7 @@ class DailyTable(NamedTuple):
     model: type[models.Model] = DailyChip
     bounds: Mapping[str, tuple[float, float]] = {}
     check: Callable[[dict[str, Any]], None] | None = None
+    pending_title: str | None = None
 
 
 TABLES: dict[str, DailyTable] = {
@@ -170,6 +176,7 @@ TABLES: dict[str, DailyTable] = {
         name="證券名稱",
         columns={"day_trade_volume": ("當日沖銷交易成交股數",)},
         convert=shares,
+        pending_title="當日沖銷交易標的",
     ),
 }
 
@@ -195,6 +202,14 @@ def labelled_fields(body: Mapping[str, Any], label: str) -> list[str]:
 def source_rows(payload: dict[str, Any], day: date, table: DailyTable) -> pd.DataFrame:
     """The table's rows for the day under labelled field names, after layout checks."""
     check_answer(payload, day)
+    if table.title is not None and table.pending_title is not None:
+        titles = [str(listed.get("title") or "") for listed in payload.get("tables", [])]
+        if not any(table.title in title for title in titles) and any(
+            title.endswith(table.pending_title) for title in titles
+        ):
+            raise SourceNotReadyError(
+                f"TWSE {table.label} for {day} lists {table.pending_title} only"
+            )
     body = payload if table.title is None else find_table(payload, table.title)
     if table.hints is not None and body.get("hints") != table.hints:
         raise SchemaChangedError(f"TWSE {table.label} units changed: {body.get('hints')!r}")
@@ -233,6 +248,8 @@ def standard_rows(raw_df: pd.DataFrame, table: DailyTable) -> pd.DataFrame:
             for column, names in table.columns.items()
         }
         records.append({"stock_id": code, "date": row["date"], **_bounded(values, table, key)})
+    if not records:
+        raise SourceNotReadyError(f"TWSE {table.label} has no stock rows yet")
     return pd.DataFrame(records, columns=["stock_id", "date", *table.columns], dtype=object)
 
 
