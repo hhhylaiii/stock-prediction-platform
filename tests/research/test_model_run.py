@@ -1,7 +1,7 @@
 import importlib.metadata
 import math
 import platform
-from datetime import date
+from datetime import date, timedelta
 from io import StringIO
 from pathlib import Path
 from typing import Any
@@ -13,8 +13,9 @@ from django.core.management.base import CommandError
 from django.db import IntegrityError, transaction
 
 from apps.research.features.store import export_year
-from apps.research.holdout import claim_holdout
+from apps.research.holdout import HoldoutError, claim_holdout
 from apps.research.models import FeatureDaily, ModelRun
+from apps.research.prediction_cache import fold_path, fold_record
 from apps.research.runs import (
     LIBRARIES,
     RunError,
@@ -25,6 +26,7 @@ from apps.research.runs import (
     model_path,
     record_run,
 )
+from apps.research.walkforward import Fold
 
 pytestmark = pytest.mark.django_db
 SPEC_COLUMNS = {
@@ -160,16 +162,69 @@ def test_runs_past_candidate_keep_their_row_and_model(artifacts: Path, status: s
     assert load_model("wf1", "wf1.ridge.h20.f000") == {"weights": [1.0]}
 
 
-def test_rows_of_a_holdout_run_are_written_once(artifacts: Path) -> None:
-    record_run(run(), {"weights": [1.0]})
+def fold(index: int, test_start: str, test_end: str) -> Fold:
+    start, end = d(test_start), d(test_end)
+    return Fold(
+        index=index,
+        train_start=start - timedelta(days=1100),
+        fit_end=start - timedelta(days=250),
+        valid_start=start - timedelta(days=200),
+        train_end=start - timedelta(days=30),
+        test_start=start,
+        test_end=end,
+        eval_end=end,
+        tuning=False,
+        holdout=end >= d("2025-01-01"),
+    )
+
+
+HELD = fold(44, "2025-01-02", "2025-03-31")
+STUDIED = fold(43, "2024-10-01", "2024-12-02")
+
+
+def held_run(**changes: Any) -> ModelRun:
+    return run("wf1.ridge.h20.f044", **changes)
+
+
+def test_runs_remember_their_fold(artifacts: Path) -> None:
+    record_run(run("wf1.ridge.h20.f043"), fold=STUDIED)
+
+    stored = ModelRun.objects.get()
+    assert stored.params["fold"] == fold_record(STUDIED)
+    assert stored.params["penalty"] == 1.0
+
+
+def test_a_holdout_fold_needs_the_claim_of_its_run(artifacts: Path) -> None:
+    with pytest.raises(HoldoutError, match="claim_holdout"):
+        record_run(held_run(), {"weights": [1.0]}, fold=HELD)
+
+    assert not ModelRun.objects.exists()
+    assert not model_path("wf1", "wf1.ridge.h20.f044").exists()
+
+
+def test_a_holdout_fold_is_rewritten_until_its_predictions_are_cached(artifacts: Path) -> None:
+    ticket = claim_holdout("rank", "wf1", d("2025-03-31"))
+    record_run(held_run(ic_mean=0.01), {"weights": [1.0]}, fold=HELD, ticket=ticket)
+    record_run(held_run(ic_mean=0.02), {"weights": [2.0]}, fold=HELD, ticket=ticket)
+    fold_path("wf1", HELD.index).parent.mkdir(parents=True)
+    fold_path("wf1", HELD.index).write_bytes(b"cached")
+
+    with pytest.raises(RunError, match="cached"):
+        record_run(held_run(ic_mean=0.9), {"weights": [9.0]}, fold=HELD, ticket=ticket)
+
+    assert ModelRun.objects.get().ic_mean == pytest.approx(0.02)
+    assert load_model("wf1", "wf1.ridge.h20.f044") == {"weights": [2.0]}
+
+
+def test_research_folds_of_a_claimed_run_stay_rewritable(artifacts: Path) -> None:
     claim_holdout("rank", "wf1", d("2025-03-31"))
+    record_run(run("wf1.ridge.h20.f043", ic_mean=0.01), fold=STUDIED)
+    fold_path("wf1", STUDIED.index).parent.mkdir(parents=True)
+    fold_path("wf1", STUDIED.index).write_bytes(b"cached")
 
-    record_run(run("wf1.ridge.h20.f001"), {"weights": [2.0]})
-    with pytest.raises(RunError, match="holdout"):
-        record_run(run(ic_mean=0.9), {"weights": [9.0]})
+    record_run(run("wf1.ridge.h20.f043", ic_mean=0.03), fold=STUDIED)
 
-    assert ModelRun.objects.get(run_id="wf1.ridge.h20.f000").ic_mean == pytest.approx(0.02)
-    assert load_model("wf1", "wf1.ridge.h20.f000") == {"weights": [1.0]}
+    assert ModelRun.objects.get().ic_mean == pytest.approx(0.03)
 
 
 @pytest.mark.django_db(transaction=True)
@@ -301,16 +356,19 @@ def test_drop_run_keeps_a_run_with_a_holdout_claim(artifacts: Path) -> None:
     assert path.exists()
 
 
-def test_drop_run_keeps_a_run_past_candidate(artifacts: Path) -> None:
+@pytest.mark.parametrize("status", ["active", "degraded", "retired"])
+def test_drop_run_keeps_a_run_past_candidate(artifacts: Path, status: str) -> None:
     record_run(run(), {"run": 0})
     record_run(run("wf1.ridge.h20.f001"))
-    ModelRun.objects.filter(run_id="wf1.ridge.h20.f001").update(status="active")
+    ModelRun.objects.filter(run_id="wf1.ridge.h20.f001").update(status=status)
+    path = cached(artifacts, "wf1")
 
-    with pytest.raises(RunError, match="active"):
+    with pytest.raises(RunError, match=f"{status} models, which drop_run keeps"):
         drop_run("wf1")
 
     assert ModelRun.objects.count() == 2
     assert model_path("wf1", "wf1.ridge.h20.f000").exists()
+    assert path.exists()
 
 
 @pytest.mark.django_db(transaction=True)

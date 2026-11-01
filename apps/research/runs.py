@@ -15,9 +15,11 @@ from django.conf import settings
 from django.db import transaction
 
 from apps.research.features.store import existing_partition
-from apps.research.holdout import require_key
+from apps.research.holdout import HoldoutTicket, authorize_folds, is_holdout, require_key
 from apps.research.models import HoldoutRun, ModelRun, ModelStatus
+from apps.research.prediction_cache import fold_path, fold_record
 from apps.research.ranges import years
+from apps.research.walkforward import Fold
 
 LIBRARIES = ("django", "numpy", "pandas", "pyarrow", "scikit-learn")
 MODEL_SUFFIX = ".pkl"
@@ -87,16 +89,31 @@ def _replaceable(run: ModelRun) -> None:
         raise RunError(f"{run.run_id} belongs to run {stored.run_key}, not {run.run_key}")
     if stored.status != ModelStatus.CANDIDATE:
         raise RunError(f"{run.run_id} is {stored.status}; only candidates are rerun")
-    if HoldoutRun.objects.filter(run_key=run.run_key).exists():
-        raise RunError(f"{run.run_key} holds a holdout run; its rows are written once")
 
 
-def record_run(run: ModelRun, model: Any | None = None) -> ModelRun:
-    """Write a candidate run with its model file, replacing only an unclaimed candidate."""
+def _writable(run_key: str, fold: Fold, ticket: HoldoutTicket | None) -> None:
+    """A holdout fold needs its run's ticket and is written until its predictions are cached."""
+    authorize_folds([fold], run_key, ticket)
+    if is_holdout(fold) and fold_path(run_key, fold.index).exists():
+        raise RunError(f"holdout fold {fold.index} of {run_key} is cached; it is recorded once")
+
+
+def record_run(
+    run: ModelRun,
+    model: Any | None = None,
+    *,
+    fold: Fold | None = None,
+    ticket: HoldoutTicket | None = None,
+) -> ModelRun:
+    """Write a candidate run of a fold with its model file, replacing only a candidate."""
     path = model_path(run.run_key, run.run_id)
     if run.status != ModelStatus.CANDIDATE:
         raise RunError(f"runs are recorded as candidates, not {run.status}")
+    if fold is not None:
+        run.params = {**run.params, "fold": fold_record(fold)}
     run.full_clean(validate_unique=False)
+    if fold is not None:
+        _writable(run.run_key, fold, ticket)
     temporary = None if model is None else _pickled(path, model)
     try:
         with transaction.atomic(durable=True):
@@ -126,7 +143,10 @@ def drop_run(run_key: str) -> int:
         rows = list(ModelRun.objects.select_for_update().filter(run_key=run_key))
         kept = sorted({row.status for row in rows if row.status != ModelStatus.CANDIDATE})
         if kept:
-            raise RunError(f"{run_key} has {', '.join(kept)} models; retire them by hand instead")
+            raise RunError(
+                f"{run_key} has {', '.join(kept)} models, which drop_run keeps; "
+                "change or remove them by hand"
+            )
         ModelRun.objects.filter(run_id__in=[row.run_id for row in rows]).delete()
     _remove(models)
     _remove(cache)
