@@ -229,6 +229,34 @@ def _validated(
     return kept
 
 
+def quoted_only(
+    frame: pd.DataFrame,
+    quoted: Mapping[date, set[str]],
+    label: str,
+    zero_columns: Sequence[str] = (),
+) -> pd.DataFrame:
+    """Rows of codes quoted that day; with zero_columns, quoted codes left out get zeros."""
+    parts = []
+    for day, codes in sorted(quoted.items()):
+        rows = frame.loc[frame["date"] == day]
+        listed = rows["stock_id"].isin(codes)
+        skipped = sorted(rows.loc[~listed, "stock_id"])
+        if skipped:
+            logger.info(
+                "%s %s: %d codes not quoted that day skipped: %s", label, day, len(skipped), skipped
+            )
+        parts.append(rows.loc[listed])
+        if zero_columns:
+            quiet = sorted(codes - set(rows["stock_id"]))
+            logger.info("%s %s: %d quoted stocks without rows, set to 0", label, day, len(quiet))
+            zeros = [
+                {"stock_id": code, "date": day, **dict.fromkeys(zero_columns, 0)} for code in quiet
+            ]
+            parts.append(pd.DataFrame(zeros, columns=frame.columns, dtype=object))
+    kept = [part for part in parts if not part.empty]
+    return pd.concat(kept, ignore_index=True) if kept else frame.iloc[0:0]
+
+
 def share_changes(frame: pd.DataFrame, latest: Mapping[str, int]) -> pd.DataFrame:
     """Days on which shares issued differ from the last known count, in date order."""
     known = dict(latest)

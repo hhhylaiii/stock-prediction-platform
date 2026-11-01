@@ -15,6 +15,7 @@ from apps.etl.adapters.exchange_tables import (
     check_published,
     find_table,
     is_foreign_currency_etf,
+    quoted_only,
     share_changes,
     source_rows,
     standard_rows,
@@ -40,7 +41,7 @@ from apps.etl.share_counts import drop_repeated_counts
 from apps.etl.upsert import upsert
 from apps.market.adjust import refresh_where_later_events
 from apps.market.calendar import TradingDays
-from apps.market.models import DailyPrice, IndexDaily, SharesOutstanding
+from apps.market.models import DailyChip, DailyPrice, IndexDaily, SharesOutstanding
 
 logger = logging.getLogger(__name__)
 TWSE_MIN_INTERVAL = 3.0
@@ -164,9 +165,12 @@ class TwseAdapter(BaseAdapter):
             return self._normalize_quotes(raw_df)
         if dataset == INDEX_DAILY:
             return taiex_frame(raw_df)
-        frame = standard_rows(raw_df, TABLES[dataset])
-        if dataset == INSTITUTIONAL:
-            return self._zero_quiet_stocks(frame, sorted(set(raw_df["date"])))
+        table = TABLES[dataset]
+        frame = standard_rows(raw_df, table)
+        if table.model is DailyChip:
+            quoted = {day: self._quoted_codes(day) for day in sorted(set(raw_df["date"]))}
+            zeros = tuple(table.columns) if dataset == INSTITUTIONAL else ()
+            return quoted_only(frame, quoted, f"TWSE {table.label}", zeros)
         if dataset == SHARES_OUTSTANDING:
             return share_changes(frame, self._latest_shares(min(raw_df["date"])))
         return frame
@@ -242,23 +246,6 @@ class TwseAdapter(BaseAdapter):
             raise SourceNotReadyError(f"TWSE daily quotes for {day} not available: {stat}")
         self.save_raw(DAILY_PRICE, params, payload)
         return quotes_frame(payload, day)
-
-    def _zero_quiet_stocks(self, frame: pd.DataFrame, days: list[date]) -> pd.DataFrame:
-        """T86 omits a stock with no institutional trades; one quoted that day nets 0 (SPEC §4)."""
-        quiet = []
-        for day in days:
-            reported = set(frame.loc[frame["date"] == day, "stock_id"])
-            quiet += [
-                {"stock_id": code, "date": day, **dict.fromkeys(TABLES[INSTITUTIONAL].columns, 0)}
-                for code in sorted(self._quoted_codes(day) - reported)
-            ]
-        logger.info(
-            "TWSE T86 %s: %d quoted stocks without institutional rows, nets set to 0",
-            ", ".join(str(day) for day in days),
-            len(quiet),
-        )
-        zeros = pd.DataFrame(quiet, columns=frame.columns, dtype=object)
-        return pd.concat([frame, zeros], ignore_index=True) if quiet else frame
 
     def _latest_shares(self, before: date) -> dict[str, int]:
         """The last shares_outstanding count of each stock effective before the given day."""

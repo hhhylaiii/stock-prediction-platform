@@ -189,7 +189,7 @@ def test_zero_fill_logs_how_many_stocks_it_filled(
     adapter: TwseAdapter, serve: Callable[[str], dict[str, Any]], caplog: pytest.LogCaptureFixture
 ) -> None:
     serve("institutional")
-    with caplog.at_level(logging.INFO, logger="apps.etl.adapters.twse"):
+    with caplog.at_level(logging.INFO, logger="apps.etl.adapters.exchange_tables"):
         _load(adapter, "institutional")
     assert "3 quoted stocks" in caplog.text
 
@@ -231,6 +231,7 @@ def test_institutional_waits_for_the_days_quotes(
 
 @responses.activate
 @pytest.mark.django_db
+@pytest.mark.usefixtures("quotes_loaded")
 def test_margin_lots_become_shares(
     adapter: TwseAdapter, serve: Callable[[str], dict[str, Any]]
 ) -> None:
@@ -248,6 +249,7 @@ def test_margin_lots_become_shares(
 
 @responses.activate
 @pytest.mark.django_db
+@pytest.mark.usefixtures("quotes_loaded")
 def test_margin_short_balance_in_shares_matches_twt93u(
     adapter: TwseAdapter, serve: Callable[[str], dict[str, Any]], load_fixture: Callable[[str], Any]
 ) -> None:
@@ -256,6 +258,31 @@ def test_margin_short_balance_in_shares_matches_twt93u(
     lending = load_fixture(DATASETS["sbl"][2])
     in_shares = {row[0]: int(row[6].replace(",", "")) for row in lending["data"] if row[0]}
     assert {code: row["short_balance"] for code, row in margin.items()} == in_shares
+
+
+@responses.activate
+@pytest.mark.django_db
+@pytest.mark.usefixtures("quotes_loaded")
+def test_chip_rows_of_codes_not_quoted_that_day_are_skipped(
+    adapter: TwseAdapter, serve: Callable[[str], dict[str, Any]], caplog: pytest.LogCaptureFixture
+) -> None:
+    serve("margin")
+    with caplog.at_level(logging.INFO, logger="apps.etl.adapters.exchange_tables"):
+        rows = _load(adapter, "margin")
+    assert {"009831", "1589"}.isdisjoint(rows)
+    assert "2 codes" in caplog.text
+
+
+@responses.activate
+@pytest.mark.django_db
+@pytest.mark.parametrize("dataset", ["margin", "sbl", "foreign_holding", "day_trade"])
+def test_chip_datasets_wait_for_the_days_quotes(
+    adapter: TwseAdapter, serve: Callable[[str], dict[str, Any]], dataset: str
+) -> None:
+    serve(dataset)
+    raw = adapter.fetch(dataset, DAY, DAY)
+    with pytest.raises(SourceNotReadyError, match="daily_price"):
+        adapter.normalize(dataset, raw)
 
 
 @responses.activate
@@ -272,6 +299,7 @@ def test_margin_unit_change_is_refused(
 
 @responses.activate
 @pytest.mark.django_db
+@pytest.mark.usefixtures("quotes_loaded")
 def test_sbl_reads_the_lending_balance_and_skips_the_total_row(
     adapter: TwseAdapter, serve: Callable[[str], dict[str, Any]]
 ) -> None:
@@ -283,6 +311,7 @@ def test_sbl_reads_the_lending_balance_and_skips_the_total_row(
 
 @responses.activate
 @pytest.mark.django_db
+@pytest.mark.usefixtures("quotes_loaded")
 def test_foreign_holding_keeps_percent_and_drops_foreign_currency_etf(
     adapter: TwseAdapter, serve: Callable[[str], dict[str, Any]]
 ) -> None:
@@ -296,6 +325,7 @@ def test_foreign_holding_keeps_percent_and_drops_foreign_currency_etf(
 @responses.activate
 @pytest.mark.django_db
 @pytest.mark.parametrize("edge", [0.0, 100.0])
+@pytest.mark.usefixtures("quotes_loaded")
 def test_foreign_holding_keeps_both_ends_of_the_percent_range(
     adapter: TwseAdapter, load_fixture: Callable[[str], Any], edge: float
 ) -> None:
@@ -307,6 +337,7 @@ def test_foreign_holding_keeps_both_ends_of_the_percent_range(
 
 @responses.activate
 @pytest.mark.django_db
+@pytest.mark.usefixtures("quotes_loaded")
 def test_foreign_holding_out_of_range_is_dropped_with_a_warning(
     adapter: TwseAdapter, load_fixture: Callable[[str], Any], caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -320,6 +351,7 @@ def test_foreign_holding_out_of_range_is_dropped_with_a_warning(
 
 @responses.activate
 @pytest.mark.django_db
+@pytest.mark.usefixtures("quotes_loaded")
 def test_day_trade_volume_in_shares_and_absent_stocks_stay_unknown(
     adapter: TwseAdapter, serve: Callable[[str], dict[str, Any]]
 ) -> None:
