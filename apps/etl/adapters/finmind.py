@@ -22,6 +22,7 @@ from apps.etl.adapters.finmind_datasets import (
     share_counts,
     valuations,
 )
+from apps.etl.adapters.finmind_fundamentals import monthly_revenues, statements
 from apps.etl.client import SourceClient
 from apps.etl.errors import SchemaChangedError, SourceRequestError
 from apps.etl.models import RawFinmind
@@ -34,6 +35,8 @@ from apps.market.models import (
     DailyPrice,
     DailyValuation,
     DividendEvent,
+    FinancialStatement,
+    MonthlyRevenue,
     ShareChangeReason,
     SharesOutstanding,
 )
@@ -147,6 +150,12 @@ FINMIND_DATASETS = {
         "TaiwanDailyShortSaleBalances",
         "TaiwanStockShareholding",
     ),
+    "monthly_revenue": ("TaiwanStockMonthRevenue",),
+    "financial_statement": (
+        "TaiwanStockFinancialStatements",
+        "TaiwanStockBalanceSheet",
+        "TaiwanStockCashFlowsStatement",
+    ),
 }
 RAW_NAMES = {
     "TaiwanStockDividend": "dividend_policy",
@@ -157,6 +166,9 @@ RAW_NAMES = {
     "TaiwanStockMarginPurchaseShortSale": "margin",
     "TaiwanDailyShortSaleBalances": "short_sale_balance",
     "TaiwanStockShareholding": "shareholding",
+    "TaiwanStockFinancialStatements": "income_statement",
+    "TaiwanStockBalanceSheet": "balance_sheet",
+    "TaiwanStockCashFlowsStatement": "cash_flow",
 }
 WHOLE_MARKET = frozenset({"TaiwanStockSplitPrice"})
 TRADING_DATE_COLUMNS = {
@@ -166,6 +178,10 @@ TRADING_DATE_COLUMNS = {
     "daily_chip": "date",
 }
 RECORD_DATE_LOOKAHEAD = timedelta(days=30)
+LOOKBACK = {
+    "monthly_revenue": timedelta(days=366),
+    "financial_statement": timedelta(days=366),
+}
 EVENT_FIELDS = ("cash_dividend", "stock_dividend")
 FROM_COLUMN = "_finmind_dataset"
 DROP_REPEATED_COUNTS_SQL = """
@@ -219,7 +235,7 @@ class FinmindAdapter(BaseAdapter):
                     RAW_NAMES.get(finmind_dataset, dataset),
                     finmind_dataset,
                     data_id=stock_id,
-                    start_date=start.isoformat(),
+                    start_date=(start - LOOKBACK.get(dataset, timedelta(0))).isoformat(),
                     end_date=last.isoformat(),
                 )
             rows.extend({**row, FROM_COLUMN: finmind_dataset} for row in fetched)
@@ -239,6 +255,24 @@ class FinmindAdapter(BaseAdapter):
                 end=raw_df.attrs["end"],
                 reductions=parts["TaiwanStockCapitalReductionReferencePrice"],
                 splits=parts["TaiwanStockSplitPrice"],
+            )
+        elif dataset == "monthly_revenue":
+            frame = monthly_revenues(
+                parts["TaiwanStockMonthRevenue"],
+                stock_id,
+                self.calendar,
+                raw_df.attrs["start"],
+                raw_df.attrs["end"],
+            )
+        elif dataset == "financial_statement":
+            frame = statements(
+                parts["TaiwanStockFinancialStatements"],
+                parts["TaiwanStockBalanceSheet"],
+                parts["TaiwanStockCashFlowsStatement"],
+                stock_id,
+                self.calendar,
+                raw_df.attrs["start"],
+                raw_df.attrs["end"],
             )
         elif dataset == "daily_chip":
             frame = chip_rows(
@@ -271,6 +305,11 @@ class FinmindAdapter(BaseAdapter):
             return insert_missing(DailyValuation, frame, ("stock_id", "date"))
         if dataset == "daily_chip":
             return insert_missing(DailyChip, frame, ("stock_id", "date"))
+        if dataset == "monthly_revenue":
+            return insert_missing(MonthlyRevenue, frame, ("stock_id", "period"))
+        if dataset == "financial_statement":
+            keys = ("stock_id", "period", "fin_type")
+            return insert_missing(FinancialStatement, frame, keys)
         if dataset == "shares_outstanding":
             rows = insert_missing(SharesOutstanding, frame, ("stock_id", "effective_date"))
             with connection.cursor() as cursor:
