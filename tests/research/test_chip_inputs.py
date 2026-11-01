@@ -74,14 +74,20 @@ def test_weekly_changes_go_stale_after_three_weeks() -> None:
 def test_chip_rows_join_by_stock_and_day() -> None:
     DailyChip.objects.create(stock_id="2330", date=d("2016-03-01"), fi_net=5, margin_balance=7)
     DailyChip.objects.create(stock_id="2330", date=d("2016-02-29"), fi_net=1)
-    panel = panel_of(["2016-03-01", "2016-03-02"])
+    DailyChip.objects.create(stock_id="1101", date=d("2016-03-01"), fi_net=9, margin_balance=8)
+    panel = pd.concat(
+        [panel_of(["2016-03-01", "2016-03-02"]), panel_of(["2016-03-01"]).assign(stock_id="1101")],
+        ignore_index=True,
+    )
 
     attached = attach_chips(panel, load_chips(d("2016-03-01"), d("2016-03-02")))
+    only = load_chips(d("2016-03-01"), d("2016-03-02"), ["2330"])
 
-    assert attached["fi_net"].tolist()[0] == 5.0
-    assert attached["margin_balance"].tolist()[0] == 7.0
+    assert attached["fi_net"].tolist()[::2] == [5.0, 9.0]
+    assert attached["margin_balance"].tolist()[::2] == [7.0, 8.0]
     assert attached[["fi_net", "it_net", "sbl_short_balance"]].iloc[1].isna().all()
     assert attached[["stock_id", "date"]].equals(panel)
+    assert only["stock_id"].tolist() == ["2330"]
 
 
 def test_no_holdings_give_missing_changes() -> None:
@@ -107,3 +113,17 @@ def test_a_later_load_start_gives_the_same_weekly_changes_across_a_gap() -> None
 
     pd.testing.assert_frame_equal(full, late)
     assert full["big_holder_pct_chg"].isna().tolist() == [True] * 5 + [False] * 5
+
+
+def test_weekly_changes_join_by_stock() -> None:
+    for stock_id, base in (("2330", 40.0), ("1101", 60.0)):
+        week(stock_id, "2016-02-26", base, 1_000)
+        week(stock_id, "2016-03-04", base + (1.0 if stock_id == "2330" else 5.0), 1_100)
+    days = ["2016-03-07"]
+    panel = pd.concat([panel_of(days), panel_of(days).assign(stock_id="1101")], ignore_index=True)
+
+    changes = load_holding_changes(CALENDAR, d(days[0]), d(days[0]))
+    only = load_holding_changes(CALENDAR, d(days[0]), d(days[0]), ["2330"])
+
+    assert attach_holding_changes(panel, changes)["big_holder_pct_chg"].tolist() == [1.0, 5.0]
+    assert set(only["stock_id"]) == {"2330"}

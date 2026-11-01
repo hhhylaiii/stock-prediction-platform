@@ -86,12 +86,31 @@ def test_margin_and_lending_changes_and_ratios() -> None:
 def test_balances_carry_over_halted_days() -> None:
     closes = rising(8)
     closes[2] = NAN
-    margin = [100.0, 110.0, NAN, 130.0, 140.0, 150.0, 160.0, 170.0]
-    panel = listing("2330", closes, shares=10.0).assign(**chips(8, margin_balance=margin))
+    balances = chips(
+        8,
+        margin_balance=[100.0, 110.0, NAN, 130.0, 140.0, 150.0, 160.0, 170.0],
+        margin_limit=[5_000.0, 4_000.0, NAN, *[5_000.0] * 5],
+        short_balance=[20.0, 22.0, NAN, *[20.0] * 5],
+        fi_holding_pct=[30.0, 31.0, NAN, *[30.0] * 5],
+    )
+    panel = listing("2330", closes, shares=10.0).assign(**balances)
 
     features = chip_features(panel)
 
     assert at(features, "2330", 7, "chip_margin_chg_5d") == pytest.approx((170 - 110) / 10)
+    assert at(features, "2330", 2, "chip_margin_usage") == pytest.approx(110 / 4_000)
+    assert at(features, "2330", 2, "chip_short_ratio") == pytest.approx(22 / 110)
+    assert at(features, "2330", 2, "chip_fi_holding_pct") == 31.0
+
+
+def test_a_traded_day_without_a_balance_is_not_filled() -> None:
+    margin = [100.0, 110.0, NAN, 130.0, 140.0, 150.0, 160.0, 170.0]
+    panel = listing("2330", rising(8), shares=10.0).assign(**chips(8, margin_balance=margin))
+
+    features = chip_features(panel)
+
+    assert np.isnan(at(features, "2330", 2, "chip_margin_usage"))
+    assert np.isnan(at(features, "2330", 7, "chip_margin_chg_5d"))
 
 
 def test_zero_limits_and_balances_give_missing_ratios() -> None:

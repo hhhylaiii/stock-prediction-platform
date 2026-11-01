@@ -161,18 +161,38 @@ def test_business_signal_goes_stale_after_62_days() -> None:
 
 
 @pytest.mark.django_db
-def test_loaded_taiex_returns_are_warm_from_the_first_day() -> None:
+def test_loaded_series_are_warm_from_the_first_day() -> None:
     days = list(CALENDAR.between(d("2016-03-01"), d("2016-05-03")))
+    steps = (("TAIEX", 8_000, "1"), ("USDTWD", 32, "0.1"), ("TSM_ADR", 25, "0"))
     IndexDaily.objects.bulk_create(
-        IndexDaily(index_id="TAIEX", date=day, close=Decimal(8_000 + k))
+        IndexDaily(index_id=index_id, date=day, close=base + Decimal(step) * k)
+        for index_id, base, step in steps
         for k, day in enumerate(days)
+    )
+    StockMaster.objects.create(stock_id="2330", name="2330", market="TWSE", industry="半導體業")
+    DailyPrice.objects.create(
+        stock_id="2330",
+        date=d("2016-05-02"),
+        open=1,
+        high=1,
+        low=1,
+        close=160,
+        volume=1,
+        turnover=1,
     )
 
     market = load_market_features(CALENDAR, d("2016-05-02"), d("2016-05-03"))
 
     first = days.index(d("2016-05-02"))
+    rate = 32 + 0.1 * first
     assert value(market, d("2016-05-02"), "mkt_taiex_ret_20d") == pytest.approx(
         (8_000 + first) / (8_000 + first - 20) - 1
+    )
+    assert value(market, d("2016-05-02"), "mkt_usdtwd_chg_20d") == pytest.approx(
+        rate / (32 + 0.1 * (first - 20)) - 1
+    )
+    assert value(market, d("2016-05-02"), "mkt_tsm_adr_gap") == pytest.approx(
+        25 * rate / 5 / 160 - 1
     )
 
 
