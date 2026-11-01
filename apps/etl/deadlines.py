@@ -10,7 +10,8 @@ QUARTER = re.compile(r"^(\d{4})-Q([1-4])$")
 REVENUE_DAY = 10
 REVENUE_DAY_EXTENDED = 15
 REVENUE_EXTENDED_FROM = date(2026, 1, 1)
-INTERIM_DEADLINES = {1: (5, 30), 2: (8, 31), 3: (11, 29)}
+INTERIM_DEADLINES = {1: (5, 31), 2: (8, 31), 3: (11, 30)}
+WEEKEND = 5
 ANNUAL_DEADLINE = (3, 31)
 ANNUAL_DEADLINE_BEFORE_2011 = (4, 30)
 THREE_MONTH_ANNUAL_FROM = 2011
@@ -28,7 +29,7 @@ def revenue_deadline(period: str) -> date:
 
 
 def statement_deadline(period: str) -> date:
-    """Latest legal deadline of any listed issuer; annual reports took 4 months before FY2011."""
+    """End of the second month for Q1–Q3 (latest issuer); annual took 4 months before FY2011."""
     found = QUARTER.match(period)
     if found is None:
         raise ValueError(f"bad quarter period {period!r}")
@@ -39,8 +40,18 @@ def statement_deadline(period: str) -> date:
     return date(year + 1, *annual)
 
 
-def visible_from(deadline: date, calendar: TradingDays) -> date:
-    """Trading day after the deadline, which itself moves past non-trading days."""
+def visible_from(deadline: date, calendar: TradingDays, extension: int = 0) -> date:
+    """Trading day after the deadline, which moves past non-trading days and extension sessions."""
     base = calendar.latest_on_or_before(deadline)
     effective = base if base == deadline else calendar.shift(base, 1)
-    return calendar.shift(effective, 1)
+    return calendar.shift(effective, extension + 1)
+
+
+def revenue_visible_from(period: str, calendar: TradingDays) -> date:
+    """FSC extends the deadline after early-month holidays; one session per closed weekday."""
+    deadline = revenue_deadline(period)
+    window = (deadline.replace(day=day) for day in range(1, deadline.day))
+    closed = sum(
+        1 for day in window if day.weekday() < WEEKEND and not calendar.is_trading_day(day)
+    )
+    return visible_from(deadline, calendar, closed)

@@ -2,7 +2,12 @@ from datetime import date, timedelta
 
 import pytest
 
-from apps.etl.deadlines import revenue_deadline, statement_deadline, visible_from
+from apps.etl.deadlines import (
+    revenue_deadline,
+    revenue_visible_from,
+    statement_deadline,
+    visible_from,
+)
 from apps.market.calendar import TradingDays
 
 HOLIDAYS = {date(2024, 4, 4), date(2024, 4, 5)}
@@ -35,13 +40,13 @@ def test_revenue_is_due_on_the_10th_and_the_15th_from_2026(period: str, deadline
 @pytest.mark.parametrize(
     ("period", "deadline"),
     [
-        ("2024-Q1", date(2024, 5, 30)),
+        ("2024-Q1", date(2024, 5, 31)),
         ("2024-Q2", date(2024, 8, 31)),
-        ("2024-Q3", date(2024, 11, 29)),
+        ("2024-Q3", date(2024, 11, 30)),
         ("2024-Q4", date(2025, 3, 31)),
         ("2011-Q4", date(2012, 3, 31)),
         ("2010-Q4", date(2011, 4, 30)),
-        ("2012-Q1", date(2012, 5, 30)),
+        ("2012-Q1", date(2012, 5, 31)),
     ],
 )
 def test_statements_take_the_latest_deadline_of_any_issuer(period: str, deadline: date) -> None:
@@ -67,3 +72,53 @@ def test_data_is_visible_the_trading_day_after_the_effective_deadline(
     deadline: date, visible: date
 ) -> None:
     assert visible_from(deadline, DAYS) == visible
+
+
+CLOSURES = {
+    date(2019, 2, 1),
+    *(date(2019, 2, d) for d in range(4, 9)),
+    date(2022, 1, 27),
+    date(2022, 1, 28),
+    date(2022, 1, 31),
+    *(date(2022, 2, d) for d in range(1, 5)),
+    *(date(2023, 4, d) for d in range(3, 6)),
+    date(2024, 10, 10),
+}
+SESSIONS = TradingDays(
+    (
+        date(2019, 1, 1) + timedelta(days=n)
+        for n in range(2200)
+        if (date(2019, 1, 1) + timedelta(days=n)).weekday() < 5
+        and date(2019, 1, 1) + timedelta(days=n) not in CLOSURES
+    ),
+    date(2019, 1, 1),
+    date(2025, 1, 31),
+)
+
+
+@pytest.mark.parametrize(
+    ("period", "announced_deadline"),
+    [
+        ("2019-01", date(2019, 2, 15)),
+        ("2022-01", date(2022, 2, 14)),
+        ("2023-03", date(2023, 4, 12)),
+    ],
+)
+def test_revenue_stays_hidden_through_every_announced_extension(
+    period: str, announced_deadline: date
+) -> None:
+    assert revenue_visible_from(period, SESSIONS) > announced_deadline
+
+
+@pytest.mark.parametrize(
+    ("period", "visible"),
+    [
+        ("2023-03", date(2023, 4, 14)),
+        ("2024-09", date(2024, 10, 14)),
+        ("2024-05", date(2024, 6, 11)),
+    ],
+)
+def test_holidays_before_the_10th_push_revenue_back_by_as_many_sessions(
+    period: str, visible: date
+) -> None:
+    assert revenue_visible_from(period, SESSIONS) == visible
