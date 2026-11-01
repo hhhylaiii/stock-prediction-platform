@@ -46,25 +46,28 @@ def write_features(frame: pd.DataFrame, start: date, end: date) -> int:
         )
 
 
-def _read_year(year: int) -> pd.DataFrame:
+def read_features(start: date, end: date) -> pd.DataFrame:
+    """feature_daily rows dated in [start, end], read a month at a time."""
     parts = []
-    for month in range(1, 13):
-        first = date(year, month, 1)
-        after = date(year + month // 12, month % 12 + 1, 1)
-        rows = FeatureDaily.objects.filter(date__gte=first, date__lt=after)
+    first = date(start.year, start.month, 1)
+    while first <= end:
+        after = date(first.year + first.month // 12, first.month % 12 + 1, 1)
+        rows = FeatureDaily.objects.filter(
+            date__gte=max(first, start), date__lt=after, date__lte=end
+        )
         listed = list(rows.order_by("date", "stock_id").values_list(*FRAME_COLUMNS))
         if listed:
             parts.append(pd.DataFrame(listed, columns=FRAME_COLUMNS))
+        first = after
     if not parts:
-        return pd.DataFrame(columns=FRAME_COLUMNS)
-    frame = pd.concat(parts, ignore_index=True)
-    return frame.astype(FRAME_TYPES)
+        return pd.DataFrame(columns=FRAME_COLUMNS).astype(FRAME_TYPES)
+    return pd.concat(parts, ignore_index=True).astype(FRAME_TYPES)
 
 
 def export_year(year: int, directory: Path) -> Path | None:
     """Rewrite one year's partition from feature_daily; a year without rows has no partition."""
     target = directory / f"year={year}" / PARTITION_FILE
-    frame = _read_year(year)
+    frame = read_features(date(year, 1, 1), date(year, 12, 31))
     if frame.empty:
         shutil.rmtree(target.parent, ignore_errors=True)
         return None
