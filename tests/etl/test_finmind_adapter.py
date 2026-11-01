@@ -459,3 +459,21 @@ def test_shareholding_fetched_for_shares_and_chips_is_stored_once(
     _backfill("daily_chip", "2330", OCTOBER)
     _backfill("shares_outstanding", "2330", OCTOBER)
     assert RawFinmind.objects.filter(dataset="shareholding").count() == 1
+
+
+@responses.activate
+def test_chip_dates_missing_from_the_calendar_reject_the_batch(
+    mock: Callable[..., None], load_fixture: Callable[[str], Any]
+) -> None:
+    rows = load_fixture("finmind/shareholding_2884_2013q3.json")["data"]
+    for dataset in (
+        "TaiwanStockInstitutionalInvestorsBuySell",
+        "TaiwanStockMarginPurchaseShortSale",
+        "TaiwanDailyShortSaleBalances",
+    ):
+        mock(dataset, "inst_2330_202610", "2884", AUGUST, data=[])
+    odd = [*rows, {**rows[-1], "date": "2013-08-17"}]
+    mock("TaiwanStockShareholding", "shareholding_2884_2013q3", "2884", AUGUST, data=odd)
+    with pytest.raises(CommandError, match="2013-08-17 is not a trading day"):
+        _backfill("daily_chip", "2884", AUGUST)
+    assert DailyChip.objects.count() == 0
