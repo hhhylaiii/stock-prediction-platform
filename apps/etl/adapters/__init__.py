@@ -5,6 +5,7 @@ from functools import cache
 from django.conf import settings
 
 from apps.etl.adapters.base import BaseAdapter
+from apps.etl.adapters.datagov import DatagovAdapter
 from apps.etl.adapters.finmind import FinmindAdapter
 from apps.etl.adapters.tdcc import TdccAdapter
 from apps.etl.adapters.tpex import TpexAdapter
@@ -19,6 +20,7 @@ ADAPTERS: dict[str, type[BaseAdapter]] = {
     FinmindAdapter.source: FinmindAdapter,
     TdccAdapter.source: TdccAdapter,
     YahooAdapter.source: YahooAdapter,
+    DatagovAdapter.source: DatagovAdapter,
 }
 
 
