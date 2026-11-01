@@ -90,6 +90,30 @@ def test_attention_of_2010(adapter_2010: TpexAdapter, load_fixture: Callable[[st
 
 @responses.activate
 @pytest.mark.django_db
+def test_attention_month_accepts_every_trading_day_in_it(
+    adapter: TpexAdapter, load_fixture: Callable[[str], Any]
+) -> None:
+    responses.post(ATTENTION, json=load_fixture("tpex/disposition/attention_20261028_30.json"))
+    events = _events(adapter, "attention", *OCTOBER)
+    assert (_sent(0)["startDate"], _sent(0)["endDate"]) == ("2026/10/01", "2026/10/30")
+    assert ("1569", DAY, "attention", DAY) in events
+    assert len(events) == 6
+
+
+@responses.activate
+@pytest.mark.django_db
+def test_attention_on_a_non_trading_day_is_a_schema_change(
+    adapter: TpexAdapter, load_fixture: Callable[[str], Any]
+) -> None:
+    payload = load_fixture("tpex/disposition/attention_20261028_30.json")
+    payload["tables"][0]["data"][0][5] = "115/10/24"
+    responses.post(ATTENTION, json=payload)
+    with pytest.raises(SchemaChangedError, match="2026-10-24"):
+        adapter.fetch("attention", *OCTOBER)
+
+
+@responses.activate
+@pytest.mark.django_db
 def test_attention_outside_the_query_is_a_schema_change(
     adapter: TpexAdapter, load_fixture: Callable[[str], Any]
 ) -> None:

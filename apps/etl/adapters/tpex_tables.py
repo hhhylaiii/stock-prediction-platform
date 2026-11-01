@@ -1,6 +1,6 @@
 """TPEx-specific tables and checks on top of the shared exchange table parsing (SPEC §8.6)."""
 
-from collections.abc import Hashable, Mapping
+from collections.abc import Hashable, Mapping, Sequence
 from datetime import date
 from typing import Any
 
@@ -177,10 +177,10 @@ def index_frame(raw_df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(records, columns=INDEX_COLUMNS, dtype=object)
 
 
-def attention_events(payload: dict[str, Any], window: tuple[date, date]) -> list[dict[str, Any]]:
+def attention_events(payload: dict[str, Any], sessions: Sequence[date]) -> list[dict[str, Any]]:
     table = find_table(payload, ATTENTION_TITLE)
     records = list_rows(table, "TPEx attention", ATTENTION_FIELDS)
-    return announced_events(records, ATTENTION_FIELDS, "TPEx attention", window)
+    return announced_events(records, ATTENTION_FIELDS, "TPEx attention", sessions)
 
 
 def disposal_events(payload: dict[str, Any], window: tuple[date, date]) -> list[dict[str, Any]]:

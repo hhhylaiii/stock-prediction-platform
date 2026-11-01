@@ -209,9 +209,8 @@ class TpexAdapter(BaseAdapter):
         if dataset == ATTENTION:
             window = (previous_session(self.calendar, first), last)
             form = {**_range_form(*window), **WHOLE_MARKET, "order": "date", "response": "json"}
-            return event_frame(
-                attention_events(self._answered(dataset, ATTENTION_PATH, form), window)
-            )
+            payload = self._answered(dataset, ATTENTION_PATH, form)
+            return event_frame(attention_events(payload, self.calendar.between(*window)))
         if dataset == DISPOSITION:
             form = {
                 **_range_form(first, last),

@@ -72,18 +72,21 @@ def announced_events(
     records: Iterable[Mapping[str, Any]],
     fields: tuple[str, str],
     label: str,
-    window: tuple[date, date],
+    sessions: Sequence[date],
 ) -> list[dict[str, Any]]:
-    """One-day attention events of rows announced inside the queried window."""
+    """One-day attention events; each must be announced on a trading day of the query."""
     code_field, date_field = fields
+    allowed = set(sessions)
     events = []
     for record in records:
         code = listed_code(record, code_field, label)
         if code is None:
             continue
         day = parse_roc_date(str(record[date_field]))
-        if not window[0] <= day <= window[1]:
-            raise SchemaChangedError(f"{label} lists {code} on {day}, outside {window}")
+        if day not in allowed:
+            raise SchemaChangedError(
+                f"{label} lists {code} on {day}, not a trading day of {sessions[0]}..{sessions[-1]}"
+            )
         events.append(_event(code, day, ATTENTION, day, day))
     return events
 
@@ -94,7 +97,7 @@ def period_events(
     label: str,
     window: tuple[date, date],
 ) -> list[dict[str, Any]]:
-    """Disposition periods overlapping the queried window, with their announcement day."""
+    """Periods overlapping the window or announced in it, with their announcement day."""
     code_field, announced_field, period_field = fields
     events = []
     for record in records:
@@ -102,11 +105,12 @@ def period_events(
         if code is None:
             continue
         first, last = disposition_period(str(record[period_field]))
-        if last < window[0] or first > window[1]:
+        announced = parse_roc_date(str(record[announced_field]))
+        outside = last < window[0] or first > window[1]
+        if outside and not window[0] <= announced <= window[1]:
             raise SchemaChangedError(
                 f"{label} lists {code} for {first}..{last}, outside {window[0]}..{window[1]}"
             )
-        announced = parse_roc_date(str(record[announced_field]))
         events.append(_event(code, first, DISPOSITION, last, announced))
     return events
 

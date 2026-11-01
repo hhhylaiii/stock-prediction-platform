@@ -252,7 +252,8 @@ class TwseAdapter(BaseAdapter):
         if payload is None:
             return event_frame([])
         records = list_rows(payload, "TWSE notice", NOTICE_FIELDS)
-        return event_frame(announced_events(records, NOTICE_FIELDS, "TWSE notice", window))
+        sessions = self.calendar.between(*window)
+        return event_frame(announced_events(records, NOTICE_FIELDS, "TWSE notice", sessions))
 
     def _fetch_disposition(self, first: date, last: date) -> pd.DataFrame:
         """Disposition periods overlapping the span; TWSE matches on the period itself."""
