@@ -21,6 +21,7 @@ from apps.research.metrics.forecast import (
     mean_by_fold,
     pinball_loss,
     reliability_table,
+    research_rows,
     shared_rows,
 )
 from apps.research.walkforward import generate_folds
@@ -202,9 +203,11 @@ def test_daily_auc_counts_ordered_pairs_and_half_ties() -> None:
 
 def test_daily_auc_skips_one_sided_and_thin_days() -> None:
     one_sided = pd.DataFrame({"date": [D1] * 4, "up": [1] * 4, "prob": [0.1, 0.2, 0.3, 0.4]})
+    none_up = one_sided.assign(up=0)
     thin = pd.DataFrame({"date": [D2] * 29, "up": [1, 0] * 14 + [1], "prob": np.linspace(0, 1, 29)})
 
     assert daily_auc(one_sided, "up", "prob", min_stocks=4).empty
+    assert daily_auc(none_up, "up", "prob", min_stocks=4).empty
     assert daily_auc(thin, "up", "prob").empty
     assert len(daily_auc(pd.concat([thin, thin.head(1)]), "up", "prob")) == 1
 
@@ -279,3 +282,15 @@ def test_shared_rows_keep_rows_every_compared_column_scores() -> None:
     kept = shared_rows(frame, ["y", "model", "base"])
 
     assert kept.index.tolist() == [0]
+
+
+def test_research_rows_keep_research_folds_through_eval_end(long_calendar: TradingDays) -> None:
+    folds = generate_folds(long_calendar, date(2026, 10, 30))
+    trimmed = next(fold for fold in folds if fold.research and fold.eval_end < fold.test_end)
+    tuning = next(fold for fold in folds if fold.tuning)
+    days = [trimmed.test_start, trimmed.eval_end, trimmed.test_end, tuning.test_start]
+    frame = pd.DataFrame({"date": days, "up": [1, 0, 1, 0], "prob": [0.9, 0.1, 0.5, 0.5]})
+
+    kept = research_rows(frame, folds)
+
+    assert kept["date"].tolist() == [trimmed.test_start, trimmed.eval_end]

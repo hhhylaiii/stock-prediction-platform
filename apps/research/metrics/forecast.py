@@ -30,6 +30,16 @@ def shared_rows(frame: pd.DataFrame, columns: Sequence[str]) -> pd.DataFrame:
     return frame.loc[frame[list(columns)].notna().all(axis=1)]
 
 
+def research_rows(frame: pd.DataFrame, folds: Iterable[Fold]) -> pd.DataFrame:
+    """Rows dated inside a research fold's test_start..eval_end, for metrics pooled over rows."""
+    days = frame[DATE]
+    keep = pd.Series(False, index=frame.index)
+    for fold in folds:
+        if fold.research:
+            keep |= (days >= fold.test_start) & (days <= fold.eval_end)
+    return frame.loc[keep]
+
+
 def _by_day(rows: pd.DataFrame, values: npt.ArrayLike, name: str) -> pd.Series:
     series = pd.Series(np.asarray(values, dtype=np.float64), index=rows[DATE].to_numpy())
     return series.groupby(level=0, sort=True).mean().rename(name).rename_axis(DATE)
