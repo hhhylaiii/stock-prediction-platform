@@ -19,7 +19,7 @@ from apps.etl.catchup import (
     rows_present,
     select_jobs,
 )
-from apps.etl.models import DataQualityLog, EtlRun
+from apps.etl.models import DataQualityLog, EtlRun, RawTwse
 from apps.market.calendar import TradingDays
 from apps.market.models import DailyChip, DailyPrice, SharesOutstanding, StockMaster
 
@@ -187,6 +187,21 @@ def test_shares_caught_up_late_rebuild_the_later_days_from_raw(
         SharesOutstanding.objects.filter(stock_id="2330").values_list("effective_date", "shares")
     )
     assert counts == {DAYS[0]: original[DAYS[0]], DAYS[1]: 99000, DAYS[2]: original[DAYS[0]]}
+
+
+@responses.activate
+def test_a_later_day_without_raw_is_reported_as_a_failed_rebuild(
+    october_2026_in_db: TradingDays, load_fixture: Callable[[str], Any]
+) -> None:
+    payload = load_fixture(SHARES)
+    for day in DAYS:
+        _serve(MI_QFIIS, payload, day, selectType="ALLBUT0999")
+    call_command("fetch", source="twse", dataset="shares_outstanding", date="2026-10-29")
+    RawTwse.objects.all().delete()
+    report = catch_up(DAYS[0], DAYS[1], october_2026_in_db, [SHARE_JOB])
+    assert report.written == {"twse/shares_outstanding": ["2026-10-27", "2026-10-28"]}
+    assert report.rebuilt == {}
+    assert list(report.failed) == ["twse/shares_outstanding rebuild 2026-10-28..2026-10-29"]
 
 
 def test_catchup_command_prints_the_report(capsys: pytest.CaptureFixture[str]) -> None:

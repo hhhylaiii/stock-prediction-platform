@@ -225,6 +225,8 @@ def _rebuild_after(
         try:
             reprocess(job.source, job.dataset, span[0], span[-1], calendar)
         except (SourceError, RetryableError) as exc:
-            return rebuilt, {f"{job.key} rebuild {span[0]}": f"{type(exc).__name__}: {exc}"}
+            return rebuilt, {
+                f"{job.key} rebuild {span[0]}..{span[-1]}": f"{type(exc).__name__}: {exc}"
+            }
         rebuilt.extend(span)
     return rebuilt, {}
