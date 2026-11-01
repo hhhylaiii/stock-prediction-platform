@@ -8,9 +8,9 @@ from django.conf import settings
 
 from apps.etl.client import SourceClient
 from apps.etl.errors import SchemaChangedError
+from apps.etl.exchange_rows import TPEX_LAYOUT, OfficialDay, official_days
 from apps.etl.models import RawTpex
 from apps.etl.ratelimit import RateLimiter
-from apps.etl.roc import days_in_month
 
 TPEX_MIN_INTERVAL = 3.0
 DELISTED_PATH = "/www/zh-tw/company/deListed"
@@ -68,6 +68,10 @@ class TpexClient(SourceClient):
 
     def stock_month(self, stock_id: str, month: date) -> list[date]:
         """Days one stock traded on TPEx in a month (個股日成交資訊); empty before listing."""
+        return [official.day for official in self.stock_days(stock_id, month)]
+
+    def stock_days(self, stock_id: str, month: date) -> list[OfficialDay]:
+        """個股日成交資訊 rows of one stock and month; volume arrives in thousands of shares."""
         form = {"code": stock_id, "date": f"{month:%Y/%m}/01", "response": "json"}
         payload = self.post_json(TRADING_STOCK_PATH, form)
         self.save_raw("trading_stock", form, payload)
@@ -76,7 +80,10 @@ class TpexClient(SourceClient):
         tables = payload.get("tables")
         if not isinstance(tables, list) or not tables or not isinstance(tables[0], dict):
             raise SchemaChangedError("TPEx stock month has no table")
-        return days_in_month(tables[0].get("data"), month, "TPEx stock month")
+        table = tables[0]
+        return official_days(
+            table.get("data"), table.get("fields"), month, "TPEx stock month", TPEX_LAYOUT
+        )
 
     @staticmethod
     def _first_table(payload: dict[str, Any]) -> dict[str, Any]:
