@@ -9,9 +9,12 @@ import pandas as pd
 
 from apps.market.calendar import OutsideCalendarError, TradingDays
 from apps.market.models import IndexDaily, IndexId, Market, SharesOutstanding
+from apps.research.features.common import FILL_LIMIT
+from apps.research.features.size_risk import BETA_DAYS
+from apps.research.features.technical import MOMENTUM_DAYS, YEAR_DAYS
 from apps.research.universe import load_universe_panel
 
-FEATURE_WARMUP = 251
+FEATURE_WARMUP = max(MOMENTUM_DAYS, YEAR_DAYS, BETA_DAYS) + FILL_LIMIT + 1
 INDEX_OF_MARKET: Mapping[str, str] = MappingProxyType(
     {Market.TWSE.value: IndexId.TAIEX.value, Market.TPEX.value: IndexId.TPEX.value}
 )
@@ -27,8 +30,18 @@ def load_shares(end: date, stock_ids: Sequence[str] | None = None) -> pd.DataFra
     return pd.DataFrame(list(rows.values_list(*SHARE_COLUMNS)), columns=SHARE_COLUMNS)
 
 
-def attach_shares(panel: pd.DataFrame, shares: pd.DataFrame) -> pd.DataFrame:
-    """New panel with the shares in effect on each row's date; NaN before the first row."""
+def segment_starts(panel: pd.DataFrame, calendar: TradingDays) -> pd.Series:
+    """First trading day of the listing for rows of a reused code (segment 2 on); NaT otherwise."""
+    later = panel["segment"] > 1
+    days, ages = panel.loc[later, "date"].tolist(), panel.loc[later, "age"].astype(int).tolist()
+    firsts = [pd.Timestamp(calendar.shift(day, -age)) for day, age in zip(days, ages, strict=True)]
+    starts = pd.Series(pd.NaT, index=panel.index, dtype="datetime64[ns]")
+    starts[later] = firsts
+    return starts
+
+
+def attach_shares(panel: pd.DataFrame, shares: pd.DataFrame, calendar: TradingDays) -> pd.DataFrame:
+    """New panel with the shares in effect on each row's date, from the row's own listing only."""
     if shares.empty or panel.empty:
         return panel.assign(shares=np.nan)
     left = pd.DataFrame(
@@ -42,11 +55,14 @@ def attach_shares(panel: pd.DataFrame, shares: pd.DataFrame) -> pd.DataFrame:
         {
             "stock_id": shares["stock_id"].to_numpy(),
             "on": pd.to_datetime(shares["effective_date"]),
+            "effective": pd.to_datetime(shares["effective_date"]),
             "shares": shares["shares"].astype("float64").to_numpy(),
         }
     ).sort_values("on")
     merged = pd.merge_asof(left, right, on="on", by="stock_id", direction="backward")
-    return panel.assign(shares=merged.sort_values("row")["shares"].to_numpy())
+    merged = merged.sort_values("row")
+    earlier = merged["effective"].to_numpy() < segment_starts(panel, calendar).to_numpy()
+    return panel.assign(shares=merged["shares"].mask(earlier).to_numpy())
 
 
 def load_index_returns(calendar: TradingDays, start: date, end: date) -> pd.DataFrame:
@@ -86,10 +102,12 @@ def load_feature_panel(
     calendar: TradingDays, start: date, end: date, stock_ids: Sequence[str] | None = None
 ) -> pd.DataFrame:
     """Universe panel from FEATURE_WARMUP days before start, with shares and index returns."""
+    days = calendar.between(max(start, calendar.start), min(end, calendar.end))
+    warm_start = days[0] if days else start
     try:
-        warm_start = calendar.shift(calendar.latest_on_or_before(start), -FEATURE_WARMUP)
+        warm_start = calendar.shift(warm_start, -FEATURE_WARMUP) if days else warm_start
     except OutsideCalendarError:
         warm_start = calendar.start
     panel = load_universe_panel(calendar, warm_start, end, stock_ids)
-    with_shares = attach_shares(panel, load_shares(end, stock_ids))
+    with_shares = attach_shares(panel, load_shares(end, stock_ids), calendar)
     return attach_market_returns(with_shares, load_index_returns(calendar, warm_start, end))

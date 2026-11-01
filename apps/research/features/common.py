@@ -5,7 +5,10 @@ from collections.abc import Mapping, Sequence
 
 import pandas as pd
 
+from apps.research.panel import REUSE_GAP
+
 ANNUAL_ROOT = math.sqrt(252)
+FILL_LIMIT = REUSE_GAP
 LISTING = ["stock_id", "segment"]
 
 
@@ -33,9 +36,14 @@ def ewm_mean(values: pd.Series, panel: pd.DataFrame, alpha: float) -> pd.Series:
     return result.droplevel(list(range(len(LISTING)))).reindex(values.index)
 
 
+def carried(values: pd.Series, panel: pd.DataFrame) -> pd.Series:
+    """Values carried over at most FILL_LIMIT empty rows, so the load start never matters."""
+    return values.groupby(_keys(panel), sort=False).ffill(limit=FILL_LIMIT)
+
+
 def filled_close(panel: pd.DataFrame) -> pd.Series:
-    """Adjusted close carried over halted days within the listing."""
-    return panel["adj_close"].groupby(_keys(panel), sort=False).ffill()
+    """Adjusted close carried over days without a close within the listing."""
+    return carried(panel["adj_close"], panel)
 
 
 def flat_returns(close: pd.Series, panel: pd.DataFrame) -> pd.Series:

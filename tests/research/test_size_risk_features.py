@@ -80,6 +80,22 @@ def test_amihud_skips_days_without_turnover() -> None:
     assert math.isnan(at(features, "2330", 0, "liq_amihud_20d"))
 
 
+def test_amihud_averages_the_last_twenty_rows_and_skips_days_without_a_close() -> None:
+    closes = [100.0 * 1.01**k for k in range(25)]
+    turnover = [1e6] * 25
+    turnover[4], turnover[5] = 1e3, 1e5
+    panel = listing("2330", closes, turnover=turnover).assign(
+        close=lambda frame: frame["close"].mask(frame.index == 7)
+    )
+    steps = pd.Series(closes) / pd.Series(closes).shift(1) - 1
+
+    features = size_liquidity_features(panel)
+
+    kept = [k for k in range(5, 25) if k != 7]
+    expected = np.mean([steps[k] / turnover[k] for k in kept])
+    assert at(features, "2330", 24, "liq_amihud_20d") == pytest.approx(expected)
+
+
 def test_beta_and_idiosyncratic_volatility_match_least_squares() -> None:
     moves = market_moves(320)
     closes = tracking(moves, 1.4, noise=0.006)

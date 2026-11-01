@@ -8,6 +8,7 @@ import pandas as pd
 
 from apps.research.features.common import (
     ANNUAL_ROOT,
+    carried,
     feature_frame,
     filled_close,
     flat_returns,
@@ -43,9 +44,9 @@ def canonical_industry(industry: pd.Series) -> pd.Series:
 def size_liquidity_features(panel: pd.DataFrame) -> pd.DataFrame:
     """Market cap from the raw close, the universe's median turnover and Amihud illiquidity."""
     require_sorted(panel)
-    raw_close = panel["close"].groupby([panel["stock_id"], panel["segment"]], sort=False).ffill()
+    raw_close = carried(panel["close"], panel)
     cap = raw_close * panel["shares"]
-    turnover = panel["turnover"].where(panel["has_bar"].astype(bool))
+    turnover = panel["turnover"].where(panel["has_bar"].astype(bool) & panel["close"].notna())
     impact = flat_returns(filled_close(panel), panel).abs() / turnover.where(turnover > 0)
     columns = {
         "size_log_mcap": pd.Series(np.log(cap.where(cap > 0)), index=panel.index),
@@ -75,7 +76,10 @@ def _regression(
 
 
 def industry_risk_features(panel: pd.DataFrame) -> pd.DataFrame:
-    """Beta and residual volatility against the stock's market index, and industry returns."""
+    """Beta and residual volatility against the market index, and industry returns.
+
+    Industry averages need the day's whole cross-section, so split loads by date, not by stock.
+    """
     require_sorted(panel)
     stock = panel["adj_close"] / shifted(panel["adj_close"], panel, 1) - 1
     beta, _ = _regression(stock, panel["market_ret"], panel, BETA_DAYS, MIN_BETA_PAIRS)

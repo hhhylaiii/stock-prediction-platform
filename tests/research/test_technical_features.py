@@ -1,10 +1,13 @@
 import math
+from datetime import date
 
 import numpy as np
 import pandas as pd
 import pytest
 
+from apps.research.features.inputs import FEATURE_WARMUP
 from apps.research.features.registry import Group, feature_names
+from apps.research.features.size_risk import size_liquidity_features
 from apps.research.features.technical import technical_features
 from tests.research.feature_panels import at, listing, rising
 
@@ -204,16 +207,29 @@ def test_windows_stay_inside_one_listing() -> None:
     assert second["tech_ret_5d"].iloc[5] == pytest.approx(0.0)
 
 
-def test_later_load_start_gives_the_same_values() -> None:
-    closes = wavy(400)
-    full = technical_features(listing("2330", closes))
-    late = technical_features(listing("2330", closes[100:], start=full["date"][100]))
+def test_later_load_start_gives_the_same_values_across_a_long_halt() -> None:
+    start = 300
+    closes = wavy(start + FEATURE_WARMUP + 100)
+    closes[start - 10 : start + 290] = [NAN] * 300
+    full_panel = listing("2330", closes, start=date(2012, 1, 2))
+    late_panel = listing("2330", closes[start:], start=full_panel["date"][start])
 
-    pd.testing.assert_frame_equal(
-        full.iloc[360:].reset_index(drop=True),
-        late.iloc[260:].reset_index(drop=True),
-        rtol=1e-6,
-    )
+    for build in (technical_features, size_liquidity_features):
+        full, late = build(full_panel), build(late_panel)
+        pd.testing.assert_frame_equal(
+            full.iloc[start + FEATURE_WARMUP :].reset_index(drop=True),
+            late.iloc[FEATURE_WARMUP:].reset_index(drop=True),
+            rtol=1e-6,
+        )
+
+
+def test_limit_counts_cover_exactly_twenty_rows() -> None:
+    limit_up = [k in (9, 10) for k in range(30)]
+
+    features = technical_features(listing("2330", rising(30), limit_up_close=limit_up))
+
+    assert at(features, "2330", 29, "tech_limit_up_cnt_20d") == 1.0
+    assert at(features, "2330", 28, "tech_limit_up_cnt_20d") == 2.0
 
 
 def test_unsorted_panel_is_refused() -> None:

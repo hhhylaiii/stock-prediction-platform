@@ -6,7 +6,7 @@ import pandas as pd
 
 from tests.research.conftest import weekday_calendar
 
-CALENDAR = weekday_calendar(date(2014, 1, 1), date(2016, 12, 31))
+CALENDAR = weekday_calendar(date(2012, 1, 1), date(2016, 12, 31))
 
 
 def listing(
