@@ -5,6 +5,7 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
 from urllib.parse import parse_qs, urlparse
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import pytest
@@ -57,6 +58,22 @@ def _by_date(frame: pd.DataFrame) -> dict[date, Any]:
     return dict(zip(frame["date"], frame["close"], strict=True))
 
 
+def _on(frame: pd.DataFrame, day: date) -> dict[str, Any]:
+    (row,) = (row for row in frame.to_dict("records") if row["date"] == day)
+    return {str(key): value for key, value in row.items()}
+
+
+def _session(payload: dict[str, Any], day: date) -> dict[str, Any]:
+    """The payload as Yahoo would send it while the bar dated day is the current session."""
+    result = _result(payload)
+    zone = ZoneInfo(result["meta"]["exchangeTimezoneName"])
+    stamp = next(
+        stamp for stamp in result["timestamp"] if datetime.fromtimestamp(stamp, zone).date() == day
+    )
+    result["meta"]["currentTradingPeriod"]["regular"].update(start=stamp, end=stamp + 86340)
+    return payload
+
+
 def _sent() -> dict[str, str]:
     query = urlparse(responses.calls[0].request.url or "").query
     return {key: values[0] for key, values in parse_qs(query).items()}
@@ -69,7 +86,7 @@ def test_fetch_asks_for_daily_bars_around_the_day_and_keeps_raw(
 ) -> None:
     payload = _payload(load_fixture, "sox")
     _closes(adapter, payload)
-    first = int(datetime(2026, 10, 27, tzinfo=UTC).timestamp())
+    first = int(datetime(2026, 10, 19, tzinfo=UTC).timestamp())
     last = int(datetime(2026, 10, 30, tzinfo=UTC).timestamp())
     assert _sent() == {"interval": "1d", "period1": str(first), "period2": str(last)}
     raw = RawYahoo.objects.get()
@@ -95,19 +112,30 @@ def test_each_series_keeps_its_close_at_the_published_precision(
     volume: int | None,
 ) -> None:
     frame = _closes(adapter, _payload(load_fixture, dataset), dataset)
-    assert frame.to_dict("records") == [
-        {"index_id": SERIES[dataset][2], "date": DAY, "close": close, "volume": volume}
-    ]
+    assert _on(frame, DAY) == {
+        "index_id": SERIES[dataset][2],
+        "date": DAY,
+        "close": close,
+        "volume": volume,
+    }
 
 
 @responses.activate
 @pytest.mark.django_db
-def test_days_taiwan_was_closed_are_written_with_the_next_session(
+def test_a_day_rewrites_the_last_five_sessions_and_the_days_taiwan_was_closed(
     adapter: YahooAdapter, load_fixture: Callable[[str], Any]
 ) -> None:
     day = date(2026, 10, 27)
     frame = _closes(adapter, _payload(load_fixture, "sox"), "sox", day, day)
-    assert list(frame["date"]) == [date(2026, 10, 23), date(2026, 10, 26), day]
+    assert list(frame["date"]) == [
+        date(2026, 10, 19),
+        date(2026, 10, 20),
+        date(2026, 10, 21),
+        date(2026, 10, 22),
+        date(2026, 10, 23),
+        date(2026, 10, 26),
+        day,
+    ]
 
 
 @responses.activate
@@ -117,10 +145,8 @@ def test_dates_stay_on_the_exchange_calendar(
 ) -> None:
     day = date(2026, 10, 12)
     frame = _closes(adapter, _payload(load_fixture, "usdtwd"), "usdtwd", day, day)
-    assert _by_date(frame) == {
-        date(2026, 10, 9): Decimal("31.9254"),
-        date(2026, 10, 12): Decimal("31.9161"),
-    }
+    closes = _by_date(frame)
+    assert (closes[date(2026, 10, 9)], closes[day]) == (Decimal("31.9254"), Decimal("31.9161"))
 
 
 @responses.activate
@@ -165,7 +191,8 @@ def test_a_bar_without_a_close_is_skipped_with_a_warning(
         quote[field][index] = None
     with caplog.at_level(logging.WARNING, logger="apps.etl.adapters.yahoo"):
         frame = _closes(adapter, payload, "usdtwd", start=date(2026, 10, 27))
-    assert list(frame["date"]) == [date(2026, 10, 23), date(2026, 10, 26), date(2026, 10, 27)]
+    assert DAY not in set(frame["date"])
+    assert date(2026, 10, 27) in set(frame["date"])
     assert "no close" in caplog.text
 
 
@@ -180,7 +207,9 @@ def test_a_day_without_a_bar_adds_no_row(
     result["timestamp"].pop(index)
     for values in result["indicators"]["quote"][0].values():
         values.pop(index)
-    assert _closes(adapter, payload).empty
+    frame = _closes(adapter, payload)
+    assert DAY not in set(frame["date"])
+    assert date(2026, 10, 27) in set(frame["date"])
 
 
 @responses.activate
@@ -258,10 +287,9 @@ def test_upsert_is_idempotent_and_leaves_other_series_alone(
 ) -> None:
     IndexDaily.objects.create(index_id="TAIEX", date=DAY, close=Decimal("28000"), volume=1)
     for _ in range(2):
-        adapter.upsert(
-            "sox", _closes(adapter, _payload(load_fixture, "sox"), start=date(2026, 10, 27))
-        )
-    assert IndexDaily.objects.filter(index_id="SOX").count() == 4
+        frame = _closes(adapter, _payload(load_fixture, "sox"))
+        adapter.upsert("sox", frame)
+    assert IndexDaily.objects.filter(index_id="SOX").count() == len(frame) == 7
     assert IndexDaily.objects.get(index_id="TAIEX").close == Decimal("28000")
 
 
@@ -282,7 +310,7 @@ def test_fetch_command_writes_each_series(
     responses.get(SERIES[dataset][0], json=load_fixture(SERIES[dataset][1]))
     call_command("fetch", source="yahoo", dataset=dataset, date="2026-10-28")
     run = EtlRun.objects.get()
-    assert (run.status, run.rows) == ("success", 1)
+    assert (run.status, run.rows) == ("success", 7)
     assert IndexDaily.objects.filter(index_id=SERIES[dataset][2], date=DAY).exists()
 
 
@@ -294,7 +322,7 @@ def test_an_adr_bar_without_volume_keeps_the_close(
     payload = _payload(load_fixture, "tsm_adr")
     _result(payload)["indicators"]["quote"][0]["volume"][-3] = None
     frame = _closes(adapter, payload, "tsm_adr")
-    assert frame.to_dict("records")[0]["volume"] is None
+    assert _on(frame, DAY)["volume"] is None
 
 
 @responses.activate
@@ -305,4 +333,32 @@ def test_a_negative_adr_volume_is_a_schema_change(
     payload = _payload(load_fixture, "tsm_adr")
     _result(payload)["indicators"]["quote"][0]["volume"][-3] = -5
     with pytest.raises(SchemaChangedError, match="volume"):
+        _closes(adapter, payload, "tsm_adr")
+
+
+@responses.activate
+@pytest.mark.django_db
+def test_a_bar_left_open_by_one_daily_run_is_written_by_the_next(
+    adapter: YahooAdapter, load_fixture: Callable[[str], Any]
+) -> None:
+    for day in (date(2026, 10, 28), date(2026, 10, 29)):
+        payload = _session(_payload(load_fixture, "usdtwd"), day)
+        with time_machine.travel(datetime(day.year, day.month, day.day, 21, 30, tzinfo=UTC)):
+            frame = _closes(adapter, payload, "usdtwd", day, day)
+        adapter.upsert("usdtwd", frame)
+        assert day not in set(frame["date"])
+    stored = set(IndexDaily.objects.filter(index_id="USDTWD").values_list("date", flat=True))
+    assert DAY in stored
+    assert date(2026, 10, 29) not in stored
+
+
+@responses.activate
+@pytest.mark.django_db
+@pytest.mark.parametrize("field", ["close", "volume"])
+def test_a_boolean_where_a_number_belongs_is_a_schema_change(
+    adapter: YahooAdapter, load_fixture: Callable[[str], Any], field: str
+) -> None:
+    payload = _payload(load_fixture, "tsm_adr")
+    _result(payload)["indicators"]["quote"][0][field][-3] = True
+    with pytest.raises(SchemaChangedError, match=field):
         _closes(adapter, payload, "tsm_adr")

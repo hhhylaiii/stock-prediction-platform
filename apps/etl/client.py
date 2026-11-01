@@ -19,7 +19,7 @@ def _reject_constant(token: str) -> Any:
 
 
 class SourceClient:
-    """One source behind its rate limiter; every response must be a JSON object."""
+    """One source behind its rate limiter; JSON answers must be objects, files come as bytes."""
 
     source: ClassVar[str]
     label: ClassVar[str]

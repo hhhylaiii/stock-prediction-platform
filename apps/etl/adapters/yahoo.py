@@ -30,6 +30,7 @@ CHART_PATH = "/v8/finance/chart/"
 INDEX_COLUMNS = ["index_id", "date", "close", "volume"]
 BAR_COLUMNS = ["index_id", "date", "close", "volume", "price_hint"]
 REQUEST_MARGIN = timedelta(days=1)
+RECHECK_SESSIONS = 5
 
 
 class Series(NamedTuple):
@@ -113,11 +114,11 @@ class YahooAdapter(BaseAdapter):
         return upsert_index_rows(frame)
 
     def _window(self, start: date, end: date) -> tuple[date, date]:
-        """Exchange dates after the previous Taiwan session, so days Taiwan closed still land."""
+        """Exchange dates back to a few Taiwan sessions, so bars left open by earlier runs land."""
         try:
-            return self.calendar.shift(start, -1) + timedelta(days=1), end
+            return self.calendar.shift(start, -RECHECK_SESSIONS) + timedelta(days=1), end
         except OutsideCalendarError:
-            return start, end
+            return min(self.calendar.start, start), end
 
 
 def _midnight(day: date) -> int:
@@ -199,7 +200,8 @@ def _session(meta: Mapping[str, Any]) -> tuple[float, float]:
 
 
 def _close(value: Any, hint: int) -> Decimal:
-    if not isinstance(value, int | float) or not math.isfinite(value) or value <= 0:
+    number = isinstance(value, int | float) and not isinstance(value, bool)
+    if not number or not math.isfinite(value) or value <= 0:
         raise SchemaChangedError(f"unexpected Yahoo close {value!r}")
     return Decimal(str(round(value, hint)))
 
@@ -207,6 +209,6 @@ def _close(value: Any, hint: int) -> Decimal:
 def _volume(value: Any) -> int | None:
     if value is None:
         return None
-    if not isinstance(value, int) or value < 0:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
         raise SchemaChangedError(f"unexpected Yahoo volume {value!r}")
     return value
