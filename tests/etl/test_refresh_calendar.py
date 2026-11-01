@@ -10,7 +10,7 @@ from responses import matchers
 
 from apps.etl.models import EtlRun
 from apps.etl.trading_calendar import UNLABELLED_CLOSURE, WEEKEND_TRADING, corrections
-from apps.market.models import TradingCalendar
+from apps.market.models import DailyPrice, TradingCalendar
 
 FMTQIK_URL = "https://www.twse.com.tw/rwd/zh/afterTrading/FMTQIK"
 OCTOBER = "twse/reference/fmtqik_202610.json"
@@ -160,3 +160,15 @@ def test_today_is_left_to_the_holiday_schedule_even_when_listed(
     _serve("202610", _with(load_fixture(OCTOBER), "115/10/24"))
     call_command("refresh_calendar")
     assert _flags()[date(2026, 10, 24)] == (False, "")
+
+
+@responses.activate
+def test_a_day_with_prices_is_not_closed(
+    monkeypatch: pytest.MonkeyPatch, load_fixture: Callable[[str], Any]
+) -> None:
+    DailyPrice.objects.create(stock_id="2330", date=date(2026, 10, 28), volume=1, turnover=1)
+    _today(monkeypatch, date(2026, 10, 31))
+    _serve("202610", _without(load_fixture(OCTOBER), "115/10/27", "115/10/28"))
+    call_command("refresh_calendar")
+    assert _flags()[date(2026, 10, 28)] == (True, "")
+    assert _flags()[date(2026, 10, 27)] == (False, UNLABELLED_CLOSURE)

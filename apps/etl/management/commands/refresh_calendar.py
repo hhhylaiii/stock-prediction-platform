@@ -14,7 +14,7 @@ from apps.etl.errors import SourceError
 from apps.etl.ratelimit import RetryableError
 from apps.etl.runs import tracked_run
 from apps.etl.trading_calendar import corrections, traded_days
-from apps.market.models import TradingCalendar
+from apps.market.models import DailyPrice, TradingCalendar
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +36,12 @@ class Command(BaseCommand):
         first = min(stored)
         try:
             with tracked_run("trading_calendar", "trading_calendar_refresh", first, through) as run:
-                changed = corrections(self._traded(first, through, today), stored)
+                priced = frozenset(
+                    DailyPrice.objects.filter(date__range=(first, through))
+                    .values_list("date", flat=True)
+                    .distinct()
+                )
+                changed = corrections(self._traded(first, through, today), stored, priced)
                 with transaction.atomic():
                     for day, (is_open, note) in changed.items():
                         TradingCalendar.objects.filter(date=day).update(

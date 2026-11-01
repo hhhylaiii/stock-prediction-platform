@@ -145,13 +145,17 @@ def build_calendar(
     return TradingDays(trading, start, end), notes
 
 
-def corrections(traded: set[date], stored: Mapping[date, ScheduledDay]) -> dict[date, ScheduledDay]:
-    """Stored days FMTQIK contradicts; a missing day is closed only before the last traded one."""
+def corrections(
+    traded: set[date], stored: Mapping[date, ScheduledDay], priced: frozenset[date] = frozenset()
+) -> dict[date, ScheduledDay]:
+    """Stored days FMTQIK contradicts; an unpriced missing day closes before the last traded one."""
     last = max(traded, default=None)
     changed: dict[date, ScheduledDay] = {}
     for day, (is_open, _) in sorted(stored.items()):
         opened = day in traded
-        if opened == is_open or (not opened and (last is None or day > last)):
+        if opened == is_open:
+            continue
+        if not opened and (last is None or day > last or day in priced):
             continue
         changed[day] = (opened, _note(day, opened, None))
     return changed
