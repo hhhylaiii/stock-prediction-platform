@@ -41,6 +41,7 @@ QUOTED_TITLE = "上櫃股票每日收盤行情(不含定價)"
 MANAGED_TITLE = "管理股票"
 QUOTE_TITLES = ("上櫃股票行情", MANAGED_TITLE)
 CODE_FIELD = "代號"
+NAME_FIELD = "名稱"
 QUOTE_COLUMNS = {
     "開盤": "open",
     "最高": "high",
@@ -115,16 +116,21 @@ def _rows(table: Mapping[str, Any], label: str) -> list[list[Any]]:
 
 def quoted_codes(payload: dict[str, Any], day: date) -> set[str]:
     """Local-currency codes of the 上櫃股票 (EW) closing quotes; warrants are not in this list."""
+    return set(quoted_names(payload, day))
+
+
+def quoted_names(payload: dict[str, Any], day: date) -> dict[str, str]:
+    """Local-currency codes of the EW closing quotes with the short names they are quoted under."""
     check_answer(payload, day)
     table = find_table(payload, QUOTED_TITLE)
     fields = [str(name).strip() for name in table.get("fields") or []]
-    if not fields or fields[0] != CODE_FIELD:
+    if fields[:2] != [CODE_FIELD, NAME_FIELD]:
         raise SchemaChangedError(f"TPEx otc quotes fields changed: {fields}")
     rows = _rows(table, "otc quotes")
     if not rows:
         raise SchemaChangedError(f"TPEx otc quotes for {day} have no rows")
-    codes = [stock_code(row[0]) for row in rows]
-    return {code for code in codes if not is_foreign_currency_etf(code)}
+    names = {stock_code(row[0]): str(row[1]).strip() for row in rows}
+    return {code: name for code, name in names.items() if not is_foreign_currency_etf(code)}
 
 
 def quote_rows(otc: dict[str, Any], quotes: dict[str, Any], day: date) -> pd.DataFrame:
