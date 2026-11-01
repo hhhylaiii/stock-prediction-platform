@@ -29,8 +29,11 @@ Matrix = npt.NDArray[np.float64]
 
 
 def decile_groups(signal: pd.DataFrame, groups: int = GROUPS) -> pd.Series:
-    """Group 1..groups of each row's score among its day's rows, equal counts; top scores last."""
-    ordered = signal.sort_values(["date", "stock_id"])
+    """Group 1..groups of each row's score among its day's rows, equal counts; top scores last.
+
+    Rows without a score get no group.
+    """
+    ordered = signal[signal["score"].notna()].sort_values(["date", "stock_id"])
     return equal_count_buckets(ordered["score"], ordered["date"], groups).reindex(signal.index)
 
 
@@ -129,7 +132,7 @@ def tranche_returns(
 ) -> pd.DataFrame:
     """Daily returns of each score group and the universe held as overlapping horizon-day tranches.
 
-    Rows must be tradable at the next open (untradable_t1 = 0); prices hold adj_open and adj_close.
+    Rows must trade at the next open (untradable_t1 = 0); prices is the unfiltered price panel.
     """
     rows = _signal_rows(signal, calendar, horizon)
     if rows.empty:
@@ -180,33 +183,39 @@ def _drawdown(excess: pd.Series) -> float:
     return float((wealth / peak - 1).min())
 
 
-def _row(own: pd.DataFrame, bench: pd.DataFrame, both_legs: bool) -> dict[str, float]:
-    joined = own.join(bench, how="inner", rsuffix="_bench")
-    monthly, benchmark = _monthly(joined["net"]), _monthly(joined["net_bench"])
-    turnover = joined["turnover"] + (joined["turnover_bench"] if both_legs else 0.0)
+def _row(own: pd.Series, bench: pd.Series, turnover: pd.Series) -> dict[str, float]:
+    """Monthly return, excess, excess drawdown and turnover of own against bench on shared days."""
+    days = own.index.intersection(bench.index)
+    monthly = _monthly(own.loc[days])
     return {
         "monthly_return": float(monthly.mean()),
-        "monthly_excess": float((monthly - benchmark).mean()),
-        "excess_drawdown": _drawdown(joined["net"] - joined["net_bench"]),
-        "annual_turnover": float(turnover.mean() * ANNUAL_DAYS),
-        "n_days": len(joined),
+        "monthly_excess": float((monthly - _monthly(bench.loc[days])).mean()),
+        "excess_drawdown": _drawdown(own.loc[days] - bench.loc[days]),
+        "annual_turnover": float(turnover.loc[days].mean() * ANNUAL_DAYS),
+        "n_days": len(days),
     }
 
 
 def tranche_summary(daily: pd.DataFrame, horizon: int) -> pd.DataFrame:
-    """Monthly return, excess over the universe, its drawdown and turnover on days all sleeves hold.
+    """Each group against the universe on days all sleeves hold, then top long and group 1 short.
 
-    The last row is the top group against group 1, with both legs' turnover.
+    The short leg loses group 1's gross return and pays its costs; turnover adds both legs.
     """
     full = daily[daily["sleeves"] == horizon]
-    books = {
-        str(name): part.set_index("date")[["net", "turnover"]]
-        for name, part in full.groupby("portfolio", sort=False)
+    if full.empty:
+        return pd.DataFrame(columns=SUMMARY_COLUMNS)
+    books = {str(name): part.set_index("date") for name, part in full.groupby("portfolio")}
+    numbered = [name for _, name in sorted((int(n[1:]), n) for n in books if n != UNIVERSE)]
+    universe = books[UNIVERSE]["net"]
+    rows = {
+        name: _row(books[name]["net"], universe, books[name]["turnover"])
+        for name in [*numbered, UNIVERSE]
     }
-    numbered = sorted((int(name[1:]), name) for name in books if name != UNIVERSE)
-    names = [name for _, name in numbered] + [UNIVERSE]
-    rows = {name: _row(books[name], books[UNIVERSE], both_legs=False) for name in names}
     if len(numbered) > 1:
-        low, high = numbered[0][1], numbered[-1][1]
-        rows[f"{high}-{low}"] = _row(books[high], books[low], both_legs=True)
+        high, low = books[numbered[-1]], books[numbered[0]]
+        days = high.index.intersection(low.index)
+        spread = high["net"].loc[days] - low["gross"].loc[days] - low["cost"].loc[days]
+        legs = high["turnover"].loc[days] + low["turnover"].loc[days]
+        flat = pd.Series(0.0, index=days)
+        rows[f"{numbered[-1]}-{numbered[0]}"] = _row(spread, flat, legs)
     return pd.DataFrame.from_dict(rows, orient="index")[SUMMARY_COLUMNS]

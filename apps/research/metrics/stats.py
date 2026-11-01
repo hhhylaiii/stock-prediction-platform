@@ -1,4 +1,4 @@
-"""Newey-West t statistics for overlapping-label metric series (SPEC §7 評估指標)."""
+"""Newey-West t statistics and daily equal-count buckets for metric series (SPEC §7 評估指標)."""
 
 import math
 

@@ -9,6 +9,7 @@ from apps.research.labels import label_panel
 from apps.research.metrics.deciles import (
     BUY_COST,
     SELL_COST,
+    SUMMARY_COLUMNS,
     UNIVERSE,
     decile_groups,
     top_liquidity,
@@ -159,6 +160,32 @@ def test_costs_apply_only_to_the_traded_weights() -> None:
     assert series(daily, "D1", "net") == pytest.approx([0.0 - cost[0], 0.05 - cost[1]])
 
 
+def test_costs_and_turnover_spread_over_the_sleeves_of_a_longer_horizon() -> None:
+    bars = prices(
+        {
+            "1101": [(10, 10), (10, 11), (11, 12), (12, 12), (12, 13)],
+            "2330": [(10, 10), (10, 9), (9, 8), (8, 8), (8, 8)],
+            "2002": [(5, 5)] * 5,
+        }
+    )
+    pair = {"1101": 1.0, "2330": 2.0}
+
+    daily = tranche_returns(
+        signal(pair, {"2330": 1.0, "2002": 2.0}, pair), bars, CALENDAR, 2, groups=1
+    )
+
+    assert series(daily, "D1", "sleeves") == [1, 2, 2, 1]
+    assert series(daily, "D1", "turnover") == pytest.approx([0.25, 0.275, 0.275, 0.25])
+    assert series(daily, "D1", "cost") == pytest.approx(
+        [
+            BUY_COST / 2,
+            (BUY_COST + 0.1 * SELL_COST) / 2,
+            (0.1 * BUY_COST + SELL_COST) / 2,
+            SELL_COST / 2,
+        ]
+    )
+
+
 def test_holding_the_same_names_costs_nothing_to_roll() -> None:
     bars = prices({"1101": [(10, 10)] * 3, "2330": [(10, 10)] * 3})
     both = {"1101": 1.0, "2330": 2.0}
@@ -190,6 +217,8 @@ def test_the_universe_holds_every_signal_row() -> None:
         (signal({}, {}, {}, {"1101": 1.0}), 1, "no open"),
         (signal({"1101": 1.0}, {}, {}, {}, {}, {"1101": 1.0}), 1, "no open"),
         (signal({"1101": 1.0}), 0, "horizon"),
+        (pd.concat([signal({"1101": 1.0})] * 2, ignore_index=True), 1, "more than one row"),
+        (signal({}, {}, {}, {}, {"1101": 1.0}), 1, "no open"),
     ],
 )
 def test_bad_signals_are_refused(frame: pd.DataFrame, horizon: int, message: str) -> None:
@@ -204,8 +233,12 @@ def test_the_inputs_stay_unchanged() -> None:
     frame = signal({"2330": 2.0, "1101": 1.0})
     before = (frame.copy(), bars.copy())
 
-    tranche_returns(frame, bars, CALENDAR, 2, groups=1)
+    daily = tranche_returns(frame, bars, CALENDAR, 2, groups=1)
     decile_groups(frame)
+    before_daily = daily.copy()
+    tranche_summary(daily, 1)
+    top_liquidity(frame.assign(liq_dollar_vol_med_20d=1.0))
+    pd.testing.assert_frame_equal(daily, before_daily)
 
     pd.testing.assert_frame_equal(frame, before[0])
     pd.testing.assert_frame_equal(bars, before[1])
@@ -220,11 +253,14 @@ def test_the_summary_reports_monthly_excess_drawdown_and_turnover_on_full_days()
         "D1": [0.5, 0.0, 0.01, -0.01, 0.0],
     }
     turnover = {"D10": 0.1, UNIVERSE: 0.02, "D1": 0.05}
+    costs = {"D10": 0.002, UNIVERSE: 0.0, "D1": 0.001}
     daily = pd.DataFrame(
         [
             {
                 "date": day,
                 "portfolio": name,
+                "gross": values[k] + costs[name],
+                "cost": costs[name],
                 "net": values[k],
                 "turnover": turnover[name],
                 "sleeves": 1 if k == 0 else 2,
@@ -244,8 +280,10 @@ def test_the_summary_reports_monthly_excess_drawdown_and_turnover_on_full_days()
     assert top["annual_turnover"] == pytest.approx(0.1 * 252)
     assert top["n_days"] == 4
     spread = summary.loc["D10-D1"]
-    low = [1.0 * 1.01 - 1, 0.99 * 1.0 - 1]
-    assert spread["monthly_excess"] == pytest.approx((january - low[0] + february - low[1]) / 2)
+    paired = [0.958 * 0.998 - 1, 1.028 * 0.998 - 1]
+    assert spread["monthly_return"] == pytest.approx(sum(paired) / 2)
+    assert spread["monthly_excess"] == pytest.approx(sum(paired) / 2)
+    assert spread["excess_drawdown"] == pytest.approx(0.958 * 0.998 - 1)
     assert spread["annual_turnover"] == pytest.approx(0.15 * 252)
     assert summary.loc[UNIVERSE, "monthly_excess"] == pytest.approx(0.0)
     assert summary.loc[UNIVERSE, "excess_drawdown"] == pytest.approx(0.0)
@@ -264,3 +302,16 @@ def test_top_liquidity_keeps_the_most_traded_third_of_each_day() -> None:
 
     assert kept["stock_id"].tolist() == ["1000", "1002", "1008"]
     assert list(kept.columns) == list(frame.columns)
+
+
+def test_a_summary_without_full_days_is_empty_and_nan_scores_get_no_group() -> None:
+    bars = prices({"1101": [(10, 10), (10, 11), (11, 12)]})
+    frame = signal({"1101": 1.0, "2330": NAN})
+
+    summary = tranche_summary(tranche_returns(frame, bars, CALENDAR, 5, groups=1), 5)
+    groups = decile_groups(frame, 1)
+
+    assert summary.empty
+    assert list(summary.columns) == SUMMARY_COLUMNS
+    assert groups.iloc[0] == 1
+    assert math.isnan(groups.iloc[1])
