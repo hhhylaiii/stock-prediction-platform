@@ -369,3 +369,24 @@ def test_ew_quotes_answered_for_the_day_count_whatever_day_was_asked(
     )
     _serve(load_fixture, "institutional")
     assert _load(adapter, "institutional")["1240"]["fi_net"] == 0
+
+
+@responses.activate
+@pytest.mark.django_db
+@pytest.mark.usefixtures("quotes_loaded")
+def test_an_earlier_day_uses_its_own_ew_quotes_not_the_latest(
+    adapter: TpexAdapter, load_fixture: Callable[[str], Any]
+) -> None:
+    later = load_fixture(QUOTE_FIXTURES[0])
+    table = later["tables"][0]
+    table["data"] = [row for row in table["data"] if row[0] != "1240"]
+    table["totalCount"] = len(table["data"])
+    RawTpex.objects.create(
+        dataset="daily_price",
+        source_hash="otc-20261029",
+        request_params={"date": "2026/10/29", "type": "EW", "response": "json"},
+        payload={**later, "date": "20261029"},
+        fetched_at=timezone.now() + timedelta(hours=24),
+    )
+    _serve(load_fixture, "institutional")
+    assert _load(adapter, "institutional")["1240"]["fi_net"] == 0
