@@ -1,21 +1,30 @@
 """TWSE whole-market daily tables mapped onto standard rows (SPEC §4, §5)."""
 
+import logging
+from collections.abc import Callable, Mapping, Sequence
 from datetime import date
-from typing import Any
+from typing import Any, NamedTuple
 
 import pandas as pd
+from django.db import models
 
 from apps.etl.errors import SchemaChangedError, SourceNotReadyError
-from apps.etl.exchange_rows import parse_count, parse_price
+from apps.etl.exchange_rows import parse_count, parse_percent, parse_price, parse_signed, stock_code
 from apps.etl.roc import parse_roc_date
-from apps.market.models import IndexId
+from apps.market.models import DailyChip, IndexId
 
+logger = logging.getLogger(__name__)
 NO_DATA_STAT = "沒有符合條件的資料"
 AFTER_LATEST_STAT = "查詢日期大於可查詢最大日期"
 FOREIGN_CURRENCY_CODE_SUFFIXES = frozenset("KMSC")
+SHARES_PER_LOT = 1000
+TOTAL_ROW_NAME = "合計"
+MARGIN_SUMMARY_TITLE = "信用交易統計"
+MARGIN_LOT_ROWS = ("融資(交易單位)", "融券(交易單位)")
 MONTHLY_UNIT_HINT = "單位：元、股"
 MONTHLY_FIELDS = ("日期", "成交股數", "成交金額", "成交筆數", "發行量加權股價指數", "漲跌點數")
 INDEX_COLUMNS = ["index_id", "date", "close", "volume"]
+Converter = Callable[[Sequence[Any]], int | float]
 
 
 def is_foreign_currency_etf(code: str) -> bool:
@@ -52,6 +61,197 @@ def check_published(payload: dict[str, Any], label: str, day: date) -> None:
     bodies = payload.get("tables", [payload])
     if stat == "OK" and not any(isinstance(body, dict) and body.get("data") for body in bodies):
         raise SourceNotReadyError(f"TWSE {label} for {day} has no rows yet")
+
+
+def net_shares(values: Sequence[Any]) -> int:
+    return sum(parse_signed(value) for value in values)
+
+
+def shares(values: Sequence[Any]) -> int:
+    return sum(parse_count(value) for value in values)
+
+
+def lots_in_shares(values: Sequence[Any]) -> int:
+    return shares(values) * SHARES_PER_LOT
+
+
+def percent(values: Sequence[Any]) -> float:
+    return sum(parse_percent(value) for value in values)
+
+
+def check_margin_lots(payload: dict[str, Any]) -> None:
+    """MI_MARGN counts stock margin in 交易單位 (1,000 shares); its summary table says so."""
+    summary = find_table(payload, MARGIN_SUMMARY_TITLE)
+    labels = {str(row[0]) for row in summary.get("data") or [] if row}
+    if not set(MARGIN_LOT_ROWS) <= labels:
+        raise SchemaChangedError(f"TWSE MI_MARGN no longer counts in 交易單位: {sorted(labels)}")
+
+
+class DailyTable(NamedTuple):
+    """One whole-market table and the standard columns it fills, each summing its sources."""
+
+    label: str
+    path: str
+    params: Mapping[str, str]
+    title: str | None
+    hints: str | None
+    code: str
+    name: str
+    columns: Mapping[str, tuple[str, ...]]
+    convert: Converter
+    model: type[models.Model] = DailyChip
+    bounds: Mapping[str, tuple[float, float]] = {}
+    check: Callable[[dict[str, Any]], None] | None = None
+
+
+TABLES: dict[str, DailyTable] = {
+    "institutional": DailyTable(
+        label="T86",
+        path="/rwd/zh/fund/T86",
+        params={"selectType": "ALLBUT0999"},
+        title=None,
+        hints="單位：股",
+        code="證券代號",
+        name="證券名稱",
+        columns={
+            "fi_net": ("外陸資買賣超股數(不含外資自營商)", "外資自營商買賣超股數"),
+            "it_net": ("投信買賣超股數",),
+            "dealer_self_net": ("自營商買賣超股數(自行買賣)",),
+            "dealer_hedge_net": ("自營商買賣超股數(避險)",),
+        },
+        convert=net_shares,
+    ),
+    "margin": DailyTable(
+        label="MI_MARGN",
+        path="/rwd/zh/marginTrading/MI_MARGN",
+        params={"selectType": "ALL"},
+        title="融資融券彙總",
+        hints=None,
+        code="股票代號",
+        name="股票名稱",
+        columns={
+            "margin_balance": ("融資今日餘額",),
+            "margin_limit": ("融資次一營業日限額",),
+            "short_balance": ("融券今日餘額",),
+        },
+        convert=lots_in_shares,
+        check=check_margin_lots,
+    ),
+    "sbl": DailyTable(
+        label="TWT93U",
+        path="/rwd/zh/marginTrading/TWT93U",
+        params={},
+        title=None,
+        hints="單位：股",
+        code="股票代號",
+        name="股票名稱",
+        columns={"sbl_short_balance": ("借券賣出當日餘額",)},
+        convert=shares,
+    ),
+    "foreign_holding": DailyTable(
+        label="MI_QFIIS",
+        path="/rwd/zh/fund/MI_QFIIS",
+        params={"selectType": "ALLBUT0999"},
+        title=None,
+        hints="單位:股",
+        code="證券代號",
+        name="證券名稱",
+        columns={"fi_holding_pct": ("全體外資及陸資持股比率",)},
+        convert=percent,
+        bounds={"fi_holding_pct": (0.0, 100.0)},
+    ),
+    "day_trade": DailyTable(
+        label="TWTB4U",
+        path="/rwd/zh/dayTrading/TWTB4U",
+        params={"selectType": "All"},
+        title="當日沖銷交易標的及成交量值",
+        hints="單位：元、股",
+        code="證券代號",
+        name="證券名稱",
+        columns={"day_trade_volume": ("當日沖銷交易成交股數",)},
+        convert=shares,
+    ),
+}
+
+
+def labelled_fields(body: Mapping[str, Any], label: str) -> list[str]:
+    """Field names prefixed by their column group, so 融資今日餘額 and 融券今日餘額 differ."""
+    fields = [str(name) for name in body.get("fields") or []]
+    groups = body.get("groups") or []
+    if groups:
+        titles = [
+            str(group.get("title") or "")
+            for group in groups
+            for _ in range(int(group.get("span") or 0))
+        ]
+        if len(titles) != len(fields):
+            raise SchemaChangedError(f"TWSE {label} column groups no longer match its fields")
+        fields = [f"{title}{name}" for title, name in zip(titles, fields, strict=True)]
+    if len(set(fields)) != len(fields):
+        raise SchemaChangedError(f"TWSE {label} has repeated columns: {fields}")
+    return fields
+
+
+def source_rows(payload: dict[str, Any], day: date, table: DailyTable) -> pd.DataFrame:
+    """The table's rows for the day under labelled field names, after layout checks."""
+    check_answer(payload, day)
+    body = payload if table.title is None else find_table(payload, table.title)
+    if table.hints is not None and body.get("hints") != table.hints:
+        raise SchemaChangedError(f"TWSE {table.label} units changed: {body.get('hints')!r}")
+    if table.check is not None:
+        table.check(payload)
+    fields = labelled_fields(body, table.label)
+    needed = {table.code, table.name, *(name for names in table.columns.values() for name in names)}
+    missing = sorted(needed - set(fields))
+    if missing:
+        raise SchemaChangedError(f"TWSE {table.label} lost columns {missing}")
+    try:
+        frame = pd.DataFrame(body["data"], columns=fields)
+    except (KeyError, ValueError) as exc:
+        raise SchemaChangedError(f"TWSE {table.label} table is malformed: {exc}") from None
+    if frame.empty:
+        raise SourceNotReadyError(f"TWSE {table.label} for {day} has no rows yet")
+    return frame.assign(date=day)
+
+
+def standard_rows(raw_df: pd.DataFrame, table: DailyTable) -> pd.DataFrame:
+    """One row per local-currency security; the total row is skipped, repeats are refused."""
+    records = []
+    seen: set[tuple[str, date]] = set()
+    for row in raw_df.to_dict("records"):
+        if not str(row[table.code]).strip() and str(row[table.name]).strip() == TOTAL_ROW_NAME:
+            continue
+        code = stock_code(row[table.code])
+        if is_foreign_currency_etf(code):
+            continue
+        key = (code, row["date"])
+        if key in seen:
+            raise SchemaChangedError(f"TWSE {table.label} repeated {code} on {row['date']}")
+        seen.add(key)
+        values = {
+            column: table.convert([row[name] for name in names])
+            for column, names in table.columns.items()
+        }
+        records.append({"stock_id": code, "date": row["date"], **_bounded(values, table, key)})
+    return pd.DataFrame(records, columns=["stock_id", "date", *table.columns], dtype=object)
+
+
+def _bounded(
+    values: dict[str, int | float], table: DailyTable, key: tuple[str, date]
+) -> dict[str, int | float | None]:
+    kept: dict[str, int | float | None] = dict(values)
+    for column, (low, high) in table.bounds.items():
+        if not low <= values[column] <= high:
+            logger.warning(
+                "TWSE %s %s %s: %s %s out of range, dropped",
+                table.label,
+                key[1],
+                key[0],
+                column,
+                values[column],
+            )
+            kept[column] = None
+    return kept
 
 
 def taiex_rows(payload: dict[str, Any], day: date) -> pd.DataFrame:
