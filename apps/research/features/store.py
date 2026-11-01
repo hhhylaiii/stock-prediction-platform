@@ -16,6 +16,7 @@ from django.db import transaction
 from apps.etl.upsert import upsert
 from apps.research.features.build import FEATURE_COLUMNS, FRAME_COLUMNS, FRAME_TYPES
 from apps.research.models import FeatureDaily
+from apps.research.ranges import months, years
 
 KEYS = ["stock_id", "date"]
 PARTITION_FILE = "part-0.parquet"
@@ -37,34 +38,50 @@ def write_features(frame: pd.DataFrame, start: date, end: date) -> int:
         raise ValueError(f"features fall outside {start}..{end}")
     values = [column for column in FRAME_COLUMNS if column not in KEYS]
     finite = _finite(frame)
-    months = pd.to_datetime(finite["date"]).dt.to_period("M")
+    month = pd.to_datetime(finite["date"]).dt.to_period("M")
     with transaction.atomic():
         FeatureDaily.objects.filter(date__range=(start, end)).delete()
         return sum(
             upsert(FeatureDaily, part, unique_fields=KEYS, update_fields=values)
-            for _, part in finite.groupby(months, sort=True)
+            for _, part in finite.groupby(month, sort=True)
         )
 
 
-def _read_year(year: int) -> pd.DataFrame:
+def _typed(parts: list[pd.DataFrame]) -> pd.DataFrame:
+    if not parts:
+        return pd.DataFrame(columns=FRAME_COLUMNS).astype(FRAME_TYPES)
+    return pd.concat(parts, ignore_index=True).astype(FRAME_TYPES)
+
+
+def read_features(start: date, end: date) -> pd.DataFrame:
+    """feature_daily rows dated in [start, end], read a month at a time."""
     parts = []
-    for month in range(1, 13):
-        first = date(year, month, 1)
-        after = date(year + month // 12, month % 12 + 1, 1)
-        rows = FeatureDaily.objects.filter(date__gte=first, date__lt=after)
+    for low, high in months(start, end):
+        rows = FeatureDaily.objects.filter(date__range=(low, high))
         listed = list(rows.order_by("date", "stock_id").values_list(*FRAME_COLUMNS))
         if listed:
             parts.append(pd.DataFrame(listed, columns=FRAME_COLUMNS))
-    if not parts:
-        return pd.DataFrame(columns=FRAME_COLUMNS)
-    frame = pd.concat(parts, ignore_index=True)
-    return frame.astype(FRAME_TYPES)
+    return _typed(parts)
+
+
+def read_partitions(start: date, end: date, directory: Path) -> pd.DataFrame:
+    """Rows dated in [start, end] from the yearly Parquet partitions export_year wrote."""
+    parts = []
+    for low, high in years(start, end):
+        path = directory / f"year={low.year}" / PARTITION_FILE
+        if not path.exists():
+            raise FileNotFoundError(
+                f"no feature partition for {low.year} in {directory}; run build_features first"
+            )
+        dated = [("date", ">=", low), ("date", "<=", high)]
+        parts.append(pq.read_table(path, filters=dated).to_pandas())
+    return _typed(parts)
 
 
 def export_year(year: int, directory: Path) -> Path | None:
     """Rewrite one year's partition from feature_daily; a year without rows has no partition."""
     target = directory / f"year={year}" / PARTITION_FILE
-    frame = _read_year(year)
+    frame = read_features(date(year, 1, 1), date(year, 12, 31))
     if frame.empty:
         shutil.rmtree(target.parent, ignore_errors=True)
         return None
