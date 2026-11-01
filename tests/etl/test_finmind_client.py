@@ -9,6 +9,7 @@ from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 from responses import matchers
 
+from apps.etl.adapters import finmind as finmind_module
 from apps.etl.adapters import limiter_for
 from apps.etl.adapters.finmind import FinmindClient, maintenance_wait
 from apps.etl.errors import SchemaChangedError, SourceRequestError
@@ -224,3 +225,10 @@ def test_retries_after_a_cooldown_also_wait_out_maintenance() -> None:
     assert len(responses.calls) == 2
     assert clock.sleeps[0] == pytest.approx(3700.0)
     assert clock.sleeps[1] == pytest.approx(6 * 3600 + 8 * 60 + 20)
+
+
+def test_default_sleep_uses_the_real_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    slept: list[float] = []
+    monkeypatch.setattr("apps.etl.adapters.finmind.time.sleep", slept.append)
+    finmind_module._sleep(1.5)
+    assert slept == [1.5]

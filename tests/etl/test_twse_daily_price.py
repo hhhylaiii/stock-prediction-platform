@@ -16,7 +16,7 @@ from apps.etl.errors import SchemaChangedError, SourceNotReadyError, SourceReque
 from apps.etl.models import RawTwse
 from apps.etl.ratelimit import RateLimit, RateLimiter, RetryableError
 from apps.market.calendar import NotATradingDayError, TradingDays
-from apps.market.models import DailyPrice
+from apps.market.models import DailyPrice, DividendEvent
 
 URL = "https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX"
 TRADING_DAY = date(2026, 10, 28)
@@ -383,3 +383,26 @@ def test_empty_quotes_table_is_a_schema_change(payload: dict[str, Any]) -> None:
     _quotes_table(changed)["data"] = []
     with pytest.raises(SchemaChangedError, match="no rows"):
         quotes_frame(changed, TRADING_DAY)
+
+
+@responses.activate
+@pytest.mark.django_db
+def test_upsert_refreshes_factors_of_stocks_with_later_events(
+    adapter: TwseAdapter, payload: dict[str, Any]
+) -> None:
+    DividendEvent.objects.create(stock_id="2330", ex_date=date(2026, 10, 29), adj_factor=0.9)
+    responses.get(URL, json=payload)
+    raw = adapter.fetch("daily_price", date(2026, 10, 28), date(2026, 10, 28))
+    adapter.upsert("daily_price", adapter.normalize("daily_price", raw))
+    factors = dict(DailyPrice.objects.values_list("stock_id", "adj_factor"))
+    assert factors["2330"] == pytest.approx(0.9)
+    assert {code: f for code, f in factors.items() if code != "2330"} == dict.fromkeys(
+        set(factors) - {"2330"}, 1.0
+    )
+
+
+@responses.activate
+def test_non_standard_json_numbers_are_a_schema_change(adapter: TwseAdapter) -> None:
+    responses.get(URL, body='{"stat": "OK", "value": NaN}', content_type="application/json")
+    with pytest.raises(SchemaChangedError, match="NaN"):
+        adapter.fetch("daily_price", TRADING_DAY, TRADING_DAY)
