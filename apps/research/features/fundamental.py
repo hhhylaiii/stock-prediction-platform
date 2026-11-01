@@ -9,7 +9,7 @@ from django.db import models
 
 from apps.market.calendar import TradingDays
 from apps.market.models import DailyValuation, FinancialStatement, FinType, MonthlyRevenue
-from apps.research.features.common import feature_frame, ratio
+from apps.research.features.common import carried, feature_frame, ratio
 from apps.research.features.registry import Group, feature_names
 from apps.research.panel import require_sorted
 
@@ -139,7 +139,7 @@ def statement_signals(statements: pd.DataFrame) -> pd.DataFrame:
 def fundamental_features(panel: pd.DataFrame) -> pd.DataFrame:
     """Fundamental features of every row; needs the attached signals, valuation and close."""
     require_sorted(panel)
-    close = panel["close"].groupby([panel["stock_id"], panel["segment"]], sort=False).ffill()
+    close = carried(panel["close"], panel)
     columns = {
         **{name: panel[name] for name in PASSED},
         "fund_ep": ratio(panel["eps_ttm"], close),
@@ -162,8 +162,8 @@ def _rows(
     return pd.DataFrame(list(rows.values_list(*columns)), columns=columns)
 
 
-def _segment_starts(panel: pd.DataFrame, calendar: TradingDays) -> pd.Series:
-    """First trading day of each row's listing for reused codes (segment 2 on); NaT otherwise."""
+def segment_starts(panel: pd.DataFrame, calendar: TradingDays) -> pd.Series:
+    """First trading day of the listing for rows of a reused code (segment 2 on); NaT otherwise."""
     later = panel["segment"] > 1
     days, ages = panel.loc[later, "date"].tolist(), panel.loc[later, "age"].astype(int).tolist()
     firsts = [pd.Timestamp(calendar.shift(day, -age)) for day, age in zip(days, ages, strict=True)]
@@ -230,7 +230,7 @@ def attach_fundamentals(
         stock_ids,
         date__range=(start, end),
     )
-    starts = _segment_starts(panel, calendar)
+    starts = segment_starts(panel, calendar)
     signals = statement_signals(statements) if not statements.empty else statements
     with_revenue = _latest(
         panel,
