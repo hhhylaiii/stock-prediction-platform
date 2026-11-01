@@ -226,7 +226,23 @@ def source_rows(payload: dict[str, Any], day: date, table: DailyTable) -> pd.Dat
         raise SchemaChangedError(f"TWSE {table.label} table is malformed: {exc}") from None
     if frame.empty:
         raise SourceNotReadyError(f"TWSE {table.label} for {day} has no rows yet")
+    check_complete(payload, body, table, len(frame))
     return frame.assign(date=day)
+
+
+def check_complete(
+    payload: Mapping[str, Any], body: Mapping[str, Any], table: DailyTable, rows: int
+) -> None:
+    """The row count and the selectType TWSE echoes back must match what was asked for."""
+    total = body.get("total")
+    if total is not None and total != rows:
+        raise SchemaChangedError(f"TWSE {table.label} sent {rows} of {total} rows")
+    answered = payload.get("selectType")
+    asked = table.params.get("selectType")
+    if answered is not None and asked is not None and answered != asked:
+        raise SchemaChangedError(
+            f"TWSE {table.label} answered selectType {answered!r}, not {asked!r}"
+        )
 
 
 def standard_rows(raw_df: pd.DataFrame, table: DailyTable) -> pd.DataFrame:

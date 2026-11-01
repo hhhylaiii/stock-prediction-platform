@@ -1,5 +1,6 @@
 """TWSE listed-market adapter using whole-market daily endpoints (SPEC §3, §8.6)."""
 
+import logging
 from collections.abc import Callable
 from datetime import date
 from typing import Any
@@ -37,6 +38,7 @@ from apps.market.adjust import refresh_where_later_events
 from apps.market.calendar import TradingDays
 from apps.market.models import DailyPrice, IndexDaily
 
+logger = logging.getLogger(__name__)
 TWSE_MIN_INTERVAL = 3.0
 DAILY_QUOTES_PATH = "/rwd/zh/afterTrading/MI_INDEX"
 SUSPEND_LISTING_PATH = "/rwd/zh/company/suspendListing"
@@ -243,6 +245,11 @@ class TwseAdapter(BaseAdapter):
                 {"stock_id": code, "date": day, **dict.fromkeys(TABLES[INSTITUTIONAL].columns, 0)}
                 for code in sorted(self._quoted_codes(day) - reported)
             ]
+        logger.info(
+            "TWSE T86 %s: %d quoted stocks without institutional rows, nets set to 0",
+            ", ".join(str(day) for day in days),
+            len(quiet),
+        )
         zeros = pd.DataFrame(quiet, columns=frame.columns, dtype=object)
         return pd.concat([frame, zeros], ignore_index=True) if quiet else frame
 

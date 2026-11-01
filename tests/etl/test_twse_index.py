@@ -57,6 +57,7 @@ def test_day_after_the_last_published_row_is_not_ready(
     responses.get(URL, json=_without(payload, "115/10/30"))
     with pytest.raises(SourceNotReadyError, match="2026-10-30"):
         adapter.fetch("index_daily", date(2026, 10, 30), date(2026, 10, 30))
+    assert RawTwse.objects.count() == 1
 
 
 @responses.activate

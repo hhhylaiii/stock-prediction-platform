@@ -184,6 +184,42 @@ def test_zero_fill_uses_the_latest_quotes_stored_for_the_day(
 
 @responses.activate
 @pytest.mark.django_db
+@pytest.mark.usefixtures("quotes_loaded")
+def test_zero_fill_logs_how_many_stocks_it_filled(
+    adapter: TwseAdapter, serve: Callable[[str], dict[str, Any]], caplog: pytest.LogCaptureFixture
+) -> None:
+    serve("institutional")
+    with caplog.at_level(logging.INFO, logger="apps.etl.adapters.twse"):
+        _load(adapter, "institutional")
+    assert "3 quoted stocks" in caplog.text
+
+
+@responses.activate
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        (lambda payload: payload["data"].pop(), "4 of 5 rows"),
+        (lambda payload: payload.__setitem__("selectType", "01"), "selectType"),
+    ],
+    ids=["truncated", "one-category"],
+)
+def test_partial_t86_is_a_schema_change_not_zeros(
+    adapter: TwseAdapter,
+    load_fixture: Callable[[str], Any],
+    change: Callable[[dict[str, Any]], None],
+    message: str,
+) -> None:
+    payload = load_fixture(DATASETS["institutional"][2])
+    change(payload)
+    responses.get(DATASETS["institutional"][0], json=payload)
+    with pytest.raises(SchemaChangedError, match=message):
+        adapter.fetch("institutional", DAY, DAY)
+    assert RawTwse.objects.count() == 1
+
+
+@responses.activate
+@pytest.mark.django_db
 def test_institutional_waits_for_the_days_quotes(
     adapter: TwseAdapter, serve: Callable[[str], dict[str, Any]]
 ) -> None:
@@ -321,6 +357,7 @@ def test_previous_day_answer_means_not_published_yet(
     responses.get(DATASETS[dataset][0], json={**payload, "date": "20261027"})
     with pytest.raises(SourceNotReadyError, match="still serves 20261027"):
         adapter.fetch(dataset, DAY, DAY)
+    assert RawTwse.objects.count() == 1
 
 
 @responses.activate
@@ -354,6 +391,7 @@ def test_margin_summary_without_stock_rows_is_not_ready(
     responses.get(DATASETS["margin"][0], json=payload)
     with pytest.raises(SourceNotReadyError, match="no rows"):
         adapter.fetch("margin", DAY, DAY)
+    assert RawTwse.objects.count() == 1
 
 
 @responses.activate
@@ -431,6 +469,7 @@ def test_day_trade_list_without_volumes_is_not_ready(
     responses.get(DATASETS["day_trade"][0], json=payload)
     with pytest.raises(SourceNotReadyError, match="當日沖銷交易標的"):
         adapter.fetch("day_trade", DAY, DAY)
+    assert RawTwse.objects.count() == 1
 
 
 @responses.activate
@@ -440,9 +479,11 @@ def test_only_a_total_row_is_not_ready(
 ) -> None:
     payload = load_fixture(DATASETS["sbl"][2])
     payload["data"] = [row for row in payload["data"] if not row[0]]
+    payload["total"] = len(payload["data"])
     responses.get(DATASETS["sbl"][0], json=payload)
     with pytest.raises(SourceNotReadyError, match="no stock rows"):
         adapter.normalize("sbl", adapter.fetch("sbl", DAY, DAY))
+    assert RawTwse.objects.count() == 1
 
 
 @responses.activate
@@ -476,6 +517,7 @@ def test_bad_rows_are_a_schema_change(
 ) -> None:
     payload = load_fixture(DATASETS["institutional"][2])
     mutate(payload["data"])
+    payload["total"] = len(payload["data"])
     responses.get(DATASETS["institutional"][0], json=payload)
     with pytest.raises(SchemaChangedError, match=message):
         adapter.normalize("institutional", adapter.fetch("institutional", DAY, DAY))
