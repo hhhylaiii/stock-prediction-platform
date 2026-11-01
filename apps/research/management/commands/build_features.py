@@ -29,12 +29,18 @@ class Command(BaseCommand):
         last = latest_price_date()
         if last is None:
             raise CommandError("daily_price is empty")
+        for name in ("date", "start", "end"):
+            given = options[name]
+            if given is not None and not calendar.start <= given <= calendar.end:
+                raise CommandError(f"--{name} {given} is outside the trading calendar")
         day = options["date"]
         if day is not None:
             if options["start"] or options["end"]:
                 raise CommandError("--date cannot be combined with --start or --end")
             if not calendar.is_trading_day(day):
                 raise CommandError(f"{day} is not a trading day")
+            if day > last:
+                raise CommandError(f"{day} is after the last price day {last}")
             return day, day
         end = min(options["end"] or last, last)
         start = options["start"] or calendar.shift(
@@ -47,10 +53,8 @@ class Command(BaseCommand):
     def handle(self, *args: Any, **options: Any) -> None:
         calendar = TradingDays.from_db()
         start, end = self._range(calendar, options)
-        rows = sum(
-            write_features(build_feature_frame(calendar, low, high), low, high)
-            for low, high in years(start, end)
-        )
-        for year in range(start.year, end.year + 1):
-            export_year(year, settings.FEATURE_PARQUET_DIR)
+        rows = 0
+        for low, high in years(start, end):
+            rows += write_features(build_feature_frame(calendar, low, high), low, high)
+            export_year(low.year, settings.FEATURE_PARQUET_DIR)
         self.stdout.write(f"feature_daily: {rows} rows for {start}..{end}")

@@ -15,6 +15,7 @@ from apps.research.features.build import FRAME_COLUMNS, build_feature_frame
 from apps.research.features.registry import feature_names
 from apps.research.features.store import export_year, write_features
 from apps.research.models import FeatureDaily
+from apps.research.universe import load_universe_panel
 from tests.research.conftest import weekday_calendar
 
 pytestmark = pytest.mark.django_db
@@ -90,6 +91,10 @@ def test_the_frame_has_one_row_per_listed_stock_and_trading_day_in_range() -> No
     k = len(CALENDAR.between(d("2015-06-01"), d("2016-02-02"))) - 1
     assert first["tech_ret_1d"] == pytest.approx((100 + 0.1 * k) / (100 + 0.1 * (k - 1)) - 1)
     assert frame["in_universe"].dtype == bool
+    flags = load_universe_panel(CALENDAR, d("2016-02-01"), d("2016-03-04"))
+    expected = flags.sort_values(["date", "stock_id"])["in_universe"].astype(bool).tolist()
+    assert frame["in_universe"].tolist() == expected
+    assert frame.loc[frame["stock_id"] == "2330", "in_universe"].all()
 
 
 def test_a_later_start_gives_the_same_features() -> None:
@@ -142,6 +147,53 @@ def test_the_year_partition_matches_the_table(tmp_path: Path) -> None:
     pd.testing.assert_frame_equal(pd.read_parquet(path), stored())
 
 
+def test_an_empty_year_leaves_no_partition_and_the_directory_reads(tmp_path: Path) -> None:
+    listed("2330", "2015-06-01", "2016-03-31")
+    frame = build_feature_frame(CALENDAR, d("2016-03-01"), d("2016-03-31"))
+    write_features(frame, d("2016-03-01"), d("2016-03-31"))
+    stale = tmp_path / "year=2014" / "part-0.parquet"
+    stale.parent.mkdir()
+    stale.write_bytes(b"stale")
+
+    assert export_year(2014, tmp_path) is None
+    export_year(2016, tmp_path)
+
+    assert not stale.parent.exists()
+    assert len(pd.read_parquet(tmp_path)) == len(frame)
+
+
+def test_a_failed_export_leaves_the_old_partition_and_no_stray_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    listed("2330", "2015-06-01", "2016-03-31")
+    frame = build_feature_frame(CALENDAR, d("2016-03-01"), d("2016-03-31"))
+    write_features(frame, d("2016-03-01"), d("2016-03-31"))
+    path = export_year(2016, tmp_path)
+    assert path is not None
+    before = path.read_bytes()
+
+    def broken(*args: object, **kwargs: object) -> None:
+        Path(str(args[1])).write_bytes(b"half")
+        raise OSError("disk full")
+
+    monkeypatch.setattr("apps.research.features.store.pq.write_table", broken)
+
+    with pytest.raises(OSError, match="disk full"):
+        export_year(2016, tmp_path)
+
+    assert sorted(item.name for item in path.parent.iterdir()) == ["part-0.parquet"]
+    assert path.read_bytes() == before
+
+
+def test_writing_warns_about_values_that_are_not_finite(caplog: pytest.LogCaptureFixture) -> None:
+    listed("2330", "2015-06-01", "2016-03-31")
+    frame = build_feature_frame(CALENDAR, d("2016-03-01"), d("2016-03-31"))
+
+    write_features(frame.assign(tech_ret_1d=np.inf), d("2016-03-01"), d("2016-03-31"))
+
+    assert f"tech_ret_1d: {len(frame)}" in caplog.text
+
+
 def test_the_command_rebuilds_one_day_and_its_year_partition(tmp_path: Path, settings: Any) -> None:
     settings.FEATURE_PARQUET_DIR = tmp_path
     calendar_rows()
@@ -160,6 +212,25 @@ def test_the_command_refuses_a_day_without_trading(tmp_path: Path, settings: Any
 
     with pytest.raises(CommandError, match="trading day"):
         call_command("build_features", date=d("2016-02-09"))
+
+
+@pytest.mark.parametrize(
+    ("options", "message"),
+    [
+        ({"date": d("2016-03-02"), "start": d("2016-03-01")}, "cannot be combined"),
+        ({"date": d("2020-03-02")}, "outside"),
+        ({"date": d("2016-04-01")}, "after the last price day"),
+    ],
+)
+def test_the_command_refuses_a_bad_day(
+    tmp_path: Path, settings: Any, options: dict[str, date], message: str
+) -> None:
+    settings.FEATURE_PARQUET_DIR = tmp_path
+    calendar_rows()
+    listed("2330", "2015-06-01", "2016-03-31")
+
+    with pytest.raises(CommandError, match=message):
+        call_command("build_features", **options)
 
 
 def test_the_command_rebuilds_the_recent_days_by_default(tmp_path: Path, settings: Any) -> None:
@@ -195,6 +266,29 @@ def test_the_command_works_year_by_year(
         "year=2015",
         "year=2016",
     ]
+
+
+def test_each_year_is_exported_before_the_next_is_built(
+    tmp_path: Path, settings: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings.FEATURE_PARQUET_DIR = tmp_path
+    calendar_rows()
+    listed("2330", "2015-06-01", "2016-03-31")
+    original = build_feature_frame
+
+    def failing(calendar: TradingDays, start: date, end: date) -> pd.DataFrame:
+        if start.year == 2016:
+            raise RuntimeError("worker lost")
+        return original(calendar, start, end)
+
+    monkeypatch.setattr(
+        "apps.research.management.commands.build_features.build_feature_frame", failing
+    )
+
+    with pytest.raises(RuntimeError, match="worker lost"):
+        call_command("build_features", start=d("2015-12-28"), end=d("2016-01-05"))
+
+    assert (tmp_path / "year=2015" / "part-0.parquet").exists()
 
 
 @pytest.mark.spec8
