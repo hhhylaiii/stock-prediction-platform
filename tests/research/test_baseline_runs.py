@@ -19,7 +19,7 @@ from apps.research.holdout import HoldoutError
 from apps.research.management.commands import train
 from apps.research.metrics.ic import daily_rank_ic
 from apps.research.models import FeatureDaily, LabelDaily, ModelRun
-from apps.research.prediction_cache import load_fold_predictions
+from apps.research.prediction_cache import fold_record, load_fold_predictions
 from apps.research.runs import feature_hash, lib_versions, load_model
 from apps.research.training import LINEAR_FEATURES, linear_inputs
 from apps.research.walkforward import Fold, WalkForwardConfig, generate_folds
@@ -123,6 +123,7 @@ def test_rank_folds_cache_ridge_scores_for_every_test_row(panel: Path) -> None:
     assert run.lib_versions == lib_versions()
     assert run.params["horizon"] == 20
     assert run.params["label"] == "fwd_rank_pct"
+    assert run.params["fold"] == fold_record(fold)
     assert run.params["penalty"] in PENALTY_GRID
     assert set(run.params["cv_scores"]) == {str(penalty) for penalty in PENALTY_GRID}
     assert run.ic_mean is not None

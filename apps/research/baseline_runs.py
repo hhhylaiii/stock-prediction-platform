@@ -2,7 +2,7 @@
 
 import math
 from collections.abc import Callable, Iterable
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -83,18 +83,11 @@ def _plain(value: float) -> float | None:
     return float(value) if math.isfinite(value) else None
 
 
-def _fold_record(fold: Fold) -> dict[str, object]:
-    return {
-        name: value.isoformat() if isinstance(value, date) else value
-        for name, value in asdict(fold).items()
-    }
-
-
 def _run(
     inputs: FoldInputs, run_key: str, model: str, horizon: int, label: str, **fields: Any
 ) -> ModelRun:
     fold = inputs.fold
-    params = {"horizon": horizon, "label": label, "fold": _fold_record(fold)}
+    params = {"horizon": horizon, "label": label}
     return ModelRun(
         run_id=f"{run_key}.{model}.h{horizon}.f{fold.index:03d}",
         run_key=run_key,
@@ -216,7 +209,7 @@ def run_fold(scope: str, fold: Fold, run_key: str, directory: Path) -> Path:
     inputs = fold_inputs(fold, fold.test_end, directory)
     result = SCOPES[scope](inputs, run_key)
     for item in result.trained:
-        record_run(item.run, item.model)
+        record_run(item.run, item.model, fold=fold)
     rows = inputs.raw.loc[inputs.test, ROW_KEYS].reset_index(drop=True)
     return save_fold_predictions(run_key, fold, rows.assign(**result.columns))
 
