@@ -293,7 +293,7 @@ def chip_rows(
 ) -> pd.DataFrame:
     """Four FinMind datasets joined into daily_chip rows; margin lots become shares."""
     days: dict[date, dict[str, Any]] = {}
-    _fill_investors(days, institutional, stock_id)
+    starts = _fill_investors(days, institutional, stock_id)
     parts: list[tuple[Iterable[Row], Sequence[str], str, Callable[[Row, str], dict[str, Any]]]] = [
         (margin, MARGIN_KEYS, "TaiwanStockMarginPurchaseShortSale", _lots),
         (lending, LENDING_KEYS, "TaiwanDailyShortSaleBalances", _lending),
@@ -307,15 +307,19 @@ def chip_rows(
                 raise SchemaChangedError(f"FinMind {label} repeated {day}")
             filled.add(day)
             days.setdefault(day, {}).update(columns(row, label))
+    _zero_quiet_days(days, starts, stock_id)
     records = [{"stock_id": stock_id, "date": day, **days[day]} for day in sorted(days)]
     frame = pd.DataFrame(records, columns=CHIP_COLUMNS, dtype=object)
     return frame.astype(object).where(frame.notna(), None)
 
 
-def _fill_investors(days: dict[date, dict[str, Any]], rows: Iterable[Row], stock_id: str) -> None:
-    """Net shares per investor type; foreign dealers join foreign investors as before 2017-12-18."""
+def _fill_investors(
+    days: dict[date, dict[str, Any]], rows: Iterable[Row], stock_id: str
+) -> dict[str, date]:
+    """Net shares per investor column; returns the first day the source covers each column."""
     label = "TaiwanStockInstitutionalInvestorsBuySell"
     seen: set[tuple[date, str]] = set()
+    starts: dict[str, date] = {}
     for row in _checked(rows, INSTITUTIONAL_KEYS, label, stock_id):
         name = str(row["name"])
         if name not in INVESTOR_COLUMNS:
@@ -326,24 +330,44 @@ def _fill_investors(days: dict[date, dict[str, Any]], rows: Iterable[Row], stock
         seen.add((day, name))
         column = INVESTOR_COLUMNS[name]
         if column is not None:
+            starts[column] = min(starts.get(column, day), day)
             target = days.setdefault(day, {})
             net = _signed(row["buy"], label) - _signed(row["sell"], label)
             target[column] = target.get(column, 0) + net
+    return starts
+
+
+def _zero_quiet_days(
+    days: dict[date, dict[str, Any]], starts: Mapping[str, date], stock_id: str
+) -> None:
+    """T86 omits a stock with no institutional trades that day; such days net 0, not unknown."""
+    quiet = 0
+    for day, columns in days.items():
+        missing = [name for name, first in starts.items() if day >= first and name not in columns]
+        quiet += bool(missing)
+        columns.update(dict.fromkeys(missing, 0))
+    if quiet:
+        logger.info("%s: %d day without institutional rows, nets set to 0", stock_id, quiet)
+
+
+def _balance(value: Any, label: str) -> int:
+    count = _signed(value, label)
+    if count < 0:
+        raise SchemaChangedError(f"FinMind {label} has a bad count {value!r}")
+    return count
 
 
 def _lots(row: Row, label: str) -> dict[str, Any]:
-    return {column: _count(row[key], label) * SHARES_PER_LOT for key, column in LOTS.items()}
+    return {column: _balance(row[key], label) * SHARES_PER_LOT for key, column in LOTS.items()}
 
 
 def _lending(row: Row, label: str) -> dict[str, Any]:
-    return {"sbl_short_balance": _count(row["SBLShortSalesCurrentDayBalance"], label)}
+    return {"sbl_short_balance": _balance(row["SBLShortSalesCurrentDayBalance"], label)}
 
 
 def _holding(row: Row, label: str) -> dict[str, Any]:
     ratio = _number(row["ForeignInvestmentSharesRatio"], label)
-    if ratio is not None and not 0 <= ratio <= PERCENT:
-        logger.warning(
-            "%s %s: foreign holding %s%% left empty", row["stock_id"], row["date"], ratio
-        )
+    if ratio is None or not 0 <= ratio <= PERCENT:
+        logger.warning("%s %s: foreign holding %s dropped", row["stock_id"], row["date"], ratio)
         ratio = None
     return {"fi_holding_pct": ratio}

@@ -5,10 +5,11 @@ from typing import Any
 
 import pytest
 
-from apps.etl.adapters.finmind_datasets import chip_rows
+from apps.etl.adapters.finmind_datasets import LOTS, chip_rows
 from apps.etl.errors import SchemaChangedError
 
 Rows = list[dict[str, Any]]
+LOTS_KEYS = tuple(LOTS)
 
 
 @pytest.fixture
@@ -95,6 +96,8 @@ def test_a_repeated_day_is_a_schema_change(october: dict[str, Rows], dataset: st
         ("institutional", "buy", "1,000"),
         ("margin", "MarginPurchaseTodayBalance", -1),
         ("lending", "SBLShortSalesCurrentDayBalance", None),
+        ("margin", "MarginPurchaseTodayBalance", 30658.7),
+        ("lending", "SBLShortSalesCurrentDayBalance", 14198514.9),
     ],
 )
 def test_bad_counts_are_schema_changes(
@@ -113,8 +116,14 @@ def test_foreign_holding_outside_0_to_100_is_left_empty(
     with caplog.at_level(logging.WARNING, logger="apps.etl.adapters.finmind_datasets"):
         frame = chip_rows(stock_id="2330", **{**october, "holding": holding})
     assert _day(frame, date(2026, 10, 1))["fi_holding_pct"] is None
-    if ratio is not None:
-        assert "foreign holding" in caplog.text
+    assert "foreign holding" in caplog.text
+
+
+@pytest.mark.parametrize("ratio", [0.0, 100.0])
+def test_foreign_holding_at_the_bounds_is_kept(october: dict[str, Rows], ratio: float) -> None:
+    holding = [{**october["holding"][0], "ForeignInvestmentSharesRatio": ratio}]
+    frame = chip_rows(stock_id="2330", **{**october, "holding": holding})
+    assert _day(frame, date(2026, 10, 1))["fi_holding_pct"] == ratio
 
 
 @pytest.mark.parametrize(
@@ -132,3 +141,39 @@ def test_rows_without_a_key_are_schema_changes(
     changed = [{k: v for k, v in row.items() if k != missing} for row in october[dataset]]
     with pytest.raises(SchemaChangedError, match=missing):
         chip_rows(stock_id="2330", **{**october, dataset: changed})
+
+
+def test_days_without_institutional_rows_mean_no_institutional_trades(
+    october: dict[str, Rows], caplog: pytest.LogCaptureFixture
+) -> None:
+    institutional = [row for row in october["institutional"] if row["date"] != "2026-10-02"]
+    with caplog.at_level(logging.INFO, logger="apps.etl.adapters.finmind_datasets"):
+        frame = chip_rows(stock_id="2330", **{**october, "institutional": institutional})
+    day = _day(frame, date(2026, 10, 2))
+    assert (day["fi_net"], day["it_net"], day["dealer_self_net"], day["dealer_hedge_net"]) == (
+        0,
+        0,
+        0,
+        0,
+    )
+    assert "2330: 1 day without institutional rows" in caplog.text
+
+
+def test_days_before_the_first_institutional_row_stay_empty(
+    october: dict[str, Rows], rows: Callable[[str], Rows]
+) -> None:
+    institutional = [row for row in october["institutional"] if row["date"] >= "2026-10-05"]
+    frame = chip_rows(stock_id="2330", **{**october, "institutional": institutional})
+    assert _day(frame, date(2026, 10, 2))["fi_net"] is None
+    assert _day(frame, date(2026, 10, 5))["fi_net"] is not None
+
+
+def test_dealer_columns_are_filled_only_after_the_dealer_split(
+    rows: Callable[[str], Rows],
+) -> None:
+    institutional = [r for r in rows("inst_2330_201411") if r["date"] != "2014-11-27"]
+    margin = [{"date": "2014-11-27", "stock_id": "2330", **dict.fromkeys(LOTS_KEYS, 1)}]
+    frame = chip_rows(institutional, margin, [], [], "2330")
+    day = _day(frame, date(2014, 11, 27))
+    assert (day["fi_net"], day["it_net"]) == (0, 0)
+    assert (day["dealer_self_net"], day["dealer_hedge_net"]) == (None, None)
