@@ -71,6 +71,8 @@ def _pickled(path: Path, model: Any) -> str:
     try:
         with os.fdopen(handle, "wb") as written:
             pickle.dump(model, written, protocol=pickle.HIGHEST_PROTOCOL)
+            written.flush()
+            os.fsync(written.fileno())
     except BaseException:
         Path(temporary).unlink(missing_ok=True)
         raise
