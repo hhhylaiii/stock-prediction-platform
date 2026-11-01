@@ -107,7 +107,7 @@ def test_valuation_out_of_range_is_dropped_with_a_warning(
     payload = load_fixture(VALUATION)
     next(row for row in payload["data"] if row[0] == "2330")[column] = value
     responses.get(VALUATION_URL, json=payload)
-    with caplog.at_level(logging.WARNING, logger="apps.etl.adapters.twse_tables"):
+    with caplog.at_level(logging.WARNING, logger="apps.etl.adapters.exchange_tables"):
         frame = adapter.normalize("daily_valuation", adapter.fetch("daily_valuation", DAY, DAY))
     assert _rows(frame)["2330"][dropped] is None
     assert "2330" in caplog.text
@@ -298,7 +298,7 @@ def test_zero_count_is_skipped_with_a_warning(
 ) -> None:
     payload = load_fixture(SHARES[DAY])
     next(row for row in payload["data"] if row[0] == "2368")[3] = "0"
-    with caplog.at_level(logging.WARNING, logger="apps.etl.adapters.twse_tables"):
+    with caplog.at_level(logging.WARNING, logger="apps.etl.adapters.exchange_tables"):
         _load_shares(adapter, payload, DAY)
     assert ("2368", DAY) not in _shares_in_db()
     assert "2368" in caplog.text

@@ -11,6 +11,7 @@ from django.core.management import call_command
 from django.utils import timezone
 
 from apps.etl.adapters.twse import TwseAdapter
+from apps.etl.adapters.twse_tables import TABLES
 from apps.etl.errors import SchemaChangedError, SourceNotReadyError
 from apps.etl.models import EtlRun, RawTwse
 from apps.etl.ratelimit import RateLimiter
@@ -189,7 +190,7 @@ def test_zero_fill_logs_how_many_stocks_it_filled(
     adapter: TwseAdapter, serve: Callable[[str], dict[str, Any]], caplog: pytest.LogCaptureFixture
 ) -> None:
     serve("institutional")
-    with caplog.at_level(logging.INFO, logger="apps.etl.adapters.twse"):
+    with caplog.at_level(logging.INFO, logger="apps.etl.adapters.exchange_tables"):
         _load(adapter, "institutional")
     assert "3 quoted stocks" in caplog.text
 
@@ -231,6 +232,7 @@ def test_institutional_waits_for_the_days_quotes(
 
 @responses.activate
 @pytest.mark.django_db
+@pytest.mark.usefixtures("quotes_loaded")
 def test_margin_lots_become_shares(
     adapter: TwseAdapter, serve: Callable[[str], dict[str, Any]]
 ) -> None:
@@ -248,6 +250,7 @@ def test_margin_lots_become_shares(
 
 @responses.activate
 @pytest.mark.django_db
+@pytest.mark.usefixtures("quotes_loaded")
 def test_margin_short_balance_in_shares_matches_twt93u(
     adapter: TwseAdapter, serve: Callable[[str], dict[str, Any]], load_fixture: Callable[[str], Any]
 ) -> None:
@@ -256,6 +259,62 @@ def test_margin_short_balance_in_shares_matches_twt93u(
     lending = load_fixture(DATASETS["sbl"][2])
     in_shares = {row[0]: int(row[6].replace(",", "")) for row in lending["data"] if row[0]}
     assert {code: row["short_balance"] for code, row in margin.items()} == in_shares
+
+
+@responses.activate
+@pytest.mark.django_db
+@pytest.mark.usefixtures("quotes_loaded")
+def test_chip_rows_of_codes_not_quoted_that_day_are_skipped(
+    adapter: TwseAdapter, serve: Callable[[str], dict[str, Any]], caplog: pytest.LogCaptureFixture
+) -> None:
+    serve("margin")
+    with caplog.at_level(logging.INFO, logger="apps.etl.adapters.exchange_tables"):
+        rows = _load(adapter, "margin")
+    assert {"009831", "1589"}.isdisjoint(rows)
+    assert "2 codes" in caplog.text
+
+
+@responses.activate
+@pytest.mark.django_db
+@pytest.mark.usefixtures("quotes_loaded")
+def test_t86_rows_of_codes_not_quoted_that_day_are_skipped(
+    adapter: TwseAdapter, load_fixture: Callable[[str], Any]
+) -> None:
+    payload = load_fixture(DATASETS["institutional"][2])
+    payload["data"].append(["009831", *payload["data"][0][1:]])
+    payload["total"] = len(payload["data"])
+    responses.get(DATASETS["institutional"][0], json=payload)
+    assert "009831" not in _load(adapter, "institutional")
+
+
+@responses.activate
+@pytest.mark.django_db
+def test_quotes_answered_for_the_day_count_whatever_day_was_asked(
+    adapter: TwseAdapter, serve: Callable[[str], dict[str, Any]], load_fixture: Callable[[str], Any]
+) -> None:
+    payload = load_fixture(QUOTES_FIXTURE)
+    table = next(t for t in payload["tables"] if "每日收盤行情" in (t.get("title") or ""))
+    table["data"].append(QUIET_QUOTE + QUIET_QUOTE_TAIL)
+    RawTwse.objects.create(
+        dataset="daily_price",
+        source_hash="quotes-asked-on-20261029",
+        request_params={"date": "20261029", "type": "ALLBUT0999", "response": "json"},
+        payload=payload,
+    )
+    serve("institutional")
+    assert _load(adapter, "institutional")["1213"]["fi_net"] == 0
+
+
+@responses.activate
+@pytest.mark.django_db
+@pytest.mark.parametrize("dataset", ["margin", "sbl", "foreign_holding", "day_trade"])
+def test_chip_datasets_wait_for_the_days_quotes(
+    adapter: TwseAdapter, serve: Callable[[str], dict[str, Any]], dataset: str
+) -> None:
+    serve(dataset)
+    raw = adapter.fetch(dataset, DAY, DAY)
+    with pytest.raises(SourceNotReadyError, match="daily_price"):
+        adapter.normalize(dataset, raw)
 
 
 @responses.activate
@@ -272,6 +331,7 @@ def test_margin_unit_change_is_refused(
 
 @responses.activate
 @pytest.mark.django_db
+@pytest.mark.usefixtures("quotes_loaded")
 def test_sbl_reads_the_lending_balance_and_skips_the_total_row(
     adapter: TwseAdapter, serve: Callable[[str], dict[str, Any]]
 ) -> None:
@@ -283,6 +343,7 @@ def test_sbl_reads_the_lending_balance_and_skips_the_total_row(
 
 @responses.activate
 @pytest.mark.django_db
+@pytest.mark.usefixtures("quotes_loaded")
 def test_foreign_holding_keeps_percent_and_drops_foreign_currency_etf(
     adapter: TwseAdapter, serve: Callable[[str], dict[str, Any]]
 ) -> None:
@@ -296,6 +357,7 @@ def test_foreign_holding_keeps_percent_and_drops_foreign_currency_etf(
 @responses.activate
 @pytest.mark.django_db
 @pytest.mark.parametrize("edge", [0.0, 100.0])
+@pytest.mark.usefixtures("quotes_loaded")
 def test_foreign_holding_keeps_both_ends_of_the_percent_range(
     adapter: TwseAdapter, load_fixture: Callable[[str], Any], edge: float
 ) -> None:
@@ -307,19 +369,21 @@ def test_foreign_holding_keeps_both_ends_of_the_percent_range(
 
 @responses.activate
 @pytest.mark.django_db
+@pytest.mark.usefixtures("quotes_loaded")
 def test_foreign_holding_out_of_range_is_dropped_with_a_warning(
     adapter: TwseAdapter, load_fixture: Callable[[str], Any], caplog: pytest.LogCaptureFixture
 ) -> None:
     payload = load_fixture(DATASETS["foreign_holding"][2])
     next(row for row in payload["data"] if row[0] == "2330")[7] = 168.55
     responses.get(DATASETS["foreign_holding"][0], json=payload)
-    with caplog.at_level(logging.WARNING, logger="apps.etl.adapters.twse_tables"):
+    with caplog.at_level(logging.WARNING, logger="apps.etl.adapters.exchange_tables"):
         assert _load(adapter, "foreign_holding")["2330"]["fi_holding_pct"] is None
     assert "2330" in caplog.text
 
 
 @responses.activate
 @pytest.mark.django_db
+@pytest.mark.usefixtures("quotes_loaded")
 def test_day_trade_volume_in_shares_and_absent_stocks_stay_unknown(
     adapter: TwseAdapter, serve: Callable[[str], dict[str, Any]]
 ) -> None:
@@ -354,7 +418,7 @@ def test_unpublished_day_raises_not_ready_and_keeps_no_raw(
     adapter: TwseAdapter, load_fixture: Callable[[str], Any], dataset: str
 ) -> None:
     responses.get(DATASETS[dataset][0], json=load_fixture(NOT_PUBLISHED[dataset]))
-    with pytest.raises(SourceNotReadyError):
+    with pytest.raises(SourceNotReadyError, match=rf"^TWSE {TABLES[dataset].label} "):
         adapter.fetch(dataset, DAY, DAY)
     assert RawTwse.objects.count() == 0
 

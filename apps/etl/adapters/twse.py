@@ -1,7 +1,6 @@
 """TWSE listed-market adapter using whole-market daily endpoints (SPEC §3, §8.6)."""
 
 import logging
-from collections.abc import Callable
 from datetime import date
 from typing import Any
 
@@ -10,35 +9,34 @@ import requests
 from django.conf import settings
 
 from apps.etl.adapters.base import BaseAdapter
-from apps.etl.adapters.twse_tables import (
+from apps.etl.adapters.exchange_tables import (
     NO_DATA_STAT,
-    TABLES,
-    check_answer,
     check_published,
     find_table,
     is_foreign_currency_etf,
+    parsed_quotes,
+    quoted_only,
     share_changes,
     source_rows,
     standard_rows,
+    upsert_daily_prices,
+    upsert_index_rows,
+)
+from apps.etl.adapters.twse_tables import (
+    TABLES,
+    check_answer,
     taiex_frame,
     taiex_rows,
 )
 from apps.etl.client import SourceClient
 from apps.etl.errors import SchemaChangedError, SourceNotReadyError
-from apps.etl.exchange_rows import (
-    TWSE_LAYOUT,
-    OfficialDay,
-    official_days,
-    parse_count,
-    parse_price,
-)
+from apps.etl.exchange_rows import TWSE_LAYOUT, OfficialDay, official_days
 from apps.etl.models import RawTwse
 from apps.etl.ratelimit import RateLimiter
 from apps.etl.share_counts import drop_repeated_counts
 from apps.etl.upsert import upsert
-from apps.market.adjust import refresh_where_later_events
 from apps.market.calendar import TradingDays
-from apps.market.models import DailyPrice, IndexDaily, SharesOutstanding
+from apps.market.models import DailyChip, SharesOutstanding
 
 logger = logging.getLogger(__name__)
 TWSE_MIN_INTERVAL = 3.0
@@ -59,8 +57,6 @@ DAILY_QUOTES_COLUMNS = {
     "成交股數": "volume",
     "成交金額": "turnover",
 }
-PRICE_COLUMNS = ("open", "high", "low", "close")
-COUNT_COLUMNS = ("volume", "turnover")
 DAILY_PRICE = "daily_price"
 INDEX_DAILY = "index_daily"
 INSTITUTIONAL = "institutional"
@@ -162,9 +158,12 @@ class TwseAdapter(BaseAdapter):
             return self._normalize_quotes(raw_df)
         if dataset == INDEX_DAILY:
             return taiex_frame(raw_df)
-        frame = standard_rows(raw_df, TABLES[dataset])
-        if dataset == INSTITUTIONAL:
-            return self._zero_quiet_stocks(frame, sorted(set(raw_df["date"])))
+        table = TABLES[dataset]
+        frame = standard_rows(raw_df, table)
+        if table.model is DailyChip:
+            quoted = {day: self._quoted_codes(day) for day in sorted(set(raw_df["date"]))}
+            zeros = tuple(table.columns) if dataset == INSTITUTIONAL else ()
+            return quoted_only(frame, quoted, f"TWSE {table.label}", zeros)
         if dataset == SHARES_OUTSTANDING:
             return share_changes(frame, self._latest_shares(min(raw_df["date"])))
         return frame
@@ -172,14 +171,9 @@ class TwseAdapter(BaseAdapter):
     def upsert(self, dataset: str, frame: pd.DataFrame) -> int:
         self.require_dataset(dataset)
         if dataset == DAILY_PRICE:
-            return self._upsert_quotes(frame)
+            return upsert_daily_prices(frame)
         if dataset == INDEX_DAILY:
-            return upsert(
-                IndexDaily,
-                frame,
-                unique_fields=("index_id", "date"),
-                update_fields=("close", "volume"),
-            )
+            return upsert_index_rows(frame)
         table = TABLES[dataset]
         rows = upsert(
             table.model, frame, unique_fields=table.keys, update_fields=tuple(table.columns)
@@ -194,15 +188,15 @@ class TwseAdapter(BaseAdapter):
         if dataset == INDEX_DAILY:
             params = {"date": f"{day:%Y%m}01", "response": "json"}
             payload = self.client.get_json(MONTHLY_TRADING_PATH, params)
-            check_published(payload, "FMTQIK", day)
+            check_published(payload, "TWSE FMTQIK", day)
             self.save_raw(dataset, params, payload)
             return taiex_rows(payload, day)
         table = TABLES[dataset]
         params = {"date": day.strftime("%Y%m%d"), **table.params, "response": "json"}
         payload = self.client.get_json(table.path, params)
-        check_published(payload, table.label, day)
+        check_published(payload, table.where, day)
         self.save_raw(dataset, params, payload)
-        return source_rows(payload, day, table)
+        return source_rows(payload, day, table, check_answer)
 
     def _normalize_quotes(self, raw_df: pd.DataFrame) -> pd.DataFrame:
         missing = set(DAILY_QUOTES_COLUMNS) - set(raw_df.columns)
@@ -211,26 +205,9 @@ class TwseAdapter(BaseAdapter):
         codes = raw_df["證券代號"].astype(str).str.strip()
         local = raw_df.loc[~codes.map(is_foreign_currency_etf)]
         frame = local[list(DAILY_QUOTES_COLUMNS)].rename(columns=DAILY_QUOTES_COLUMNS)
-        converters: dict[str, Callable[[str], object]] = {
-            **dict.fromkeys(PRICE_COLUMNS, parse_price),
-            **dict.fromkeys(COUNT_COLUMNS, parse_count),
-        }
-        return frame.assign(
-            stock_id=frame["stock_id"].astype(str).str.strip(),
-            date=local["date"],
-            **{col: frame[col].map(convert) for col, convert in converters.items()},
+        return parsed_quotes(
+            frame.assign(stock_id=frame["stock_id"].astype(str).str.strip(), date=local["date"])
         )
-
-    def _upsert_quotes(self, frame: pd.DataFrame) -> int:
-        rows = upsert(
-            DailyPrice,
-            frame,
-            unique_fields=("stock_id", "date"),
-            update_fields=(*PRICE_COLUMNS, *COUNT_COLUMNS),
-        )
-        if not frame.empty:
-            refresh_where_later_events(frame["stock_id"].unique(), frame["date"].min())
-        return rows
 
     def _fetch_daily_quotes(self, day: date) -> pd.DataFrame:
         params = {"date": day.strftime("%Y%m%d"), "type": "ALLBUT0999", "response": "json"}
@@ -240,23 +217,6 @@ class TwseAdapter(BaseAdapter):
             raise SourceNotReadyError(f"TWSE daily quotes for {day} not available: {stat}")
         self.save_raw(DAILY_PRICE, params, payload)
         return quotes_frame(payload, day)
-
-    def _zero_quiet_stocks(self, frame: pd.DataFrame, days: list[date]) -> pd.DataFrame:
-        """T86 omits a stock with no institutional trades; one quoted that day nets 0 (SPEC §4)."""
-        quiet = []
-        for day in days:
-            reported = set(frame.loc[frame["date"] == day, "stock_id"])
-            quiet += [
-                {"stock_id": code, "date": day, **dict.fromkeys(TABLES[INSTITUTIONAL].columns, 0)}
-                for code in sorted(self._quoted_codes(day) - reported)
-            ]
-        logger.info(
-            "TWSE T86 %s: %d quoted stocks without institutional rows, nets set to 0",
-            ", ".join(str(day) for day in days),
-            len(quiet),
-        )
-        zeros = pd.DataFrame(quiet, columns=frame.columns, dtype=object)
-        return pd.concat([frame, zeros], ignore_index=True) if quiet else frame
 
     def _latest_shares(self, before: date) -> dict[str, int]:
         """The last shares_outstanding count of each stock effective before the given day."""
@@ -269,15 +229,15 @@ class TwseAdapter(BaseAdapter):
         return dict(latest)
 
     def _quoted_codes(self, day: date) -> set[str]:
-        """Local-currency codes in the MI_INDEX quotes that daily_price stored for the day."""
+        """Local-currency codes of the latest stored MI_INDEX quotes answered for the day."""
         stored = (
-            RawTwse.objects.filter(dataset=DAILY_PRICE, request_params__date=f"{day:%Y%m%d}")
+            RawTwse.objects.filter(dataset=DAILY_PRICE, payload__date=f"{day:%Y%m%d}")
             .order_by("-fetched_at")
             .first()
         )
         if stored is None:
             raise SourceNotReadyError(
-                f"TWSE daily_price for {day} is not loaded; institutional nets need its quotes"
+                f"TWSE daily_price for {day} is not loaded; chip rows need its quotes"
             )
         codes = quotes_frame(stored.payload, day)["證券代號"].astype(str).str.strip()
         return {code for code in codes if not is_foreign_currency_etf(code)}
