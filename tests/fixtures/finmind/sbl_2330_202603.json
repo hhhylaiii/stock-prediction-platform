@@ -1,0 +1,57 @@
+{
+ "msg": "success",
+ "status": 200,
+ "data": [
+  {
+   "stock_id": "2330",
+   "MarginShortSalesPreviousDayBalance": 155000,
+   "MarginShortSalesShortSales": 88000,
+   "MarginShortSalesShortCovering": 43000,
+   "MarginShortSalesStockRedemption": 0,
+   "MarginShortSalesCurrentDayBalance": 200000,
+   "MarginShortSalesQuota": 6483131130,
+   "SBLShortSalesPreviousDayBalance": 1628680,
+   "SBLShortSalesShortSales": 744000,
+   "SBLShortSalesReturns": 0,
+   "SBLShortSalesAdjustments": 0,
+   "SBLShortSalesCurrentDayBalance": 2372680,
+   "SBLShortSalesQuota": 13692717,
+   "SBLShortSalesShortCovering": 0,
+   "date": "2026-03-09"
+  },
+  {
+   "stock_id": "2330",
+   "MarginShortSalesPreviousDayBalance": 2945000,
+   "MarginShortSalesShortSales": 122000,
+   "MarginShortSalesShortCovering": 34000,
+   "MarginShortSalesStockRedemption": 0,
+   "MarginShortSalesCurrentDayBalance": 3033000,
+   "MarginShortSalesQuota": 6482595114,
+   "SBLShortSalesPreviousDayBalance": 16732000,
+   "SBLShortSalesShortSales": 48000,
+   "SBLShortSalesReturns": 1285000,
+   "SBLShortSalesAdjustments": 0,
+   "SBLShortSalesCurrentDayBalance": 15495000,
+   "SBLShortSalesQuota": 7864527,
+   "SBLShortSalesShortCovering": 0,
+   "date": "2026-03-10"
+  },
+  {
+   "stock_id": "2330",
+   "MarginShortSalesPreviousDayBalance": 139000,
+   "MarginShortSalesShortSales": 0,
+   "MarginShortSalesShortCovering": 125000,
+   "MarginShortSalesStockRedemption": 12000,
+   "MarginShortSalesCurrentDayBalance": 2000,
+   "MarginShortSalesQuota": 6483131130,
+   "SBLShortSalesPreviousDayBalance": 2374680,
+   "SBLShortSalesShortSales": 7000,
+   "SBLShortSalesReturns": 0,
+   "SBLShortSalesAdjustments": 0,
+   "SBLShortSalesCurrentDayBalance": 2381680,
+   "SBLShortSalesQuota": 13556242,
+   "SBLShortSalesShortCovering": 0,
+   "date": "2026-03-11"
+  }
+ ]
+}

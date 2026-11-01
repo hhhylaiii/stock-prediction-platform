@@ -16,6 +16,7 @@ from apps.etl.models import EtlRun, RawFinmind
 from apps.market.adjust import refresh_adj_factor
 from apps.market.calendar import TradingDays
 from apps.market.models import (
+    DailyChip,
     DailyPrice,
     DailyValuation,
     DividendEvent,
@@ -411,3 +412,68 @@ def test_a_split_list_without_stock_ids_is_a_schema_change(
     )
     with pytest.raises(CommandError, match="stock_id"):
         _backfill("dividend_event", "2884", AUGUST)
+
+
+OCTOBER = ("2026-10-01", "2026-10-31")
+
+
+def _mock_chip(mock: Callable[..., None]) -> None:
+    mock("TaiwanStockInstitutionalInvestorsBuySell", "inst_2330_202610", "2330", OCTOBER)
+    mock("TaiwanStockMarginPurchaseShortSale", "margin_2330_202610", "2330", OCTOBER)
+    mock("TaiwanDailyShortSaleBalances", "sbl_2330_202610", "2330", OCTOBER)
+    mock("TaiwanStockShareholding", "shareholding_2330_202610", "2330", OCTOBER)
+
+
+@responses.activate
+def test_chip_backfill_writes_one_row_per_trading_day(mock: Callable[..., None]) -> None:
+    _mock_chip(mock)
+    _backfill("daily_chip", "2330", OCTOBER)
+    assert DailyChip.objects.count() == 19
+    first = DailyChip.objects.get(stock_id="2330", date=date(2026, 10, 1))
+    assert (first.fi_net, first.margin_balance, first.fi_holding_pct) == (
+        3_090_730,
+        30_658_000,
+        69.19,
+    )
+    assert EtlRun.objects.get(dataset="daily_chip").rows == 19
+
+
+@responses.activate
+def test_chip_backfill_never_overwrites_rows_from_the_primary_source(
+    mock: Callable[..., None],
+) -> None:
+    DailyChip.objects.create(stock_id="2330", date=date(2026, 10, 1), fi_net=1)
+    _mock_chip(mock)
+    _backfill("daily_chip", "2330", OCTOBER)
+    kept = DailyChip.objects.get(stock_id="2330", date=date(2026, 10, 1))
+    assert (kept.fi_net, kept.margin_balance) == (1, None)
+    assert EtlRun.objects.get(dataset="daily_chip").rows == 18
+
+
+@responses.activate
+def test_shareholding_fetched_for_shares_and_chips_is_stored_once(
+    mock: Callable[..., None],
+) -> None:
+    _mock_chip(mock)
+    mock("TaiwanStockShareholding", "shareholding_2330_202610", "2330", OCTOBER)
+    _backfill("daily_chip", "2330", OCTOBER)
+    _backfill("shares_outstanding", "2330", OCTOBER)
+    assert RawFinmind.objects.filter(dataset="shareholding").count() == 1
+
+
+@responses.activate
+def test_chip_dates_missing_from_the_calendar_reject_the_batch(
+    mock: Callable[..., None], load_fixture: Callable[[str], Any]
+) -> None:
+    rows = load_fixture("finmind/shareholding_2884_2013q3.json")["data"]
+    for dataset in (
+        "TaiwanStockInstitutionalInvestorsBuySell",
+        "TaiwanStockMarginPurchaseShortSale",
+        "TaiwanDailyShortSaleBalances",
+    ):
+        mock(dataset, "inst_2330_202610", "2884", AUGUST, data=[])
+    odd = [*rows, {**rows[-1], "date": "2013-08-17"}]
+    mock("TaiwanStockShareholding", "shareholding_2884_2013q3", "2884", AUGUST, data=odd)
+    with pytest.raises(CommandError, match="2013-08-17 is not a trading day"):
+        _backfill("daily_chip", "2884", AUGUST)
+    assert DailyChip.objects.count() == 0

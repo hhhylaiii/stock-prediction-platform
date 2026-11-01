@@ -1,0 +1,60 @@
+{
+ "msg": "success",
+ "status": 200,
+ "data": [
+  {
+   "date": "2026-03-09",
+   "stock_id": "2330",
+   "MarginPurchaseBuy": 3193,
+   "MarginPurchaseCashRepayment": 20,
+   "MarginPurchaseLimit": 6483131,
+   "MarginPurchaseSell": 1526,
+   "MarginPurchaseTodayBalance": 25279,
+   "MarginPurchaseYesterdayBalance": 23632,
+   "Note": " ",
+   "OffsetLoanAndShort": 9,
+   "ShortSaleBuy": 43,
+   "ShortSaleCashRepayment": 0,
+   "ShortSaleLimit": 6483131,
+   "ShortSaleSell": 88,
+   "ShortSaleTodayBalance": 200,
+   "ShortSaleYesterdayBalance": 155
+  },
+  {
+   "date": "2026-03-10",
+   "stock_id": "2330",
+   "MarginPurchaseBuy": 1126,
+   "MarginPurchaseCashRepayment": 81,
+   "MarginPurchaseLimit": 6483131,
+   "MarginPurchaseSell": 1754,
+   "MarginPurchaseTodayBalance": 24570,
+   "MarginPurchaseYesterdayBalance": 25279,
+   "Note": "X ",
+   "OffsetLoanAndShort": 6,
+   "ShortSaleBuy": 64,
+   "ShortSaleCashRepayment": 0,
+   "ShortSaleLimit": 6483131,
+   "ShortSaleSell": 3,
+   "ShortSaleTodayBalance": 139,
+   "ShortSaleYesterdayBalance": 200
+  },
+  {
+   "date": "2026-03-11",
+   "stock_id": "2330",
+   "MarginPurchaseBuy": 1344,
+   "MarginPurchaseCashRepayment": 37,
+   "MarginPurchaseLimit": 6483131,
+   "MarginPurchaseSell": 1872,
+   "MarginPurchaseTodayBalance": 24005,
+   "MarginPurchaseYesterdayBalance": 24570,
+   "Note": "X ",
+   "OffsetLoanAndShort": 0,
+   "ShortSaleBuy": 125,
+   "ShortSaleCashRepayment": 12,
+   "ShortSaleLimit": 6483131,
+   "ShortSaleSell": 0,
+   "ShortSaleTodayBalance": 2,
+   "ShortSaleYesterdayBalance": 139
+  }
+ ]
+}

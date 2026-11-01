@@ -16,6 +16,7 @@ from django.utils import timezone
 
 from apps.etl.adapters.base import BaseAdapter
 from apps.etl.adapters.finmind_datasets import (
+    chip_rows,
     dividend_events,
     price_bars,
     share_counts,
@@ -29,6 +30,7 @@ from apps.etl.upsert import insert_missing, upsert
 from apps.market.adjust import refresh_adj_factor, refresh_where_later_events
 from apps.market.calendar import TradingDays
 from apps.market.models import (
+    DailyChip,
     DailyPrice,
     DailyValuation,
     DividendEvent,
@@ -139,18 +141,29 @@ FINMIND_DATASETS = {
     ),
     "daily_valuation": ("TaiwanStockPER",),
     "shares_outstanding": ("TaiwanStockShareholding",),
+    "daily_chip": (
+        "TaiwanStockInstitutionalInvestorsBuySell",
+        "TaiwanStockMarginPurchaseShortSale",
+        "TaiwanDailyShortSaleBalances",
+        "TaiwanStockShareholding",
+    ),
 }
 RAW_NAMES = {
     "TaiwanStockDividend": "dividend_policy",
     "TaiwanStockDividendResult": "dividend_result",
     "TaiwanStockCapitalReductionReferencePrice": "capital_reduction",
     "TaiwanStockSplitPrice": "split",
+    "TaiwanStockInstitutionalInvestorsBuySell": "institutional",
+    "TaiwanStockMarginPurchaseShortSale": "margin",
+    "TaiwanDailyShortSaleBalances": "short_sale_balance",
+    "TaiwanStockShareholding": "shareholding",
 }
 WHOLE_MARKET = frozenset({"TaiwanStockSplitPrice"})
 TRADING_DATE_COLUMNS = {
     "daily_price": "date",
     "daily_valuation": "date",
     "shares_outstanding": "effective_date",
+    "daily_chip": "date",
 }
 RECORD_DATE_LOOKAHEAD = timedelta(days=30)
 EVENT_FIELDS = ("cash_dividend", "stock_dividend")
@@ -227,6 +240,14 @@ class FinmindAdapter(BaseAdapter):
                 reductions=parts["TaiwanStockCapitalReductionReferencePrice"],
                 splits=parts["TaiwanStockSplitPrice"],
             )
+        elif dataset == "daily_chip":
+            frame = chip_rows(
+                parts["TaiwanStockInstitutionalInvestorsBuySell"],
+                parts["TaiwanStockMarginPurchaseShortSale"],
+                parts["TaiwanDailyShortSaleBalances"],
+                parts["TaiwanStockShareholding"],
+                stock_id,
+            )
         else:
             normalizer = {
                 "daily_price": price_bars,
@@ -248,6 +269,8 @@ class FinmindAdapter(BaseAdapter):
             return rows
         if dataset == "daily_valuation":
             return insert_missing(DailyValuation, frame, ("stock_id", "date"))
+        if dataset == "daily_chip":
+            return insert_missing(DailyChip, frame, ("stock_id", "date"))
         if dataset == "shares_outstanding":
             rows = insert_missing(SharesOutstanding, frame, ("stock_id", "effective_date"))
             with connection.cursor() as cursor:
