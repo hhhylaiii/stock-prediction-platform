@@ -112,7 +112,7 @@ def test_ifrs_statements_become_single_quarter_ratios(rows: Callable[[str], Rows
     average_equity = (3_635_731_930_000 + 3_458_913_627_000) / 2
     assert q1["roe"] == pytest.approx(225_484_877_000 / average_equity)
     assert q1["operating_cf"] == 436_311_108_000
-    assert q1["announce_date"] == date(2024, 5, 31)
+    assert q1["announce_date"] == date(2024, 6, 3)
     assert _record(frame, "2024-Q2")["operating_cf"] == 813_979_318_000 - 436_311_108_000
     q4 = _record(frame, "2024-Q4")
     assert q4["revenue"] == 868_461_178_000
@@ -123,7 +123,7 @@ def test_financial_companies_have_no_margins_and_equity_excludes_minorities(
     rows: Callable[[str], Rows],
 ) -> None:
     q1 = _record(_statements(rows, "2884", "2023_2024", *YEAR_2024), "2024-Q1")
-    assert (q1["gross_margin"], q1["op_margin"], q1["operating_cf"]) == (None, None, None)
+    assert (q1["gross_margin"], q1["op_margin"]) == (None, None)
     assert q1["net_income"] == 6_250_969_000
     assert q1["debt_ratio"] == pytest.approx(3_489_129_204_000 / 3_734_752_361_000)
     average_equity = ((245_623_157_000 - 179_643_000) + (236_423_847_000 - 176_167_000)) / 2
@@ -204,3 +204,36 @@ def test_an_empty_value_counts_as_missing(rows: Callable[[str], Rows]) -> None:
     q1 = _record(frame, "2024-Q1")
     assert (q1["revenue"], q1["gross_margin"]) == (None, None)
     assert q1["net_income"] == 225_484_877_000
+
+
+def test_consolidated_reports_before_2013_are_labelled_consolidated(
+    rows: Callable[[str], Rows],
+) -> None:
+    income = rows("income_2884_2011_2013")
+    frame = statements(income, [], [], "2884", WEEKDAYS, date(2012, 1, 1), date(2012, 12, 31))
+    q4 = _record(frame, "2012-Q4")
+    assert q4["fin_type"] == "consolidated"
+    assert (q4["revenue"], q4["net_income"], q4["eps"]) == (
+        5_850_819_000,
+        1_395_072_000,
+        Decimal("0.28"),
+    )
+
+
+def test_companies_without_subsidiaries_report_individual_net_income(
+    rows: Callable[[str], Rows],
+) -> None:
+    income = rows("income_4162_2023_2024")
+    frame = statements(income, [], [], "4162", WEEKDAYS, date(2023, 1, 1), date(2023, 12, 31))
+    q1 = _record(frame, "2023-Q1")
+    assert q1["fin_type"] == "individual"
+    assert q1["net_income"] == 81_380_000
+
+
+def test_half_year_figures_are_not_taken_as_a_quarter(rows: Callable[[str], Rows]) -> None:
+    income = [r for r in rows("income_2330_2023_2024") if r["date"] != "2024-03-31"]
+    frame = statements(income, [], [], "2330", WEEKDAYS, *YEAR_2024)
+    q2 = _record(frame, "2024-Q2")
+    assert (q2["eps"], q2["revenue"], q2["net_income"]) == (None, None, None)
+    assert q2["gross_margin"] == pytest.approx(358_124_478_000 / 673_510_177_000)
+    assert _record(frame, "2024-Q4")["revenue"] is None

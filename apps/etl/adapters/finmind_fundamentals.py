@@ -9,7 +9,7 @@ from typing import Any
 import pandas as pd
 
 from apps.etl.adapters.finmind_datasets import Row, checked_rows, parse_day
-from apps.etl.deadlines import revenue_deadline, statement_deadline, visible_from
+from apps.etl.deadlines import revenue_visible_from, statement_deadline, visible_from
 from apps.etl.errors import SchemaChangedError
 from apps.market.calendar import TradingDays
 from apps.market.models import FinType
@@ -29,7 +29,21 @@ VALUE_COLUMNS = [
     "operating_cf",
 ]
 STATEMENT_COLUMNS = ["stock_id", "period", "fin_type", *VALUE_COLUMNS, "announce_date"]
-NET_INCOME_TYPES = ("EquityAttributableToOwnersOfParent", "NetIncome")
+NET_INCOME_TYPES = (
+    "EquityAttributableToOwnersOfParent",
+    "TotalConsolidatedProfitForThePeriodBelongsParentCompany",
+    "NetIncome",
+    "IncomeAfterTaxes",
+    "IncomeAfterTax",
+)
+CONSOLIDATED_MARKERS = frozenset(
+    {
+        "EquityAttributableToOwnersOfParent",
+        "TotalConsolidatedProfitForThePeriodBelongsParentCompany",
+        "ConsolidatedNetIncome",
+    }
+)
+FLOW_COLUMNS = ("eps", "revenue", "net_income")
 OPERATING_CF_TYPES = ("CashFlowsFromOperatingActivities", "NetCashInflowFromOperatingActivities")
 USED_TYPES = frozenset(
     {
@@ -38,6 +52,7 @@ USED_TYPES = frozenset(
         "GrossProfit",
         "OperatingIncome",
         *NET_INCOME_TYPES,
+        *CONSOLIDATED_MARKERS,
         "TotalAssets",
         "Liabilities",
         "Equity",
@@ -72,7 +87,7 @@ def monthly_revenues(
             "revenue": revenue,
             "yoy": _growth(revenue, found.get(_shift_month(period, -MONTHS))),
             "mom": _growth(revenue, found.get(_shift_month(period, -1))),
-            "announce_date": visible_from(revenue_deadline(period), calendar),
+            "announce_date": revenue_visible_from(period, calendar),
         }
         for period, (published, revenue) in sorted(found.items())
         if start <= published <= end
@@ -107,7 +122,7 @@ def statements(
     start: date,
     end: date,
 ) -> pd.DataFrame:
-    """Quarters ending in [start, end]; before 2013 only the individual income statement is used."""
+    """Quarters ending in [start, end]; before 2013 only the income statement is used."""
     income_items = _pivot(income, "TaiwanStockFinancialStatements", stock_id)
     balance_items = _pivot(balance, "TaiwanStockBalanceSheet", stock_id)
     cash_items = _pivot(cash_flow, "TaiwanStockCashFlowsStatement", stock_id)
@@ -115,9 +130,11 @@ def statements(
     for day in sorted(income_items.keys() | balance_items.keys() | cash_items.keys()):
         if not start <= day <= end:
             continue
-        individual = day.year < IFRS_FROM
-        values = dict.fromkeys(VALUE_COLUMNS) | _income_values(income_items.get(day, {}))
-        if not individual:
+        items = income_items.get(day, {})
+        values = dict.fromkeys(VALUE_COLUMNS) | _income_values(items)
+        if not _whole_quarter(day, income_items):
+            values |= dict.fromkeys(FLOW_COLUMNS)
+        if day.year >= IFRS_FROM:
             values |= _balance_values(day, values["net_income"], balance_items, cash_items)
         if all(value is None for value in values.values()):
             continue
@@ -126,7 +143,9 @@ def statements(
             {
                 "stock_id": stock_id,
                 "period": period,
-                "fin_type": FinType.INDIVIDUAL if individual else FinType.CONSOLIDATED,
+                "fin_type": FinType.CONSOLIDATED
+                if CONSOLIDATED_MARKERS & items.keys()
+                else FinType.INDIVIDUAL,
                 **values,
                 "announce_date": visible_from(statement_deadline(period), calendar),
             }
@@ -184,6 +203,16 @@ def _balance_values(
         "debt_ratio": _share(sheet.get("Liabilities"), sheet.get("TotalAssets")),
         "operating_cf": None if flow is None or earlier is None else _whole(flow - earlier),
     }
+
+
+def _whole_quarter(day: date, income: Sheet) -> bool:
+    """Before listing only half years are filed, so Q2 and Q4 figures may cover two quarters."""
+    earlier = [end for end in _quarter_ends(day.year) if end < day]
+    return all(end in income for end in earlier)
+
+
+def _quarter_ends(year: int) -> list[date]:
+    return [date(year, month, day) for month, day in QUARTER_ENDS]
 
 
 def _previous_quarter_end(day: date) -> date:
