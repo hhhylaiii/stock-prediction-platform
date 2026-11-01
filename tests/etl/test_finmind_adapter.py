@@ -538,3 +538,19 @@ def test_one_statement_losing_a_key_fails_the_batch(
     with pytest.raises(CommandError, match="value"):
         _backfill("financial_statement", "2330", YEAR_2024)
     assert FinancialStatement.objects.count() == 0
+
+
+@responses.activate
+def test_prices_before_the_listing_date_are_not_written(mock: Callable[..., None]) -> None:
+    StockMaster.objects.filter(stock_id="2884").update(list_date=date(2013, 8, 15))
+    mock("TaiwanStockPrice", "price_2884_201308", "2884", AUGUST)
+    _backfill("daily_price", "2884", AUGUST)
+    assert min(DailyPrice.objects.values_list("date", flat=True)) == date(2013, 8, 15)
+
+
+@responses.activate
+def test_chips_before_the_listing_date_are_not_written(mock: Callable[..., None]) -> None:
+    StockMaster.objects.filter(stock_id="2330").update(list_date=date(2026, 10, 15))
+    _mock_chip(mock)
+    _backfill("daily_chip", "2330", OCTOBER)
+    assert min(DailyChip.objects.values_list("date", flat=True)) == date(2026, 10, 15)

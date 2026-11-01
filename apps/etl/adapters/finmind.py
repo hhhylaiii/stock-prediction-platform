@@ -39,6 +39,7 @@ from apps.market.models import (
     MonthlyRevenue,
     ShareChangeReason,
     SharesOutstanding,
+    StockMaster,
 )
 
 logger = logging.getLogger(__name__)
@@ -178,6 +179,7 @@ TRADING_DATE_COLUMNS = {
     "daily_chip": "date",
 }
 RECORD_DATE_LOOKAHEAD = timedelta(days=30)
+LISTED_ONLY = frozenset({"daily_price", "daily_valuation", "daily_chip"})
 LOOKBACK = {
     "monthly_revenue": timedelta(days=366),
     "financial_statement": timedelta(days=366),
@@ -294,6 +296,8 @@ class FinmindAdapter(BaseAdapter):
         return frame
 
     def upsert(self, dataset: str, frame: pd.DataFrame) -> int:
+        if not frame.empty and dataset in LISTED_ONLY:
+            frame = _listed_only(frame)
         if frame.empty:
             return 0
         stock_id = str(frame["stock_id"].iloc[0])
@@ -353,6 +357,14 @@ class FinmindAdapter(BaseAdapter):
                 raise SchemaChangedError(
                     f"FinMind {dataset} for {stock_id}: {day} is not a trading day"
                 )
+
+
+def _listed_only(frame: pd.DataFrame) -> pd.DataFrame:
+    """Market rows before stock_master.list_date are emerging-market trades (SPEC §8.6)."""
+    stock_id = str(frame["stock_id"].iloc[0])
+    listed = StockMaster.objects.filter(stock_id=stock_id).values_list("list_date", flat=True)
+    first = listed.first()
+    return frame if first is None else frame[frame["date"] >= first]
 
 
 def _rows_from(raw_df: pd.DataFrame, finmind_dataset: str) -> list[dict[str, Any]]:
