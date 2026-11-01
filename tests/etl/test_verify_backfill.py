@@ -1,3 +1,4 @@
+import io
 from collections.abc import Callable
 from datetime import date, timedelta
 from decimal import Decimal
@@ -16,7 +17,7 @@ from apps.etl.adapters.twse import TwseClient
 from apps.etl.errors import SchemaChangedError
 from apps.etl.exchange_rows import OfficialDay
 from apps.etl.roc import parse_roc_date
-from apps.etl.verify import Difference, compare_days, sample_pairs
+from apps.etl.verify import TPEX_ABOVE, Difference, compare_days, sample_pairs
 from apps.market.models import DailyPrice, Market, StockMaster, TradingCalendar
 
 TWSE_URL = "https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY"
@@ -110,12 +111,37 @@ def test_official_rows_are_checked(row: list[str], expected: str | None) -> None
 
 @responses.activate
 @pytest.mark.django_db
-def test_a_changed_column_layout_is_a_schema_change() -> None:
-    moved = ["日期", "成交金額", *TWSE_FIELDS[2:]]
+@pytest.mark.parametrize(
+    "fields",
+    [
+        ["日期", "成交金額", *TWSE_FIELDS[2:]],
+        [*TWSE_FIELDS[:6], "均價", *TWSE_FIELDS[7:]],
+    ],
+)
+def test_a_changed_column_layout_is_a_schema_change(fields: list[str]) -> None:
     row = ["115/10/01", "1,000", "0", "1", "1", "1", "1", "", "0", ""]
-    responses.get(TWSE_URL, json={"stat": "OK", "fields": moved, "data": [row]})
+    responses.get(TWSE_URL, json={"stat": "OK", "fields": fields, "data": [row]})
     with pytest.raises(SchemaChangedError, match="fields changed"):
         TwseClient.build(limiter_for("twse")).stock_days("2330", date(2026, 10, 1))
+
+
+@responses.activate
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("label", "accepted"), [("成交仟股", True), ("成交張數", True), ("成交股數", False)]
+)
+def test_tpex_accepts_both_of_its_volume_labels(label: str, accepted: bool) -> None:
+    fields = ["日 期", label, "成交仟元", "開盤", "最高", "最低", "收盤", "漲跌", "筆數"]
+    row = ["114/09/01", "1,666", "0", "1", "1", "1", "364.50", "", "0"]
+    table = {"fields": fields, "data": [row]}
+    responses.post(TPEX_URL, json={"stat": "ok", "tables": [table]})
+    client = TpexClient.build(limiter_for("tpex"))
+    if accepted:
+        days = client.stock_days("6488", date(2025, 9, 1))
+        assert days == [OfficialDay(date(2025, 9, 1), Decimal("364.50"), 1_666_000, 1000)]
+        return
+    with pytest.raises(SchemaChangedError, match="fields changed"):
+        client.stock_days("6488", date(2025, 9, 1))
 
 
 def _official(day: date, close: str | None, volume: int, unit: int = 1) -> OfficialDay:
@@ -126,6 +152,15 @@ def test_tpex_volumes_match_within_half_a_thousand_shares() -> None:
     official = {JAN_4: _official(JAN_4, "64.90", 200_000, 1000)}
     assert compare_days("6488", official, {JAN_4: (Decimal("64.90"), 200_500)}) == []
     assert compare_days("6488", official, {JAN_4: (Decimal("64.90"), 199_500)}) == []
+
+
+def test_a_stored_volume_above_tpex_is_kept_apart() -> None:
+    official = {JAN_4: _official(JAN_4, "64.90", 200_000, 1000)}
+    assert compare_days("6488", official, {JAN_4: (Decimal("64.90"), 260_720)}) == [
+        Difference("6488", JAN_4, TPEX_ABOVE, "260720", "200000")
+    ]
+    lower = compare_days("6488", official, {JAN_4: (Decimal("64.90"), 199_000)})
+    assert lower[0].field == "volume"
 
 
 def test_matching_days_have_no_differences() -> None:
@@ -147,7 +182,7 @@ def test_each_kind_of_difference_is_reported() -> None:
     stored = {JAN_4: (Decimal("64.80"), 100), day5: (Decimal("65.00"), 200_600), day7: (None, 0)}
     assert compare_days("2330", official, stored) == [
         Difference("2330", JAN_4, "close", "64.80", "64.90"),
-        Difference("2330", day5, "volume", "200600", "200000"),
+        Difference("2330", day5, TPEX_ABOVE, "200600", "200000"),
         Difference("2330", day6, "missing", "-", "66.00 / 300"),
         Difference("2330", day7, "extra", "None / 0", "-"),
     ]
@@ -271,13 +306,17 @@ def test_tpex_stocks_ask_tpex_first_and_long_lists_are_cut(
     _calendar(date(2015, 9, 1), date(2015, 9, 30), {date(2015, 9, 25), date(2015, 9, 30)})
     StockMaster.objects.create(stock_id="6488", name="環球晶", market=Market.TPEX)
     month("tpex", "6488", "201509", "tpex/trading_stock/6488_201509")
+    shown = io.StringIO()
+    report = tmp_path / "r.md"
     with pytest.raises(CommandError, match="2 differences"):
         call_command(
-            "verify_backfill", "--pair", "6488:2015-09", "--output", str(tmp_path / "r.md")
+            "verify_backfill", "--pair", "6488:2015-09", "--output", str(report), stdout=shown
         )
-    text = (tmp_path / "r.md").read_text(encoding="utf-8")
+    text = report.read_text(encoding="utf-8")
     assert "| 6488 | 2015-09-25 | missing |" in text
-    assert "1 more differences not listed" in text
+    assert "| 6488 | 2015-09-30 | missing |" in text
+    assert "1 more rows in the --output file" in shown.getvalue()
+    assert "| 6488 | 2015-09-30 | missing |" not in shown.getvalue()
 
 
 @responses.activate
@@ -326,3 +365,44 @@ def test_an_empty_calendar_is_a_command_error() -> None:
     StockMaster.objects.create(stock_id="2330", name="台積電", market=Market.TWSE)
     with pytest.raises(CommandError, match="trading_calendar is empty"):
         call_command("verify_backfill", "--pair", "2330:2010-02")
+
+
+@responses.activate
+@pytest.mark.django_db
+def test_volumes_above_tpex_are_listed_but_do_not_fail(
+    month: Callable[..., None], tmp_path: Path, load_fixture: Callable[[str], Any]
+) -> None:
+    rows = load_fixture("tpex/trading_stock/6488_202509.json")["tables"][0]["data"]
+    days = {parse_roc_date(row[0]): row for row in rows}
+    _calendar(date(2025, 9, 1), date(2025, 9, 30), set(days))
+    StockMaster.objects.create(stock_id="6488", name="環球晶", market=Market.TPEX)
+    block = {date(2025, 9, 30): 60_720}
+    DailyPrice.objects.bulk_create(
+        DailyPrice(
+            stock_id="6488",
+            date=day,
+            close=Decimal(row[6].replace(",", "")),
+            volume=int(row[1].replace(",", "")) * 1000 + block.get(day, 0),
+            turnover=1,
+        )
+        for day, row in days.items()
+    )
+    month("tpex", "6488", "202509", "tpex/trading_stock/6488_202509")
+    call_command("verify_backfill", "--pair", "6488:2025-09", "--output", str(tmp_path / "r.md"))
+    text = (tmp_path / "r.md").read_text(encoding="utf-8")
+    assert "0 differences" in text
+    assert "### Volumes above TPEx, likely block trades (1)" in text
+
+
+@responses.activate
+@pytest.mark.django_db
+def test_failing_spans_in_a_row_stop_the_check(tmp_path: Path, settings: Any) -> None:
+    settings.ETL_MAX_CONSECUTIVE_REJECTIONS = 2
+    _calendar(date(2010, 2, 1), date(2010, 2, 28), set())
+    for code in ("1101", "2330", "2884"):
+        StockMaster.objects.create(stock_id=code, name=code, market=Market.TWSE)
+    responses.get(TWSE_URL, json={"stat": "error"})
+    args = [arg for code in ("1101", "2330", "2884") for arg in ("--pair", f"{code}:2010-02")]
+    with pytest.raises(CommandError, match="2 failed in 2 stock-years; stopped after"):
+        call_command("verify_backfill", *args, "--output", str(tmp_path / "r.md"))
+    assert "Stopped early" in (tmp_path / "r.md").read_text(encoding="utf-8")

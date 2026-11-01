@@ -6,6 +6,7 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
 
@@ -15,7 +16,14 @@ from apps.etl.adapters.twse import TwseClient
 from apps.etl.errors import SourceError
 from apps.etl.exchange_rows import OfficialDay
 from apps.etl.ratelimit import RetryableError
-from apps.etl.verify import FIRST_YEAR, Difference, compare_days, sample_pairs, stored_days
+from apps.etl.verify import (
+    FIRST_YEAR,
+    TPEX_ABOVE,
+    Difference,
+    compare_days,
+    sample_pairs,
+    stored_days,
+)
 from apps.market.calendar import CalendarError, TradingDays
 from apps.market.models import Market, StockMaster
 
@@ -43,9 +51,16 @@ class Checked(NamedTuple):
     differences: list[Difference]
     error: str = ""
 
+    @property
+    def failing(self) -> list[Difference]:
+        return [found for found in self.differences if found.field != TPEX_ABOVE]
+
 
 class Command(BaseCommand):
-    help = "Compare sampled stock-years of daily_price with TWSE STOCK_DAY and TPEx tradingStock."
+    help = (
+        "Compare sampled stock-years of daily_price with TWSE STOCK_DAY and TPEx tradingStock; "
+        "run after load_listing_dates so no emerging-market rows remain."
+    )
 
     def add_arguments(self, parser: ArgumentParser) -> None:
         parser.add_argument("--sample", type=int, default=20)
@@ -63,16 +78,19 @@ class Command(BaseCommand):
         except CalendarError as exc:
             raise CommandError(f"CalendarError: {exc}") from exc
         twse, tpex = TwseClient.build(limiter_for("twse")), TpexClient.build(limiter_for("tpex"))
-        checked = [_checked(span, calendar, twse, tpex) for span in spans]
-        report = _render(checked, chosen)
-        self.stdout.write(report)
+        checked = _check_all(spans, calendar, twse, tpex)
+        stopped = len(checked) < len(spans)
+        self.stdout.write(_render(checked, chosen, stopped, DETAIL_LIMIT))
         if options["output"]:
-            Path(options["output"]).write_text(report, encoding="utf-8")
-        total = sum(len(item.differences) for item in checked)
+            Path(options["output"]).write_text(_render(checked, chosen, stopped), encoding="utf-8")
+        total = sum(len(item.failing) for item in checked)
         failed = sum(1 for item in checked if item.error)
-        if total or failed:
+        if total or failed or stopped:
             noun = "stock-year" if len(checked) == 1 else "stock-years"
-            raise CommandError(f"{total} differences, {failed} failed in {len(checked)} {noun}")
+            ending = "; stopped after failed spans in a row" if stopped else ""
+            raise CommandError(
+                f"{total} differences, {failed} failed in {len(checked)} {noun}{ending}"
+            )
 
     def _spans(self, options: dict[str, Any], today: date) -> tuple[list[Span], str]:
         if options["pairs"]:
@@ -82,8 +100,9 @@ class Command(BaseCommand):
             last_year = options["last_year"] or today.year - 1
             pairs = sample_pairs(options["sample"], options["years"], options["seed"], last_year)
             spans = [_year_span(code, year, today) for code, year in pairs]
+            stocks = len({code for code, _ in pairs})
             chosen = (
-                f"{options['sample']} stocks x {options['years']} years, seed {options['seed']}, "
+                f"{stocks} stocks x {options['years']} years, seed {options['seed']}, "
                 f"years {FIRST_YEAR}..{last_year}"
             )
         if not spans:
@@ -117,6 +136,21 @@ def _year_span(code: str, year: int, today: date) -> Span:
     return Span(code, str(year), past)
 
 
+def _check_all(
+    spans: list[Span], calendar: TradingDays, twse: TwseClient, tpex: TpexClient
+) -> list[Checked]:
+    """Stop once enough spans fail in a row, which looks like a blocked source."""
+    checked: list[Checked] = []
+    streak = 0
+    for span in spans:
+        item = _checked(span, calendar, twse, tpex)
+        checked.append(item)
+        streak = streak + 1 if item.error else 0
+        if streak >= settings.ETL_MAX_CONSECUTIVE_REJECTIONS:
+            break
+    return checked
+
+
 def _checked(span: Span, calendar: TradingDays, twse: TwseClient, tpex: TpexClient) -> Checked:
     """A failed lookup marks the span and lets the others finish."""
     try:
@@ -135,10 +169,7 @@ def _check(span: Span, calendar: TradingDays, twse: TwseClient, tpex: TpexClient
     official: dict[date, OfficialDay] = {}
     unanswered = []
     for month in span.months:
-        month_end = _next_month(month) - timedelta(days=1)
-        needed = set(calendar.between(month, month_end)) | {
-            day for day in stored if month <= day <= month_end
-        }
+        needed = set(calendar.between(month, _next_month(month) - timedelta(days=1)))
         answers = []
         for lookup in lookups:
             days = lookup(span.stock_id, month)
@@ -157,8 +188,8 @@ def _next_month(month: date) -> date:
     return date(month.year + month.month // MONTHS, month.month % MONTHS + 1, 1)
 
 
-def _render(checked: list[Checked], chosen: str) -> str:
-    total = sum(len(item.differences) for item in checked)
+def _render(checked: list[Checked], chosen: str, stopped: bool, limit: int | None = None) -> str:
+    total = sum(len(item.failing) for item in checked)
     lines = [
         f"verify_backfill: {len(checked)} stock-years, {total} differences ({chosen})",
         "",
@@ -169,16 +200,24 @@ def _render(checked: list[Checked], chosen: str) -> str:
     ]
     lines += [
         f"| {item.span.stock_id} | {item.span.label} | {item.official} | {item.stored} "
-        f"| {len(item.differences)} | {item.error} |"
+        f"| {len(item.failing)} | {item.error} |"
         for item in checked
     ]
-    details = [difference for item in checked for difference in item.differences]
-    if details:
-        lines += ["", "| stock | date | field | stored | official |", DIVIDER]
-        lines += [
-            f"| {d.stock_id} | {d.day} | {d.field} | {d.stored} | {d.official} |"
-            for d in details[:DETAIL_LIMIT]
-        ]
-        if len(details) > DETAIL_LIMIT:
-            lines.append(f"\n{len(details) - DETAIL_LIMIT} more differences not listed")
+    if stopped:
+        lines.append("\nStopped early: too many spans failed in a row.")
+    failing = [found for item in checked for found in item.failing]
+    above = [found for item in checked for found in item.differences if found.field == TPEX_ABOVE]
+    lines += _details("Differences", failing, limit)
+    lines += _details(f"Volumes above TPEx, likely block trades ({len(above)})", above, limit)
     return "\n".join(lines) + "\n"
+
+
+def _details(title: str, rows: list[Difference], limit: int | None) -> list[str]:
+    if not rows:
+        return []
+    shown = rows if limit is None else rows[:limit]
+    lines = ["", f"### {title}", "", "| stock | date | field | stored | official |", DIVIDER]
+    lines += [f"| {d.stock_id} | {d.day} | {d.field} | {d.stored} | {d.official} |" for d in shown]
+    if len(rows) > len(shown):
+        lines.append(f"\n{len(rows) - len(shown)} more rows in the --output file")
+    return lines

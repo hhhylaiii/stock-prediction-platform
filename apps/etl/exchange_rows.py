@@ -14,12 +14,12 @@ CLOSE_AT = 6
 
 
 class Layout(NamedTuple):
-    volume_field: str
+    volume_fields: frozenset[str]
     volume_unit: int
 
 
-TWSE_LAYOUT = Layout("成交股數", 1)
-TPEX_LAYOUT = Layout("成交仟股", 1000)
+TWSE_LAYOUT = Layout(frozenset({"成交股數"}), 1)
+TPEX_LAYOUT = Layout(frozenset({"成交仟股", "成交張數"}), 1000)
 CLOSE_FIELD = "收盤"
 
 
@@ -58,7 +58,7 @@ def official_days(
     if rows and not (
         isinstance(fields, list)
         and len(fields) > CLOSE_AT
-        and fields[VOLUME_AT] == layout.volume_field
+        and fields[VOLUME_AT] in layout.volume_fields
         and CLOSE_FIELD in str(fields[CLOSE_AT])
     ):
         raise SchemaChangedError(f"{label} fields changed: {fields}")

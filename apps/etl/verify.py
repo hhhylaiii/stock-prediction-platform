@@ -15,6 +15,9 @@ FIRST_YEAR = 2010
 Stored = tuple[Decimal | None, int]
 
 
+TPEX_ABOVE = "volume above TPEx"
+
+
 class Difference(NamedTuple):
     stock_id: str
     day: date
@@ -55,7 +58,7 @@ def stored_days(stock_id: str, first: date, last: date) -> dict[date, Stored]:
 def compare_days(
     stock_id: str, official: Mapping[date, OfficialDay], stored: Mapping[date, Stored]
 ) -> list[Difference]:
-    """Close must match exactly; volume within half the official unit (TPEx rounds to 1,000)."""
+    """Close exact, volume within half the official unit; TPEx leaves block trades out."""
     differences = []
     for day in sorted(official.keys() | stored.keys()):
         if day not in stored:
@@ -75,7 +78,7 @@ def _field_differences(stock_id: str, official: OfficialDay, stored: Stored) -> 
     if close != official.close:
         found.append(Difference(stock_id, official.day, "close", str(close), str(official.close)))
     if abs(volume - official.volume) * 2 > official.volume_unit:
-        found.append(
-            Difference(stock_id, official.day, "volume", str(volume), str(official.volume))
-        )
+        above_tpex = official.volume_unit > 1 and volume > official.volume
+        field = TPEX_ABOVE if above_tpex else "volume"
+        found.append(Difference(stock_id, official.day, field, str(volume), str(official.volume)))
     return found

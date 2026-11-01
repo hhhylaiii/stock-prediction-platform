@@ -521,3 +521,19 @@ def test_a_run_of_rejections_stops_asking(settings: Any) -> None:
     run = EtlRun.objects.get()
     assert (run.status, sorted(run.checkpoint["rejected"])) == ("failed", ["6488", "6489"])
     assert len(responses.calls) == 2
+
+
+@responses.activate
+@pytest.mark.django_db
+def test_tpex_months_from_2025_use_the_new_volume_label(
+    twse_month: Callable[..., None], tpex_month: Callable[..., None]
+) -> None:
+    StockMaster.objects.create(stock_id="6488", name="環球晶", market=Market.TPEX)
+    _prices("6488", date(2025, 9, 1))
+    tpex_month("6488", "202509", "tpex/trading_stock/6488_202509")
+    tpex_month("6488", "202508", EMPTY_TPEX)
+    twse_month("6488", "202508", EMPTY_TWSE)
+    call_command("load_listing_dates", "--stock", "6488")
+    checkpoint = EtlRun.objects.get().checkpoint
+    assert checkpoint["rejected"] == {}
+    assert checkpoint["settled"] == {"6488": ["2025-09-01", "first_price_after_empty_month"]}
