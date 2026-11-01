@@ -11,6 +11,7 @@ from apps.market.models import (
     DailyChip,
     DailyPrice,
     DailyValuation,
+    DispositionEvent,
     DividendEvent,
     FinancialStatement,
     IndexDaily,
@@ -30,6 +31,7 @@ COVERED: tuple[tuple[type[models.Model], str, str | None], ...] = (
     (DailyChip, "date", "stock_id"),
     (SharesOutstanding, "effective_date", "stock_id"),
     (DividendEvent, "ex_date", "stock_id"),
+    (DispositionEvent, "start_date", "stock_id"),
     (MonthlyRevenue, "period", "stock_id"),
     (FinancialStatement, "period", "stock_id"),
     (WeeklyHolding, "data_date", "stock_id"),
@@ -39,23 +41,26 @@ COVERED: tuple[tuple[type[models.Model], str, str | None], ...] = (
 LIMIT_CHANGE = date(2015, 6, 1)
 OLD_LIMIT = 0.07
 LIMIT = 0.10
+FUND_PREFIX = "00"
 JUMPS_SQL = """
 WITH bars AS (
     SELECT stock_id, date, close * adj_factor AS adjusted,
            LAG(close * adj_factor) OVER w AS previous,
-           ROW_NUMBER() OVER w AS nth
+           ROW_NUMBER() OVER w AS nth,
+           MIN(date) OVER (PARTITION BY stock_id) AS first_day
     FROM daily_price
     WHERE close IS NOT NULL
     WINDOW w AS (PARTITION BY stock_id ORDER BY date)
 )
-SELECT b.stock_id, b.date, b.previous, b.adjusted, b.adjusted / b.previous - 1 AS change
+SELECT b.stock_id, b.date, b.previous, b.adjusted, b.adjusted / b.previous - 1 AS change,
+       EXISTS (
+           SELECT 1 FROM dividend_event e WHERE e.stock_id = b.stock_id AND e.ex_date = b.date
+       ) AS event
 FROM bars b
-WHERE b.date >= %(since)s AND b.nth > %(free_days)s AND b.previous > 0
+WHERE b.date >= %(since)s AND b.previous > 0
+  AND NOT (b.nth <= %(free_days)s AND b.first_day > (SELECT MIN(date) FROM daily_price))
   AND ABS(b.adjusted / b.previous - 1)
       > CASE WHEN b.date < %(limit_change)s THEN %(old_limit)s ELSE %(limit)s END + %(tolerance)s
-  AND NOT EXISTS (
-      SELECT 1 FROM dividend_event e WHERE e.stock_id = b.stock_id AND e.ex_date = b.date
-  )
 ORDER BY ABS(b.adjusted / b.previous - 1) DESC, b.stock_id, b.date
 """
 
@@ -74,6 +79,22 @@ class Jump(NamedTuple):
     previous: float
     adjusted: float
     change: float
+    event: bool
+
+    @property
+    def fund(self) -> bool:
+        return self.stock_id.startswith(FUND_PREFIX)
+
+
+class Backfill(NamedTuple):
+    source: str
+    dataset: str
+    start: date
+    end: date
+    run_ids: list[int]
+    rows: int
+    latest: EtlRun
+    outstanding: dict[str, str]
 
 
 def coverage() -> list[Coverage]:
@@ -105,7 +126,7 @@ def delisted_counts() -> tuple[int, int]:
 
 
 def price_jumps(since: date, free_days: int, tolerance: float) -> list[Jump]:
-    """Adjusted daily moves past the price limit with no event that day (SPEC §8.2)."""
+    """Adjusted daily moves past the price limit; on an event day the factor itself is suspect."""
     params: dict[str, date | int | float] = {
         "since": since,
         "free_days": free_days,
@@ -116,13 +137,47 @@ def price_jumps(since: date, free_days: int, tolerance: float) -> list[Jump]:
     }
     with connection.cursor() as cursor:
         cursor.execute(JUMPS_SQL, params)
-        return [Jump(row[0], row[1], *map(float, row[2:])) for row in cursor.fetchall()]
+        return [
+            Jump(row[0], row[1], float(row[2]), float(row[3]), float(row[4]), bool(row[5]))
+            for row in cursor.fetchall()
+        ]
 
 
-def latest_backfills() -> list[EtlRun]:
-    """The newest whole-market backfill of each dataset."""
-    runs = EtlRun.objects.filter(checkpoint__kind="backfill", checkpoint__selection="all")
-    newest: dict[tuple[str, str], EtlRun] = {}
-    for run in runs.order_by("run_id"):
-        newest[run.source, run.dataset] = run
-    return [newest[key] for key in sorted(newest)]
+def backfills() -> list[Backfill]:
+    """Whole-market backfills per range, rows summed over resumes, rejections net of retries."""
+    runs = EtlRun.objects.filter(checkpoint__kind="backfill").order_by("run_id")
+    groups: dict[tuple[str, str, date, date], list[EtlRun]] = {}
+    for run in runs:
+        groups.setdefault((run.source, run.dataset, run.start_date, run.end_date), []).append(run)
+    found = []
+    for key, members in sorted(groups.items()):
+        whole = [run for run in members if run.checkpoint.get("selection") == "all"]
+        if not whole:
+            continue
+        latest = whole[-1]
+        later = [run for run in members if run.run_id > latest.run_id and run not in whole]
+        found.append(
+            Backfill(
+                *key,
+                run_ids=[run.run_id for run in whole],
+                rows=sum(run.rows for run in whole),
+                latest=latest,
+                outstanding=_outstanding(latest, later),
+            )
+        )
+    return found
+
+
+def _outstanding(latest: EtlRun, later: list[EtlRun]) -> dict[str, str]:
+    """Rejections left after later runs over chosen stocks that reached their last stock."""
+    left = dict(latest.checkpoint.get("rejected", {}))
+    for run in later:
+        if not (run.status == EtlRun.Status.SUCCESS or run.checkpoint.get("finished")):
+            continue
+        rejected = run.checkpoint.get("rejected", {})
+        for code in run.checkpoint.get("selection", []):
+            if code in rejected:
+                left[code] = rejected[code]
+            else:
+                left.pop(code, None)
+    return left

@@ -7,29 +7,26 @@ from typing import Any
 
 from django.core.management.base import BaseCommand
 
-from apps.etl.backfill_report import coverage, delisted_counts, latest_backfills, price_jumps
+from apps.etl.adapters.finmind import FINMIND_DATASETS
+from apps.etl.backfill_report import Jump, backfills, coverage, delisted_counts, price_jumps
 
 FIRST_DAY = date(2010, 1, 1)
 NEW_LISTING_FREE_DAYS = 5
 LIMIT_TOLERANCE = 0.001
-JUMP_ROWS = 50
-REJECTED_SHOWN = 20
+FUND_ROWS = 50
+DIVIDER = "| --- | --- | --- | --- | --- |"
+JUMP_HEADER = ["| stock | date | previous | adjusted | change | event day |", DIVIDER + " --- |"]
 
 
 class Command(BaseCommand):
-    help = "Report table coverage, delisted stocks, unexplained price jumps and backfill runs."
+    help = "Report table coverage, delisted stocks, price jumps past the limit and backfill runs."
 
     def add_arguments(self, parser: ArgumentParser) -> None:
         parser.add_argument("--since", type=date.fromisoformat, default=FIRST_DAY)
         parser.add_argument("--output")
 
     def handle(self, *args: Any, **options: Any) -> None:
-        sections = [
-            _coverage(),
-            _delisted(),
-            _jumps(options["since"]),
-            _runs(),
-        ]
+        sections = [_coverage(), _delisted(), _jumps(options["since"]), _runs()]
         report = "\n\n".join(sections) + "\n"
         self.stdout.write(report)
         if options["output"]:
@@ -37,12 +34,7 @@ class Command(BaseCommand):
 
 
 def _coverage() -> str:
-    lines = [
-        "## Coverage",
-        "",
-        "| table | rows | stocks | first | last |",
-        "| --- | --- | --- | --- | --- |",
-    ]
+    lines = ["## Coverage", "", "| table | rows | stocks | first | last |", DIVIDER]
     lines += [
         f"| {item.table} | {item.rows} | {'-' if item.stocks is None else item.stocks} "
         f"| {item.first or '-'} | {item.last or '-'} |"
@@ -58,42 +50,73 @@ def _delisted() -> str:
 
 def _jumps(since: date) -> str:
     jumps = price_jumps(since, NEW_LISTING_FREE_DAYS, LIMIT_TOLERANCE)
+    stocks = [jump for jump in jumps if not jump.fund]
+    funds = [jump for jump in jumps if jump.fund]
     lines = [
-        "## Price jumps without an event",
+        "## Price jumps past the limit",
         "",
-        f"{len(jumps)} adjusted daily moves since {since} beyond the price limit "
-        f"(7% before 2015-06-01, 10% after) with no dividend_event that day, "
-        f"skipping each stock's first {NEW_LISTING_FREE_DAYS} priced days",
+        f"Adjusted daily moves since {since} beyond the price limit (7% before 2015-06-01, "
+        f"10% after, plus {LIMIT_TOLERANCE:.1%}), skipping the first {NEW_LISTING_FREE_DAYS} "
+        "priced days of stocks that started trading inside the data. On an event day the "
+        "adjustment factor itself is suspect.",
+        "",
+        f"### Stocks: {len(stocks)}",
+        *_jump_table(stocks),
+        "",
+        f"### Funds (codes starting 00, some without a price limit): {len(funds)}",
+        *_jump_table(funds[:FUND_ROWS]),
     ]
-    if jumps:
-        lines += [
-            "",
-            "| stock | date | previous | adjusted | change |",
-            "| --- | --- | --- | --- | --- |",
-        ]
-        lines += [
-            f"| {jump.stock_id} | {jump.day} | {jump.previous:.4f} | {jump.adjusted:.4f} "
-            f"| {jump.change:+.2%} |"
-            for jump in jumps[:JUMP_ROWS]
-        ]
+    if len(funds) > FUND_ROWS:
+        lines.append(f"\n{len(funds) - FUND_ROWS} more fund rows not listed")
     return "\n".join(lines)
 
 
+def _jump_table(jumps: list[Jump]) -> list[str]:
+    if not jumps:
+        return []
+    return [
+        "",
+        *JUMP_HEADER,
+        *(
+            f"| {jump.stock_id} | {jump.day} | {jump.previous:.4f} | {jump.adjusted:.4f} "
+            f"| {jump.change:+.2%} | {'yes' if jump.event else ''} |"
+            for jump in jumps
+        ),
+    ]
+
+
 def _runs() -> str:
+    found = backfills()
     lines = [
         "## Backfill runs",
         "",
-        "| source | dataset | run | status | range | stocks | rows | rejected |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- |",
+        "Rows are summed over every whole-market run of the range (resumes add up); "
+        "rejections are what is left after later runs over chosen stocks.",
+        "",
+        "| source | dataset | range | runs | latest | finished | last stock | stocks | rows "
+        "| rejected |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
-    for run in latest_backfills():
-        rejected = sorted(run.checkpoint.get("rejected", {}))
-        shown = ", ".join(rejected[:REJECTED_SHOWN]) + (
-            " …" if len(rejected) > REJECTED_SHOWN else ""
-        )
+    for item in found:
+        checkpoint = item.latest.checkpoint
+        finished = item.latest.status == "success" or bool(checkpoint.get("finished"))
         lines.append(
-            f"| {run.source} | {run.dataset} | {run.run_id} | {run.status} "
-            f"| {run.start_date}..{run.end_date} | {run.checkpoint.get('stocks', '-')} "
-            f"| {run.rows} | {len(rejected)}{f' ({shown})' if rejected else ''} |"
+            f"| {item.source} | {item.dataset} | {item.start}..{item.end} "
+            f"| {', '.join(map(str, item.run_ids))} | {item.latest.status} "
+            f"| {'yes' if finished else 'no'} | {checkpoint.get('last_stock_id') or '-'} "
+            f"| {checkpoint.get('stocks', '-')} | {item.rows} | {len(item.outstanding)} |"
         )
+    seen = {item.dataset for item in found if item.source == "finmind"}
+    lines += [
+        f"| finmind | {dataset} | - | - | not run | - | - | - | - | - |"
+        for dataset in FINMIND_DATASETS
+        if dataset not in seen
+    ]
+    rejected = [
+        f"- {item.dataset} {code}: {reason}"
+        for item in found
+        for code, reason in sorted(item.outstanding.items())
+    ]
+    if rejected:
+        lines += ["", "### Rejected stocks", "", *rejected]
     return "\n".join(lines)
