@@ -102,6 +102,8 @@ def test_a_code_newly_missing_for_five_sessions_is_alerted(
     _master("9999", Market.TWSE)
     _master("8888", Market.TWSE)
     _master("7777", Market.TWSE)
+    _master("6666", Market.TWSE)
+    DailyPrice.objects.create(stock_id="6666", date=date(2026, 10, 16), volume=1, turnover=1)
     DailyPrice.objects.create(stock_id="9999", date=date(2026, 10, 19), volume=1, turnover=1)
     for day in (date(2026, 10, 19), date(2026, 10, 27)):
         DailyPrice.objects.create(stock_id="7777", date=day, volume=1, turnover=1)
@@ -163,3 +165,39 @@ def test_a_code_quoted_on_both_exchanges_is_refused(load_fixture: Callable[[str]
 def test_a_day_that_is_not_a_trading_day_is_refused() -> None:
     with pytest.raises(CommandError, match="not a trading day"):
         call_command("refresh_stock_master", date="2026-10-25")
+
+
+@responses.activate
+@pytest.mark.usefixtures("quotes", "delistings", "alerts")
+def test_a_day_before_the_last_refresh_is_refused() -> None:
+    call_command("refresh_stock_master", date="2026-10-28")
+    with pytest.raises(CommandError, match="before the last refresh on 2026-10-28"):
+        call_command("refresh_stock_master", date="2026-10-27")
+
+
+@responses.activate
+@pytest.mark.usefixtures("quotes", "delistings", "alerts")
+def test_a_delisting_after_the_day_is_kept_for_a_quoted_code() -> None:
+    _master("1101", Market.TWSE, "台泥", delisted=date(2026, 10, 30))
+    call_command("refresh_stock_master", date="2026-10-28")
+    assert _state()["1101"] == ("台泥", Market.TWSE, date(2026, 10, 30))
+    assert EtlRun.objects.get().checkpoint["relisted"] == []
+
+
+@responses.activate
+@pytest.mark.usefixtures("quotes", "alerts")
+def test_only_a_recent_delisting_by_the_codes_own_market_applies(
+    load_fixture: Callable[[str], Any],
+) -> None:
+    responses.get(TWSE_URL, json=load_fixture("twse/reference/suspend_listing.json"))
+    tpex = load_fixture("tpex/delisted.json")
+    table = tpex["tables"][0]
+    later = ["6666", "後下市股份有限公司", "115-10-30", *table["data"][0][3:]]
+    table["data"] = [*table["data"], later]
+    table["totalCount"] = len(table["data"])
+    responses.post(TPEX_URL, json=tpex)
+    _master("8908", Market.TWSE, "欣雄")
+    _master("6666", Market.TPEX, "後下市")
+    call_command("refresh_stock_master", date="2026-10-28")
+    assert _state()["8908"][2] is None
+    assert _state()["6666"][2] is None

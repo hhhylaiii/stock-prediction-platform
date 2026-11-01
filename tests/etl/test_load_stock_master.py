@@ -113,6 +113,22 @@ def test_schema_change_is_a_command_error(load_fixture: Callable[[str], Any]) ->
 @responses.activate
 @pytest.mark.django_db
 @pytest.mark.usefixtures("sources")
+def test_the_daily_refresh_count_is_not_the_baseline() -> None:
+    EtlRun.objects.create(
+        source="stock_master",
+        dataset="stock_master_daily",
+        start_date=date(2026, 10, 31),
+        end_date=date(2026, 10, 31),
+        status=EtlRun.Status.SUCCESS,
+        checkpoint={"listed": 100000},
+    )
+    call_command("load_stock_master", stdout=StringIO())
+    assert StockMaster.objects.exists()
+
+
+@responses.activate
+@pytest.mark.django_db
+@pytest.mark.usefixtures("sources")
 def test_a_much_shorter_listing_than_last_time_is_refused() -> None:
     EtlRun.objects.create(
         source="stock_master",

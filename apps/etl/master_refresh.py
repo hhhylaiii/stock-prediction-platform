@@ -19,12 +19,18 @@ from apps.etl.models import DataQualityLog, EtlRun, RawRecord, RawTpex, RawTwse
 from apps.etl.runs import tracked_run
 from apps.etl.stock_master import MASTER_COLUMNS, tpex_delistings, twse_delistings
 from apps.etl.upsert import upsert
-from apps.market.calendar import NotATradingDayError, OutsideCalendarError, TradingDays
+from apps.market.calendar import (
+    CalendarError,
+    NotATradingDayError,
+    OutsideCalendarError,
+    TradingDays,
+)
 from apps.market.models import DailyPrice, Market, StockMaster
 
 VANISHED_SESSIONS = 5
 DELISTING_WINDOW = timedelta(days=90)
 CHECK_NAME = "stock_master"
+DAILY_DATASET = "stock_master_daily"
 UPDATED_FIELDS = ("name", "market", "delist_date")
 Listing = tuple[str, str]
 MasterRow = tuple[str, str, date | None]
@@ -85,16 +91,17 @@ def master_changes(
             added.append(code)
         elif known[1] != market:
             moved.append(code)
-        if known is not None and known[2] is not None:
+        gone = known[2] if known is not None else None
+        if gone is not None and gone <= day:
             relisted.append(code)
-        rows.append(_row(code, name, market, None))
+        rows.append(_row(code, name, market, gone if gone is not None and gone > day else None))
     recent = _recent_delistings(delistings, day)
     delisted = [
         code
-        for code, (_, _, gone) in sorted(master.items())
-        if gone is None and code not in quoted and code in recent
+        for code, (_, market, gone) in sorted(master.items())
+        if gone is None and code not in quoted and recent.get(code, (None, ""))[1] == market
     ]
-    rows.extend(_row(code, master[code][0], master[code][1], recent[code]) for code in delisted)
+    rows.extend(_row(code, master[code][0], master[code][1], recent[code][0]) for code in delisted)
     return MasterChanges(rows, added, moved, relisted, delisted)
 
 
@@ -108,13 +115,14 @@ def _row(code: str, name: str, market: str, delisted: date | None) -> dict[str, 
     }
 
 
-def _recent_delistings(delistings: pd.DataFrame, day: date) -> dict[str, date]:
-    """Latest official delisting date per code within the window; older ones may be reused codes."""
+def _recent_delistings(delistings: pd.DataFrame, day: date) -> dict[str, tuple[date, str]]:
+    """Latest official delisting per code within the window, with the market that delisted it."""
     recent = delistings.loc[
         (delistings["delist_date"] > day - DELISTING_WINDOW) & (delistings["delist_date"] <= day)
     ]
     latest = recent.sort_values("delist_date").drop_duplicates("stock_id", keep="last")
-    return dict(zip(latest["stock_id"], latest["delist_date"], strict=True))
+    pairs = zip(latest["delist_date"], latest["market"], strict=True)
+    return dict(zip(latest["stock_id"], pairs, strict=True))
 
 
 def newly_vanished(codes: Iterable[str], day: date, calendar: TradingDays) -> list[str]:
@@ -135,7 +143,14 @@ def refresh_stock_master(day: date, calendar: TradingDays) -> EtlRun:
     """Apply the day's quotes and recent delistings, then log and alert on vanished codes."""
     if not calendar.is_trading_day(day):
         raise NotATradingDayError(f"{day} is not a trading day")
-    with tracked_run("stock_master", "stock_master_daily", day, day) as run:
+    last = (
+        EtlRun.objects.filter(dataset=DAILY_DATASET, status=EtlRun.Status.SUCCESS)
+        .order_by("-start_date")
+        .first()
+    )
+    if last is not None and day < last.start_date:
+        raise CalendarError(f"{day} is before the last refresh on {last.start_date}")
+    with tracked_run("stock_master", DAILY_DATASET, day, day) as run:
         quoted = quoted_listings(day)
         delistings = pd.concat(
             [
