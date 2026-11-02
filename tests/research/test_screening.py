@@ -71,6 +71,7 @@ def test_signal_features_below_the_floor_at_every_horizon_are_dropped() -> None:
             "chip_fi_net_1d": (math.nan, math.nan),
             "size_log_mcap": (math.nan, math.nan),
             "tech_ma_gap_60d": (IC_FLOOR, -IC_FLOOR),
+            "tech_ret_60d": (0.003, math.nan),
         }
     )
 
@@ -236,8 +237,37 @@ def test_screen_counts_only_rows_tradable_at_the_next_open() -> None:
     result = screen(features, {5: labels, 20: labels})
 
     usable = frame[frame["in_universe"] & ~frame["untradable_t1"]]
-    expected = daily_rank_ic(usable, "tech_ret_1d", "fwd_rank_pct").mean()
-    assert result.table.loc["tech_ret_1d", "ic_h5"] == pytest.approx(expected)
+    daily = daily_rank_ic(usable, "tech_ret_1d", "fwd_rank_pct")
+    row = result.table.loc["tech_ret_1d"]
+    assert row["ic_h5"] == pytest.approx(daily.mean())
+    assert row["nw_t_h5"] == pytest.approx(summarize_ic(daily, lag=5).nw_t)
+    assert row["nw_t_h20"] == pytest.approx(summarize_ic(daily, lag=20).nw_t)
+    assert row["nw_t_h5"] != pytest.approx(row["nw_t_h20"])
+
+
+def test_screen_applies_the_floor_only_to_features_covering_half_the_window() -> None:
+    days = weekdays()[:30]
+    frame = panel(days, seed=8)
+    rank = frame[frame["in_universe"]].groupby("date")["fwd_rank_pct"].rank()
+    flat = ((rank - 20) ** 2).reindex(frame.index)
+    frame = frame.assign(
+        tech_ret_5d=flat,
+        tech_ma_gap_5d=flat.where(frame["date"] > days[14]),
+        tech_ret_1d=flat.where(frame["date"] > days[15]),
+    )
+    labels = frame[["stock_id", "date", "fwd_rank_pct", "untradable_t1"]]
+    features = frame.drop(columns=["fwd_rank_pct", "untradable_t1"])
+
+    result = screen(features, {5: labels, 20: labels})
+
+    thin = result.table.loc["tech_ret_1d"]
+    assert result.days == 30
+    assert thin["ic_h5"] == pytest.approx(0.0, abs=IC_FLOOR)
+    assert [thin["days_h5"], thin["days_h20"]] == [14, 14]
+    assert "below" in result.dropped["tech_ret_5d"]
+    assert "below" in result.dropped["tech_ma_gap_5d"]
+    assert "tech_ret_1d" not in result.dropped
+    assert not thin["covered"]
 
 
 def test_screen_refuses_labels_missing_on_any_day_of_the_window() -> None:
@@ -264,13 +294,18 @@ def test_render_escapes_pipes_inside_cells() -> None:
             {
                 "ic_h5": [0.001, 0.03, math.nan],
                 "nw_t_h5": [0.1, 2.0, math.nan],
+                "days_h5": [40, 40, 0],
                 "ic_h20": [0.001, 0.02, math.nan],
                 "nw_t_h20": [0.1, 1.5, math.nan],
+                "days_h20": [40, 38, 0],
             },
             index=names,
-        ).assign(conditional=False, reason=[dropped["tech_ret_5d"], "", ""]),
+        ).assign(
+            conditional=False, covered=[True, True, False], reason=[dropped["tech_ret_5d"], "", ""]
+        ),
         dropped,
         correlations(names, {}),
+        40,
     )
 
     text = ic_report.render(result, START, END, "rank-screen1.screening")
@@ -278,10 +313,11 @@ def test_render_escapes_pipes_inside_cells() -> None:
     rows = [line for line in text.splitlines() if line.startswith(("| tech_", "| chip_", "| mkt_"))]
     assert "|" in dropped["tech_ret_5d"]
     assert len(rows) == 3 + len(ic_report.UNSCREENED)
-    assert all(len(re.findall(r"(?<!\\)\|", row)) == 8 for row in rows)
+    assert all(len(re.findall(r"(?<!\\)\|", row)) == 9 for row in rows)
     assert "| mkt_taiex_ret_5d | 市場 |" in text
-    assert rows[1].endswith("| 保留 |")
-    assert "未篩選" in rows[2]
+    assert rows[1] == "| tech_ret_20d | 訊號 | 0.0300 | 2.00 | 0.0200 | 1.50 | 40／38 | 保留 |"
+    assert "未做低 IC 篩選" in rows[2]
+    assert "40 個交易日" in text
 
 
 def test_screen_keeps_the_signal_and_drops_its_duplicate() -> None:
@@ -377,12 +413,58 @@ def test_ic_report_records_the_kept_list_and_writes_the_report(stored: Path) -> 
         FeatureDaily.objects.filter(**later).update(tech_ret_20d=float(len(STOCKS) - position))
     export_year(2016, Path(stored) / "features")
 
-    call_command("ic_report", run_key="rank-screen2", output=str(output), stdout=StringIO())
+    call_command("ic_report", run_key="rank-screen1", output=str(output), stdout=StringIO())
 
-    rerun = ModelRun.objects.get(run_id="rank-screen2.screening")
+    rerun = ModelRun.objects.get()
     assert rerun.params["ic"] == run.params["ic"]
     assert rerun.params["dropped"] == run.params["dropped"]
     assert rerun.feature_list == run.feature_list
+
+
+@pytest.mark.django_db
+def test_ic_report_keeps_a_signal_feature_without_an_ic(stored: Path) -> None:
+    name = "chip_big_holder_pct_chg_1w"
+    FeatureDaily.objects.update(**{name: None})
+    export_year(2016, stored / "features")
+    output = stored / "report.md"
+
+    call_command("ic_report", run_key="rank-screen1", output=str(output), stdout=StringIO())
+
+    run = ModelRun.objects.get()
+    assert run.params["ic"][name] == {"5": None, "20": None}
+    assert run.params["days"][name] == {"5": 0, "20": 0}
+    assert run.params["days"]["tech_ret_20d"]["5"] == run.params["window_days"]
+    assert name in run.feature_list
+    row = next(line for line in output.read_text().splitlines() if line.startswith(f"| {name} |"))
+    assert "未做低 IC 篩選" in row
+
+
+@pytest.mark.django_db
+def test_ic_report_keeps_a_single_screening(stored: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    call_command(
+        "ic_report", run_key="rank-screen1", output=str(stored / "report.md"), stdout=StringIO()
+    )
+    monkeypatch.setattr(ic_report, "screen", lambda *args: pytest.fail("screened first"))
+
+    with pytest.raises(CommandError, match=r"rank-screen1\.screening"):
+        call_command("ic_report", run_key="rank-screen2", output=str(stored / "other.md"))
+
+    assert list(ModelRun.objects.values_list("run_id", flat=True)) == ["rank-screen1.screening"]
+    assert not (stored / "other.md").exists()
+
+
+@pytest.mark.django_db
+def test_ic_report_refuses_features_missing_on_trading_days(stored: Path) -> None:
+    gap = {"date__range": (date(2016, 3, 1), date(2016, 3, 15))}
+    FeatureDaily.objects.filter(**gap).delete()
+    LabelDaily.objects.filter(**gap).delete()
+    export_year(2016, stored / "features")
+
+    with pytest.raises(CommandError, match=r"missing on 11 of \d+ trading days from 2016-03-01"):
+        call_command("ic_report", run_key="rank-screen1", output=str(stored / "report.md"))
+
+    assert not ModelRun.objects.exists()
+    assert not (stored / "report.md").exists()
 
 
 @pytest.mark.django_db
@@ -394,6 +476,8 @@ def test_ic_report_checks_the_run_key_before_screening(
 
     with pytest.raises(CommandError, match="lowercase"):
         call_command("ic_report", run_key=run_key, output=str(stored / "report.md"))
+
+    assert not (stored / "report.md").exists()
 
 
 @pytest.mark.django_db
@@ -407,6 +491,7 @@ def test_ic_report_refuses_a_last_date_inside_the_tuning_period(stored: Path) ->
         )
 
     assert not ModelRun.objects.exists()
+    assert not (stored / "report.md").exists()
 
 
 @pytest.mark.django_db
@@ -417,6 +502,7 @@ def test_ic_report_refuses_missing_labels(stored: Path) -> None:
         call_command("ic_report", run_key="rank-screen1", output=str(stored / "report.md"))
 
     assert not ModelRun.objects.exists()
+    assert not (stored / "report.md").exists()
 
 
 @pytest.mark.django_db
@@ -430,6 +516,7 @@ def test_ic_report_refuses_partitions_that_change_while_reading(
         call_command("ic_report", run_key="rank-screen1", output=str(stored / "report.md"))
 
     assert not ModelRun.objects.exists()
+    assert not (stored / "report.md").exists()
 
 
 @pytest.mark.django_db
@@ -448,6 +535,7 @@ def test_ic_report_refuses_a_holdout_claimed_while_screening(
         call_command("ic_report", run_key="rank-screen1", output=str(stored / "report.md"))
 
     assert not ModelRun.objects.filter(model_type="screening").exists()
+    assert not (stored / "report.md").exists()
 
 
 @pytest.mark.django_db
@@ -461,3 +549,4 @@ def test_ic_report_refuses_to_rescreen_after_a_holdout_run(
         call_command("ic_report", run_key="rank-screen1", output=str(stored / "report.md"))
 
     assert not ModelRun.objects.exists()
+    assert not (stored / "report.md").exists()
