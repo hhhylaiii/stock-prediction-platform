@@ -16,6 +16,7 @@ from apps.research.holdout import HoldoutError, claim_holdout
 from apps.research.prediction_cache import (
     FoldMismatchError,
     MissingFoldsError,
+    fold_notes,
     fold_path,
     load_fold_predictions,
     load_predictions,
@@ -67,6 +68,17 @@ def test_saved_predictions_read_back_equal(research: list[Fold], cache_dir: Path
     assert path == fold_path(RUN, fold.index)
     pd.testing.assert_frame_equal(loaded, frame)
     assert type(loaded["date"].iloc[0]) is date
+
+
+def test_notes_are_kept_with_the_fold(research: list[Fold]) -> None:
+    fold = research[0]
+    assert fold_notes("rank-v1", fold.index) == {}
+
+    save_fold_predictions("rank-v1", fold, predictions(fold), notes={"feature_hash": "ab12"})
+    assert fold_notes("rank-v1", fold.index) == {"feature_hash": "ab12"}
+
+    save_fold_predictions("rank-v1", fold, predictions(fold))
+    assert fold_notes("rank-v1", fold.index) == {}
 
 
 def test_index_is_not_kept(research: list[Fold]) -> None:
