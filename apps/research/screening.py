@@ -65,37 +65,49 @@ def mean_daily_correlation(frame: pd.DataFrame, features: Sequence[str]) -> pd.D
 
 
 def _low_ic(names: Sequence[str], strength: pd.Series, horizons: str) -> dict[str, str]:
-    reasons = {}
-    for name in names:
-        if feature(name).conditional:
-            continue
-        if math.isnan(strength[name]):
-            reasons[name] = f"no rank IC: fewer than {MIN_STOCKS} stocks with values every day"
-        elif strength[name] < IC_FLOOR:
-            reasons[name] = f"|rank IC| below {IC_FLOOR} at horizons {horizons}"
-    return reasons
+    """Signal features under the floor at every horizon; a feature without an IC is not screened."""
+    return {
+        name: f"|rank IC| below {IC_FLOOR} at horizons {horizons}"
+        for name in names
+        if not feature(name).conditional and strength[name] < IC_FLOOR
+    }
+
+
+def _twin(name: str, kept: Sequence[str], correlation: pd.DataFrame) -> str | None:
+    row = np.abs(correlation.loc[[name], list(kept)].to_numpy(dtype=np.float64)[0])
+    closeness = dict(zip(kept, row, strict=True))
+    tied = [other for other in kept if closeness[other] > CORRELATION_CEILING]
+    return max(tied, key=closeness.__getitem__, default=None)
 
 
 def select(ic: pd.DataFrame, correlation: pd.DataFrame) -> dict[str, str]:
-    """Drop reasons: signal features under the IC floor, then the weaker of each correlated pair."""
+    """Drop reasons: signal features under the IC floor, then features tied to a stronger kept one.
+
+    Features are kept in order of max |IC| over horizons, ties in registry order.
+    """
     order = {name: position for position, name in enumerate(STOCK_LEVEL)}
-    names = sorted(ic.index, key=order.__getitem__)
     strength = ic.abs().max(axis=1)
-    reasons = _low_ic(names, strength, " and ".join(str(horizon) for horizon in ic.columns))
-    ranked = np.nan_to_num(strength.to_numpy(dtype=np.float64), nan=-np.inf)
-    power = dict(zip(strength.index, ranked, strict=True))
-    pairs = [
-        (first, second, float(correlation.loc[first, second]))
-        for position, first in enumerate(names)
-        for second in names[position + 1 :]
-        if abs(correlation.loc[first, second]) > CORRELATION_CEILING
-    ]
-    for first, second, rho in sorted(pairs, key=lambda pair: -abs(pair[2])):
-        if first in reasons or second in reasons:
-            continue
-        weaker, stronger = (first, second) if power[first] < power[second] else (second, first)
-        reasons[weaker] = f"duplicate of {stronger} (mean daily Spearman {rho:+.3f})"
+    reasons = _low_ic(list(ic.index), strength, " and ".join(str(h) for h in ic.columns))
+    ranked = strength.fillna(-math.inf)
+    kept: list[str] = []
+    for name in sorted(set(ic.index) - set(reasons), key=lambda n: (-ranked[n], order[n])):
+        twin = _twin(name, kept, correlation)
+        if twin is None:
+            kept.append(name)
+        else:
+            rho = float(correlation.loc[name, twin])
+            reasons[name] = f"duplicate of {twin} (mean daily Spearman {rho:+.3f})"
     return reasons
+
+
+def _require_labels(features: pd.DataFrame, labels: pd.DataFrame, horizon: int) -> None:
+    days = pd.Index(features["date"].unique())
+    missing = days.difference(pd.Index(labels["date"].unique()))
+    if len(missing):
+        raise ValueError(
+            f"labels at horizon {horizon} are missing on {len(missing)} of {len(days)} days "
+            f"from {min(missing)}; run build_labels over the screening window"
+        )
 
 
 def screen(features: pd.DataFrame, labels: Mapping[int, pd.DataFrame]) -> Screening:
@@ -103,6 +115,7 @@ def screen(features: pd.DataFrame, labels: Mapping[int, pd.DataFrame]) -> Screen
     columns: dict[str, pd.Series] = {}
     means = {}
     for horizon, frame in labels.items():
+        _require_labels(features, frame, horizon)
         summary = single_factor_ic(training_rows(features, frame, RANK_LABEL), STOCK_LEVEL, horizon)
         columns[f"ic_h{horizon}"] = summary["mean"]
         columns[f"nw_t_h{horizon}"] = summary["nw_t"]
