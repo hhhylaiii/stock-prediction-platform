@@ -16,6 +16,7 @@ from apps.research.walkforward import Fold
 
 IC_FLOOR = 0.005
 CORRELATION_CEILING = 0.95
+MIN_COVERAGE = 0.5
 RANK_LABEL = "fwd_rank_pct"
 
 
@@ -26,6 +27,7 @@ class Screening:
     table: pd.DataFrame
     dropped: dict[str, str]
     correlation: pd.DataFrame
+    days: int
 
     @property
     def kept(self) -> list[str]:
@@ -65,7 +67,7 @@ def mean_daily_correlation(frame: pd.DataFrame, features: Sequence[str]) -> pd.D
 
 
 def _low_ic(names: Sequence[str], strength: pd.Series, horizons: str) -> dict[str, str]:
-    """Signal features under the floor at every horizon; a feature without an IC is not screened."""
+    """Signal features under the floor at every horizon; one lacking an IC anywhere is kept."""
     return {
         name: f"|rank IC| below {IC_FLOOR} at horizons {horizons}"
         for name in names
@@ -87,7 +89,8 @@ def select(ic: pd.DataFrame, correlation: pd.DataFrame) -> dict[str, str]:
     """
     order = {name: position for position, name in enumerate(STOCK_LEVEL)}
     strength = ic.abs().max(axis=1)
-    reasons = _low_ic(list(ic.index), strength, " and ".join(str(h) for h in ic.columns))
+    judged = strength.where(ic.notna().all(axis=1))
+    reasons = _low_ic(list(ic.index), judged, " and ".join(str(h) for h in ic.columns))
     ranked = strength.fillna(-math.inf)
     kept: list[str] = []
     for name in sorted(set(ic.index) - set(reasons), key=lambda n: (-ranked[n], order[n])):
@@ -111,7 +114,11 @@ def _require_labels(features: pd.DataFrame, labels: pd.DataFrame, horizon: int) 
 
 
 def screen(features: pd.DataFrame, labels: Mapping[int, pd.DataFrame]) -> Screening:
-    """Screen the stock-level columns of raw features against each horizon's labels."""
+    """Screen the stock-level columns of raw features against each horizon's labels.
+
+    An IC over fewer than MIN_COVERAGE of the window's days is left out of select.
+    """
+    days = features["date"].nunique()
     columns: dict[str, pd.Series] = {}
     means = {}
     for horizon, frame in labels.items():
@@ -119,12 +126,15 @@ def screen(features: pd.DataFrame, labels: Mapping[int, pd.DataFrame]) -> Screen
         summary = single_factor_ic(training_rows(features, frame, RANK_LABEL), STOCK_LEVEL, horizon)
         columns[f"ic_h{horizon}"] = summary["mean"]
         columns[f"nw_t_h{horizon}"] = summary["nw_t"]
-        means[horizon] = summary["mean"]
+        columns[f"days_h{horizon}"] = summary["n_days"]
+        means[horizon] = summary["mean"].where(summary["n_days"] >= MIN_COVERAGE * days)
     universe = features[features["in_universe"].astype(bool)]
     correlation = mean_daily_correlation(universe, STOCK_LEVEL)
-    dropped = select(pd.DataFrame(means), correlation)
+    screened = pd.DataFrame(means)
+    dropped = select(screened, correlation)
     table = pd.DataFrame(columns).assign(
         conditional=[feature(name).conditional for name in STOCK_LEVEL],
+        covered=screened.notna().all(axis=1),
         reason=[dropped.get(name, "") for name in STOCK_LEVEL],
     )
-    return Screening(table, dropped, correlation)
+    return Screening(table, dropped, correlation, days)
