@@ -1,4 +1,5 @@
 import math
+import re
 from datetime import date, timedelta
 from io import StringIO
 from pathlib import Path
@@ -21,6 +22,7 @@ from apps.research.models import FeatureDaily, LabelDaily, ModelRun
 from apps.research.screening import (
     CORRELATION_CEILING,
     IC_FLOOR,
+    Screening,
     mean_daily_correlation,
     screen,
     screening_window,
@@ -74,9 +76,8 @@ def test_signal_features_below_the_floor_at_every_horizon_are_dropped() -> None:
 
     reasons = select(ic, correlations(list(ic.index), {}))
 
-    assert set(reasons) == {"tech_ret_5d", "chip_fi_net_1d"}
+    assert set(reasons) == {"tech_ret_5d"}
     assert str(IC_FLOOR) in reasons["tech_ret_5d"]
-    assert "no rank IC" in reasons["chip_fi_net_1d"]
 
 
 def test_correlated_pairs_keep_the_stronger_feature() -> None:
@@ -111,15 +112,41 @@ def test_low_ic_pruning_runs_before_deduplication() -> None:
     assert list(reasons) == ["tech_ret_5d"]
 
 
-def test_deduplication_is_greedy_from_the_tightest_pair() -> None:
+def test_deduplication_keeps_the_strongest_and_drops_only_twins_of_kept_features() -> None:
     ic = table(
-        {"tech_ret_1d": (0.05, 0.05), "tech_ret_5d": (0.04, 0.04), "tech_ret_20d": (0.03, 0.03)}
+        {"tech_ret_5d": (0.02, 0.0), "tech_ret_20d": (0.01, 0.0), "tech_ret_60d": (0.03, 0.0)}
     )
-    pairs = {("tech_ret_1d", "tech_ret_5d"): 0.99, ("tech_ret_5d", "tech_ret_20d"): 0.97}
+    pairs = {
+        ("tech_ret_5d", "tech_ret_20d"): 0.99,
+        ("tech_ret_5d", "tech_ret_60d"): 0.97,
+        ("tech_ret_20d", "tech_ret_60d"): 0.90,
+    }
 
     reasons = select(ic, correlations(list(ic.index), pairs))
 
     assert list(reasons) == ["tech_ret_5d"]
+    assert "duplicate of tech_ret_60d" in reasons["tech_ret_5d"]
+
+
+def test_a_duplicate_names_its_tightest_kept_twin() -> None:
+    ic = table(
+        {"tech_ret_1d": (0.05, 0.05), "tech_ret_5d": (0.04, 0.04), "tech_ret_20d": (0.03, 0.03)}
+    )
+    pairs = {("tech_ret_1d", "tech_ret_20d"): 0.96, ("tech_ret_5d", "tech_ret_20d"): -0.99}
+
+    reasons = select(ic, correlations(list(ic.index), pairs))
+
+    assert list(reasons) == ["tech_ret_20d"]
+    assert "duplicate of tech_ret_5d" in reasons["tech_ret_20d"]
+
+
+def test_features_without_an_ic_rank_after_every_scored_feature() -> None:
+    ic = table({"chip_fi_net_1d": (math.nan, math.nan), "chip_fi_net_5d": (0.02, 0.0)})
+
+    reasons = select(ic, correlations(list(ic.index), {("chip_fi_net_1d", "chip_fi_net_5d"): 0.99}))
+
+    assert list(reasons) == ["chip_fi_net_1d"]
+    assert "duplicate of chip_fi_net_5d" in reasons["chip_fi_net_1d"]
 
 
 def test_ties_drop_the_later_feature_in_registry_order() -> None:
@@ -177,6 +204,84 @@ def test_mean_daily_correlation_averages_each_day_spearman() -> None:
     assert matrix.loc["tech_ret_20d", "tech_ret_1d"] == pytest.approx(expected)
     assert matrix.to_numpy()[0, 1] > CORRELATION_CEILING
     assert matrix.loc["tech_ret_1d", "tech_ret_1d"] == pytest.approx(1.0)
+
+
+def test_mean_daily_correlation_pairs_shared_stocks_and_skips_thin_days() -> None:
+    frame = panel(weekdays()[:5], seed=5)
+    first_day = frame["date"].eq(frame["date"].iloc[0])
+    frame.loc[first_day & frame["stock_id"].lt("1115"), "tech_ret_1d"] = np.nan
+    frame.loc[~first_day & frame["stock_id"].lt("1105"), "tech_ret_1d"] = np.nan
+    frame.loc[frame["stock_id"].gt("1134"), "tech_ret_60d"] = np.nan
+    names = ["tech_ret_20d", "tech_ret_1d", "tech_ret_60d"]
+
+    matrix = mean_daily_correlation(frame, names)
+
+    expected = np.mean(
+        [
+            pair["tech_ret_20d"].corr(pair["tech_ret_1d"], method="spearman")
+            for _, day in frame[~first_day].groupby("date")
+            for pair in [day[["tech_ret_20d", "tech_ret_1d"]].dropna()]
+        ]
+    )
+    assert matrix.loc["tech_ret_20d", "tech_ret_1d"] == pytest.approx(expected)
+
+
+def test_screen_counts_only_rows_tradable_at_the_next_open() -> None:
+    frame = panel(weekdays()[:30], seed=6).assign(
+        untradable_t1=lambda rows: rows["stock_id"].lt("1105")
+    )
+    labels = frame[["stock_id", "date", "fwd_rank_pct", "untradable_t1"]]
+    features = frame.drop(columns=["fwd_rank_pct", "untradable_t1"])
+
+    result = screen(features, {5: labels, 20: labels})
+
+    usable = frame[frame["in_universe"] & ~frame["untradable_t1"]]
+    expected = daily_rank_ic(usable, "tech_ret_1d", "fwd_rank_pct").mean()
+    assert result.table.loc["tech_ret_1d", "ic_h5"] == pytest.approx(expected)
+
+
+def test_screen_refuses_labels_missing_on_any_day_of_the_window() -> None:
+    frame = panel(weekdays()[:30], seed=7)
+    labels = frame[["stock_id", "date", "fwd_rank_pct", "untradable_t1"]]
+    features = frame.drop(columns=["fwd_rank_pct", "untradable_t1"])
+    partial = labels[labels["date"] > weekdays()[3]]
+
+    with pytest.raises(ValueError, match=r"horizon 5 .* 4 of 30 days"):
+        screen(features, {5: partial, 20: labels})
+    with pytest.raises(ValueError, match=r"horizon 20 .* 30 of 30 days"):
+        screen(features, {5: labels, 20: labels.iloc[:0]})
+
+
+def test_render_escapes_pipes_inside_cells() -> None:
+    names = ["tech_ret_5d", "tech_ret_20d", "chip_big_holder_pct_chg_1w"]
+    dropped = {
+        "tech_ret_5d": select(
+            table({"tech_ret_5d": (0.001, 0.001)}), correlations(["tech_ret_5d"], {})
+        )["tech_ret_5d"]
+    }
+    result = Screening(
+        pd.DataFrame(
+            {
+                "ic_h5": [0.001, 0.03, math.nan],
+                "nw_t_h5": [0.1, 2.0, math.nan],
+                "ic_h20": [0.001, 0.02, math.nan],
+                "nw_t_h20": [0.1, 1.5, math.nan],
+            },
+            index=names,
+        ).assign(conditional=False, reason=[dropped["tech_ret_5d"], "", ""]),
+        dropped,
+        correlations(names, {}),
+    )
+
+    text = ic_report.render(result, START, END, "rank-screen1.screening")
+
+    rows = [line for line in text.splitlines() if line.startswith(("| tech_", "| chip_", "| mkt_"))]
+    assert "|" in dropped["tech_ret_5d"]
+    assert len(rows) == 3 + len(ic_report.UNSCREENED)
+    assert all(len(re.findall(r"(?<!\\)\|", row)) == 8 for row in rows)
+    assert "| mkt_taiex_ret_5d | 市場 |" in text
+    assert rows[1].endswith("| 保留 |")
+    assert "未篩選" in rows[2]
 
 
 def test_screen_keeps_the_signal_and_drops_its_duplicate() -> None:
@@ -259,6 +364,7 @@ def test_ic_report_records_the_kept_list_and_writes_the_report(stored: Path) -> 
     assert "tech_ret_60d" not in run.feature_list
     assert "duplicate of tech_ret_20d" in run.params["dropped"]["tech_ret_60d"]
     assert run.params["ic_floor"] == IC_FLOOR
+    assert run.params["unscreened"] == list(ic_report.UNSCREENED)
     folds = generate_folds(TradingDays(weekdays(), START, END), END, CONFIG)
     assert (run.train_start, run.train_end) == screening_window(folds)
     text = output.read_text()
@@ -280,8 +386,76 @@ def test_ic_report_records_the_kept_list_and_writes_the_report(stored: Path) -> 
 
 
 @pytest.mark.django_db
-def test_ic_report_refuses_to_rescreen_after_a_holdout_run(stored: Path) -> None:
+@pytest.mark.parametrize("run_key", ["Rank-screen", "rank-" + "a" * 55])
+def test_ic_report_checks_the_run_key_before_screening(
+    stored: Path, monkeypatch: pytest.MonkeyPatch, run_key: str
+) -> None:
+    monkeypatch.setattr(ic_report, "screen", lambda *args: pytest.fail("screened first"))
+
+    with pytest.raises(CommandError, match="lowercase"):
+        call_command("ic_report", run_key=run_key, output=str(stored / "report.md"))
+
+
+@pytest.mark.django_db
+def test_ic_report_refuses_a_last_date_inside_the_tuning_period(stored: Path) -> None:
+    with pytest.raises(CommandError, match="tuning period"):
+        call_command(
+            "ic_report",
+            run_key="rank-screen1",
+            last_date="2016-10-31",
+            output=str(stored / "report.md"),
+        )
+
+    assert not ModelRun.objects.exists()
+
+
+@pytest.mark.django_db
+def test_ic_report_refuses_missing_labels(stored: Path) -> None:
+    LabelDaily.objects.filter(horizon=5).delete()
+
+    with pytest.raises(CommandError, match="horizon 5"):
+        call_command("ic_report", run_key="rank-screen1", output=str(stored / "report.md"))
+
+    assert not ModelRun.objects.exists()
+
+
+@pytest.mark.django_db
+def test_ic_report_refuses_partitions_that_change_while_reading(
+    stored: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    digests = iter(["before", "after"])
+    monkeypatch.setattr(ic_report, "feature_hash", lambda *args: next(digests))
+
+    with pytest.raises(CommandError, match="changed while reading"):
+        call_command("ic_report", run_key="rank-screen1", output=str(stored / "report.md"))
+
+    assert not ModelRun.objects.exists()
+
+
+@pytest.mark.django_db
+def test_ic_report_refuses_a_holdout_claimed_while_screening(
+    stored: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = ic_report.screen
+
+    def claimed(*args: Any) -> Screening:
+        claim_holdout("rank", "rank-final", date(2017, 3, 31))
+        return real(*args)
+
+    monkeypatch.setattr(ic_report, "screen", claimed)
+
+    with pytest.raises(CommandError, match="holdout"):
+        call_command("ic_report", run_key="rank-screen1", output=str(stored / "report.md"))
+
+    assert not ModelRun.objects.filter(model_type="screening").exists()
+
+
+@pytest.mark.django_db
+def test_ic_report_refuses_to_rescreen_after_a_holdout_run(
+    stored: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     claim_holdout("rank", "rank-final", date(2017, 3, 31))
+    monkeypatch.setattr(ic_report, "screen", lambda *args: pytest.fail("screened first"))
 
     with pytest.raises(CommandError, match="holdout"):
         call_command("ic_report", run_key="rank-screen1", output=str(stored / "report.md"))
