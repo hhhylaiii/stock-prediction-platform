@@ -18,6 +18,7 @@ from apps.research.models import FeatureDaily, ModelRun
 from apps.research.prediction_cache import fold_path, fold_record
 from apps.research.runs import (
     LIBRARIES,
+    SCREENING_MODEL,
     RunError,
     drop_run,
     feature_hash,
@@ -354,6 +355,20 @@ def test_drop_run_keeps_a_run_with_a_holdout_claim(artifacts: Path) -> None:
     assert ModelRun.objects.exists()
     assert model_path("wf1", "wf1.ridge.h20.f000").exists()
     assert path.exists()
+
+
+def test_drop_run_keeps_the_screening_once_any_holdout_run_exists(artifacts: Path) -> None:
+    for run_key in ["wf1", "wf3"]:
+        record_run(run(f"{run_key}.screening", run_key, model_type=SCREENING_MODEL))
+
+    assert drop_run("wf3") == 1
+
+    claim_holdout("rank", "wf2", d("2025-03-31"))
+
+    with pytest.raises(RunError, match="screening"):
+        drop_run("wf1")
+
+    assert ModelRun.objects.filter(run_id="wf1.screening").exists()
 
 
 @pytest.mark.parametrize("status", ["active", "degraded", "retired"])
