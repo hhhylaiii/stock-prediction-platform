@@ -6,13 +6,17 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
 
 from apps.etl.management.options import as_date
 from apps.market.calendar import TradingDays
+from apps.research.features.registry import FEATURES, FeatureSpec
 from apps.research.features.store import read_partitions
+from apps.research.holdout import require_key
 from apps.research.labels import HORIZONS, latest_price_date
+from apps.research.metrics.ic import MIN_STOCKS
 from apps.research.models import HoldoutRun, ModelObjective, ModelRun
 from apps.research.runs import RunError, feature_hash, lib_versions, record_run
 from apps.research.screening import (
@@ -28,6 +32,9 @@ from apps.research.walkforward import WalkForwardConfig, generate_folds
 DEFAULT_CONFIG = WalkForwardConfig()
 SCREENING_VERSION = "1"
 REPORT = Path("docs") / "reports" / "phase3-ic-report.md"
+UNSCREENED = [
+    spec.name for spec in FEATURES if spec.batch == 1 and (spec.market_level or spec.categorical)
+]
 
 
 def _plain(value: float) -> float | None:
@@ -36,6 +43,23 @@ def _plain(value: float) -> float | None:
 
 def _cell(value: float, digits: int) -> str:
     return "—" if math.isnan(value) else f"{value:.{digits}f}"
+
+
+def _text(value: str) -> str:
+    return value.replace("|", "\\|")
+
+
+def _verdict(row: pd.Series) -> str:
+    if row["reason"]:
+        return f"剔除：{_text(row['reason'])}"
+    if all(math.isnan(row[f"ic_h{horizon}"]) for horizon in HORIZONS):
+        return f"保留：篩選窗內沒有一天湊得到 {MIN_STOCKS} 檔有值，算不出 IC，未篩選"
+    return "保留"
+
+
+def _unscreened(spec: FeatureSpec) -> str:
+    kind, why = ("類別", "類別值沒有大小順序") if spec.categorical else ("市場", "同一天全市場同值")
+    return f"| {spec.name} | {kind} | — | — | — | — | 不篩選：{why}，橫截面 IC 沒有定義 |"
 
 
 def render(result: Screening, start: date, end: date, run_id: str) -> str:
@@ -55,10 +79,11 @@ def render(result: Screening, start: date, end: date, run_id: str) -> str:
         f"| {name} | {'條件' if row['conditional'] else '訊號'} "
         f"| {_cell(row['ic_h5'], 4)} | {_cell(row['nw_t_h5'], 2)} "
         f"| {_cell(row['ic_h20'], 4)} | {_cell(row['nw_t_h20'], 2)} "
-        f"| {'剔除：' + row['reason'] if row['reason'] else '保留'} |"
+        f"| {_verdict(row)} |"
         for name, row in result.table.iterrows()
     ]
-    return "\n".join([*header, *rows, ""])
+    skipped = [_unscreened(spec) for spec in FEATURES if spec.name in UNSCREENED]
+    return "\n".join([*header, *rows, *skipped, ""])
 
 
 class Command(BaseCommand):
@@ -72,17 +97,49 @@ class Command(BaseCommand):
         parser.add_argument("--output")
 
     def handle(self, *args: Any, **options: Any) -> None:
+        run_key = options["run_key"]
+        try:
+            require_key(f"{run_key}.screening")
+            self._refuse_after_holdout()
+            start, end = self._window(options["last_date"])
+            result, digest = self._screen(start, end)
+            self._refuse_after_holdout()
+            run = self._record(run_key, result, start, end, digest)
+        except (RunError, ValueError, FileNotFoundError) as error:
+            raise CommandError(str(error)) from error
+        output = Path(options["output"] or Path(settings.BASE_DIR) / REPORT)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(render(result, start, end, run.run_id), encoding="utf-8")
+        kept, total = len(result.kept), len(result.table)
+        self.stdout.write(f"{run.run_id}: kept {kept} of {total} features; report at {output}")
+
+    def _refuse_after_holdout(self) -> None:
         if HoldoutRun.objects.exists():
             raise CommandError("a holdout run exists, so the screening is frozen (SPEC §6 步驟 7)")
-        last = as_date(options["last_date"], "--last-date") or latest_price_date()
+
+    def _window(self, last_date: str | None) -> tuple[date, date]:
+        last = as_date(last_date, "--last-date") or latest_price_date()
         if last is None:
             raise CommandError("daily_price is empty")
-        start, end = screening_window(generate_folds(TradingDays.from_db(), last, DEFAULT_CONFIG))
+        if last <= DEFAULT_CONFIG.tuning_end:
+            raise CommandError(
+                f"--last-date {last} falls inside the tuning period ending "
+                f"{DEFAULT_CONFIG.tuning_end}; the screening window would be cut short"
+            )
+        return screening_window(generate_folds(TradingDays.from_db(), last, DEFAULT_CONFIG))
+
+    def _screen(self, start: date, end: date) -> tuple[Screening, str]:
         directory = settings.FEATURE_PARQUET_DIR
         digest = feature_hash(start, end, directory)
+        features = read_partitions(start, end, directory)
+        if feature_hash(start, end, directory) != digest:
+            raise CommandError("feature partitions changed while reading; run ic_report again")
         labels = {horizon: load_labels(start, end, horizon) for horizon in HORIZONS}
-        result = screen(read_partitions(start, end, directory), labels)
-        run_key = options["run_key"]
+        return screen(features, labels), digest
+
+    def _record(
+        self, run_key: str, result: Screening, start: date, end: date, digest: str
+    ) -> ModelRun:
         run = ModelRun(
             run_id=f"{run_key}.screening",
             run_key=run_key,
@@ -99,17 +156,11 @@ class Command(BaseCommand):
                 },
                 "ic_floor": IC_FLOOR,
                 "correlation_ceiling": CORRELATION_CEILING,
+                "unscreened": UNSCREENED,
             },
             feature_list=result.kept,
             lib_versions=lib_versions(),
             feature_hash=digest,
         )
-        try:
-            record_run(run)
-        except (RunError, ValueError) as error:
-            raise CommandError(str(error)) from error
-        output = Path(options["output"] or Path(settings.BASE_DIR) / REPORT)
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(render(result, start, end, run.run_id), encoding="utf-8")
-        kept, total = len(result.kept), len(result.table)
-        self.stdout.write(f"{run.run_id}: kept {kept} of {total} features; report at {output}")
+        record_run(run)
+        return run
