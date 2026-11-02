@@ -24,6 +24,7 @@ from apps.research.walkforward import Fold
 LIBRARIES = ("django", "numpy", "pandas", "pyarrow", "scikit-learn")
 MODEL_SUFFIX = ".pkl"
 CHUNK = 1 << 20
+SCREENING_MODEL = "screening"
 
 
 class RunError(RuntimeError):
@@ -135,12 +136,17 @@ def _remove(directory: Path) -> None:
 
 
 def drop_run(run_key: str) -> int:
-    """Delete a run's model_run rows, model files and cached predictions; holdout runs stay."""
+    """Delete a run's model_run rows, model files and cached predictions.
+
+    Holdout runs stay, and so does the feature screening once any holdout run exists.
+    """
     models, cache = run_dir(run_key), Path(settings.RESEARCH_CACHE_DIR) / run_key
     with transaction.atomic(durable=True):
         if HoldoutRun.objects.filter(run_key=run_key).exists():
             raise RunError(f"{run_key} holds a holdout run, which is recorded once and kept")
         rows = list(ModelRun.objects.select_for_update().filter(run_key=run_key))
+        if any(row.model_type == SCREENING_MODEL for row in rows) and HoldoutRun.objects.exists():
+            raise RunError(f"{run_key} holds the feature screening, which a holdout run freezes")
         kept = sorted({row.status for row in rows if row.status != ModelStatus.CANDIDATE})
         if kept:
             raise RunError(
