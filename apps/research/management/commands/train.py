@@ -8,12 +8,12 @@ from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
 
 from apps.etl.management.options import as_date
-from apps.market.calendar import TradingDays
-from apps.research.baseline_runs import SCOPES, run_folds, shuffle_check
+from apps.market.calendar import CalendarError, TradingDays
+from apps.research.baseline_runs import SCOPES, check_run_key, run_folds, shuffle_check
 from apps.research.holdout import HoldoutError, is_holdout
 from apps.research.labels import latest_price_date
 from apps.research.runs import RunError
-from apps.research.walkforward import Fold, WalkForwardConfig, generate_folds
+from apps.research.walkforward import Fold, WalkForwardConfig, WalkForwardError, generate_folds
 
 DEFAULT_CONFIG = WalkForwardConfig()
 
@@ -41,7 +41,12 @@ class Command(BaseCommand):
         parser.add_argument("--run-key")
         parser.add_argument("--folds")
         parser.add_argument("--last-date")
-        parser.add_argument("--rerun", action="store_true")
+        parser.add_argument(
+            "--rerun",
+            action="store_true",
+            help="Refit cached folds too. A cache is reused while its fold boundaries and feature "
+            "partitions are unchanged; after rebuilding labels or changing the recipe, rerun.",
+        )
         parser.add_argument("--shuffle-check", action="store_true")
         parser.add_argument("--seed", type=int, default=0)
 
@@ -49,17 +54,22 @@ class Command(BaseCommand):
         last = as_date(options["last_date"], "--last-date") or latest_price_date()
         if last is None:
             raise CommandError("daily_price is empty")
-        folds = generate_folds(TradingDays.from_db(), last, DEFAULT_CONFIG)
+        try:
+            folds = generate_folds(TradingDays.from_db(), last, DEFAULT_CONFIG)
+        except (CalendarError, WalkForwardError) as error:
+            raise CommandError(f"--last-date {last}: {error}") from error
         if options["folds"] is None:
             return [fold for fold in folds if not is_holdout(fold)]
         wanted = fold_indices(options["folds"])
         known = {fold.index: fold for fold in folds}
         unknown = sorted(wanted - known.keys())
         held = sorted(index for index in wanted & known.keys() if is_holdout(known[index]))
-        if unknown or held:
-            raise CommandError(
-                f"folds {unknown} do not exist; holdout folds {held} wait for Phase 4"
-            )
+        problems = [
+            *([f"folds {unknown} do not exist"] if unknown else []),
+            *([f"holdout folds {held} wait for Phase 4"] if held else []),
+        ]
+        if problems:
+            raise CommandError("; ".join(problems))
         return [known[index] for index in sorted(wanted)]
 
     def _shuffle(self, folds: list[Fold], seed: int) -> None:
@@ -87,6 +97,10 @@ class Command(BaseCommand):
         scope, run_key = options["scope"], options["run_key"]
         if not scope or not run_key:
             raise CommandError("training needs --scope and --run-key")
+        try:
+            check_run_key(scope, run_key)
+        except ValueError as error:
+            raise CommandError(str(error)) from error
         if options["folds"] is None:
             self._shuffle(folds, options["seed"])
         try:

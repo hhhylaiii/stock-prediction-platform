@@ -27,14 +27,14 @@ from apps.research.features.store import read_partitions
 from apps.research.holdout import HoldoutError, is_holdout, require_key
 from apps.research.labels import HORIZONS, VOL_DAYS
 from apps.research.metrics.ic import daily_rank_ic, summarize_ic
-from apps.research.models import HoldoutScope, ModelObjective, ModelRun
+from apps.research.models import HoldoutScope, ModelObjective, ModelRun, ModelStatus
 from apps.research.prediction_cache import (
     fold_notes,
     fold_path,
     missing_folds,
     save_fold_predictions,
 )
-from apps.research.runs import feature_hash, lib_versions, record_run
+from apps.research.runs import RunError, feature_hash, lib_versions, record_run
 from apps.research.training import LINEAR_FEATURES, linear_inputs, load_labels, training_rows
 from apps.research.walkforward import Fold
 
@@ -226,10 +226,18 @@ def fold_inputs(fold: Fold, start: date, end: date, directory: Path) -> FoldInpu
     return FoldInputs(fold, raw, digest)
 
 
+def _require_candidates(run_key: str, fold: Fold) -> None:
+    rows = ModelRun.objects.filter(run_key=run_key, run_id__endswith=f".f{fold.index:03d}")
+    kept = sorted(rows.exclude(status=ModelStatus.CANDIDATE).values_list("run_id", flat=True))
+    if kept:
+        raise RunError(f"{kept} are past candidate; fold {fold.index} keeps its cache")
+
+
 def run_fold(scope: str, fold: Fold, run_key: str, directory: Path) -> Path:
     """Fit one fold's baselines; its old cache goes first and the new one is written last."""
     if is_holdout(fold):
         raise HoldoutError(f"fold {fold.index} is holdout; it runs once with the Phase 4 models")
+    _require_candidates(run_key, fold)
     fold_path(run_key, fold.index).unlink(missing_ok=True)
     inputs = fold_inputs(fold, first_day(scope, fold), fold.test_end, directory)
     result = SCOPES[scope](inputs, run_key)
@@ -240,7 +248,8 @@ def run_fold(scope: str, fold: Fold, run_key: str, directory: Path) -> Path:
     return save_fold_predictions(run_key, fold, rows.assign(**result.columns), notes=notes)
 
 
-def _check(scope: str, run_key: str) -> None:
+def check_run_key(scope: str, run_key: str) -> None:
+    """A run_key names a known scope, starts with it and leaves room for its run_ids."""
     if scope not in SCOPES:
         raise ValueError(f"scope must be one of {list(SCOPES)}, not {scope!r}")
     require_key(run_key)
@@ -260,7 +269,7 @@ def run_folds(
     scope: str, folds: Iterable[Fold], run_key: str, directory: Path, rerun: bool = False
 ) -> list[int]:
     """Run folds without a current cache, or all with rerun; holdout folds are refused."""
-    _check(scope, run_key)
+    check_run_key(scope, run_key)
     chosen = list(folds)
     held = [fold.index for fold in chosen if is_holdout(fold)]
     if held:

@@ -18,9 +18,14 @@ from apps.research.features.store import export_year
 from apps.research.holdout import HoldoutError
 from apps.research.management.commands import train
 from apps.research.metrics.ic import daily_rank_ic
-from apps.research.models import FeatureDaily, LabelDaily, ModelRun
-from apps.research.prediction_cache import fold_record, load_fold_predictions, missing_folds
-from apps.research.runs import feature_hash, lib_versions, load_model
+from apps.research.models import FeatureDaily, LabelDaily, ModelRun, ModelStatus
+from apps.research.prediction_cache import (
+    fold_path,
+    fold_record,
+    load_fold_predictions,
+    missing_folds,
+)
+from apps.research.runs import RunError, feature_hash, lib_versions, load_model
 from apps.research.training import LINEAR_FEATURES, linear_inputs
 from apps.research.walkforward import Fold, WalkForwardConfig, generate_folds
 
@@ -276,6 +281,39 @@ def test_a_rerun_that_fails_leaves_its_fold_to_be_run_again(
     assert missing_folds("return-wf1", [fold]) == [fold.index]
 
 
+@pytest.mark.parametrize(
+    ("scope", "run_key", "first"),
+    [("rank", "rank-wf1", "train_start"), ("return", "return-wf1", "test_start")],
+)
+def test_resumed_folds_hash_the_partitions_their_scope_reads(
+    panel: Path, monkeypatch: pytest.MonkeyPatch, scope: str, run_key: str, first: str
+) -> None:
+    fold = research()[0]
+    run_folds(scope, [fold], run_key, panel)
+    ranges = []
+
+    def recorded(start: date, end: date, directory: Path) -> str:
+        ranges.append((start, end))
+        return feature_hash(start, end, directory)
+
+    monkeypatch.setattr(baseline_runs, "feature_hash", recorded)
+
+    assert run_folds(scope, [fold], run_key, panel) == []
+    assert ranges == [(getattr(fold, first), fold.test_end)]
+
+
+def test_a_fold_with_a_promoted_model_keeps_its_cache(panel: Path) -> None:
+    fold = research()[0]
+    run_folds("rank", [fold], "rank-wf1", panel)
+    promoted = f"rank-wf1.ridge.h5.f{fold.index:03d}"
+    ModelRun.objects.filter(run_id=promoted).update(status=ModelStatus.ACTIVE)
+
+    with pytest.raises(RunError, match=promoted):
+        run_folds("rank", [fold], "rank-wf1", panel, rerun=True)
+
+    assert fold_path("rank-wf1", fold.index).exists()
+
+
 def test_cached_folds_are_skipped_unless_rerun(panel: Path) -> None:
     first, second = research()[:2]
     run_folds("return", [first], "return-wf1", panel)
@@ -363,8 +401,9 @@ def test_a_full_run_stops_when_the_shuffle_check_fails(command: Path, settings: 
 def test_command_refuses_holdout_and_unknown_folds(command: Path) -> None:
     held = next(fold.index for fold in folds() if fold.holdout)
 
-    with pytest.raises(CommandError, match=rf"holdout folds \[{held}\] wait"):
+    with pytest.raises(CommandError, match=rf"holdout folds \[{held}\] wait") as caught:
         call_command("train", scope="return", run_key="return-wf1", folds=str(held))
+    assert "do not exist" not in str(caught.value)
     with pytest.raises(CommandError, match=r"folds \[99\] do not exist"):
         call_command("train", scope="return", run_key="return-wf1", folds="99")
     for written in ("3-1", "0-", "a"):
@@ -372,6 +411,55 @@ def test_command_refuses_holdout_and_unknown_folds(command: Path) -> None:
             call_command("train", scope="return", run_key="return-wf1", folds=written)
     with pytest.raises(CommandError, match="--scope and --run-key"):
         call_command("train", scope="return")
+    for last in ("2030-01-01", "2016-08-01"):
+        with pytest.raises(CommandError):
+            call_command("train", scope="return", run_key="return-wf1", last_date=last)
+
+
+def test_a_full_run_checks_the_run_key_before_the_shuffle_check(
+    command: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(train, "shuffle_check", lambda *args: pytest.fail("shuffled first"))
+
+    with pytest.raises(CommandError, match="start with rank-"):
+        call_command("train", scope="rank", run_key="interval-x")
+
+
+def test_command_stops_at_the_last_date(command: Path, settings: Any) -> None:
+    settings.SHUFFLE_IC_LIMIT = 0.2
+    out = StringIO()
+
+    call_command("train", scope="return", run_key="return-wf1", last_date="2016-10-31", stdout=out)
+
+    calendar = TradingDays(weekdays(), START, END)
+    indices = [fold.index for fold in generate_folds(calendar, date(2016, 10, 31), CONFIG)]
+    assert f"return-wf1: ran folds {indices}, 0 cached" in out.getvalue()
+    assert len(indices) < len(research())
+
+
+def test_command_rerun_refits_cached_folds(command: Path) -> None:
+    call_command("train", scope="return", run_key="return-wf1", folds="0", stdout=StringIO())
+    out = StringIO()
+
+    call_command("train", scope="return", run_key="return-wf1", folds="0", rerun=True, stdout=out)
+
+    assert "return-wf1: ran folds [0], 0 cached" in out.getvalue()
+
+
+def test_command_passes_the_seed_to_the_shuffle_check(
+    command: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seeds = []
+
+    def recorded(fold: Fold, directory: Path, seed: int) -> float:
+        seeds.append(seed)
+        return 0.0
+
+    monkeypatch.setattr(train, "shuffle_check", recorded)
+
+    call_command("train", shuffle_check=True, seed=7, stdout=StringIO())
+
+    assert seeds == [7]
 
 
 def test_command_shuffle_check_passes_and_fails_by_the_limit(command: Path, settings: Any) -> None:
@@ -382,6 +470,17 @@ def test_command_shuffle_check_passes_and_fails_by_the_limit(command: Path, sett
     settings.SHUFFLE_IC_LIMIT = 0.0
     with pytest.raises(CommandError, match="label column"):
         call_command("train", shuffle_check=True)
+
+
+@pytest.mark.parametrize("ic", [0.02, -0.02])
+def test_a_shuffled_ic_at_the_limit_fails(
+    command: Path, monkeypatch: pytest.MonkeyPatch, settings: Any, ic: float
+) -> None:
+    settings.SHUFFLE_IC_LIMIT = 0.02
+    monkeypatch.setattr(train, "shuffle_check", lambda *args: ic)
+
+    with pytest.raises(CommandError, match="label column"):
+        call_command("train", shuffle_check=True, stdout=StringIO())
 
 
 def test_a_shuffle_check_without_an_ic_fails(
