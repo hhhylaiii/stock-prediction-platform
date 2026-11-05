@@ -98,6 +98,17 @@ class RawDatagov(RawRecord):
         ]
 
 
+class RawMops(RawRecord):
+    class Meta:
+        db_table = "raw_mops"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["dataset", "source_hash"], name="raw_mops_dataset_hash_uniq"
+            )
+        ]
+        indexes = [models.Index(fields=["dataset", "fetched_at"], name="raw_mops_ds_fetched_idx")]
+
+
 class EtlRun(models.Model):
     """One ETL execution with its outcome and a checkpoint for resuming."""
 
