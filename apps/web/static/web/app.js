@@ -5,14 +5,17 @@
   const STOCK_CODE = /^[0-9A-Za-z]{1,10}$/;
   const PRICE_DAYS = 60;
   const QUALITY_DAYS = 30;
-  const SOURCES = { twse: '證交所', tpex: '櫃買中心', finmind: 'FinMind', tdcc: '集保', yahoo: 'Yahoo', datagov: 'data.gov.tw', mops: 'MOPS' };
+  const SOURCES = { twse: '證交所', tpex: '櫃買中心', finmind: 'FinMind', tdcc: '集保', yahoo: 'Yahoo', datagov: 'data.gov.tw', mops: 'MOPS', stock_master: '股票清單', trading_calendar: '交易日曆', twse_tpex: '證交所／櫃買中心' };
   const RUN_STATUS = { success: ['完成', 'in'], failed: ['失敗', 'warn'], running: ['執行中', 'idle'] };
   const CHECKS = {
     row_count: '各表當日列數',
     big_move: '漲跌幅超過 10% 且無除權息紀錄',
     missing_values: 'standard 表當日缺值',
     trading_calendar: '所有日期都在交易日曆內',
-    index_freshness: '市場指數的最新收盤'
+    index_freshness: '市場指數的最新收盤',
+    etl_runs: '每日資料集都已更新',
+    stock_master: '股票清單異動',
+    us_close: '美股收盤'
   };
   const SEVERITY = { info: ['通過', 'in'], warning: ['警告', 'warn'], error: ['錯誤', 'warn'] };
 
@@ -52,16 +55,24 @@
 
   const statusEl = document.getElementById('status');
   const warningCount = day => day.checks.filter(c => c.severity === 'warning').length;
+  const sizeOf = v => Array.isArray(v) ? v.length : Number(v || 0);
+
+  function verdictOf(day) {
+    const warnings = warningCount(day);
+    if (day.worst === 'error') return { label: '未通過', cls: 'warn', text: '有檢查未通過，當日不產出預測。' };
+    if (!day.checks.length) return { label: '尚未執行', cls: 'idle', text: '檢查尚未執行。' };
+    if (day.missing_checks.length) return { label: '尚未完成', cls: 'idle', text: '已執行的檢查沒有錯誤，還有 ' + day.missing_checks.length + ' 項尚未執行。' };
+    if (warnings) return { label: '通過（' + warnings + ' 項警告）', cls: 'warn', text: '檢查通過，但有 ' + warnings + ' 項警告。' };
+    return { label: '通過', cls: 'in', text: '全部檢查通過。' };
+  }
 
   async function renderStatus() {
     try {
       const { data } = await api.get('data-quality', { days: 1 });
       const day = data[0];
-      const ran = day.checks.length > 0;
-      const warnings = warningCount(day);
-      const label = day.passed ? '品質檢查通過' + (warnings ? '（' + warnings + ' 項警告）' : '') : ran ? '品質檢查未通過' : '品質檢查尚未執行';
-      const cls = day.passed ? (warnings ? ' warn' : '') : ran ? ' warn' : ' idle';
-      statusEl.innerHTML = '<span>' + esc(day.date) + ' 交易日</span><span><i class="dot' + cls + '"></i>' + label + '</span>';
+      const verdict = verdictOf(day);
+      const cls = verdict.cls === 'in' ? '' : ' ' + verdict.cls;
+      statusEl.innerHTML = '<span>' + esc(day.date) + ' 交易日</span><span><i class="dot' + cls + '"></i>品質檢查' + esc(verdict.label) + '</span>';
     } catch (err) {
       statusEl.innerHTML = '<span><i class="dot warn"></i>' + esc(err.message) + '</span>';
     }
@@ -74,6 +85,7 @@
     document.querySelectorAll('[data-h]').forEach(b => b.setAttribute('aria-pressed', String(Number(b.dataset.h) === state.h)));
     document.querySelectorAll('[data-mkt]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.mkt === state.mkt)));
     document.getElementById('ret-head').textContent = state.h + ' 日預測報酬';
+    document.getElementById('prob-head').textContent = '漲幅超過 5% 機率' + (state.h === 20 ? '' : '（僅 20 日）');
     watchOnlyBtn.hidden = state.watch.size === 0;
     watchOnlyBtn.textContent = '只看追蹤（' + state.watch.size + '）';
     watchOnlyBtn.setAttribute('aria-pressed', String(state.watchOnly && state.watch.size > 0));
@@ -100,7 +112,7 @@
     return backLink +
       '<div class="stockhead"><div><div class="id"><h1><span class="code">' + esc(s.stock_id) + '</span><span id="stock-name">' + esc(s.name) + '</span></h1>' +
       '<span class="tags">' + tags.map(t => '<span>' + esc(t) + '</span>').join('') + '</span></div>' + quoteHtml(s.quote) + '</div>' +
-      '<div class="aside"><div class="kpi"><div class="l">' + state.h + ' 日預測排名</div><div class="v">—<small> 等預測資料</small></div></div>' +
+      '<div class="aside"><div class="kpi"><div class="l">' + state.h + ' 日預測排名</div><div class="v">—<small> 尚未產出</small></div></div>' +
       '<button type="button" class="ghost" id="watch-btn" aria-pressed="' + watching + '" style="height:36px">' + (watching ? '已追蹤' : '加入追蹤') + '</button></div></div>' +
       '<div class="section"><div class="sechead"><div class="control"><h2>過去 ' + PRICE_DAYS + ' 個交易日</h2>' +
       '<div class="seg" role="group" aria-label="圖表類型" id="chart-seg"><button type="button" data-ct="candle" aria-pressed="' + (state.chart === 'candle') + '">K 線</button><button type="button" data-ct="line" aria-pressed="' + (state.chart === 'line') + '">收盤線</button></div></div>' +
@@ -264,7 +276,7 @@
     const d = check.detail || {};
     switch (check.check_name) {
       case 'row_count': return (d.table || '') + ' ' + fmtInt(d.count || 0) + ' 列' + (d.previous ? '，前一交易日 ' + fmtInt(d.previous) + ' 列' : '');
-      case 'big_move': return fmtInt(d.count || 0) + ' 檔，已標記待查';
+      case 'big_move': return d.count ? fmtInt(d.count) + ' 檔，已標記待查' : '沒有';
       case 'missing_values': {
         const cols = Object.entries(d.columns || {}).filter(([, gap]) => gap.missing > 0);
         return (d.table || '') + (cols.length ? '：' + cols.map(([col, gap]) => (col === 'row' ? '整列' : col) + ' 缺 ' + fmtInt(gap.missing) + ' 檔').join('、') : ' 沒有缺值');
@@ -274,6 +286,17 @@
         return tables.length ? '有資料落在休市日：' + tables.map(([table, days]) => table + '（' + Object.keys(days).join('、') + '）').join('、') : '沒有資料落在休市日';
       }
       case 'index_freshness': return Object.keys(d.stale || {}).length ? '過期：' + Object.keys(d.stale).join('、') : '全部在期限內';
+      case 'us_close': return Object.keys(d.stale || {}).length ? '未更新：' + Object.keys(d.stale).join('、') : '全部已更新';
+      case 'etl_runs': {
+        const blocking = d.blocking || [], rest = (d.missing || []).filter(key => !blocking.includes(key));
+        if (!blocking.length && !rest.length) return '全部資料集都已更新';
+        return [blocking.length ? '缺閘門資料集：' + blocking.join('、') : '', rest.length ? '尚未更新：' + rest.join('、') : ''].filter(Boolean).join('；');
+      }
+      case 'stock_master': {
+        const parts = [['新增', d.added], ['換市場', d.moved], ['恢復上市', d.relisted], ['下市', d.delisted], ['消失未下市', d.vanished]]
+          .filter(([, v]) => sizeOf(v) > 0).map(([label, v]) => label + ' ' + fmtInt(sizeOf(v)) + ' 檔');
+        return parts.length ? parts.join('、') : '沒有異動';
+      }
       default: return '';
     }
   }
@@ -289,14 +312,12 @@
     try {
       const { data } = await api.get('data-quality', { days: QUALITY_DAYS });
       const latest = data[0];
-      const warnings = warningCount(latest);
-      const verdict = latest.passed ? (warnings ? '檢查通過，但有 ' + warnings + ' 項警告。' : '全部檢查通過。') : latest.checks.length ? '有檢查未通過或尚未執行；任一項為 error 時當日不產出預測。' : '檢查尚未執行。';
-      sub.textContent = latest.date + '：' + verdict;
+      sub.textContent = latest.date + '：' + verdictOf(latest).text;
       host.innerHTML = latest.checks.map(checkHtml).join('') +
         latest.missing_checks.map(name => '<div class="check"><i class="idle"></i><div><div>' + esc(CHECKS[name] || name) + '</div><div class="muted small">尚未執行</div></div></div>').join('');
       days.innerHTML = '<div class="list">' + data.map(day => {
-        const label = day.passed ? '通過' : day.checks.length ? '未通過' : '未執行';
-        return '<div class="trow short qh-cols"><div class="muted">' + esc(day.date) + '</div><div class="res"><i class="' + (day.passed ? 'in' : day.checks.length ? 'warn' : 'idle') + '"></i><span>' + label + '</span></div>' +
+        const verdict = verdictOf(day);
+        return '<div class="trow short qh-cols"><div class="muted">' + esc(day.date) + '</div><div class="res"><i class="' + verdict.cls + '"></i><span>' + esc(verdict.label) + '</span></div>' +
           '<div class="muted small">' + (day.worst ? '最嚴重：' + esc((SEVERITY[day.worst] || [day.worst])[0]) : '') + (day.missing_checks.length && day.checks.length ? '，缺 ' + day.missing_checks.length + ' 項' : '') + '</div></div>';
       }).join('') + '</div>';
     } catch (err) {
@@ -319,10 +340,10 @@
     document.querySelector('[data-nav="stock"]').setAttribute('href', '#stock-' + encodeURIComponent(state.stock));
     if (name === 'stock') renderStock(code);
     if (name === 'models') { renderEtl(); renderQuality(); }
+    renderStatus();
     window.scrollTo(0, 0);
   }
   window.addEventListener('hashchange', route);
   renderToday();
-  renderStatus();
   route();
 })();

@@ -18,6 +18,7 @@ EXTRA_RUNS = 101
 POPULATION = {"missing": 0, "population": 1842, "markets": {}}
 QUALITY: tuple[tuple[str, str, dict[str, Any]], ...] = (
     ("row_count", "info", {"table": "daily_price", "count": 1842, "previous": 1840}),
+    ("row_count", "info", {"table": "margin", "count": 1201, "previous": 1199}),
     ("big_move", "info", {"table": "daily_price", "count": 3, "stocks": {"1101": 0.12}}),
     (
         "missing_values",
@@ -29,6 +30,12 @@ QUALITY: tuple[tuple[str, str, dict[str, Any]], ...] = (
     ),
     ("trading_calendar", "info", {"rows": {}}),
     ("index_freshness", "warning", {"stale": {"SOX": "2026-10-28"}}),
+    ("etl_runs", "info", {"missing": [], "blocking": []}),
+    (
+        "stock_master",
+        "info",
+        {"added": ["6999"], "moved": [], "relisted": [], "delisted": [], "vanished": []},
+    ),
 )
 
 
@@ -74,7 +81,7 @@ def seeded(transactional_db: None) -> Seed:
         [d for n, d in enumerate(sessions) if n != GAP_INDEX],
         [c for n, c in enumerate(closes) if n != GAP_INDEX],
     )
-    add_stock(stock_id="9999", name=XSS_NAME, market=Market.TPEX)
+    add_stock(stock_id="9999", name=XSS_NAME, industry=XSS_NAME, market=Market.TPEX)
     add_bars("9999", sessions[-3:], [10.0, 10.5, 11.0])
     for source, dataset, hour, minute, status in (
         ("twse", "daily_price", 15, 31, EtlRun.Status.SUCCESS),

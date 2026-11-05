@@ -51,6 +51,8 @@ def test_models_view_lists_every_run_of_the_day_and_each_check(
         "daily_price 1,842 列，前一交易日 1,840 列",
         "daily_price：整列 缺 1 檔、close 缺 2 檔",
         "過期：SOX",
+        "全部資料集都已更新",
+        "新增 1 檔",
     ):
         expect(checks.filter(has_text=summary)).to_have_count(1)
     expect(page.locator("#quality-sub")).to_contain_text("檢查通過，但有 1 項警告")
@@ -71,6 +73,12 @@ def test_models_view_renders_api_strings_as_text(
     DataQualityLog.objects.create(
         date=seeded.last_session, check_name=XSS_NAME[:64], severity="warning", detail={}
     )
+    DataQualityLog.objects.create(
+        date=seeded.last_session,
+        check_name="index_freshness",
+        severity="warning",
+        detail={"stale": {XSS_NAME: ""}},
+    )
 
     page.goto(f"{live_server.url}/#models")
 
@@ -88,6 +96,7 @@ def test_today_view_says_predictions_are_pending(
     expect(page.locator("#today-empty")).to_contain_text("預測資料尚未產出")
     page.get_by_role("button", name="5 日").click()
     expect(page.locator("#ret-head")).to_have_text("5 日預測報酬")
+    expect(page.locator("#prob-head")).to_have_text("漲幅超過 5% 機率（僅 20 日）")
     expect(page.locator("[data-nav=today]")).to_have_attribute("aria-current", "page")
 
 
@@ -95,8 +104,39 @@ def test_stock_names_render_as_text(page: Page, live_server: LiveServer, seeded:
     page.goto(f"{live_server.url}/#stock-9999")
 
     expect(page.locator("#stock-name")).to_have_text(XSS_NAME)
+    expect(page.locator("#view-stock .tags")).to_contain_text(XSS_NAME)
     expect(page.locator("#view-stock img")).to_have_count(0)
     assert page.evaluate("window.__xss") is None
+
+
+def test_unfinished_checks_are_not_called_a_failure(
+    page: Page, live_server: LiveServer, seeded: Seed
+) -> None:
+    DataQualityLog.objects.filter(date=seeded.last_session).exclude(
+        check_name="stock_master"
+    ).delete()
+
+    page.goto(f"{live_server.url}/#models")
+
+    expect(page.locator("#status")).to_contain_text("品質檢查尚未完成")
+    expect(page.locator("#status")).not_to_contain_text("未通過")
+    expect(page.locator("#quality-sub")).to_contain_text("還有 5 項尚未執行")
+    expect(page.locator("#quality-days .trow").first).to_contain_text("尚未完成")
+
+
+def test_a_blocking_dataset_fails_the_day_and_is_named(
+    page: Page, live_server: LiveServer, seeded: Seed
+) -> None:
+    DataQualityLog.objects.filter(date=seeded.last_session, check_name="etl_runs").update(
+        severity="error",
+        detail={"missing": ["twse/daily_price", "twse/margin"], "blocking": ["twse/daily_price"]},
+    )
+
+    page.goto(f"{live_server.url}/#models")
+
+    expect(page.locator("#status")).to_contain_text("品質檢查未通過")
+    expect(page.locator("#quality")).to_contain_text("缺閘門資料集：twse/daily_price")
+    expect(page.locator("#quality-days .trow").first).to_contain_text("未通過")
 
 
 def test_a_non_json_gateway_error_is_shown(
@@ -143,6 +183,8 @@ def test_tooltip_shows_volume_in_lots(page: Page, live_server: LiveServer, seede
     overlay.hover(position={"x": box["width"] - 1, "y": box["height"] / 2})
 
     expect(page.locator("#price-chart .tip")).to_contain_text("成交量 1,000 張")
+    expect(page.locator("#price-chart .tip")).to_contain_text("5 日均 1,134")
+    expect(page.locator("#price-chart .tip")).not_to_contain_text("20 日均")
 
 
 def test_a_bad_stock_hash_keeps_the_nav_on_the_last_good_stock(
