@@ -9,6 +9,7 @@ from typing import Any
 import pandas as pd
 from django.db import transaction
 
+from apps.api.serving import MONITOR_LOOKBACK_MONTHS, Slot, months_before, served_monitor
 from apps.etl.alerts import dispatch
 from apps.etl.models import DataQualityLog
 from apps.market.calendar import OutsideCalendarError, TradingDays
@@ -32,6 +33,7 @@ from apps.research.models import (
     ModelStatus,
     Prediction,
 )
+from apps.research.runs import SCREENING_MODEL
 
 WIDTH_CHECK = "output_width_ratio"
 ODDS_CHECK = "output_odds_vs_q50"
@@ -40,6 +42,7 @@ ALERT_CHECK = "model_alert"
 CHECKS = (WIDTH_CHECK, ODDS_CHECK, UNSCORED_CHECK, ALERT_CHECK)
 IC_THRESHOLD = "rolling_ic_threshold"
 BRIER_BASELINE = "brier_baseline"
+DEGRADED_ON = "degraded_on"
 WINDOW = 60
 COVERAGE_BOUNDS = (0.70, 0.90)
 OUTPUTS = ["score", "ret_pred", "q10", "q50", "q90", "vol_pred", "prob_up_5pct"]
@@ -261,12 +264,24 @@ RULES: Mapping[str, Rule] = {
 }
 
 
-def recent_values(run_id: str, horizon: int, metric: str, day: date) -> list[float]:
-    """The run's last 60 evaluated values of a metric up to the day, as the API averages them."""
-    rows = ModelMonitor.objects.filter(run_id=run_id, horizon=horizon, date__lte=day).exclude(
-        **{f"{metric}__isnull": True}
+def recent_values(objective: str, horizon: int, metric: str, day: date) -> list[float]:
+    """The slot's last 60 out-of-sample values up to the day, chained over runs like the API."""
+    slot = Slot(objective, horizon)
+    window = {slot: (months_before(day, MONITOR_LOOKBACK_MONTHS), day)}
+    rows = served_monitor(window).get(slot, [])
+    return [row[metric] for row in reversed(rows) if row[metric] is not None][:WINDOW]
+
+
+def _serving(objective: str) -> ModelRun | None:
+    """The watched run serving an objective now: active before degraded, then the newest."""
+    runs = ModelRun.objects.filter(objective=objective, status__in=WATCHED).exclude(
+        model_type=SCREENING_MODEL
     )
-    return list(rows.order_by("-date").values_list(metric, flat=True)[:WINDOW])
+    return min(
+        runs,
+        key=lambda run: (WATCHED.index(run.status), -run.created_at.timestamp(), run.run_id),
+        default=None,
+    )
 
 
 def _breach(run: ModelRun, rule: Rule, horizon: int, values: list[float]) -> dict[str, Any] | None:
@@ -287,15 +302,16 @@ def _breach(run: ModelRun, rule: Rule, horizon: int, values: list[float]) -> dic
 
 
 def run_alerts(matured: Mapping[int, date]) -> list[dict[str, Any]]:
-    """Entries of watched runs whose 60-day mean breaches its rule or lacks its reference."""
+    """Entries of serving runs whose slot's 60-day mean breaches its rule or lacks its reference."""
     found = []
-    runs = ModelRun.objects.filter(status__in=WATCHED, objective__in=list(RULES)).order_by("run_id")
-    for run in runs:
-        rule = RULES[run.objective]
+    for objective, rule in RULES.items():
+        run = _serving(objective)
+        if run is None:
+            continue
         for horizon in rule.horizons:
             if horizon not in matured:
                 continue
-            values = recent_values(run.run_id, horizon, rule.metric, matured[horizon])
+            values = recent_values(objective, horizon, rule.metric, matured[horizon])
             entry = _breach(run, rule, horizon, values) if len(values) == WINDOW else None
             if entry is not None:
                 found.append(entry)
@@ -311,12 +327,16 @@ def _alert_row(day: date, entries: list[dict[str, Any]]) -> list[DataQualityLog]
     return [DataQualityLog(date=day, check_name=ALERT_CHECK, severity=severity, detail=detail)]
 
 
-def _degrade(entries: list[dict[str, Any]]) -> list[str]:
+def _degrade(day: date, entries: list[dict[str, Any]]) -> list[str]:
+    """Move breached active runs to degraded, noting the day in params."""
     breached = {row["run_id"] for row in entries if row["reason"] != "missing_reference"}
     active = ModelRun.objects.filter(run_id__in=breached, status=ModelStatus.ACTIVE)
-    ids = sorted(active.values_list("run_id", flat=True))
-    ModelRun.objects.filter(run_id__in=ids).update(status=ModelStatus.DEGRADED)
-    return ids
+    runs = list(active.order_by("run_id"))
+    for run in runs:
+        run.status = ModelStatus.DEGRADED
+        run.params = {**run.params, DEGRADED_ON: day.isoformat()}
+        run.save(update_fields=["status", "params"])
+    return [run.run_id for run in runs]
 
 
 def _alerting(row: DataQualityLog) -> bool:
@@ -350,6 +370,6 @@ def run_monitor(day: date, calendar: TradingDays) -> MonitorResult:
         logs = [*consistency_checks(day), *_unscored_row(day, missed), *_alert_row(day, entries)]
         DataQualityLog.objects.filter(date=day, check_name__in=CHECKS).delete()
         DataQualityLog.objects.bulk_create(logs)
-        degraded = _degrade(entries)
+        degraded = _degrade(day, entries)
     dispatch([row for row in logs if _alerting(row)])
     return MonitorResult(scored, tuple(logs), tuple(degraded))

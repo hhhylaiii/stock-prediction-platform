@@ -26,11 +26,11 @@ def rolling_ic_threshold(ic: pd.Series, window: int = WINDOW, quantile: float = 
 
 
 def _labelled(cached: pd.DataFrame, folds: list[Fold], horizon: int) -> pd.DataFrame:
-    """Cached universe rows joined to their label_daily row of a horizon."""
+    """Cached universe rows tradable at the next open, joined to their label_daily row."""
     first = min(fold.test_start for fold in folds)
     last = max(fold.eval_end for fold in folds)
     joined = cached.merge(load_labels(first, last, horizon), on=["date", "stock_id"])
-    return joined[joined["in_universe"].astype(bool)]
+    return joined[joined["in_universe"].astype(bool) & joined["untradable_t1"].eq(False)]
 
 
 def research_ic_thresholds(run_key: str, model: str, folds: Iterable[Fold]) -> dict[int, float]:

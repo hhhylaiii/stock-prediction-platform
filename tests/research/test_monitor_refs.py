@@ -21,6 +21,7 @@ from apps.research.prediction_cache import save_fold_predictions
 from apps.research.walkforward import Fold
 
 STOCKS = [str(1000 + n) for n in range(40)]
+STUCK = STOCKS[:3]
 OUTSIDE = [str(9000 + n) for n in range(5)]
 
 
@@ -94,7 +95,13 @@ def panel(seed: int) -> tuple[pd.DataFrame, pd.DataFrame]:
                 }
             )
     frame = pd.DataFrame(rows)
-    frame["fwd_rank_pct"] = frame.groupby("date")["truth"].rank(pct=True)
+    stuck = frame["stock_id"].isin(STUCK)
+    frame = frame.assign(
+        untradable_t1=stuck,
+        truth=frame["truth"].mask(stuck, -0.5),
+        logistic_h20=frame["logistic_h20"].mask(stuck, 0.99),
+    )
+    frame["fwd_rank_pct"] = frame["truth"].mask(stuck).groupby(frame["date"]).rank(pct=True)
     frame["fwd_up_5pct"] = frame["truth"] > 0.05
     return frame, frame
 
@@ -108,24 +115,24 @@ def store(frame: pd.DataFrame, model: str, columns: list[str]) -> None:
 
 
 def write_labels(frame: pd.DataFrame) -> None:
-    names = ["stock_id", "date", "fwd_rank_pct", "fwd_up_5pct"]
+    names = ["stock_id", "date", "fwd_rank_pct", "fwd_up_5pct", "untradable_t1"]
     columns = zip(*(frame[name] for name in names), strict=True)
     LabelDaily.objects.bulk_create(
         LabelDaily(
             stock_id=str(stock),
             date=day,
             horizon=horizon,
-            fwd_rank_pct=float(pct),
+            fwd_rank_pct=None if math.isnan(pct) else float(pct),
             fwd_up_5pct=bool(up) if horizon == 20 else None,
-            untradable_t1=False,
+            untradable_t1=bool(stuck),
         )
-        for stock, day, pct, up in columns
+        for stock, day, pct, up, stuck in columns
         for horizon in (5, 20)
     )
 
 
 def expected_threshold(frame: pd.DataFrame, column: str) -> float:
-    rows = frame[frame["in_universe"] & frame["date"].map(counted)]
+    rows = frame[frame["in_universe"] & ~frame["untradable_t1"] & frame["date"].map(counted)]
     ic = daily_rank_ic(rows, column)
     means = ic.rolling(60).mean().dropna()
     return float(means.quantile(0.05))
@@ -155,9 +162,10 @@ def test_baseline_brier_is_the_research_mean_of_the_logistic_baseline() -> None:
 
     brier = research_brier("wf1", FOLDS)
 
-    rows = frame[frame["in_universe"] & frame["date"].map(counted)]
+    rows = frame[frame["in_universe"] & ~frame["untradable_t1"] & frame["date"].map(counted)]
     daily = daily_brier(rows.assign(up=rows["fwd_up_5pct"].astype(float)), "up", "logistic_h20")
     assert brier == pytest.approx(daily.mean())
+    assert brier < 0.2
 
 
 def make_run(**params: Any) -> ModelRun:

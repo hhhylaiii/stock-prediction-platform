@@ -6,6 +6,7 @@ import pandas as pd
 import pytest
 from django.core.management import call_command
 from django.core.management.base import CommandError
+from django.db.models import F
 from django.utils import timezone
 
 from apps.etl.models import DataQualityLog
@@ -27,12 +28,14 @@ from apps.research.models import LabelDaily, ModelMonitor, ModelRun, Prediction
 from apps.research.monitor import (
     ALERT_CHECK,
     BRIER_BASELINE,
+    DEGRADED_ON,
     IC_THRESHOLD,
     ODDS_CHECK,
     UNSCORED_CHECK,
     WIDTH_CHECK,
     run_monitor,
 )
+from apps.research.runs import SCREENING_MODEL
 
 pytestmark = pytest.mark.django_db
 DAY = date(2026, 9, 30)
@@ -68,7 +71,11 @@ def matured(horizon: int) -> date:
 
 
 def make_run(
-    run_id: str, objective: str, status: str = "active", params: dict[str, Any] | None = None
+    run_id: str,
+    objective: str,
+    status: str = "active",
+    params: dict[str, Any] | None = None,
+    train_end: date = date(2026, 3, 31),
 ) -> ModelRun:
     return ModelRun.objects.create(
         run_id=run_id,
@@ -77,7 +84,7 @@ def make_run(
         objective=objective,
         version="2026-09",
         train_start=date(2023, 1, 2),
-        train_end=date(2026, 8, 31),
+        train_end=train_end,
         lib_versions={},
         feature_hash="0" * 64,
         status=status,
@@ -473,6 +480,74 @@ def test_degraded_runs_stay_degraded_and_retired_runs_are_left_alone() -> None:
     assert result.degraded == ()
 
 
+def test_the_window_chains_the_runs_that_served_the_slot() -> None:
+    limits = {IC_THRESHOLD: {"20": 0.0}}
+    old = make_run("prod.rank.old", "rank", status="retired", params=limits)
+    new = make_run("prod.rank", "rank", params=limits)
+    history(old, "ic", [-0.5] * 45, end=calendar().shift(matured(20), -15))
+    history(new, "ic", [-0.5] * 15)
+
+    result = run_monitor(DAY, calendar())
+
+    assert result.degraded == (new.run_id,)
+    assert ModelRun.objects.get(pk=new.pk).params[DEGRADED_ON] == DAY.isoformat()
+    assert [(row["run_id"], row["days"]) for row in alerts()] == [(new.run_id, 60)]
+
+
+def test_in_sample_days_and_days_beyond_six_months_do_not_count() -> None:
+    days = calendar().between(date(2026, 1, 2), matured(20))
+    limits = {IC_THRESHOLD: {"20": 0.0}}
+    trained = make_run("prod.rank", "rank", params=limits, train_end=days[-60])
+    history(trained, "ic", [-0.5] * 61)
+    run_monitor(DAY, calendar())
+    assert (status(trained), alerts()) == ("active", [])
+
+    ModelRun.objects.filter(pk=trained.pk).update(train_end=date(2025, 6, 30))
+    ModelMonitor.objects.filter(date__lt=days[-30]).update(date=F("date") - timedelta(days=200))
+    run_monitor(DAY, calendar())
+    assert (status(trained), alerts()) == ("active", [])
+
+
+def test_the_active_run_is_judged_before_a_newer_degraded_one_and_screening_runs_never() -> None:
+    limits = {IC_THRESHOLD: {"20": 0.0}}
+    active = make_run("prod.rank", "rank", params=limits)
+    make_run("prod.rank.newer", "rank", status="degraded", params=limits)
+    screening = make_run("prod.rank.screen", "rank", params=limits)
+    ModelRun.objects.filter(pk=screening.pk).update(model_type=SCREENING_MODEL)
+    history(active, "ic", [-0.5] * 60)
+
+    result = run_monitor(DAY, calendar())
+
+    assert result.degraded == (active.run_id,)
+    assert [row["run_id"] for row in alerts()] == [active.run_id]
+    assert status(screening) == "active"
+
+
+def test_days_after_the_matured_date_do_not_count() -> None:
+    run = make_run("prod.rank", "rank", params={IC_THRESHOLD: {"20": 0.0}})
+    history(run, "ic", [0.05] * 60)
+    later = calendar().between(calendar().shift(matured(20), 1), DAY)
+    history(run, "ic", [-0.9] * len(later), end=DAY)
+
+    run_monitor(DAY, calendar())
+
+    assert (status(run), alerts()) == ("active", [])
+
+
+@pytest.mark.parametrize(("short", "long", "breached"), [(-0.01, -0.01, 5), (0.01, -0.03, 20)])
+def test_either_rank_horizon_below_its_own_threshold_degrades(
+    short: float, long: float, breached: int
+) -> None:
+    run = make_run("prod.rank", "rank", params={IC_THRESHOLD: {"5": 0.0, "20": -0.02}})
+    history(run, "ic", [short] * 60, horizon=5)
+    history(run, "ic", [long] * 60, horizon=20)
+
+    run_monitor(DAY, calendar())
+
+    assert status(run) == "degraded"
+    assert [row["horizon"] for row in alerts()] == [breached]
+
+
 def test_model_checks_never_write_errors_so_the_day_still_predicts() -> None:
     limits = {IC_THRESHOLD: {"5": 0.0, "20": 0.0}, BRIER_BASELINE: 0.1}
     runs = seed_today(narrow=30, against=30)
@@ -537,6 +612,7 @@ def test_rerunning_a_day_changes_nothing_and_leaves_other_checks_alone() -> None
 
     assert snapshot() == once
     assert status(runs["quantile"]) == "degraded"
+    assert ModelRun.objects.get(pk=runs["quantile"].pk).params[DEGRADED_ON] == DAY.isoformat()
     assert DataQualityLog.objects.filter(check_name="row_count", severity="error").count() == 1
     own = DataQualityLog.objects.filter(check_name__in=monitor.CHECKS)
     assert own.exists()
