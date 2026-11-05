@@ -10,6 +10,7 @@ from apps.research.features.registry import Group, feature_names
 from apps.research.features.size_risk import (
     canonical_industry,
     industry_risk_features,
+    second_batch_industry_features,
     size_liquidity_features,
 )
 from tests.research.feature_panels import at, listing, rising
@@ -216,3 +217,47 @@ def test_industry_features_ignore_a_load_start_inside_a_long_halt() -> None:
         full.iloc[start + FEATURE_WARMUP :].reset_index(drop=True),
         late.iloc[FEATURE_WARMUP:].reset_index(drop=True),
     )
+
+
+def test_sector_ids_are_twse_industry_codes_of_the_unified_names() -> None:
+    names = ["半導體業", " 金融業", "水泥工業", "其他電子類", "新產業", "", None]
+    panel = pd.concat(
+        [listing(str(1000 + k), rising(3), industry=name) for k, name in enumerate(names)],
+        ignore_index=True,
+    )
+    empty = pd.Series(NAN, index=panel.index)
+
+    features = second_batch_industry_features(panel, empty, empty)
+
+    assert list(features.columns) == [
+        "stock_id",
+        "date",
+        *feature_names(Group.INDUSTRY_RISK, batch=2),
+    ]
+    ids = [at(features, str(1000 + k), 2, "ind_sector_id") for k in range(len(names))]
+    assert ids[:4] == [24.0, 17.0, 1.0, 31.0]
+    assert all(math.isnan(value) for value in ids[4:])
+
+
+def test_neutral_features_subtract_the_day_median_of_universe_stocks_in_the_industry() -> None:
+    rows = [
+        ("2330", "半導體業", True, 0.1, 0.05),
+        ("2303", "半導體業", True, 0.3, 0.07),
+        ("2317", "半導體業", False, 0.9, 0.01),
+        ("1101", "水泥工業", False, 0.2, 0.04),
+        ("9999", "", True, 0.5, NAN),
+    ]
+    panel = pd.concat(
+        [listing(s, rising(2), industry=i, in_universe=u) for s, i, u, _, _ in rows],
+        ignore_index=True,
+    )
+    momentum = pd.Series([m for *_, m, _ in rows for _ in range(2)], index=panel.index)
+    earnings = pd.Series([e for *_, e in rows for _ in range(2)], index=panel.index)
+
+    features = second_batch_industry_features(panel, momentum, earnings)
+
+    neutral = [at(features, s, 1, "ind_mom_neutral") for s, *_ in rows]
+    assert neutral == pytest.approx([-0.1, 0.1, 0.7, -0.1, 0.2])
+    assert at(features, "2330", 1, "ind_ep_neutral") == pytest.approx(0.05 - 0.06)
+    assert at(features, "1101", 1, "ind_ep_neutral") == pytest.approx(0.04 - 0.06)
+    assert math.isnan(at(features, "9999", 1, "ind_ep_neutral"))

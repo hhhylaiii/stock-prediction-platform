@@ -34,6 +34,49 @@ INDUSTRY_ALIASES: Mapping[str, str] = MappingProxyType(
     }
 )
 
+SECTOR_CODES: Mapping[str, int] = MappingProxyType(
+    {
+        "水泥工業": 1,
+        "食品工業": 2,
+        "塑膠工業": 3,
+        "紡織纖維": 4,
+        "電機機械": 5,
+        "電器電纜": 6,
+        "化學生技醫療": 7,
+        "玻璃陶瓷": 8,
+        "造紙工業": 9,
+        "鋼鐵工業": 10,
+        "橡膠工業": 11,
+        "汽車工業": 12,
+        "電子工業": 13,
+        "建材營造": 14,
+        "航運業": 15,
+        "觀光餐旅": 16,
+        "金融保險": 17,
+        "貿易百貨": 18,
+        "綜合": 19,
+        "其他": 20,
+        "化學工業": 21,
+        "生技醫療業": 22,
+        "油電燃氣業": 23,
+        "半導體業": 24,
+        "電腦及週邊設備業": 25,
+        "光電業": 26,
+        "通信網路業": 27,
+        "電子零組件業": 28,
+        "電子通路業": 29,
+        "資訊服務業": 30,
+        "其他電子業": 31,
+        "文化創意業": 32,
+        "農業科技業": 33,
+        "電子商務": 34,
+        "綠能環保": 35,
+        "數位雲端": 36,
+        "運動休閒": 37,
+        "居家生活": 38,
+    }
+)
+
 
 def canonical_industry(industry: pd.Series) -> pd.Series:
     """TWSE names for TPEx industries; empty names become None (missing)."""
@@ -97,3 +140,25 @@ def industry_risk_features(panel: pd.DataFrame) -> pd.DataFrame:
         "ind_rel_ret_20d": own - sector,
     }
     return feature_frame(panel, columns, feature_names(Group.INDUSTRY_RISK))
+
+
+def _neutral(values: pd.Series, panel: pd.DataFrame, industry: pd.Series) -> pd.Series:
+    """Values less the day's industry median over universe stocks, else the universe median."""
+    counted = values.where(panel["in_universe"].astype(bool))
+    whole = counted.groupby(panel["date"]).transform("median")
+    sector = counted.groupby([panel["date"], industry]).transform("median").fillna(whole)
+    return values - sector
+
+
+def second_batch_industry_features(
+    panel: pd.DataFrame, momentum: pd.Series, earnings: pd.Series
+) -> pd.DataFrame:
+    """TWSE industry code and industry-neutral 250-20 momentum and earnings yield."""
+    require_sorted(panel)
+    industry = canonical_industry(panel["industry"])
+    columns = {
+        "ind_sector_id": industry.map(dict(SECTOR_CODES)).astype("float64"),
+        "ind_mom_neutral": _neutral(momentum, panel, industry),
+        "ind_ep_neutral": _neutral(earnings, panel, industry),
+    }
+    return feature_frame(panel, columns, feature_names(Group.INDUSTRY_RISK, batch=2))
