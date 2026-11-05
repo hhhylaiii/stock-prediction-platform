@@ -115,6 +115,34 @@ jobs:
           fi
           exit "$status"
 
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: twp
+          POSTGRES_PASSWORD: twp
+          POSTGRES_DB: twp
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U twp -d twp"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://twp:twp@localhost:5432/twp
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+      - run: uv run playwright install --with-deps chromium
+      - run: uv run pytest -m e2e
+
   docker:
     if: (github.event_name == 'push' && github.ref == 'refs/heads/develop') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
