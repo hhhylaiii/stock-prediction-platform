@@ -7,6 +7,7 @@ import pickle
 import platform
 import shutil
 import tempfile
+from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,25 @@ SCREENING_MODEL = "screening"
 
 class RunError(RuntimeError):
     """A run cannot be written or dropped without losing a record that must stay."""
+
+
+@dataclass(frozen=True)
+class Screened:
+    kept: list[str]
+    unscreened: list[str]
+
+
+def screened_features() -> Screened:
+    """Features the recorded screening kept, and the market features it left unscreened."""
+    rows = list(
+        ModelRun.objects.filter(model_type=SCREENING_MODEL).values_list("feature_list", "params")
+    )
+    if not rows:
+        raise RunError("no feature screening is recorded; run ic_report first")
+    if len(rows) > 1:
+        raise RunError(f"{len(rows)} feature screenings are recorded; drop_run all but one")
+    kept, params = rows[0]
+    return Screened(list(kept), list(params.get("unscreened", [])))
 
 
 def lib_versions() -> dict[str, str]:
