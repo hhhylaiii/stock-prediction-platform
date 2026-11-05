@@ -35,7 +35,39 @@ def checked(seeded: Seed) -> Seed:
         "warning",
         {"runs": [{"run_id": "rank-h20", "date": "2026-10-01", "horizon": 20}] * 2},
     )
-    log(seeded, "model_alert", "warning", {"reason": "below_threshold", "run_id": XSS_NAME})
+    alerts = [
+        {
+            "run_id": XSS_NAME,
+            "objective": "rank",
+            "horizon": 20,
+            "metric": "ic",
+            "reason": "below_threshold",
+            "value": 0.0123,
+            "threshold": 0.02,
+            "days": 60,
+        },
+        {
+            "run_id": "quantile-h20",
+            "objective": "quantile",
+            "horizon": 20,
+            "metric": "coverage",
+            "reason": "outside_range",
+            "value": 0.652,
+            "threshold": [0.7, 0.9],
+            "days": 60,
+        },
+        {
+            "run_id": "prob-h20",
+            "objective": "classification",
+            "horizon": 20,
+            "metric": "brier",
+            "reason": "missing_reference",
+            "value": 0.231,
+            "threshold": None,
+            "days": 60,
+        },
+    ]
+    log(seeded, "model_alert", "warning", {"runs": alerts})
     return seeded
 
 
@@ -56,8 +88,16 @@ def test_model_output_checks_have_their_own_block(
     expect(unscored).to_contain_text("2 筆")
     expect(unscored.locator("i")).to_have_class("warn")
     alert = rows.filter(has_text="模型告警")
-    expect(alert).to_contain_text("滾動 IC 低於門檻")
     expect(alert.locator("i")).to_have_class("warn")
+    lines = alert.locator(".run")
+    expect(lines).to_have_count(3)
+    expect(lines.nth(0)).to_have_text(
+        f"{XSS_NAME}（排名 20 日）：IC 低於門檻，近 60 日 0.012，門檻 0.020"
+    )
+    expect(lines.nth(1)).to_have_text(
+        "quantile-h20（分位數 20 日）：覆蓋率超出範圍，近 60 日 65.2%，門檻 70.0%–90.0%"
+    )
+    expect(lines.nth(2)).to_have_text("prob-h20（上漲機率 20 日）：Brier 缺參考值，近 60 日 0.231")
     expect(page.locator("#model-checks img")).to_have_count(0)
     expect(page.locator("#model-checks-sub")).to_contain_text(checked.last_session.isoformat())
 
@@ -101,9 +141,26 @@ def test_the_block_reads_the_last_day_monitored(
 def test_a_model_check_error_fails_the_strip_like_the_gate(
     page: Page, live_server: LiveServer, seeded: Seed
 ) -> None:
-    log(seeded, "model_alert", "error", {"reason": "outside_range"})
+    log(seeded, "output_width_ratio", "error", {"share": 0.05, "flagged": 5, "n_stocks": 100})
 
     page.goto(f"{live_server.url}/#models")
 
     expect(page.locator("#status")).to_contain_text("品質檢查未通過")
-    expect(page.locator("#quality-sub")).to_contain_text("模型輸出檢查有錯誤，當日不產出預測。")
+    expect(page.locator("#quality-sub")).to_contain_text("模型輸出檢查有錯誤。")
+    expect(page.locator("#quality-days .trow").first).to_contain_text("模型輸出檢查有錯誤")
+    expect(page.locator("#quality-days .trow").first).not_to_contain_text("最嚴重")
+    expect(page.locator("#model-checks .check")).to_contain_text("錯誤")
+    expect(page.locator("#model-checks .check i")).to_have_class("warn")
+
+
+def test_the_block_reads_the_alert_share_from_the_api(
+    page: Page, live_server: LiveServer, checked: Seed, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("apps.api.ops.ALERT_SHARE", 0.2)
+
+    page.goto(f"{live_server.url}/#models")
+
+    width = page.locator("#model-checks .check").filter(has_text="區間寬度比異常")
+    expect(width).to_contain_text("少量標記，220／1,842 檔")
+    expect(width.locator("i")).not_to_have_class("warn")
+    expect(page.locator("#model-checks-sub")).to_contain_text("超過 20% 才算警告")

@@ -129,11 +129,15 @@ def test_a_model_check_error_fails_the_day_as_the_gate_does(client: Client) -> N
     assert day["passed"] is False
 
 
-def test_the_output_alert_share_comes_from_the_research_layer(client: Client) -> None:
+def test_the_output_alert_share_follows_the_research_constant(
+    client: Client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("apps.api.ops.ALERT_SHARE", 0.2)
+
     with time_machine.travel(FRIDAY_NIGHT, tick=False):
         meta = envelope_of(client.get("/api/data-quality", {"days": 1}))["meta"]
 
-    assert meta["output_alert_share"] == ALERT_SHARE
+    assert meta["output_alert_share"] == 0.2
 
 
 @time_machine.travel(FRIDAY_NIGHT, tick=False)
