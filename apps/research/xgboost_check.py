@@ -8,13 +8,18 @@ import pandas as pd
 import xgboost as xgb
 
 from apps.research import lgbm_runs
-from apps.research.features.store import read_partitions
+from apps.research.baseline_runs import fold_inputs
 from apps.research.gbdt import EARLY_STOPPING_ROUNDS, DailyRankIC, split_validation
 from apps.research.gbdt import MAX_ROUNDS as DEFAULT_MAX_ROUNDS
 from apps.research.labels import HORIZONS
 from apps.research.metrics.ic import daily_rank_ic
 from apps.research.models import HoldoutScope, ModelObjective, ModelRun
-from apps.research.prediction_cache import fold_notes, load_fold_predictions
+from apps.research.prediction_cache import (
+    MissingFoldsError,
+    fold_notes,
+    fold_path,
+    load_fold_predictions,
+)
 from apps.research.rank_model import RANK_LABEL, rank_inputs
 from apps.research.runs import feature_hash
 from apps.research.training import KEYS, load_labels, training_rows
@@ -28,6 +33,7 @@ XGB_PARAMS = {
     "eta": 0.02,
     "subsample": 0.8,
     "colsample_bytree": 0.7,
+    "min_child_weight": 200,
     "objective": "reg:squarederror",
 }
 DAILY_COLUMNS = ["fold", "horizon", "date", "lightgbm", "xgboost"]
@@ -74,27 +80,35 @@ def _features(run_key: str, folds: Sequence[Fold]) -> dict[int, list[str]]:
     return {index: list(found[run_id].feature_list) for run_id, index in wanted.items()}
 
 
-def _fingerprint(run_key: str, fold: Fold) -> dict[str, str | None]:
+def _stale(run_key: str, fold: Fold, digest: str) -> bool:
+    """Whether the fold's features or labels differ from those its LightGBM cache was fit on."""
     notes = fold_notes(run_key, lgbm_runs.MODEL, fold.index)
-    return {key: notes.get(key) for key in ("feature_hash", "label_hash")}
+    current = {
+        "feature_hash": digest,
+        "label_hash": lgbm_runs.label_digest(HoldoutScope.RANK, fold),
+    }
+    return {key: notes.get(key) for key in current} != current
 
 
-def _stale(run_key: str, folds: Sequence[Fold], directory: Path) -> None:
-    """Refuse folds whose features or labels changed since their LightGBM cache was written."""
-    stale = [
-        fold.index
-        for fold in folds
-        if _fingerprint(run_key, fold)
-        != {
-            "feature_hash": feature_hash(fold.train_start, fold.test_end, directory),
-            "label_hash": lgbm_runs.label_digest(HoldoutScope.RANK, fold),
-        }
-    ]
+def _refuse(run_key: str, stale: list[int]) -> None:
     if stale:
         raise LookupError(
             f"folds {stale} of {run_key} are stale: their features or labels changed since "
             "LightGBM ran; rerun train --model lightgbm"
         )
+
+
+def _check_caches(run_key: str, folds: Sequence[Fold], directory: Path) -> None:
+    """Refuse missing LightGBM caches first, then folds whose inputs changed since."""
+    absent = [
+        fold.index for fold in folds if not fold_path(run_key, lgbm_runs.MODEL, fold.index).exists()
+    ]
+    if absent:
+        raise MissingFoldsError(run_key, lgbm_runs.MODEL, absent)
+    digests = {
+        fold.index: feature_hash(fold.train_start, fold.test_end, directory) for fold in folds
+    }
+    _refuse(run_key, [fold.index for fold in folds if _stale(run_key, fold, digests[fold.index])])
 
 
 def _window(inputs: pd.DataFrame, labels: pd.DataFrame, fold: Fold, test: bool) -> pd.DataFrame:
@@ -105,7 +119,9 @@ def _window(inputs: pd.DataFrame, labels: pd.DataFrame, fold: Fold, test: bool) 
 def _fold_ics(
     run_key: str, fold: Fold, features: list[str], directory: Path, seed: int
 ) -> list[pd.DataFrame]:
-    inputs = rank_inputs(read_partitions(fold.train_start, fold.test_end, directory), features)
+    read = fold_inputs(fold, fold.train_start, fold.test_end, directory, features)
+    _refuse(run_key, [fold.index] if _stale(run_key, fold, read.feature_hash) else [])
+    inputs = rank_inputs(read.raw, features)
     cached = load_fold_predictions(run_key, lgbm_runs.MODEL, fold)
     parts = []
     for horizon in HORIZONS:
@@ -121,6 +137,7 @@ def _fold_ics(
             axis=1,
         ).rename(columns={"ic": "xgboost"})
         parts.append(both.reset_index().assign(fold=fold.index, horizon=horizon))
+    _refuse(run_key, [fold.index] if _stale(run_key, fold, read.feature_hash) else [])
     return parts
 
 
@@ -129,7 +146,7 @@ def xgboost_daily_ics(
 ) -> pd.DataFrame:
     """Daily OOS rank IC of LightGBM's cached scores and an XGBoost refit, on the same rows."""
     features = _features(run_key, folds)
-    _stale(run_key, folds, directory)
+    _check_caches(run_key, folds, directory)
     parts = [
         part
         for fold in folds

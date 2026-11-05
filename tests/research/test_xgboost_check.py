@@ -14,6 +14,7 @@ from apps.research import xgboost_check
 from apps.research.features.store import export_year, read_partitions
 from apps.research.management.commands import xgb_check
 from apps.research.models import FeatureDaily, LabelDaily, ModelRun
+from apps.research.prediction_cache import MissingFoldsError, fold_path
 from apps.research.rank_model import rank_inputs
 from apps.research.training import load_labels, training_rows
 from apps.research.xgboost_check import (
@@ -42,10 +43,11 @@ def test_relative_gap_scales_by_the_lightgbm_ic() -> None:
 
 
 def test_xgboost_report_pools_days_and_flags_gaps_past_the_limit() -> None:
-    day = date(2016, 10, 3)
+    day, later = date(2016, 10, 3), date(2016, 10, 4)
     rows = [
         [1, 5, day, 0.04, 0.036],
-        [2, 5, day, 0.06, 0.054],
+        [1, 5, later, 0.02, 0.018],
+        [2, 5, day, 0.09, 0.081],
         [1, 20, day, 0.05, 0.03],
         [2, 20, day, 0.05, 0.04],
         [1, 1, day, 0.0, 0.02],
@@ -59,7 +61,8 @@ def test_xgboost_report_pools_days_and_flags_gaps_past_the_limit() -> None:
     assert "| 20 | 0.0500 | 0.0350 | 30.0% | investigate the implementation |" in text
     assert "| 1 | 0.0000 | 0.0200 | n/a | investigate the implementation |" in text
     assert "| 1 | 20 | 0.0500 | 0.0300 |" in text
-    assert "| 2 | 5 | 0.0600 | 0.0540 |" in text
+    assert "| 1 | 5 | 0.0300 | 0.0270 |" in text
+    assert "| 2 | 5 | 0.0900 | 0.0810 |" in text
 
 
 @pytest.fixture
@@ -94,7 +97,9 @@ def test_fit_xgboost_stops_on_validation_rank_ic_then_refits_every_row(
     assert probe["maximize"] is True
     assert probe["early_stopping_rounds"] == 100
     assert probe["params"]["disable_default_eval_metric"] == 1
-    assert probe["rows"] < final["rows"] == len(rows)
+    assert probe["rows"] == int((rows["date"] <= fold.fit_end).sum())
+    assert probe["evals"][0][0].num_row() == int((rows["date"] >= fold.valid_start).sum())
+    assert final["rows"] == len(rows)
     assert "evals" not in final
     rounds = probe["out"].best_iteration + 1
     assert final["num_boost_round"] == rounds
@@ -107,6 +112,7 @@ def test_fit_xgboost_stops_on_validation_rank_ic_then_refits_every_row(
         "eta": 0.02,
         "subsample": 0.8,
         "colsample_bytree": 0.7,
+        "min_child_weight": 200,
         "objective": "reg:squarederror",
     }
 
@@ -142,6 +148,31 @@ def test_xgboost_daily_ics_refuse_stale_or_missing_lightgbm_folds(rank_caches: P
     export_year(2016, rank_caches)
     with pytest.raises(LookupError, match="stale"):
         xgboost_daily_ics("rank-wf1", folds[-1:], rank_caches, seed=0)
+
+
+def test_xgboost_daily_ics_name_a_missing_lightgbm_cache(rank_caches: Path) -> None:
+    folds = chosen()
+    fold_path("rank-wf1", "lightgbm", folds[-1].index).unlink()
+
+    with pytest.raises(MissingFoldsError, match=rf"rank-wf1/lightgbm .* \[{folds[-1].index}\]"):
+        xgboost_daily_ics("rank-wf1", folds, rank_caches, seed=0)
+
+
+def test_xgboost_daily_ics_refuse_labels_rebuilt_mid_run(
+    rank_caches: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(xgboost_check, "MAX_ROUNDS", 120)
+    folds = chosen()
+    fit = xgboost_check.fit_xgboost
+
+    def rebuilt(rows: pd.DataFrame, fold: Any, features: list[str], seed: int) -> xgb.Booster:
+        LabelDaily.objects.filter(date=fold.train_start, horizon=20).update(fwd_rank_pct=0.5)
+        return fit(rows, fold, features, seed)
+
+    monkeypatch.setattr(xgboost_check, "fit_xgboost", rebuilt)
+
+    with pytest.raises(LookupError, match=rf"folds \[{folds[0].index}\] .* stale"):
+        xgboost_daily_ics("rank-wf1", folds, rank_caches, seed=0)
 
 
 @pytest.fixture

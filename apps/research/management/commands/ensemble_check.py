@@ -3,12 +3,18 @@
 from argparse import ArgumentParser
 from typing import Any
 
+import pandas as pd
 from django.core.management.base import BaseCommand, CommandError
 
 from apps.etl.management.options import as_date
 from apps.market.calendar import CalendarError
 from apps.research.baseline_runs import check_run_key
-from apps.research.ensemble import ensemble_ics, ensemble_report, research_folds, write_report
+from apps.research.ensemble import (
+    ensemble_daily_ics,
+    ensemble_report,
+    research_folds,
+    write_report,
+)
 from apps.research.labels import HORIZONS
 from apps.research.models import HoldoutScope
 from apps.research.prediction_cache import FoldMismatchError, MissingFoldsError
@@ -31,7 +37,10 @@ class Command(BaseCommand):
             check_run_key(HoldoutScope.RANK, run_key)
             last = as_date(options["last_date"], "--last-date")
             folds = research_folds(DEFAULT_CONFIG, last)
-            ics = {horizon: ensemble_ics(run_key, folds, horizon) for horizon in HORIZONS}
+            daily = pd.concat(
+                [ensemble_daily_ics(run_key, folds, horizon) for horizon in HORIZONS],
+                ignore_index=True,
+            )
         except (
             ValueError,
             CalendarError,
@@ -40,6 +49,6 @@ class Command(BaseCommand):
             FoldMismatchError,
         ) as error:
             raise CommandError(str(error)) from error
-        text = ensemble_report(run_key, ics)
+        text = ensemble_report(run_key, daily)
         written = write_report(text, options["output"])
         self.stdout.write(text if written is None else f"wrote {written}")
