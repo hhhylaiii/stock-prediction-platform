@@ -255,15 +255,32 @@
     return '<div class="price"><span class="big" id="stock-close">' + fmtPrice(quote.close) + '</span>' + change + '<span class="faint small">' + esc(quote.date) + ' 收盤</span></div>';
   }
 
+  const SUPERSCRIPT = { '-': '⁻', 0: '⁰', 1: '¹', 2: '²', 3: '³', 4: '⁴', 5: '⁵', 6: '⁶', 7: '⁷', 8: '⁸', 9: '⁹' };
+  const minus = (v, text) => (v < 0 ? '−' : '') + text;
+  function percentText(v, signedOut) {
+    const x = Math.abs(v * 100), text = x.toFixed(x >= 10 ? 1 : x >= 0.01 ? 2 : 3);
+    if (Number(text) === 0) return text + '%';
+    return (v < 0 ? '−' : signedOut ? '+' : '') + text + '%';
+  }
+  function numberText(v) {
+    const x = Math.abs(v);
+    if (x === 0) return '0';
+    if (x >= 1000) return minus(v, fmtInt(Math.round(x)));
+    if (x >= 0.001) return minus(v, String(Number(x.toPrecision(4))));
+    const [mantissa, exponent] = x.toExponential(2).split('e');
+    return minus(v, mantissa + '×10' + String(Number(exponent)).split('').map(c => SUPERSCRIPT[c]).join(''));
+  }
   const UNIT_TEXT = {
-    ratio: v => sgn(v * 100, Math.abs(v) < 0.01 ? 2 : 1),
-    number: v => Math.abs(v) >= 1000 ? fmtInt(Math.round(v)) : String(Number(v.toPrecision(4))),
+    ratio: v => percentText(v, true),
+    percent: v => percentText(v, false),
+    number: numberText,
     count: v => fmtInt(Math.round(v)),
     flag: v => v ? '是' : '否',
     category: v => String(v)
   };
   const valueText = (v, unit) => v === null || v === undefined ? '—' : (UNIT_TEXT[unit] || UNIT_TEXT.number)(v);
   const loading = '<p class="placeholder">載入中…</p>';
+  const settle = promise => promise.then(value => ({ status: 'fulfilled', value: value }), reason => ({ status: 'rejected', reason: reason }));
 
   function stockHtml(s) {
     const watching = state.watch.has(s.stock_id);
@@ -282,8 +299,9 @@
       '<div class="section" id="history"><div class="sechead"><h2>過去對本股的 ' + HISTORY_HORIZON + ' 日預測，與實際結果</h2><span class="muted small"></span></div><div class="body">' + loading + '</div></div>';
   }
 
-  function rankHtml(entry, failed) {
-    if (failed) return '—<small> 讀取失敗</small>';
+  function rankHtml(entry, status) {
+    if (status === 'pending') return '—<small> 載入中…</small>';
+    if (status === 'rejected') return '—<small> 讀取失敗</small>';
     const p = entry && entry.prediction;
     if (!p) return '—<small> 尚未產出</small>';
     if (p.rank === null) return '—<small> 訓練範圍外</small>';
@@ -329,7 +347,7 @@
     return '<p class="sub">對 ' + meta.horizon + ' 日排名分數影響最大的 ' + data.items.length + ' 個特徵；右側是對模型分數的貢獻，正值推高排名。</p><div class="list">' +
       data.items.map(item => {
         const w = Math.abs(item.contrib) / scale * 50, pos = item.contrib >= 0;
-        return '<div class="feat"><span>' + esc(item.label) + '<span class="faint small">　' + esc(valueText(item.value, item.unit)) + '</span></span>' +
+        return '<div class="feat"><span>' + esc(item.label) + '<span class="faint small">　</span><span class="faint small value">' + esc(valueText(item.value, item.unit)) + '</span></span>' +
           '<span class="right num contrib"' + (pos ? '' : ' style="color:var(--ink-2)"') + '>' + signed(item.contrib, 3) + '</span>' +
           '<div class="bar"><div class="zero"></div><div class="fill" style="background:' + (pos ? 'var(--model)' : 'var(--ink-4)') + ';left:' + (pos ? 50 : 50 - w) + '%;width:' + w + '%"></div></div></div>';
       }).join('') + '</div>' +
@@ -362,7 +380,11 @@
     const more = body.querySelector('#history-all');
     if (more) more.addEventListener('click', () => {
       more.disabled = true;
-      api.getAll('stocks/' + state.stock + '/history', { horizon: HISTORY_HORIZON }).then(all => showHistory(host, { status: 'fulfilled', value: all }), err => { body.innerHTML = errorBox(err); });
+      const note = more.parentNode;
+      note.querySelectorAll('.error').forEach(box => box.remove());
+      api.getAll('stocks/' + state.stock + '/history', { horizon: HISTORY_HORIZON }).then(
+        all => showHistory(host, { status: 'fulfilled', value: all }),
+        err => { note.insertAdjacentHTML('beforeend', errorBox(err)); more.disabled = false; });
     });
   }
 
@@ -392,12 +414,11 @@
       return;
     }
     stockEl.innerHTML = backLink + loading;
-    const [stock, prices, forecasts, history] = await Promise.allSettled([
-      api.get('stocks/' + code),
-      api.get('stocks/' + code + '/prices', { days: PRICE_DAYS }),
-      api.get('stocks/' + code + '/predictions'),
-      api.get('stocks/' + code + '/history', { horizon: HISTORY_HORIZON, page_size: HISTORY_ROWS })
-    ]);
+    const later = {
+      forecasts: settle(api.get('stocks/' + code + '/predictions')),
+      history: settle(api.get('stocks/' + code + '/history', { horizon: HISTORY_HORIZON, page_size: HISTORY_ROWS }))
+    };
+    const [stock, prices] = await Promise.all([settle(api.get('stocks/' + code)), settle(api.get('stocks/' + code + '/prices', { days: PRICE_DAYS }))]);
     if (token !== state.stockToken) return;
     if (stock.status === 'rejected') {
       stockEl.innerHTML = backLink + errorBox(stock.reason);
@@ -415,9 +436,12 @@
       e.currentTarget.textContent = on ? '已追蹤' : '加入追蹤';
       controls();
     });
+    let forecasts = { status: 'pending' };
     const entryOf = () => forecasts.status === 'fulfilled' ? forecasts.value.data.horizons.find(entry => entry.horizon === state.h) : null;
     const drawChart = () => {
-      const fan = fanOf(entryOf());
+      const bars = prices.status === 'fulfilled' ? prices.value.data : [];
+      const candidate = fanOf(entryOf());
+      const fan = candidate && bars.some(b => b.date === candidate.date && b.close !== null) ? candidate : null;
       document.querySelectorAll('#chart-seg [data-ct]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.ct === state.chart)));
       const forecastLegend = fan ? '<span><i class="sw-dash"></i>預測中位數（內插）</span>' + (fan.band ? '<span><i class="sw-band"></i>80% 預測區間（內插）</span>' : '') : '';
       document.getElementById('chart-legend').innerHTML = (state.chart === 'candle'
@@ -425,35 +449,45 @@
         : '<span><i class="sw-line"></i>收盤價（還原）</span>') + forecastLegend;
       const host = document.getElementById('price-chart');
       if (prices.status === 'rejected') host.innerHTML = errorBox(prices.reason);
-      else drawPriceChart(host, s, prices.value.data, state.chart, fan);
+      else drawPriceChart(host, s, bars, state.chart, fan);
     };
+    const showRank = () => { document.querySelector('#stock-rank .v').innerHTML = rankHtml(entryOf(), forecasts.status); };
     const drawHorizon = () => {
       controls();
       document.querySelectorAll('#stock-seg [data-sh]').forEach(b => b.setAttribute('aria-pressed', String(Number(b.dataset.sh) === state.h)));
       document.getElementById('chart-title').textContent = '過去 ' + PRICE_DAYS + ' 個交易日，與未來 ' + state.h + ' 日的預測';
       document.querySelector('#stock-rank .l').textContent = state.h + ' 日預測排名';
-      document.querySelector('#stock-rank .v').innerHTML = rankHtml(entryOf(), forecasts.status === 'rejected');
+      showRank();
       drawChart();
       loadFeatures(s.stock_id, token);
     };
-    document.querySelectorAll('#stock-seg [data-sh]').forEach(b => b.addEventListener('click', () => { state.h = Number(b.dataset.sh); drawHorizon(); }));
+    document.querySelectorAll('#stock-seg [data-sh]').forEach(b => b.addEventListener('click', () => { state.h = Number(b.dataset.sh); state.page = 1; drawHorizon(); }));
     document.querySelectorAll('#chart-seg [data-ct]').forEach(b => b.addEventListener('click', () => {
       state.chart = b.dataset.ct;
       try { localStorage.setItem('twp-chart', state.chart); } catch (e) { state.chart = b.dataset.ct; }
       drawChart();
     }));
-    document.querySelector('#forecasts .body').innerHTML = forecasts.status === 'rejected' ? errorBox(forecasts.reason) : forecastsHtml(forecasts.value.data);
-    showHistory(document.getElementById('history'), history);
     drawHorizon();
+    later.forecasts.then(result => {
+      if (token !== state.stockToken) return;
+      forecasts = result;
+      document.querySelector('#forecasts .body').innerHTML = result.status === 'rejected' ? errorBox(result.reason) : forecastsHtml(result.value.data);
+      showRank();
+      drawChart();
+    });
+    later.history.then(result => { if (token === state.stockToken) showHistory(document.getElementById('history'), result); });
   }
 
-  function fanPoints(fan, anchor) {
+  function fanPoints(fan, anchor, base) {
     const steps = [...Array(fan.h + 1).keys()];
-    const at = (t, r, root) => ({ i: anchor + t, v: fan.close * (1 + r * (root ? Math.sqrt(t / fan.h) : t / fan.h)) });
+    const at = (t, q) => {
+      const share = t / fan.h;
+      return { i: anchor + t, v: base * (1 + fan.ret * share + (q - fan.ret) * Math.sqrt(share)) };
+    };
     return {
-      median: steps.map(t => at(t, fan.ret, false)),
-      top: fan.band ? steps.map(t => at(t, fan.band.high, true)) : [],
-      bottom: fan.band ? steps.map(t => at(t, fan.band.low, true)) : []
+      median: steps.map(t => at(t, fan.ret)),
+      top: fan.band ? steps.map(t => at(t, fan.band.high)) : [],
+      bottom: fan.band ? steps.map(t => at(t, fan.band.low)) : []
     };
   }
 
@@ -462,10 +496,9 @@
     if (!traded.length) { host.innerHTML = '<p class="placeholder">這段期間沒有成交資料。</p>'; return; }
     const candle = kind === 'candle';
     const n = bars.length;
-    const found = fan ? bars.findIndex(b => b.date === fan.date) : -1;
-    const anchor = found < 0 ? n - 1 : found;
-    const fanAt = fan ? fanPoints(fan, anchor) : null;
-    const slots = fan ? Math.max(n, anchor + fan.h + 1) : n;
+    const anchor = fan ? bars.findIndex(b => b.date === fan.date && b.close !== null) : -1;
+    const fanAt = anchor < 0 ? null : fanPoints(fan, anchor, bars[anchor].close);
+    const slots = fanAt ? Math.max(n, anchor + fan.h + 1) : n;
     const fanValues = fanAt ? [...fanAt.median, ...fanAt.top, ...fanAt.bottom].map(pt => pt.v) : [];
     const closes = bars.map(b => b.close);
     const ma5 = ma(closes, 5), ma20 = ma(closes, 20);
@@ -487,7 +520,7 @@
     const bw = Math.max(3, Math.round(Math.max(step, 6) * 0.62 * 10) / 10);
     const path = arr => arr.map((v, i) => v === null ? '' : ((i === 0 || arr[i - 1] === null) ? 'M' : 'L') + f1(x(i)) + ' ' + f1(y(v))).join(' ');
     const xl = bars.map((b, i) => ({ i, label: md(b.date) })).filter(t => t.i % 10 === 0 || t.i === n - 1);
-    if (fan) xl.push({ i: anchor + fan.h, label: '+' + fan.h + ' 日' });
+    if (fanAt) xl.push({ i: anchor + fan.h, label: '+' + fan.h + ' 日' });
     const line = pts => pts.map((pt, k) => (k ? 'L' : 'M') + f1(x(pt.i)) + ' ' + f1(y(pt.v))).join(' ');
     const fanLayer = !fanAt ? '' :
       (fanAt.top.length ? '<path class="fan-band" d="' + line(fanAt.top) + ' L' + line([...fanAt.bottom].reverse()).slice(1) + ' Z" fill="var(--model-soft)" stroke="none"></path>' : '') +
@@ -514,7 +547,7 @@
     }).join('');
 
     host.innerHTML =
-      '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="' + esc(s.name) + '過去 ' + n + ' 個交易日' + (candle ? 'K 線' : '收盤價') + '與成交量">' +
+      '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="' + esc(s.name) + '過去 ' + n + ' 個交易日' + (candle ? 'K 線' : '收盤價') + '與成交量' + (fanAt ? '，與未來 ' + fan.h + ' 日的預測' : '') + '">' +
       ticks.filter(v => v >= yMin && v <= yMax).map(v => '<line x1="' + padL + '" x2="' + (W - padR) + '" y1="' + f1(y(v)) + '" y2="' + f1(y(v)) + '" stroke="#2A2A28"></line><text x="' + (padL - 10) + '" y="' + f1(y(v) + 4) + '" text-anchor="end" fill="#8A887F" font-size="12">' + labelPrice(v) + '</text>').join('') +
       '<line x1="' + padL + '" x2="' + (W - padR) + '" y1="' + f1(volTop) + '" y2="' + f1(volTop) + '" stroke="#2A2A28"></line>' +
       '<text x="' + (padL - 10) + '" y="' + f1(volTop + 4) + '" text-anchor="end" fill="#8A887F" font-size="12">' + fmtInt(Math.round(maxVol)) + '</text>' +
@@ -531,13 +564,22 @@
     overlay.addEventListener('pointermove', ev => {
       const rect = svg.getBoundingClientRect();
       const ux = (ev.clientX - rect.left) * (W / rect.width);
-      const idx = n > 1 ? Math.max(0, Math.min(n - 1, Math.round((ux - padL) / step))) : 0;
+      const idx = slots > 1 ? Math.max(0, Math.min(slots - 1, Math.round((ux - padL) / step))) : 0;
       const d = bars[idx], px = x(idx);
-      tt.textContent = d.date.replace(/-/g, '/');
-      if (d.close === null) {
+      if (!d) {
+        const t = idx - anchor, median = fanAt.median[t].v;
+        tt.textContent = '+' + t + ' 個交易日';
+        tb.innerHTML = '<div>預測中位數 ' + fmtPrice(median) + '</div>' +
+          (fanAt.top.length ? '<div class="muted">80% 區間 ' + fmtPrice(fanAt.bottom[t].v) + ' – ' + fmtPrice(fanAt.top[t].v) + '</div>' : '');
+        hc.setAttribute('cy', y(median));
+        hc.setAttribute('fill', '#ECEAE4');
+        hc.style.display = '';
+      } else if (d.close === null) {
+        tt.textContent = d.date.replace(/-/g, '/');
         tb.textContent = '無成交資料';
         hc.style.display = 'none';
       } else {
+        tt.textContent = d.date.replace(/-/g, '/');
         const prior = prevClose[idx];
         const chg = prior ? (d.close / prior - 1) * 100 : 0;
         const volume = lots[idx] === null ? '' : '成交量 ' + fmtInt(Math.round(lots[idx])) + ' 張';
@@ -551,7 +593,7 @@
       hx.setAttribute('x1', px); hx.setAttribute('x2', px); hc.setAttribute('cx', px);
       hover.style.display = ''; tip.style.display = '';
       tip.style.left = (px / W * 100) + '%';
-      tip.style.transform = idx > n - 12 ? 'translateX(-100%)' : idx < 6 ? 'translateX(0)' : 'translateX(-50%)';
+      tip.style.transform = idx > slots - 12 ? 'translateX(-100%)' : idx < 6 ? 'translateX(0)' : 'translateX(-50%)';
     });
     overlay.addEventListener('pointerleave', () => { hover.style.display = 'none'; tip.style.display = 'none'; });
   }

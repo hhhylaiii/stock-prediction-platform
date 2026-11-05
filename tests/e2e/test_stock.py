@@ -1,12 +1,14 @@
 import pytest
-from playwright.sync_api import Page, expect
+from playwright.sync_api import Page, Route, expect
 from pytest_django.live_server_helper import LiveServer
 
+from apps.market.models import DailyPrice
 from apps.research.models import (
     REST_FEATURE,
     FeatureDaily,
     LabelDaily,
     ModelRun,
+    Prediction,
     PredictionContrib,
 )
 from tests.api.conftest import add_predictions
@@ -50,7 +52,13 @@ def explained(predicted: Seed) -> Seed:
     """Contributions, raw values and the realised volatility of 2330 on the last session."""
     add_contribs(
         predicted,
-        [("tech_ret_60d", 0.031), ("chip_fi_net_20d", -0.024), ("tech_future_<b>", 0.002)],
+        [
+            ("tech_ret_60d", 0.031),
+            ("chip_fi_net_20d", -0.024),
+            ("tech_future_<b>", 0.002),
+            ("fund_dividend_yield", 0.0015),
+            ("tech_vol_20d", -0.001),
+        ],
         (0.004, 72),
     )
     FeatureDaily.objects.create(
@@ -60,6 +68,7 @@ def explained(predicted: Seed) -> Seed:
         tech_ret_60d=0.12,
         tech_vol_20d=0.22,
         tech_vol_60d=0.25,
+        fund_dividend_yield=0.0345,
     )
     return predicted
 
@@ -129,14 +138,17 @@ def test_contributions_carry_chinese_names_and_raw_values(
     page.goto(f"{live_server.url}/#stock-2330")
 
     feats = page.locator("#features .feat")
-    expect(feats).to_have_count(3)
+    expect(feats).to_have_count(5)
     expect(feats.nth(0)).to_contain_text("60 日報酬")
     expect(feats.nth(0)).to_contain_text("+12.0%")
     expect(feats.nth(0).locator(".contrib")).to_have_text("+0.031")
     expect(feats.nth(1).locator(".contrib")).to_have_text("−0.024")
     expect(feats.nth(2)).to_contain_text("tech_future_<b>")
     expect(page.locator("#features b")).to_have_count(0)
-    expect(page.locator("#features .note")).to_have_text("共 75 個特徵，其餘 72 個合計 +0.004。")
+    expect(feats.nth(3)).to_contain_text("殖利率")
+    expect(feats.nth(3).locator(".value")).to_have_text("3.45%")
+    expect(feats.nth(4).locator(".value")).to_have_text("22.0%")
+    expect(page.locator("#features .note")).to_have_text("共 77 個特徵，其餘 72 個合計 +0.004。")
 
 
 def test_history_counts_the_returns_inside_the_band(
@@ -176,3 +188,131 @@ def test_a_failed_contribution_request_keeps_the_rest(
 
     expect(page.locator("#features .error")).to_have_text("無法連線到伺服器。")
     expect(page.locator("#forecasts .trow")).to_have_count(2)
+
+
+def test_the_rank_shows_when_the_stock_is_outside_the_universe(
+    page: Page, live_server: LiveServer, explained: Seed
+) -> None:
+    Prediction.objects.filter(
+        run_id="rank-h20", stock_id="2330", date=explained.last_session
+    ).update(in_universe=False, rank=None, pct=None)
+
+    page.goto(f"{live_server.url}/#stock-2330")
+
+    expect(page.locator(".stockhead .kpi .v")).to_contain_text("訓練範圍外")
+
+
+def test_a_failed_forecast_request_is_shown(
+    page: Page, live_server: LiveServer, explained: Seed
+) -> None:
+    page.route("**/api/stocks/2330/predictions", lambda route: route.abort())
+
+    page.goto(f"{live_server.url}/#stock-2330")
+
+    expect(page.locator(".stockhead .kpi .v")).to_contain_text("讀取失敗")
+    expect(page.locator("#forecasts .error")).to_have_text("無法連線到伺服器。")
+    expect(page.locator("#features .feat")).to_have_count(5)
+
+
+def one_row_pages(route: Route) -> None:
+    route.continue_(url=route.request.url.replace("page_size=8", "page_size=1"))
+
+
+def test_history_expands_to_every_prediction(
+    page: Page, live_server: LiveServer, matured: Seed
+) -> None:
+    page.route("**/api/stocks/2330/history?*", one_row_pages)
+    page.goto(f"{live_server.url}/#stock-2330")
+    expect(page.locator("#history .trow")).to_have_count(1)
+
+    page.get_by_role("button", name="顯示全部 2 次預測").click()
+
+    expect(page.locator("#history .trow")).to_have_count(2)
+
+
+def test_a_failed_expansion_keeps_the_rows(
+    page: Page, live_server: LiveServer, matured: Seed
+) -> None:
+    def history(route: Route) -> None:
+        if "page_size=100" in route.request.url:
+            route.abort()
+        else:
+            one_row_pages(route)
+
+    page.route("**/api/stocks/2330/history?*", history)
+    page.goto(f"{live_server.url}/#stock-2330")
+
+    page.get_by_role("button", name="顯示全部 2 次預測").click()
+
+    expect(page.locator("#history .error")).to_have_text("無法連線到伺服器。")
+    expect(page.locator("#history .trow")).to_have_count(1)
+    expect(page.get_by_role("button", name="顯示全部 2 次預測")).to_be_enabled()
+
+
+GAP_AT_FAN_START = """() => {
+  const coords = d => d.split(/[ML]/).filter(Boolean).map(p => p.trim().split(' ').map(Number));
+  const chart = document.querySelector('#price-chart');
+  const start = coords(chart.querySelector('path.fan-median').getAttribute('d'))[0];
+  const line = coords(chart.querySelector('path.close-line').getAttribute('d'));
+  const bar = line.find(p => Math.abs(p[0] - start[0]) < 0.01);
+  return bar ? Math.abs(bar[1] - start[1]) : null;
+}"""
+
+
+def test_the_fan_starts_on_the_adjusted_bar_of_its_prediction_day(
+    page: Page, live_server: LiveServer, explained: Seed
+) -> None:
+    day = explained.sessions[-2]
+    DailyPrice.objects.filter(stock_id="2330", date__lte=day).update(adj_factor=0.95)
+
+    def earlier(route: Route) -> None:
+        response = route.fetch()
+        body = response.json()
+        for entry in body["data"]["horizons"]:
+            if entry["prediction"]:
+                entry["prediction"]["close_date"] = day.isoformat()
+                entry["prediction"]["close"] = explained.closes[-2]
+        route.fulfill(response=response, json=body)
+
+    page.route("**/api/stocks/2330/predictions", earlier)
+    page.goto(f"{live_server.url}/#stock-2330")
+    page.get_by_role("button", name="收盤線").click()
+    expect(page.locator("#price-chart path.fan-median")).to_have_count(1)
+
+    gap = page.evaluate(GAP_AT_FAN_START)
+    assert gap is not None
+    assert gap < 0.5
+
+
+def test_the_forecast_area_has_its_own_tooltip(
+    page: Page, live_server: LiveServer, explained: Seed
+) -> None:
+    page.goto(f"{live_server.url}/#stock-2330")
+    expect(page.locator("#price-chart path.fan-median")).to_have_count(1)
+    overlay = page.locator("#price-chart .overlay")
+    box = overlay.bounding_box()
+    assert box is not None
+
+    overlay.hover(position={"x": box["width"] - 1, "y": box["height"] / 2})
+
+    tip = page.locator("#price-chart .tip")
+    expect(tip).to_contain_text("+20 個交易日")
+    expect(tip).to_contain_text("預測中位數 1,184")
+    expect(tip).to_contain_text("80% 區間 1,081 – 1,275")
+    expect(page.locator("#price-chart svg")).to_have_attribute(
+        "aria-label", "台積電過去 60 個交易日K 線與成交量，與未來 20 日的預測"
+    )
+
+
+def test_switching_the_horizon_here_sends_today_back_to_page_one(
+    page: Page, live_server: LiveServer, explained: Seed
+) -> None:
+    page.goto(live_server.url)
+    page.locator("#next-page").click()
+    expect(page.locator("#count")).to_have_text("第 21–25 名，共 25 檔")
+
+    page.goto(f"{live_server.url}/#stock-2330")
+    page.locator("#stock-seg [data-sh='5']").click()
+    page.locator("[data-nav=today]").click()
+
+    expect(page.locator("#count")).to_have_text("第 1–20 名，共 25 檔")
