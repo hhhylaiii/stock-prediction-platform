@@ -7,7 +7,11 @@ import pandas as pd
 import pytest
 
 from apps.market.calendar import TradingDays
-from apps.research.features.chip import chip_features, holding_changes
+from apps.research.features.chip import (
+    chip_features,
+    holding_changes,
+    second_batch_chip_features,
+)
 from apps.research.features.inputs import FEATURE_WARMUP
 from apps.research.features.registry import Group, feature_names
 from tests.research.feature_panels import CALENDAR, at, listing, rising
@@ -26,6 +30,7 @@ def chips(n: int, **columns: object) -> dict[str, Any]:
         "short_balance": 2_000.0,
         "sbl_short_balance": [5_000.0 + 10 * k for k in range(n)],
         "fi_holding_pct": 30.0,
+        "day_trade_volume": 100.0,
         "big_holder_pct_chg": NAN,
         "holder_count_chg": NAN,
     }
@@ -202,3 +207,53 @@ def test_later_load_start_gives_the_same_values_across_a_long_halt() -> None:
         full.iloc[start + FEATURE_WARMUP :].reset_index(drop=True),
         late.iloc[FEATURE_WARMUP:].reset_index(drop=True),
     )
+
+
+def test_second_batch_columns_follow_the_registry() -> None:
+    features = second_batch_chip_features(listing("2330", rising(25)).assign(**chips(25)))
+
+    assert list(features.columns) == ["stock_id", "date", *feature_names(Group.CHIP, batch=2)]
+
+
+def test_day_trade_ratio_reads_only_days_settled_two_trading_days_ago() -> None:
+    closes = rising(12)
+    closes[3] = NAN
+    volume = [1_000.0 * (k + 1) for k in range(12)]
+    day_trade = [100.0 * (k + 1) for k in range(12)]
+    day_trade[9] = NAN
+    panel = listing("2330", closes, volume=volume).assign(**chips(12, day_trade_volume=day_trade))
+
+    features = second_batch_chip_features(panel)
+
+    traded = [0.0 if k == 3 else v for k, v in enumerate(volume)]
+    trades = [0.0 if k == 3 else v for k, v in enumerate(day_trade)]
+    assert math.isnan(at(features, "2330", 5, "chip_day_trade_ratio_5d"))
+    assert at(features, "2330", 6, "chip_day_trade_ratio_5d") == pytest.approx(
+        sum(trades[0:5]) / sum(traded[0:5])
+    )
+    assert at(features, "2330", 10, "chip_day_trade_ratio_5d") == pytest.approx(
+        sum(trades[4:9]) / sum(traded[4:9])
+    )
+    assert math.isnan(at(features, "2330", 11, "chip_day_trade_ratio_5d"))
+
+
+def test_holding_change_institutional_net_and_buy_streak() -> None:
+    closes = rising(26)
+    closes[6] = NAN
+    flows = [1.0, 2.0, -1.0, 3.0, 1.0, 2.0, 5.0, 4.0, NAN, 6.0] + [1.0] * 16
+    holding = [30.0 + 0.1 * k for k in range(26)]
+    panel = listing("2330", closes, shares=1_000_000.0).assign(
+        **chips(26, fi_net=flows, fi_holding_pct=holding)
+    )
+
+    features = second_batch_chip_features(panel)
+
+    streak = [at(features, "2330", k, "chip_fi_buy_streak") for k in range(10)]
+    assert streak[:8] == [1.0, 2.0, 0.0, 1.0, 2.0, 3.0, 0.0, 1.0]
+    assert math.isnan(streak[8])
+    assert streak[9] == 1.0
+    assert at(features, "2330", 25, "chip_fi_buy_streak") == 17.0
+    assert math.isnan(at(features, "2330", 19, "chip_fi_holding_chg_20d"))
+    assert at(features, "2330", 25, "chip_fi_holding_chg_20d") == pytest.approx(2.0)
+    assert math.isnan(at(features, "2330", 18, "chip_it_net_20d"))
+    assert at(features, "2330", 25, "chip_it_net_20d") == pytest.approx(19 * 100 / 1e6)
