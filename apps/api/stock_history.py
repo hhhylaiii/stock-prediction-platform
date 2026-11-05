@@ -25,15 +25,15 @@ from apps.api.sessions import load_calendar
 from apps.api.stocks import require_stock
 from apps.api.views import ReadOnlyView
 from apps.market.calendar import CalendarError
-from apps.research.models import LabelDaily, ModelStatus
+from apps.research.models import FeatureDaily, LabelDaily, ModelStatus
 
 HISTORY_ROLES = ("return", "interval", "volatility")
-ROW_FIELDS = ("date", "ret_pred", "q10", "q50", "q90", "vol_pred")
+ROW_FIELDS = ("date", "ret_pred", "q10", "q50", "q90", "vol_pred", "in_universe")
 RATIO_DIGITS = 6
 
 
 def matured(stock_id: str, horizon: int) -> dict[date, float]:
-    """Realised open-to-open returns, the label the return models are trained on."""
+    """Returns from the t+1 open to the horizon close, the label the return models learn."""
     rows = LabelDaily.objects.filter(
         stock_id=stock_id, horizon=horizon, fwd_ret_open__isnull=False
     ).values_list("date", "fwd_ret_open")
@@ -57,8 +57,20 @@ def predicted(
     return grouped
 
 
+def tech_vols(stock_id: str, first: date, last: date) -> dict[date, float]:
+    rows = FeatureDaily.objects.filter(
+        stock_id=stock_id, date__range=(first, last), tech_vol_20d__isnull=False
+    ).values_list("date", "tech_vol_20d")
+    return {day: value for day, value in rows if value is not None}
+
+
 def outcome(
-    day: date, actual: float, rows: list[dict[str, Any]], roles: dict[str, Slot], horizon: int
+    day: date,
+    actual: float,
+    rows: list[dict[str, Any]],
+    roles: dict[str, Slot],
+    horizon: int,
+    tech_vol: float | None,
 ) -> dict[str, Any] | None:
     """The served return and band of the day judged against the realised return."""
     runs = best_runs((serving_run(row) for row in rows), roles.values())
@@ -80,17 +92,23 @@ def outcome(
         q10=band_row.get("q10"),
         q90=band_row.get("q90"),
         vol=part("volatility")[1].get("vol_pred"),
-        tech_vol=None,
+        tech_vol=tech_vol,
         quantile_alert=band_run is not None and band_run.status == ModelStatus.DEGRADED,
     )
+    band = None
+    if interval is not None:
+        band = {
+            "ret_low": round(interval.ret_low, RATIO_DIGITS),
+            "ret_high": round(interval.ret_high, RATIO_DIGITS),
+        }
     return {
         "date": day,
         "ret_pred": ret,
         "actual": actual,
-        "ret_low": None if interval is None else round(interval.ret_low, RATIO_DIGITS),
-        "ret_high": None if interval is None else round(interval.ret_high, RATIO_DIGITS),
+        "interval": band,
         "interval_source": None if interval is None else interval.source,
         "inside": None if interval is None else interval.ret_low <= actual <= interval.ret_high,
+        "in_universe": ret_row["in_universe"],
         "run_id": ret_run.run_id,
     }
 
@@ -119,13 +137,17 @@ class StockHistoryView(ReadOnlyView):
         require_stock(stock_id)
         roles = {role: slot for role, slot in roles_for(horizon).items() if role in HISTORY_ROLES}
         actuals = matured(stock_id, horizon)
-        rows = (
-            predicted(stock_id, list(roles.values()), min(actuals), max(actuals)) if actuals else {}
-        )
+        rows, vols = {}, {}
+        if actuals:
+            first, last = min(actuals), max(actuals)
+            rows = predicted(stock_id, list(roles.values()), first, last)
+            vols = tech_vols(stock_id, first, last)
         outcomes = [
             item
             for day in sorted(actuals, reverse=True)
-            if (item := outcome(day, actuals[day], rows.get(day, []), roles, horizon))
+            if (
+                item := outcome(day, actuals[day], rows.get(day, []), roles, horizon, vols.get(day))
+            )
         ]
         history = spaced(outcomes, horizon)
         paginator = EnvelopePagination()

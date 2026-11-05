@@ -6,7 +6,7 @@ import pytest
 from django.test import Client
 from pytest_django import DjangoAssertNumQueries
 
-from apps.research.models import LabelDaily, ModelRun
+from apps.research.models import FeatureDaily, LabelDaily, ModelRun
 from tests.api.conftest import (
     SESSIONS,
     add_model_run,
@@ -34,9 +34,16 @@ def picks(days: list[date], step: int) -> list[date]:
     return chosen
 
 
-def add_labels(horizon: int, actual: dict[date, float | None]) -> None:
+def add_labels(horizon: int, actual: dict[date, float | None], stock_id: str = "2330") -> None:
+    """fwd_ret is set apart from fwd_ret_open so reading the wrong label shows."""
     LabelDaily.objects.bulk_create(
-        LabelDaily(stock_id="2330", date=day, horizon=horizon, fwd_ret=value, fwd_ret_open=value)
+        LabelDaily(
+            stock_id=stock_id,
+            date=day,
+            horizon=horizon,
+            fwd_ret=None if value is None else value + 0.5,
+            fwd_ret_open=value,
+        )
         for day, value in actual.items()
     )
 
@@ -54,10 +61,13 @@ def outside_on(day: date) -> bool:
 @pytest.fixture
 def history(db: None) -> ModelRun:
     add_stock()
+    add_stock(stock_id="2317", name="鴻海")
     quantile = add_model_run("quantile-h20", "quantile")
+    other = {"q10": -0.6, "q50": -0.4, "q90": -0.3, "ret_pred": -0.4}
     for day in PREDICTED:
-        add_predictions(quantile, day, 20, {"2330": QUANTILES})
+        add_predictions(quantile, day, 20, {"2330": QUANTILES, "2317": other})
     add_labels(20, {day: actual_on(day) for day in LABELLED})
+    add_labels(20, dict.fromkeys(LABELLED, -0.9), stock_id="2317")
     return quantile
 
 
@@ -79,10 +89,10 @@ def test_matured_twenty_day_predictions_every_twenty_sessions(
         "date": LAST_LABELLED.isoformat(),
         "ret_pred": 0.01,
         "actual": 0.03,
-        "ret_low": -0.05,
-        "ret_high": 0.08,
+        "interval": {"ret_low": -0.05, "ret_high": 0.08},
         "interval_source": "quantile",
         "inside": True,
+        "in_universe": True,
         "run_id": "quantile-h20",
     }
     inside = sum(not outside_on(day) for day in expected)
@@ -136,11 +146,15 @@ def test_a_degraded_quantile_run_is_judged_on_its_volatility_band(
     rows = rows_of(envelope_of(client.get("/api/stocks/2330/history")))
 
     assert rows[0]["interval_source"] == "volatility"
-    assert (rows[0]["ret_low"], rows[0]["ret_high"]) == (
-        round(0.01 - spread, 6),
-        round(0.01 + spread, 6),
+    assert rows[0]["interval"] == {
+        "ret_low": round(0.01 - spread, 6),
+        "ret_high": round(0.01 + spread, 6),
+    }
+    assert (rows[1]["interval"], rows[1]["interval_source"], rows[1]["inside"]) == (
+        None,
+        None,
+        None,
     )
-    assert (rows[1]["ret_low"], rows[1]["inside"]) == (None, None)
 
 
 def test_five_day_history_steps_five_sessions_on_the_regression(
@@ -159,9 +173,38 @@ def test_five_day_history_steps_five_sessions_on_the_regression(
     assert [row["date"] for row in rows_of(body)] == [
         day.isoformat() for day in picks(LABELLED, 5)[:5]
     ]
-    assert rows_of(body)[0]["ret_high"] == round(-0.01 + spread, 6)
+    assert rows_of(body)[0]["interval"]["ret_high"] == round(-0.01 + spread, 6)
     assert rows_of(body)[0]["run_id"] == "reg-h5"
     assert body["meta"]["total"] == len(picks(LABELLED, 5))
+
+
+def test_without_vol_pred_the_band_uses_that_day_s_tech_vol_20d(
+    client: Client, history: ModelRun
+) -> None:
+    regression = add_model_run("reg-h5", "regression")
+    for day in PREDICTED:
+        add_predictions(regression, day, 5, {"2330": {"ret_pred": 0.0}})
+    add_labels(5, dict.fromkeys(LABELLED, 0.0))
+    FeatureDaily.objects.create(
+        stock_id="2330", date=LAST_LABELLED, in_universe=True, tech_vol_20d=0.4
+    )
+    second = picks(LABELLED, 5)[1]
+    FeatureDaily.objects.create(stock_id="2317", date=second, in_universe=True, tech_vol_20d=0.4)
+    spread = 1.28 * 0.4 * math.sqrt(5 / 252)
+
+    rows = rows_of(envelope_of(client.get("/api/stocks/2330/history", {"horizon": "5"})))
+
+    assert rows[0]["interval_source"] == "tech_vol_20d"
+    assert rows[0]["interval"] == {"ret_low": round(-spread, 6), "ret_high": round(spread, 6)}
+    assert rows[1]["interval"] is None
+
+
+def test_days_outside_the_training_universe_are_flagged(client: Client, history: ModelRun) -> None:
+    history.predictions.filter(stock_id="2330", date=LAST_LABELLED).update(in_universe=False)
+
+    rows = rows_of(envelope_of(client.get("/api/stocks/2330/history")))
+
+    assert [row["in_universe"] for row in rows[:2]] == [False, True]
 
 
 def test_unlabelled_or_null_labels_are_not_matured(client: Client, history: ModelRun) -> None:
