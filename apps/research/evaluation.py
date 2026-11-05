@@ -86,12 +86,19 @@ def _monthly(ic: pd.Series) -> pd.Series:
 
 
 def _beats(
-    by_fold: pd.DataFrame, baseline: pd.Series, folds: Sequence[Fold]
+    by_fold: pd.DataFrame,
+    shared: pd.DataFrame,
+    score: str,
+    baseline: str,
+    folds: Sequence[Fold],
+    horizon: int,
 ) -> tuple[pd.DataFrame, float]:
-    """Fold table with the baseline's mean IC, and the share of research folds the model beats."""
-    table = by_fold.assign(baseline_mean=baseline, beats=by_fold["mean"] > baseline)
+    """Fold table with model and baseline IC on rows both score, and the research folds won."""
+    paired = ic_by_fold(daily_rank_ic(shared, score), folds, horizon)["mean"]
+    compared = ic_by_fold(daily_rank_ic(shared, baseline), folds, horizon)["mean"]
+    table = by_fold.assign(paired_mean=paired, baseline_mean=compared, beats=paired > compared)
     research = [fold.index for fold in folds if fold.research]
-    scored = table.loc[research].dropna(subset=["mean", "baseline_mean"])
+    scored = table.loc[research].dropna(subset=["paired_mean", "baseline_mean"])
     return table, float(scored["beats"].mean()) if len(scored) else math.nan
 
 
@@ -115,19 +122,17 @@ def rank_report(
 ) -> RankReport:
     """Rank IC by fold, year and liquidity tercile, and neutralized, over tradable universe rows.
 
-    With a baseline column, model and baseline share the rows that hold both scores.
+    A baseline is compared fold by fold on rows both score; the model's own metrics keep its rows.
     """
     chosen = tuple(folds)
     rows = tradable_rows(frame)
-    if baseline is not None:
-        rows = shared_rows(rows, [score, baseline])
     ic = daily_rank_ic(rows, score)
     counted = research_ic(ic, chosen)
     by_fold = ic_by_fold(ic, chosen, horizon)
     beat = math.nan
     if baseline is not None:
-        compared = ic_by_fold(daily_rank_ic(rows, baseline), chosen, horizon)["mean"]
-        by_fold, beat = _beats(by_fold, compared, chosen)
+        shared = shared_rows(rows, [score, baseline])
+        by_fold, beat = _beats(by_fold, shared, score, baseline, chosen, horizon)
     return RankReport(
         horizon=horizon,
         folds=chosen,
@@ -169,9 +174,9 @@ def importance_drift(
 
 
 def _last_hold(calendar: TradingDays, last_signal: date, horizon: int) -> date:
-    """Last day a tranche bought after last_signal is held, or the calendar end."""
+    """Close a tranche bought the day after last_signal exits on, or the calendar end."""
     following = calendar.between(last_signal, calendar.end)
-    return following[min(horizon + 1, len(following) - 1)]
+    return following[min(horizon, len(following) - 1)]
 
 
 def decile_report(

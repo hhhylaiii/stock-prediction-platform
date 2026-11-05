@@ -9,6 +9,7 @@ import pytest
 from apps.market.calendar import TradingDays
 from apps.research import evaluation
 from apps.research.evaluation import (
+    band_width,
     consistency_report,
     coverage_report,
     decile_report,
@@ -22,6 +23,7 @@ from apps.research.metrics.ic import (
     daily_rank_ic,
     ic_by_fold,
     neutralized_rank_ic,
+    rank_ic_by_bucket,
     research_ic,
     summarize_ic,
 )
@@ -128,6 +130,11 @@ def test_rank_report_counts_tradable_universe_rows_of_research_folds() -> None:
     assert report.total == expected
     assert report.total.mean < 0.9
     assert report.positive_share == 0.75
+    buckets = rank_ic_by_bucket(kept, "score")
+    terciles = [summarize_ic(research_ic(buckets[n], folds()), 20).mean for n in (1, 2, 3)]
+    assert report.by_liquidity["mean"].tolist() == pytest.approx(terciles)
+    neutral = summarize_ic(research_ic(neutralized_rank_ic(kept, "score"), folds()), 20)
+    assert report.neutralized == neutral
     assert math.isnan(report.beat_share)
     days = research_ic(ic, folds())
     years = pd.Index([day.year for day in days.index])
@@ -146,16 +153,33 @@ def test_beat_share_compares_model_and_baseline_on_the_same_rows() -> None:
     missing = frame["stock_id"].isin(STOCKS[10:20])
     frame.loc[missing, "ridge"] = np.nan
     frame.loc[missing, "score"] = -frame.loc[missing, "fwd_rank_pct"]
+    alone = rank_report(frame, "score", 20, folds())
 
     report = rank_report(frame, "score", 20, folds(), baseline="ridge")
 
     shared = frame[~missing]
     model = ic_by_fold(daily_rank_ic(shared, "score"), folds(), 20)
     base = ic_by_fold(daily_rank_ic(shared, "ridge"), folds(), 20)
-    assert report.by_fold["mean"].tolist() == pytest.approx(model["mean"].tolist())
+    assert report.by_fold["paired_mean"].tolist() == pytest.approx(model["mean"].tolist())
     assert report.by_fold["baseline_mean"].tolist() == pytest.approx(base["mean"].tolist())
     assert report.beat_share == 0.75
-    assert report.total.mean > 0.5
+    pd.testing.assert_frame_equal(report.by_fold[alone.by_fold.columns], alone.by_fold)
+    assert report.total == alone.total
+    assert report.neutralized == alone.neutralized
+    pd.testing.assert_frame_equal(report.by_liquidity, alone.by_liquidity)
+
+
+def test_a_baseline_without_a_fold_leaves_the_model_metrics_whole() -> None:
+    frame = panel()
+    best = inside(frame, [research()[0]])
+    frame.loc[best, "ridge"] = frame.loc[best, "fwd_rank_pct"]
+    frame.loc[inside(frame, [research()[3]]), "ridge"] = np.nan
+
+    report = rank_report(frame, "score", 20, folds(), baseline="ridge")
+
+    assert report.total == rank_report(frame, "score", 20, folds()).total
+    assert report.positive_share == 1.0
+    assert report.beat_share == pytest.approx(2 / 3)
 
 
 def test_liquidity_terciles_and_neutralized_ic() -> None:
@@ -249,6 +273,8 @@ def test_decile_report_holds_research_signals_net_of_costs(
     bars = prices(frame)
     gone = frame["stock_id"].isin(STOCKS[:2]) & inside(frame, [research()[1]])
     frame.loc[gone, "untradable_t1"] = True
+    outside = frame["stock_id"].isin(STOCKS[2:6]) & inside(frame, [research()[2]])
+    frame.loc[outside, "in_universe"] = False
     for stock, day in frame.loc[gone, ["stock_id", "date"]].itertuples(index=False):
         following = calendar().shift(day, 1)
         bars.loc[(bars["stock_id"] == stock) & (bars["date"] == following), "adj_open"] = np.nan
@@ -263,24 +289,29 @@ def test_decile_report_holds_research_signals_net_of_costs(
 
     report = decile_report(frame, "score", horizon, folds(), bars, calendar())
 
-    rows = frame[inside(frame, research()) & ~frame["untradable_t1"]]
+    rows = frame[inside(frame, research()) & frame["in_universe"] & ~frame["untradable_t1"]]
     signal = rows[["date", "stock_id", "liq_dollar_vol_med_20d"]].assign(score=rows["score"])
     for sample, chosen in (("all", signal), ("liquid", top_liquidity(signal))):
         expected = tranche_summary(original(chosen, bars, calendar(), horizon), horizon)
         pd.testing.assert_frame_equal(cast(pd.DataFrame, report.loc[sample]), expected)
     last = max(fold.eval_end for fold in research())
-    assert max(seen) <= calendar().shift(last, horizon + 1)
+    assert max(seen) == calendar().shift(last, horizon)
+    assert max(seen) < next(fold for fold in folds() if fold.holdout).test_start
     assert report["annual_turnover"][("all", "D10")] > 0
 
 
 def test_coverage_report_buckets_research_rows_by_volatility() -> None:
     frame = panel()
-    calm = frame["stock_id"].isin(STOCKS[:20])
+    calm = frame["stock_id"].isin(STOCKS[:30])
     wild = frame["stock_id"].isin(STOCKS[-20:])
     frame.loc[calm, ["q10", "q90"]] = [-1.0, 1.0]
     frame.loc[wild, ["q10", "q90"]] = [10.0, 10.0]
     outside = ~inside(frame, research())
     frame.loc[outside, ["q10", "q90"]] = [-1.0, 1.0]
+    dropped = frame["stock_id"].isin(STOCKS[:8])
+    frame.loc[dropped, ["q10", "q90"]] = [10.0, 10.0]
+    frame.loc[frame["stock_id"].isin(STOCKS[:4]), "in_universe"] = False
+    frame.loc[frame["stock_id"].isin(STOCKS[4:8]), "untradable_t1"] = True
 
     table = coverage_report(frame, "fwd_ret_open", "q10", "q90", folds())
 
@@ -289,7 +320,7 @@ def test_coverage_report_buckets_research_rows_by_volatility() -> None:
     assert table.loc[1, "width"] == pytest.approx(2.0)
     assert table.loc[5, "coverage"] == 0.0
     assert table.loc[5, "width"] == 0.0
-    rows = frame[inside(frame, research())]
+    rows = frame[inside(frame, research()) & ~dropped]
     overall = daily_coverage(rows, "fwd_ret_open", "q10", "q90").mean()
     assert table.loc["all", "coverage"] == pytest.approx(overall)
 
@@ -326,3 +357,22 @@ def test_band_ratios_inside_half_to_double_are_consistent(ratio: float, share: f
     report = consistency_report(frame, "q10", "q50", "q90", "vol", "prob", folds())
 
     assert report.loc["width_ratio", "mean_share"] == share
+
+
+def test_exact_bounds_are_consistent_and_an_alert_needs_more_than_ten_percent() -> None:
+    frame = panel()
+    width = band_width(frame["vol"])
+    frame["q10"] = 0.0
+    frame["q90"] = np.where(frame["stock_id"].isin(STOCKS[:50]), 2 * width, width / 2)
+    frame.loc[frame["stock_id"].isin(STOCKS[:10]), "prob"] = 0.5
+    frame.loc[frame["stock_id"].isin(STOCKS[10:20]), ["prob", "q50"]] = [0.7, 0.05]
+    frame.loc[frame["stock_id"].isin(STOCKS[20:30]), ["prob", "q50"]] = [0.3, 0.05]
+    frame.loc[frame["stock_id"].isin(STOCKS[30:40]), ["prob", "q50"]] = [0.5, 0.06]
+    first = frame.loc[inside(frame, research()), "date"].min()
+    frame.loc[(frame["date"] == first) & frame["stock_id"].isin(STOCKS[40:50]), "prob"] = 0.9
+
+    report = consistency_report(frame, "q10", "q50", "q90", "vol", "prob", folds())
+
+    assert report.loc["width_ratio", "mean_share"] == 0.0
+    assert report.loc["contradiction", "max_share"] == pytest.approx(0.1)
+    assert report.loc["contradiction", "days_over"] == 0
