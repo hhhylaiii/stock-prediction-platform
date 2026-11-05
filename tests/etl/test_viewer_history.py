@@ -52,6 +52,10 @@ def pages(fixture_path: Callable[[str], Path]) -> dict[str, str]:
     }
 
 
+def served_pages(pages: dict[str, str]) -> tuple:
+    return served(pages)
+
+
 def served(pages: dict[str, str], answers: dict[tuple[str, str], str] | None = None) -> tuple:
     asked: list[tuple[str, str]] = []
 
@@ -242,3 +246,75 @@ def test_each_stock_keeps_its_own_log_for_the_same_span() -> None:
         )
     logs = DataQualityLog.objects.filter(check_name=MISMATCH_CHECKS[STATEMENT_VIEWER])
     assert sorted(log.detail["stock_id"] for log in logs) == ["6211", "6212"]
+
+
+def next_year(page: str) -> str:
+    """The 2013-Q1 page restated as if it were 2014-Q1, to pair it with a real 2013-Q4."""
+    return (
+        page.replace("2013年", "2014年")
+        .replace("2012年", "2013年")
+        .replace("102年第1季", "103年第1季")
+    )
+
+
+def test_a_first_quarter_takes_its_roe_against_the_last_year_end(pages: dict[str, str]) -> None:
+    served = {"2013-Q4": pages["2013-Q4"], "2014-Q1": next_year(pages["2013-Q1"])}
+    asked: list[str] = []
+
+    def page(period: str, kind: str) -> str:
+        asked.append(period)
+        return served[period] if kind == "C" else NOT_FILED
+
+    frame = viewer_frame("6211", ["2013-Q4", "2014-Q1"], {"2013-Q4"}, page, SCAN_COLUMNS)
+    (row,) = frame.to_dict("records")
+    assert row["period"] == "2014-Q1"
+    assert row["roe"] == pytest.approx(48_155 / ((700_768 + 704_935) / 2))
+    assert asked == ["2013-Q4", "2014-Q1"]
+
+
+def test_a_quarter_without_revenue_is_noted(pages: dict[str, str]) -> None:
+    served = {**pages, "2013-Q2": pages["2013-Q2"].replace("營業收入合計", "營業總收入")}
+    page, _ = served_pages(served)
+    frame = viewer_frame("6211", YEAR, set(), page, COLUMNS)
+    assert frame.attrs["no_revenue"] == ["2013-Q2"]
+
+
+@pytest.mark.django_db
+@responses.activate
+def test_reruns_up_to_any_day_share_one_log_ending_at_the_last_quarter(
+    adapter: MopsAdapter, pages: dict[str, str]
+) -> None:
+    StockMaster.objects.create(
+        stock_id="6211",
+        name="福登",
+        market="TPEx",
+        list_date=date(2000, 1, 1),
+        delist_date=date(2014, 1, 4),
+    )
+    serve(pages)
+    for day in (TODAY, TODAY + timedelta(days=1)):
+        with time_machine.travel(day, tick=False):
+            adapter.backfill(STATEMENT_VIEWER, ["6211"], date(2013, 1, 1), day.date())
+    (logged,) = DataQualityLog.objects.filter(check_name=MISMATCH_CHECKS[STATEMENT_VIEWER])
+    assert logged.detail["span"] == ["2013-01-01", "2013-12-31"]
+    assert len(logged.detail["added"]) == len(YEAR)
+
+
+def test_a_stored_first_ifrs_quarter_is_compared_without_one_before(
+    pages: dict[str, str],
+) -> None:
+    page, _ = served(pages)
+    frame = viewer_frame("6211", YEAR, {"2013-Q1"}, page, COLUMNS)
+    assert list(frame["period"]) == YEAR
+
+
+@pytest.mark.django_db
+@responses.activate
+@pytest.mark.usefixtures("delisted")
+def test_the_log_names_quarters_whose_revenue_was_not_recognised(
+    adapter: MopsAdapter, pages: dict[str, str]
+) -> None:
+    serve({**pages, "2013-Q3": pages["2013-Q3"].replace("營業收入合計", "營業總收入")})
+    backfill(adapter)
+    logged = DataQualityLog.objects.get(check_name=MISMATCH_CHECKS[STATEMENT_VIEWER])
+    assert logged.detail["no_revenue"] == ["2013-Q3"]

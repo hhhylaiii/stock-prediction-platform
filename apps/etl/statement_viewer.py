@@ -25,8 +25,9 @@ NOT_FILED = "檔案不存在"
 THOUSANDS = "單位：新臺幣仟元"
 TITLE_HEADER = "會計項目"
 CODE_HEADER = "代號Code"
-OLD_CODE = re.compile(r"name\s*=\s*'CO_ID'\s+id\s*=\s*'CO_ID'\s+value\s*=\s*'([0-9A-Z]*)'")
-NEW_CODE = re.compile(r"<title>\s*([0-9A-Z]+)\s+\d{4}Q\d\s")
+OLD_TITLE = re.compile(r"font-size:32px'>\s*([0-9A-Z]+)\s+(\d+)年第(\d)季\s+IFRS")
+NEW_TITLE = re.compile(r"<title>\s*([0-9A-Z]+)\s+(\d{4})Q(\d)\s")
+ROC_OFFSET = 1911
 DAY = re.compile(r"^(\d{4})年(\d{1,2})月(\d{1,2})日")
 YEAR_TO_DATE = re.compile(r"^(\d{4})年0?1月0?1日至(?:\d{4}年)?(\d{1,2})月(\d{1,2})日")
 WHOLE_YEAR = re.compile(r"^(\d{4})年度")
@@ -58,7 +59,6 @@ NAMES = {
     },
     CASH_FLOW: {
         "營業活動之淨現金流入（流出）": "營業活動之淨現金流入（流出）",
-        "營運產生之現金流入（流出）": "營運產生之現金流入（流出）",
     },
 }
 REQUIRED = {
@@ -73,13 +73,22 @@ def parse_viewer(page: str, code: str, period: str) -> dict[str, dict[str, float
     """Year-to-date thousands of TWD (EPS in TWD) per statement; a report never filed is None."""
     if NOT_FILED in page and TITLE_HEADER not in page and CODE_HEADER not in page:
         return None
-    shown = OLD_CODE.search(page) or NEW_CODE.search(page)
-    if shown is None or shown[1] != code:
-        raise SchemaChangedError(f"MOPS viewer page is {shown[1] if shown else '?'}, is not {code}")
+    shown = _shown(page)
+    if shown != (code, period):
+        raise SchemaChangedError(f"MOPS viewer page is {shown}, is not {code} {period}")
     if THOUSANDS not in page:
         raise SchemaChangedError(f"MOPS viewer {code} {period} is not in thousands of TWD")
     tables = _tables(page)
     return {report: _figures(tables, report, code, period) for report in TITLES}
+
+
+def _shown(page: str) -> tuple[str, str] | None:
+    """The company and quarter the report's own title names, not the echoed query."""
+    old = OLD_TITLE.search(page)
+    if old is not None:
+        return old[1], f"{int(old[2]) + ROC_OFFSET}-Q{old[3]}"
+    new = NEW_TITLE.search(page)
+    return None if new is None else (new[1], f"{new[2]}-Q{new[3]}")
 
 
 def _tables(page: str) -> dict[int, Table]:
@@ -96,7 +105,9 @@ def _figures(
 ) -> dict[str, float | None]:
     """The first filled row of each known title, read in the period's own column."""
     rows = _statement(tables, report, code)
-    header = next(row for row in rows if row and row[0] in (TITLE_HEADER, CODE_HEADER))
+    header = next((row for row in rows if row and row[0] in (TITLE_HEADER, CODE_HEADER)), None)
+    if header is None:
+        raise SchemaChangedError(f"MOPS viewer {code} {TITLES[report]} has no header row")
     label = 1 if header[0] == CODE_HEADER else 0
     column = label + 1 + _column(header[label + 1 :], report, period, code)
     figures: dict[str, float | None] = {}

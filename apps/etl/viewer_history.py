@@ -9,7 +9,7 @@ import pandas as pd
 from apps.etl.deadlines import statement_deadline
 from apps.etl.filings import quarter_end
 from apps.etl.mops_history import IFRS_FROM, quarters_between
-from apps.etl.statement_summary import REPORTS, previous_period, statement_rows
+from apps.etl.statement_summary import INCOME, REPORTS, REVENUE, previous_period, statement_rows
 from apps.etl.statement_viewer import parse_viewer
 
 KINDS = ("C", "A")
@@ -38,9 +38,9 @@ def viewer_frame(
     records: list[dict[str, Any]] = []
     for period in periods:
         current = reports.get(period)
-        first = period.endswith("Q1")
-        before = None if first else reports.get(previous_period(period))
-        if current is None or (period in stored and not first and before is None):
+        earlier = previous_period(period)
+        before = reports.get(earlier)
+        if current is None or (period in stored and before is None and earlier >= IFRS_FROM):
             continue
         rows = statement_rows(
             _summary(stock_id, current), _summary(stock_id, before), int(period[-1])
@@ -48,12 +48,20 @@ def viewer_frame(
         records.extend({**row, "period": period} for row in rows)
     frame = pd.DataFrame(records, columns=columns, dtype=object)
     frame.attrs["absent"] = [period for period in missing if reports.get(period) is None]
+    frame.attrs["no_revenue"] = [
+        period for period in missing if _lacks(reports.get(period), INCOME, REVENUE)
+    ]
     return frame
 
 
 def _needed(missing: list[str]) -> list[str]:
-    earlier = {previous_period(p) for p in missing if not p.endswith("Q1")}
-    return sorted(set(missing) | {p for p in earlier if p >= IFRS_FROM})
+    """The quarter before each one too: flows, EPS and ROE are taken against it."""
+    earlier = {previous_period(period) for period in missing}
+    return sorted(set(missing) | {period for period in earlier if period >= IFRS_FROM})
+
+
+def _lacks(figures: Figures | None, report: str, names: tuple[str, ...]) -> bool:
+    return figures is not None and all(figures[report].get(name) is None for name in names)
 
 
 def _reports(stock_id: str, periods: list[str], page: Page) -> dict[str, Figures | None]:

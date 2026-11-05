@@ -57,7 +57,6 @@ def test_the_2019_layout_has_codes_english_titles_and_bracketed_losses(
     assert found[BALANCE]["1262"][ASSETS] == 11_051_624
     assert found[BALANCE]["1262"]["歸屬於母公司業主之權益合計"] == 10_057_215
     assert found[CASH_FLOW]["1262"][CFO] == 109_522
-    assert found[CASH_FLOW]["1262"]["營運產生之現金流入（流出）"] == 113_725
 
 
 def test_banks_and_brokers_name_revenue_and_profit_their_own_way(
@@ -134,3 +133,15 @@ def test_flows_of_another_year_are_not_taken_for_the_quarter(page: Callable[[str
     )
     with pytest.raises(SchemaChangedError, match="no column for 2013-Q2"):
         parse_viewer(text, "6211", "2013-Q2")
+
+
+def test_a_statement_without_its_header_row_is_refused(page: Callable[[str], str]) -> None:
+    text = page("t164sb01_6211_2013_1_C.html").replace("會計項目", "項目", 1)
+    with pytest.raises(SchemaChangedError, match="資產負債表 has no header row"):
+        parse_viewer(text, "6211", "2013-Q1")
+
+
+def test_the_report_title_must_name_the_quarter_asked(page: Callable[[str], str]) -> None:
+    text = page("t164sb01_6211_2013_1_C.html").replace("102年第1季", "102年第2季")
+    with pytest.raises(SchemaChangedError, match=r"\('6211', '2013-Q2'\), is not 6211 2013-Q1"):
+        parse_viewer(text, "6211", "2013-Q1")

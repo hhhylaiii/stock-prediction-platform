@@ -72,7 +72,7 @@ SCANS = frozenset({STATEMENT_SCAN, REVENUE_SCAN})
 REVENUE_PATH = "/nas/t21"
 SUMMARY_PATH = "/mops/web/ajax_"
 VIEWER_PATH = "/server-java/t164sb01"
-NOTES = ("incomplete", "stock_id", "absent")
+NOTES = ("incomplete", "stock_id", "absent", "no_revenue")
 SUMMARY_ENCODING = "utf-8"
 EXPORT_NAME = re.compile(r"name='filename' value='[^']*'")
 LISTING_PATH = "/server-java/t57sb01"
