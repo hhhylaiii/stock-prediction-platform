@@ -255,6 +255,21 @@ def test_the_next_session_checked_against_the_gap_is_checked_again(
 
 
 @responses.activate
+def test_a_next_session_with_only_other_logs_is_not_checked_again(
+    october_2026_in_db: TradingDays,
+    load_fixture: Callable[[str], Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("apps.etl.catchup.dispatch", lambda results: None)
+    DataQualityLog.objects.create(
+        date=DAYS[2], check_name="statement_filed_late", severity="info", detail={}
+    )
+    _serve_prices(load_fixture, DAYS[1])
+    report = catch_up(DAYS[1], DAYS[1], october_2026_in_db, [PRICE_JOB])
+    assert report.checked == ["2026-10-28"]
+
+
+@responses.activate
 def test_an_unexpected_error_fails_its_job_only(
     october_2026_in_db: TradingDays,
     load_fixture: Callable[[str], Any],
