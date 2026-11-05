@@ -61,7 +61,7 @@ HEADER = (CODE, YEAR, KIND, DETAIL, UPLOADED, CORRECTION)
 FINANCIAL_REPORT = "財務報告書"
 ENGLISH = "英文版"
 SUPPLEMENTS = frozenset({"關係企業合併報表"})
-RESTATED = "(重編)"
+RESTATED_MARKS = ("(重編)", "重編")
 REPORT_TYPES = {
     "IFRSs合併財報": FinType.CONSOLIDATED,
     "母子公司合併報表": FinType.CONSOLIDATED,
@@ -203,8 +203,9 @@ def _filing(cells: dict[str, str], code: str, roc_year: int) -> Filing:
         raise SchemaChangedError(
             f"doc.twse {code} {roc_year} listed {cells[CODE]!r} {cells[YEAR]!r}"
         )
-    restated = cells[DETAIL].endswith(RESTATED)
-    fin_type = REPORT_TYPES.get(cells[DETAIL].removesuffix(RESTATED))
+    mark = next((mark for mark in RESTATED_MARKS if cells[DETAIL].endswith(mark)), "")
+    restated = bool(mark)
+    fin_type = REPORT_TYPES.get(cells[DETAIL].removesuffix(mark))
     if cells[KIND] != FINANCIAL_REPORT or fin_type is None:
         raise SchemaChangedError(
             f"doc.twse {code} {roc_year} has an unknown report {cells[KIND]!r} {cells[DETAIL]!r}"
