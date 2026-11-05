@@ -18,6 +18,7 @@ from apps.research.walkforward import Fold, WalkForwardConfig, generate_folds
 START, END = date(2016, 1, 1), date(2016, 12, 31)
 STOCKS = [f"{1100 + k}" for k in range(40)]
 KEPT = ["tech_ret_1d", "tech_ret_60d", "tech_vol_20d"]
+UNSCREENED = ["mkt_taiex_ret_5d"]
 SCREENED = linear_features(KEPT)
 CONFIG = WalkForwardConfig(
     train_months=6,
@@ -31,7 +32,7 @@ CONFIG = WalkForwardConfig(
 )
 
 
-def record_screening(kept: list[str]) -> ModelRun:
+def record_screening(kept: list[str], unscreened: list[str] | None = None) -> ModelRun:
     return ModelRun.objects.create(
         run_id="screen-1.screening",
         run_key="screen-1",
@@ -40,7 +41,7 @@ def record_screening(kept: list[str]) -> ModelRun:
         version="1",
         train_start=START,
         train_end=date(2016, 6, 30),
-        params={"unscreened": []},
+        params={"unscreened": list(unscreened or [])},
         feature_list=kept,
         lib_versions={},
         feature_hash="0" * 64,
@@ -57,11 +58,11 @@ def weekdays() -> list[date]:
 
 
 def build_panel(settings: Any, tmp_path: Path) -> Path:
-    """A year of 40 stocks whose tech_ret_1d drives the labels; 1139 is outside the universe."""
+    """A year of 40 stocks whose tech_ret_1d drives returns and tech_vol_20d their volatility."""
     settings.RESEARCH_CACHE_DIR = tmp_path / "predictions"
     settings.MODEL_DIR = tmp_path / "models"
     settings.FEATURE_PARQUET_DIR = tmp_path / "features"
-    rng = np.random.default_rng(3)
+    rng, extra = np.random.default_rng(3), np.random.default_rng(4)
     days = weekdays()
     TradingCalendar.objects.bulk_create(
         TradingCalendar(date=day, is_trading_day=day.weekday() < 5)
@@ -71,6 +72,8 @@ def build_panel(settings: Any, tmp_path: Path) -> Path:
     for day in days:
         signal = rng.normal(size=len(STOCKS))
         noise = rng.normal(size=len(STOCKS))
+        market = float(extra.normal(0, 0.02))
+        wobble = np.exp(0.1 * extra.normal(size=len(STOCKS)))
         ranks = pd.Series(signal + noise).rank(pct=True).to_numpy()
         for k, stock in enumerate(STOCKS):
             features.append(
@@ -81,6 +84,7 @@ def build_panel(settings: Any, tmp_path: Path) -> Path:
                     tech_ret_1d=float(signal[k]),
                     tech_ret_60d=0.01 * k,
                     tech_vol_20d=0.2 + 0.01 * k,
+                    mkt_taiex_ret_5d=market,
                 )
             )
             ret = 0.01 * float(signal[k] + noise[k])
@@ -93,7 +97,7 @@ def build_panel(settings: Any, tmp_path: Path) -> Path:
                         fwd_ret=ret,
                         fwd_ret_open=ret,
                         fwd_rank_pct=float(ranks[k]),
-                        fwd_vol_20d=0.3 if horizon == 20 else None,
+                        fwd_vol_20d=(0.2 + 0.01 * k) * float(wobble[k]) if horizon == 20 else None,
                         fwd_up_5pct=bool(signal[k] + noise[k] > 0.5) if horizon == 20 else None,
                         untradable_t1=False,
                     )
@@ -101,7 +105,7 @@ def build_panel(settings: Any, tmp_path: Path) -> Path:
     FeatureDaily.objects.bulk_create(features)
     LabelDaily.objects.bulk_create(labels)
     export_year(2016, settings.FEATURE_PARQUET_DIR)
-    record_screening(KEPT)
+    record_screening(KEPT, UNSCREENED)
     return Path(settings.FEATURE_PARQUET_DIR)
 
 
