@@ -49,6 +49,31 @@ def panel(
     return frame.assign(**{LABEL: target.groupby(frame["date"]).rank(pct=True)})
 
 
+@pytest.fixture
+def probe_rounds(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Rounds each early-stopped lgb.train call actually ran."""
+    ran: list[int] = []
+    train = lgb.train
+
+    def spy(params: dict[str, Any], train_set: lgb.Dataset, **kwargs: Any) -> lgb.Booster:
+        if "valid_sets" not in kwargs:
+            return train(params, train_set, **kwargs)
+        seen: list[int] = []
+
+        def record(env: Any) -> None:
+            seen.append(env.iteration)
+
+        record.order = 0  # type: ignore[attr-defined]
+        booster = train(
+            params, train_set, **{**kwargs, "callbacks": [record, *kwargs["callbacks"]]}
+        )
+        ran.append(len(seen))
+        return booster
+
+    monkeypatch.setattr(gbdt.lgb, "train", spy)
+    return ran
+
+
 def training_window() -> pd.DataFrame:
     window = fold()
     return panel(window.train_start, window.train_end)
@@ -106,6 +131,21 @@ def test_feval_scores_a_day_without_spread_as_no_signal() -> None:
     assert DailyRankIC(frame["date"], frame[LABEL]).value(np.zeros(len(frame))) == 0.0
 
 
+def test_feval_leaves_a_day_without_spread_out_of_the_mean() -> None:
+    frame = panel(date(2011, 3, 1), date(2011, 3, 14), stocks=45, seed=3)
+    scores = frame["signal"].to_numpy() + np.random.default_rng(4).normal(size=len(frame))
+    flat = frame["date"] == date(2011, 3, 8)
+    scores[flat.to_numpy()] = 1.0
+    expected = np.mean(
+        [
+            spearmanr(scores[day.index], day[LABEL]).statistic
+            for _, day in frame[~flat].groupby("date")
+        ]
+    )
+
+    assert DailyRankIC(frame["date"], frame[LABEL]).value(scores) == pytest.approx(expected)
+
+
 def test_feval_refuses_a_validation_set_without_a_full_day() -> None:
     frame = panel(date(2011, 3, 1), date(2011, 3, 4), stocks=10)
 
@@ -160,13 +200,16 @@ def test_boost_stops_on_validation_ic_then_refits_the_whole_window(
     assert importance["signal"] > importance["noise"]
 
 
-def test_boost_without_signal_stops_soon_after_its_best_round() -> None:
+def test_boost_without_signal_stops_a_patience_after_its_best_round(
+    probe_rounds: list[int],
+) -> None:
     window = fold()
     rows = panel(window.train_start, window.train_end, signal=0.0)
 
     boosted = boost(rows, window, FEATURES, LABEL, seed=1, feval=DailyRankIC, max_rounds=2000)
 
-    assert boosted.rounds < 2000 - EARLY_STOPPING_ROUNDS
+    assert probe_rounds == [boosted.rounds + EARLY_STOPPING_ROUNDS]
+    assert probe_rounds[0] < 2000
     assert abs(boosted.valid_score) < 0.1
 
 
@@ -183,7 +226,7 @@ def test_boost_is_reproducible_with_a_seed() -> None:
     assert not np.array_equal(scores(2), first)
 
 
-def test_boost_with_a_builtin_metric_stops_on_that_loss() -> None:
+def test_boost_with_a_builtin_metric_stops_on_that_loss(probe_rounds: list[int]) -> None:
     window = fold()
     rows = panel(window.train_start, window.train_end, signal=0.0)
 
@@ -197,5 +240,6 @@ def test_boost_with_a_builtin_metric_stops_on_that_loss() -> None:
         max_rounds=1000,
     )
 
-    assert boosted.rounds < 1000 - EARLY_STOPPING_ROUNDS
+    assert probe_rounds == [boosted.rounds + EARLY_STOPPING_ROUNDS]
+    assert probe_rounds[0] < 1000
     assert 0.2 < boosted.valid_score < 0.3
