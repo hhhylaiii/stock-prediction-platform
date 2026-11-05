@@ -208,7 +208,7 @@ def attention_events(payload: dict[str, Any], sessions: Sequence[date]) -> list[
     table = find_table(payload, ATTENTION_TITLE)
     records = list_rows(table, "TPEx attention", ATTENTION_FIELDS)
     events = announced_events(records, ATTENTION_FIELDS, "TPEx attention", sessions)
-    check_listed_count(table, records, "TPEx attention")
+    check_listed_count(table, records, "TPEx attention", placeholders_counted=True)
     return events
 
 
@@ -221,9 +221,12 @@ def disposal_events(payload: dict[str, Any], window: tuple[date, date]) -> list[
 
 
 def check_listed_count(
-    table: Mapping[str, Any], records: Sequence[Mapping[str, Any]], label: str
+    table: Mapping[str, Any],
+    records: Sequence[Mapping[str, Any]],
+    label: str,
+    placeholders_counted: bool = False,
 ) -> None:
-    """TPEx lists give their row count only in the subtitle (總累計次數), placeholders aside."""
+    """The subtitle's 總累計次數 against the rows; the attention list may count empty days."""
     listed = sum(1 for record in records if str(record[SECURITY_CODE]).strip())
     subtitle = str(table.get("subtitle") or "")
     match = LISTED_COUNT.search(subtitle)
@@ -231,8 +234,11 @@ def check_listed_count(
         if listed:
             raise SchemaChangedError(f"{label} subtitle no longer gives 總累計次數: {subtitle!r}")
         return
-    if int(match.group(1)) != listed:
-        raise SchemaChangedError(f"{label} sent {listed} of {match.group(1)} rows")
+    allowed = {listed, len(records)} if placeholders_counted else {listed}
+    if int(match.group(1)) not in allowed:
+        raise SchemaChangedError(
+            f"{label} sent {listed} of {match.group(1)} rows ({len(records)} with empty days)"
+        )
 
 
 def full_delivery_codes(payload: dict[str, Any], day: date) -> list[str]:
