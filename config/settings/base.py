@@ -187,7 +187,7 @@ DATAGOV_TIMEOUT = env.float("DATAGOV_TIMEOUT", default=60.0)
 MOPS_DOC_BASE_URL = env.str("MOPS_DOC_BASE_URL", default="https://doc.twse.com.tw")
 MOPS_BASE_URL = env.str("MOPS_BASE_URL", default="https://mopsov.twse.com.tw")
 MOPS_TIMEOUT = env.float("MOPS_TIMEOUT", default=60.0)
-STATEMENT_SCAN_DAYS_AFTER = env.int("STATEMENT_SCAN_DAYS_AFTER", default=5)
+STATEMENT_SCAN_DAYS_AFTER = env.int("STATEMENT_SCAN_DAYS_AFTER", default=45)
 ETL_RATE_LIMITS: dict[str, dict[str, float]] = {
     "twse": {
         "min_interval": env.float("TWSE_MIN_INTERVAL", default=3.5),
