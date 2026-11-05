@@ -6,7 +6,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from apps.research.eval_report import rank_metrics, render_report, write_rank_metrics
+from apps.research.eval_report import (
+    RANK_METRICS,
+    rank_metrics,
+    render_report,
+    write_rank_metrics,
+)
 from apps.research.evaluation import (
     RankReport,
     consistency_report,
@@ -20,13 +25,15 @@ from tests.research.test_evaluation import calendar, folds, inside, panel, price
 
 
 def reports() -> tuple[RankReport, RankReport]:
-    """A weak 5-day score against a noise baseline, and a 20-day score that copies its label."""
+    """A weak 5-day score against a baseline that wins one fold, and a 20-day leaked score."""
     frame = panel()
     rng = np.random.default_rng(3)
     weak = frame.assign(
         score=frame["fwd_ret_open"] + rng.normal(0, 1.0, len(frame)),
         noise=rng.normal(size=len(frame)),
     )
+    won = inside(weak, [research()[0]])
+    weak.loc[won, "noise"] = weak.loc[won, "fwd_rank_pct"]
     leaked = frame.assign(score=frame["fwd_rank_pct"])
     return (
         rank_report(weak, "score", 5, folds(), baseline="noise"),
@@ -82,12 +89,35 @@ def test_report_renders_every_section_from_a_synthetic_prediction_set() -> None:
     assert "20 日研究期 IC 均值 1.0000 高於 0.15" in text
     assert "| D10-D1 |" in text
     assert "成交金額前三分之一" in text
+    total, neutral = five.total, five.neutralized
+    assert (
+        f"- 研究期 IC 均值 {total.mean:.4f}，標準差 {total.std:.4f}，NW t {total.nw_t:.2f}，"
+        f"ICIR {total.icir:.2f}，{total.n_days} 天" in text
+    )
+    assert f"- IC 為正的研究摺比例：{five.positive_share:.0%}\n" in text
+    assert f"- 中性化 IC：{neutral.mean:.4f}，NW t {neutral.nw_t:.2f}，{neutral.n_days} 天" in text
+    assert "| IC 為正的天數比例 | 天數 |" in text
+    year = cast(pd.Series, five.by_year.loc[2016])
+    assert (
+        f"| 2016 | {year['mean']:.4f} | {year['std']:.4f} | {year['icir']:.2f} "
+        f"| {year['nw_t']:.2f} | {year['positive_day_share']:.0%} | {int(year['n_days'])} |"
+    ) in text
+    high = cast(pd.Series, five.by_liquidity.loc[3])
+    assert f"| 高 | {high['mean']:.4f} | {high['std']:.4f} |" in text
+    tuning = next(fold for fold in folds() if fold.tuning)
+    holdout = next(fold for fold in folds() if fold.holdout)
+    lines = text.splitlines()
+    assert any(line.startswith(f"| {tuning.index} | 調參 | {tuning.test_start}") for line in lines)
+    assert any(
+        line.startswith(f"| {holdout.index} | holdout | {holdout.test_start}") for line in lines
+    )
     assert "| 1 | a, b | — |" in text
     assert "| 2 | b, c | 1 |" in text
     top = cast(pd.Series, deciles[5].loc[("all", "D10")])
     assert (
-        f"| 全部 | D10 | {top['monthly_return'] * 100:.2f}% | {top['monthly_excess'] * 100:.2f}% |"
-        in text
+        f"| 全部 | D10 | {top['monthly_return'] * 100:.2f}% | {top['monthly_excess'] * 100:.2f}% "
+        f"| {top['excess_drawdown'] * 100:.2f}% | {top['annual_turnover']:.2f} "
+        f"| {int(top['n_days'])} |" in text
     )
     whole = cast(pd.Series, coverage.loc["all"])
     assert f"| 全體 | {whole['coverage'] * 100:.1f}% | {whole['width']:.4f} |" in text
@@ -122,24 +152,38 @@ def test_rank_metrics_hold_total_fold_year_month_and_liquidity_rows() -> None:
     assert set(rows["objective"]) == {"rank"}
     assert set(rows["horizon"]) == {5}
     total = rows[(rows["grain"] == "total") & (rows["segment"] == "")].set_index("metric")
-    assert total.loc["rank_ic", "value"] == pytest.approx(five.total.mean)
-    assert total.loc["rank_ic_nw_t", "value"] == pytest.approx(five.total.nw_t)
-    assert total.loc["beat_baseline_share", "value"] == five.beat_share
-    assert total.loc["beat_baseline_folds", "value"] == five.compared_folds
+    expected = {
+        "rank_ic": five.total.mean,
+        "rank_icir": five.total.icir,
+        "rank_ic_nw_t": five.total.nw_t,
+        "positive_fold_share": five.positive_share,
+        "beat_baseline_share": five.beat_share,
+        "beat_baseline_folds": float(five.compared_folds),
+        "neutral_rank_ic": five.neutralized.mean,
+        "neutral_rank_ic_nw_t": five.neutralized.nw_t,
+    }
+    assert five.positive_share != five.beat_share
+    assert total["value"].to_dict() == pytest.approx(expected)
     assert total.loc["rank_ic", "period_start"] == research()[0].test_start
     assert total.loc["rank_ic", "period_end"] == research()[-1].eval_end
-    folds_ic = rows[(rows["grain"] == "fold") & (rows["metric"] == "rank_ic")]
-    assert folds_ic["period_start"].tolist() == [fold.test_start for fold in research()]
-    years = rows[(rows["grain"] == "year") & (rows["metric"] == "rank_ic")]
-    assert years["period_start"].tolist() == [date(2016, 1, 1), date(2017, 1, 1)]
-    assert years["period_end"].tolist() == [date(2016, 12, 31), date(2017, 12, 31)]
+    chosen = [fold.index for fold in research()]
+    for metric, column in (("rank_ic", "mean"), ("rank_ic_nw_t", "nw_t")):
+        by_fold = rows[(rows["grain"] == "fold") & (rows["metric"] == metric)]
+        assert by_fold["period_start"].tolist() == [fold.test_start for fold in research()]
+        assert by_fold["period_end"].tolist() == [fold.eval_end for fold in research()]
+        assert by_fold["value"].tolist() == pytest.approx(five.by_fold.loc[chosen, column].tolist())
+        years = rows[(rows["grain"] == "year") & (rows["metric"] == metric)]
+        assert years["period_start"].tolist() == [date(2016, 1, 1), date(2017, 1, 1)]
+        assert years["period_end"].tolist() == [date(2016, 12, 31), date(2017, 12, 31)]
+        assert years["value"].tolist() == pytest.approx(five.by_year[column].tolist())
+        terciles = rows[(rows["segment"] != "") & (rows["metric"] == metric)]
+        assert terciles["segment"].tolist() == ["liq_t1", "liq_t2", "liq_t3"]
+        assert terciles["value"].tolist() == pytest.approx(five.by_liquidity[column].tolist())
     months = rows[(rows["grain"] == "month") & (rows["metric"] == "rank_ic")]
     assert months["value"].tolist() == pytest.approx(five.monthly.tolist())
+    assert months["period_start"].tolist() == five.monthly.index.tolist()
     assert months["period_end"].iloc[1] == date(2016, 10, 31)
-    liquidity = rows[rows["segment"] != ""]
-    assert sorted(set(liquidity["segment"])) == ["liq_t1", "liq_t2", "liq_t3"]
-    top = liquidity[(liquidity["segment"] == "liq_t3") & (liquidity["metric"] == "rank_ic")]
-    assert top["value"].tolist() == pytest.approx([five.by_liquidity.loc[3, "mean"]])
+    assert set(rows["metric"]) == set(RANK_METRICS)
     assert rows.duplicated(["metric", "grain", "period_start", "period_end", "segment"]).sum() == 0
 
 
@@ -161,17 +205,23 @@ def test_writing_rank_metrics_replaces_the_group_and_keeps_others() -> None:
     BacktestMetric.objects.create(model_type="lightgbm", **{**other, "horizon": 20})
     BacktestMetric.objects.create(model_type="lightgbm", **{**other, "objective": "regression"})
     BacktestMetric.objects.create(model_type="lightgbm", **{**other, "run_key": "rank-y"})
+    BacktestMetric.objects.create(model_type="lightgbm", **{**other, "metric": "decile_spread"})
 
     written = write_rank_metrics(five, "rank-x", "lightgbm")
     again = write_rank_metrics(five, "rank-x", "lightgbm")
 
     stored = BacktestMetric.objects.filter(
-        run_key="rank-x", model_type="lightgbm", objective="rank", horizon=5
+        run_key="rank-x",
+        model_type="lightgbm",
+        objective="rank",
+        horizon=5,
+        metric__in=RANK_METRICS,
     )
     assert written == again == stored.count() == len(rank_metrics(five, "rank-x", "lightgbm"))
     assert not stored.filter(period_start=date(2010, 1, 1)).exists()
     assert BacktestMetric.objects.filter(model_type="ridge").count() == 1
-    assert BacktestMetric.objects.filter(period_start=date(2010, 1, 1)).count() == 4
+    assert BacktestMetric.objects.filter(period_start=date(2010, 1, 1)).count() == 5
+    assert BacktestMetric.objects.filter(metric="decile_spread").count() == 1
     beat = stored.get(metric="beat_baseline_share", grain="total")
     assert beat.value == pytest.approx(five.beat_share)
 
@@ -202,3 +252,15 @@ def test_a_fold_without_a_baseline_verdict_renders_empty() -> None:
     )
     assert row.endswith("| — | — | — |")
     assert "（3／4 摺可比）" in text
+
+
+def test_percent_cells_without_a_value_render_a_bare_dash() -> None:
+    frame = panel().assign(q10=np.nan, prob=np.nan)
+    coverage = coverage_report(frame, "fwd_ret_open", "q10", "q90", folds())
+    consistency = consistency_report(frame, "q10", "q50", "q90", "vol", "prob", folds())
+
+    text = render_report("rank-x lightgbm", [], coverage=coverage, consistency=consistency)
+
+    assert "| 全體 | — | — |" in text
+    assert "| 上漲機率與 q50 矛盾 | — | — | 0 | 0 |" in text
+    assert "—%" not in text

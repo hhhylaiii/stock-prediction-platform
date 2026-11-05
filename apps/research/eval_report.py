@@ -29,6 +29,16 @@ METRIC_KEY = [
     "period_end",
     "segment",
 ]
+RANK_METRICS = (
+    "rank_ic",
+    "rank_icir",
+    "rank_ic_nw_t",
+    "positive_fold_share",
+    "beat_baseline_share",
+    "beat_baseline_folds",
+    "neutral_rank_ic",
+    "neutral_rank_ic_nw_t",
+)
 SAMPLES = {"all": "全部", "liquid": "成交金額前三分之一"}
 LIQUIDITY_NAMES = {"1": "低", "2": "中", "3": "高"}
 CHECK_NAMES = {"width_ratio": "寬度比超出 0.5 到 2", "contradiction": "上漲機率與 q50 矛盾"}
@@ -42,6 +52,10 @@ def _share(value: float) -> str:
     return "—" if math.isnan(value) else f"{value:.0%}"
 
 
+def _percent(value: float, digits: int) -> str:
+    return "—" if math.isnan(value) else f"{value * 100:.{digits}f}%"
+
+
 def _summary(label: object, row: pd.Series) -> str:
     return (
         f"| {label} | {_cell(row['mean'], 4)} | {_cell(row['std'], 4)} "
@@ -50,7 +64,7 @@ def _summary(label: object, row: pd.Series) -> str:
     )
 
 
-SUMMARY_HEADER = "| IC 均值 | 標準差 | ICIR | NW t | IC 為正的天數 | 天數 |"
+SUMMARY_HEADER = "| IC 均值 | 標準差 | ICIR | NW t | IC 為正的天數比例 | 天數 |"
 SUMMARY_RULE = "| --- | --- | --- | --- | --- | --- | --- |"
 
 
@@ -90,8 +104,8 @@ def _rank_section(report: RankReport, deciles: pd.DataFrame | None) -> list[str]
     lines = [
         f"## 排名 {horizon} 日",
         "",
-        f"- 研究期 IC 均值 {_cell(total.mean, 4)}，NW t {_cell(total.nw_t, 2)}，"
-        f"ICIR {_cell(total.icir, 2)}，{total.n_days} 天",
+        f"- 研究期 IC 均值 {_cell(total.mean, 4)}，標準差 {_cell(total.std, 4)}，"
+        f"NW t {_cell(total.nw_t, 2)}，ICIR {_cell(total.icir, 2)}，{total.n_days} 天",
         f"- IC 為正的研究摺比例：{_share(report.positive_share)}",
         f"- 中性化 IC：{_cell(neutral.mean, 4)}，NW t {_cell(neutral.nw_t, 2)}，"
         f"{neutral.n_days} 天",
@@ -128,9 +142,9 @@ def _decile_table(deciles: pd.DataFrame) -> list[str]:
         sample, name = cast(tuple[str, str], key)
         lines.append(
             f"| {SAMPLES.get(sample, sample)} | {name} "
-            f"| {_cell(row['monthly_return'] * 100, 2)}% "
-            f"| {_cell(row['monthly_excess'] * 100, 2)}% "
-            f"| {_cell(row['excess_drawdown'] * 100, 2)}% | {_cell(row['annual_turnover'], 2)} "
+            f"| {_percent(row['monthly_return'], 2)} "
+            f"| {_percent(row['monthly_excess'], 2)} "
+            f"| {_percent(row['excess_drawdown'], 2)} | {_cell(row['annual_turnover'], 2)} "
             f"| {int(row['n_days'])} |"
         )
     return [*lines, ""]
@@ -158,7 +172,7 @@ def _coverage_section(coverage: pd.DataFrame) -> list[str]:
         "| --- | --- | --- |",
     ]
     lines += [
-        f"| {'全體' if bucket == 'all' else bucket} | {_cell(row['coverage'] * 100, 1)}% "
+        f"| {'全體' if bucket == 'all' else bucket} | {_percent(row['coverage'], 1)} "
         f"| {_cell(row['width'], 4)} |"
         for bucket, row in coverage.iterrows()
     ]
@@ -173,8 +187,8 @@ def _consistency_section(consistency: pd.DataFrame) -> list[str]:
         "| --- | --- | --- | --- | --- |",
     ]
     lines += [
-        f"| {CHECK_NAMES.get(str(check), check)} | {_cell(row['mean_share'] * 100, 1)}% "
-        f"| {_cell(row['max_share'] * 100, 1)}% "
+        f"| {CHECK_NAMES.get(str(check), check)} | {_percent(row['mean_share'], 1)} "
+        f"| {_percent(row['max_share'], 1)} "
         f"| {int(row['days_over'])} | {int(row['n_days'])} |"
         for check, row in consistency.iterrows()
     ]
@@ -263,7 +277,7 @@ def rank_metrics(report: RankReport, run_key: str, model_type: str) -> pd.DataFr
 
 
 def write_rank_metrics(report: RankReport, run_key: str, model_type: str) -> int:
-    """Replace a run model's rank metrics at the report's horizon with the report's rows."""
+    """Replace a run model's RANK_METRICS rows at the report's horizon; other metric names stay."""
     rows = rank_metrics(report, run_key, model_type)
     with transaction.atomic():
         BacktestMetric.objects.filter(
@@ -271,5 +285,6 @@ def write_rank_metrics(report: RankReport, run_key: str, model_type: str) -> int
             model_type=model_type,
             objective=ModelObjective.RANK,
             horizon=report.horizon,
+            metric__in=RANK_METRICS,
         ).delete()
         return upsert(BacktestMetric, rows, unique_fields=METRIC_KEY, update_fields=["value"])
