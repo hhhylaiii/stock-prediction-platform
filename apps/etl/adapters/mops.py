@@ -16,6 +16,7 @@ from django.utils import timezone
 
 from apps.etl.adapters.base import BaseAdapter
 from apps.etl.client import SourceClient
+from apps.etl.deadlines import statement_deadline
 from apps.etl.errors import SchemaChangedError, SourceError
 from apps.etl.filings import FILING_COLUMNS, Filing, apply_statement_filings
 from apps.etl.models import EtlRun, RawMops
@@ -301,15 +302,14 @@ class MopsAdapter(BaseAdapter):
         """Each open quarter against the one before; a quarter is fetched once per scan."""
         fetched: dict[str, Summary] = {}
 
-        def summaries(period: str, filed: bool) -> Summary:
+        def summaries(period: str) -> Summary:
             if period not in fetched:
-                fetched[period] = self._summaries(period, filed)
+                fetched[period] = self._summaries(period, statement_deadline(period) < day)
             return fetched[period]
 
         records = []
         for period in open_periods(day, int(settings.STATEMENT_SCAN_DAYS_AFTER)):
-            current = summaries(period, filed=False)
-            previous = summaries(previous_period(period), filed=True)
+            current, previous = summaries(period), summaries(previous_period(period))
             waiting = incomplete(current)
             if waiting:
                 logger.warning("mops %s scan waits for %s", period, ", ".join(waiting))
@@ -327,7 +327,7 @@ class MopsAdapter(BaseAdapter):
                 params, page = self.summaries.summary(report, market, year - ROC_OFFSET, season)
                 identity = {"html": EXPORT_NAME.sub("", page)}
                 self.save_raw(STATEMENT_SCAN, params, {"html": page}, identity)
-                companies = parse_summary(page, market, season)
+                companies = parse_summary(page, market, season, report)
                 if filed and not companies:
                     raise SchemaChangedError(f"MOPS {report} {market} {period} came back empty")
                 if companies.keys() & found[report].keys():

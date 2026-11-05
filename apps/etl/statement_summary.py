@@ -56,6 +56,12 @@ VALUE_COLUMNS = [
     "operating_cf",
 ]
 
+REQUIRED = {
+    INCOME: (EPS, NET_INCOME, PARENT_NET_INCOME),
+    BALANCE: (ASSETS, LIABILITIES, EQUITY + PARENT_EQUITY),
+    CASH_FLOW: (OPERATING_CF,),
+}
+
 Row = Mapping[str, float | None]
 Summary = Mapping[str, Mapping[str, Row]]
 
@@ -96,7 +102,9 @@ class _Cells(HTMLParser):
             self._cell = None
 
 
-def parse_summary(page: str, market: str, season: int) -> dict[str, dict[str, float | None]]:
+def parse_summary(
+    page: str, market: str, season: int, report: str
+) -> dict[str, dict[str, float | None]]:
     """Each company's named values in thousands of TWD; no filings yet is an empty answer."""
     titles = [re.sub(r"\s+", "", title) for title in TITLE.findall(page)]
     if not titles:
@@ -113,6 +121,7 @@ def parse_summary(page: str, market: str, season: int) -> dict[str, dict[str, fl
     table = -1
     for where, cells in parser.rows:
         if cells and cells[0] == CODE_HEADER:
+            _require(cells, report, market)
             header, table = cells, where
             continue
         if not cells:
@@ -131,6 +140,13 @@ def parse_summary(page: str, market: str, season: int) -> dict[str, dict[str, fl
     if not companies:
         raise SchemaChangedError(f"MOPS {market} season {season} summary lists no company")
     return companies
+
+
+def _require(header: list[str], report: str, market: str) -> None:
+    """Every industry table must still name the figures the rows are built from."""
+    for names in REQUIRED[report]:
+        if not any(name in header for name in names):
+            raise SchemaChangedError(f"MOPS {report} {market} header lacks {names[0]}")
 
 
 def _number(text: str, code: str) -> float | None:

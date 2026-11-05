@@ -95,7 +95,7 @@ def summaries(page: Callable[..., str], season: int, roc: int = 115) -> dict[str
             code: values
             for market in ("sii", "otc")
             for code, values in parse_summary(
-                page(report, market, season, roc), market, season
+                page(report, market, season, roc), market, season, report
             ).items()
         }
         for report in REPORTS
@@ -109,18 +109,18 @@ def by_code(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
 def test_a_summary_gives_each_companys_year_to_date_figures(
     page: Callable[[str, str, int], str],
 ) -> None:
-    income = parse_summary(page(INCOME, "sii", 2), "sii", 2)
+    income = parse_summary(page(INCOME, "sii", 2), "sii", 2, INCOME)
     assert income["2330"]["營業收入"] == 2_404_483_690
     assert income["2330"]["基本每股盈餘（元）"] == 49.33
     assert income["2816"]["淨利（損）歸屬於母公司業主"] is None
     assert income["1409"]["收入"] == 22_040_585
-    balance = parse_summary(page(BALANCE, "sii", 2), "sii", 2)
+    balance = parse_summary(page(BALANCE, "sii", 2), "sii", 2, BALANCE)
     assert balance["2801"]["資產總額"] == 3_535_310_278
     assert balance["2330"]["資產總計"] == 9_375_654_727
 
 
 def test_no_filings_yet_is_an_empty_answer(page: Callable[[str, str, int], str]) -> None:
-    assert parse_summary(page(INCOME, "sii", 4), "sii", 4) == {}
+    assert parse_summary(page(INCOME, "sii", 4), "sii", 4, INCOME) == {}
 
 
 @pytest.mark.parametrize(("market", "season"), [("otc", 2), ("sii", 1)])
@@ -128,7 +128,7 @@ def test_a_page_of_another_market_or_season_fails(
     page: Callable[[str, str, int], str], market: str, season: int
 ) -> None:
     with pytest.raises(SchemaChangedError, match="is not"):
-        parse_summary(page(INCOME, "sii", 2), market, season)
+        parse_summary(page(INCOME, "sii", 2), market, season, INCOME)
 
 
 @pytest.mark.parametrize(
@@ -145,7 +145,7 @@ def test_a_changed_layout_fails(
     text = page(INCOME, "sii", 2)
     assert old in text
     with pytest.raises(SchemaChangedError, match=message):
-        parse_summary(text.replace(old, new, 1), "sii", 2)
+        parse_summary(text.replace(old, new, 1), "sii", 2, INCOME)
 
 
 def test_a_company_listed_twice_fails(page: Callable[[str, str, int], str]) -> None:
@@ -153,14 +153,14 @@ def test_a_company_listed_twice_fails(page: Callable[[str, str, int], str]) -> N
     row = text[text.index("<tr class='", text.index(">2330<") - 200) :]
     row = row[: row.index("</tr>") + 5]
     with pytest.raises(SchemaChangedError, match="twice"):
-        parse_summary(text.replace(row, row + row, 1), "sii", 2)
+        parse_summary(text.replace(row, row + row, 1), "sii", 2, INCOME)
 
 
 def test_a_title_without_companies_fails(page: Callable[..., str]) -> None:
     text = page(INCOME, "sii", 2)
     rows = re.compile(r"<tr class='(?:even|odd)'>.*?</tr>", re.S)
     with pytest.raises(SchemaChangedError, match="lists no company"):
-        parse_summary(rows.sub("", text), "sii", 2)
+        parse_summary(rows.sub("", text), "sii", 2, INCOME)
 
 
 def test_a_renamed_header_fails_instead_of_dropping_its_industry(page: Callable[..., str]) -> None:
@@ -168,12 +168,30 @@ def test_a_renamed_header_fails_instead_of_dropping_its_industry(page: Callable[
     renamed = text.replace("公司<br>代號", "代號")
     assert renamed != text
     with pytest.raises(SchemaChangedError, match="outside a report table"):
-        parse_summary(renamed, "sii", 2)
+        parse_summary(renamed, "sii", 2, INCOME)
+
+
+@pytest.mark.parametrize(
+    ("report", "name"),
+    [
+        (INCOME, "基本每股盈餘（元）"),
+        (INCOME, "淨利（淨損）歸屬於母公司業主"),
+        (BALANCE, "負債總計"),
+        (CASH_FLOW, "營業活動之淨現金流入（流出）"),
+    ],
+)
+def test_a_renamed_figure_column_fails_instead_of_leaving_it_blank(
+    page: Callable[..., str], report: str, name: str
+) -> None:
+    text = page(report, "sii", 2)
+    assert f">{name}<" in text
+    with pytest.raises(SchemaChangedError, match="header lacks"):
+        parse_summary(text.replace(f">{name}<", f">{name}x<"), "sii", 2, report)
 
 
 def test_a_page_without_any_report_fails() -> None:
     with pytest.raises(SchemaChangedError, match="no title"):
-        parse_summary("<html><body>FOR SECURITY REASONS</body></html>", "sii", 2)
+        parse_summary("<html><body>FOR SECURITY REASONS</body></html>", "sii", 2, INCOME)
 
 
 def test_second_quarter_figures_match_the_finmind_backfill(

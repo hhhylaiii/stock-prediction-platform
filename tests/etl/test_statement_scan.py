@@ -16,7 +16,7 @@ from apps.etl.adapters.mops import STATEMENT_SCAN, MopsAdapter
 from apps.etl.errors import SchemaChangedError
 from apps.etl.models import DataQualityLog, EtlRun, RawMops
 from apps.etl.ratelimit import RateLimit, RateLimiter
-from apps.etl.statement_scan import SCAN_COLUMNS
+from apps.etl.statement_scan import SCAN_COLUMNS, SOURCE_MISMATCH_CHECK
 from apps.etl.statement_summary import (
     BALANCE,
     CASH_FLOW,
@@ -178,7 +178,14 @@ def test_a_filing_seen_before_keeps_its_first_values_and_date(adapter: MopsAdapt
         date(2026, 11, 3),
     )
     assert run.rows == 3
+    differing = DataQualityLog.objects.get(check_name=SOURCE_MISMATCH_CHECK)
+    assert differing.severity == "info"
+    [entry] = differing.detail["statements"]
+    assert (entry["stock_id"], entry["fin_type"]) == ("1215", CONSOLIDATED)
+    assert entry["fields"]["eps"] == ["9.9900", "2.2300"]
+    assert entry["fields"]["revenue"] == [None, 7_464_783_000]
     rerun = scan_at(adapter, "2026-11-05 22:40:00")
+    assert DataQualityLog.objects.filter(check_name=SOURCE_MISMATCH_CHECK).count() == 1
     assert rerun.rows == 0
 
 
@@ -346,3 +353,32 @@ def test_a_company_missing_from_one_summary_waits_and_is_named(
     scan_at(adapter, "2026-11-05 19:00:00")
     assert set(stored()) == FILERS - {"1215"}
     assert any("2026-Q3 scan waits for 1215" in row.getMessage() for row in caplog.records)
+
+
+@pytest.mark.django_db
+@responses.activate
+@pytest.mark.parametrize(
+    ("day", "empty"),
+    [(date(2026, 4, 2), (BALANCE, "sii", 4, 114)), (date(2026, 7, 2), (INCOME, "sii", 1, 115))],
+)
+def test_a_quarter_past_its_deadline_cannot_come_back_empty_even_when_still_open(
+    adapter: MopsAdapter,
+    summary: Callable[..., bytes],
+    day: date,
+    empty: tuple[str, str, int, int],
+) -> None:
+    pages = {(1, 115), (4, 114), (3, 114)} if day.month == 4 else {(2, 115), (1, 115), (4, 114)}
+    nothing = summary(INCOME, "sii", 4)
+    for report in (INCOME, BALANCE, CASH_FLOW):
+        for market in ("sii", "otc"):
+            for season, roc in pages:
+                body = nothing if (report, market, season, roc) == empty else None
+                serve(report, market, season, body or summary(report, market, season, roc), roc)
+    with (
+        time_machine.travel(
+            datetime.combine(day, datetime.min.time(), TAIPEI).replace(hour=19), tick=False
+        ),
+        pytest.raises(SchemaChangedError, match="came back empty"),
+    ):
+        adapter.run(STATEMENT_SCAN, day, day)
+    assert not FinancialStatement.objects.exists()
