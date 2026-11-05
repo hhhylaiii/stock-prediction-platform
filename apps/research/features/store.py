@@ -50,7 +50,7 @@ def write_features(frame: pd.DataFrame, start: date, end: date) -> int:
 def _typed(parts: list[pd.DataFrame]) -> pd.DataFrame:
     if not parts:
         return pd.DataFrame(columns=FRAME_COLUMNS).astype(FRAME_TYPES)
-    return pd.concat(parts, ignore_index=True).astype(FRAME_TYPES)
+    return pd.concat([part.astype(FRAME_TYPES) for part in parts], ignore_index=True)
 
 
 def read_features(start: date, end: date) -> pd.DataFrame:

@@ -1,4 +1,5 @@
 import math
+import warnings
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
@@ -208,6 +209,23 @@ def test_the_year_partition_matches_the_table(tmp_path: Path) -> None:
 
     assert path == tmp_path / "year=2016" / "part-0.parquet"
     pd.testing.assert_frame_equal(pd.read_parquet(path), stored())
+
+
+def test_a_month_without_values_of_a_feature_exports_without_warnings(tmp_path: Path) -> None:
+    listed("2330", "2015-06-01", "2016-03-31")
+    frame = build_feature_frame(CALENDAR, d("2016-02-01"), d("2016-03-31"))
+    march = frame["date"] >= d("2016-03-01")
+    blank = frame.assign(tech_ret_1d=frame["tech_ret_1d"].where(march))
+    write_features(blank, d("2016-02-01"), d("2016-03-31"))
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        path = export_year(2016, tmp_path)
+
+    assert path is not None
+    exported = pd.read_parquet(path)
+    pd.testing.assert_frame_equal(exported, stored())
+    assert exported["tech_ret_1d"].notna().sum() == int(march.sum())
 
 
 def test_an_empty_year_leaves_no_partition_and_the_directory_reads(tmp_path: Path) -> None:
