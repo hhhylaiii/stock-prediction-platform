@@ -1,7 +1,9 @@
+import json
 from datetime import date, timedelta
+from statistics import fmean, stdev
 
 import pytest
-from playwright.sync_api import Page, expect
+from playwright.sync_api import Page, Route, expect
 from pytest_django.live_server_helper import LiveServer
 
 from apps.research.models import BacktestMetric, ModelMonitor, ModelRun
@@ -10,6 +12,7 @@ from tests.e2e.conftest import Seed
 pytestmark = pytest.mark.e2e
 
 RESEARCH = (date(2014, 1, 2), date(2024, 12, 3))
+RANK_ICS = [0.04 + 0.002 * n for n in range(10)]
 XSS_VERSION = "<img src=x onerror=1>"
 
 
@@ -65,7 +68,6 @@ def scored(predicted: Seed) -> Seed:
     """Monitoring for every serving run, research totals and 26 months of rank IC."""
     days = predicted.sessions[-10:]
     monitors = {
-        "rank-h20": {"ic": 0.05},
         "rank-h5": {"ic": 0.03},
         "reg-h5": {"mae": 0.058, "direction_acc": 0.54},
         "quantile-h20": {"coverage": 0.79, "width": 0.131},
@@ -78,6 +80,10 @@ def scored(predicted: Seed) -> Seed:
         )
         for run_id, values in monitors.items()
         for day in days
+    )
+    ModelMonitor.objects.bulk_create(
+        ModelMonitor(run_id="rank-h20", date=day, horizon=20, n_stocks=25, ic=ic)
+        for day, ic in zip(days, RANK_ICS, strict=True)
     )
     BacktestMetric.objects.bulk_create(
         [
@@ -100,10 +106,15 @@ def test_the_serving_models_are_listed_with_their_scores(
 
     rows = page.locator("#model-table .trow")
     expect(rows).to_have_count(6)
-    for text in ("排名", "20 日", "LightGBM", "2026-10", "2023-10 到 2026-09", "rank IC 0.050"):
+    icir = fmean(RANK_ICS) / stdev(RANK_ICS)
+    for text in ("排名", "20 日", "LightGBM", "2026-10", "2023-10 到 2026-09"):
         expect(rows.nth(0)).to_contain_text(text)
+    expect(rows.nth(0)).to_contain_text(f"rank IC 0.049，ICIR {icir:.2f}（近 10 個評估日）")
     expect(rows.nth(0)).to_contain_text("研究期 rank IC 0.041，ICIR 0.62；Ridge 0.027，ICIR 0.41")
     expect(rows.nth(1)).to_contain_text("5 日")
+    expect(rows.nth(1)).to_contain_text("研究期成績尚未產出")
+    expect(rows.nth(2).locator("div").last).to_have_text("—")
+    expect(rows.nth(3)).to_contain_text("報酬區間")
     expect(rows.nth(2)).to_contain_text("MAE 5.8%，方向準確率 54.0%")
     expect(rows.nth(3)).to_contain_text("覆蓋率 79.0%，平均寬度 13.1 個百分點")
     expect(rows.nth(4)).to_contain_text("MAE 4.1 個百分點（年化）")
@@ -111,7 +122,7 @@ def test_the_serving_models_are_listed_with_their_scores(
     expect(rows.nth(5)).to_contain_text("降級中")
     expect(rows.nth(5).locator(".version")).to_have_text(XSS_VERSION)
     expect(page.locator("#model-table img")).to_have_count(0)
-    expect(rows.nth(0)).to_contain_text("近 10 個評估日")
+    expect(page.locator("#model-rules")).to_contain_text("近 6 個月")
     expect(page.locator("#model-rules")).to_contain_text("覆蓋率不在 70%–90%")
 
 
@@ -174,3 +185,27 @@ def test_failed_model_requests_are_shown(page: Page, live_server: LiveServer, sc
 
     expect(page.locator("#model-table .error")).to_have_text("無法連線到伺服器。")
     expect(page.locator("#ic-chart .error")).to_have_text("無法連線到伺服器。")
+
+
+def test_a_slot_without_matured_days_says_so(
+    page: Page, live_server: LiveServer, scored: Seed
+) -> None:
+    ModelMonitor.objects.filter(run_id="vol-h20").delete()
+
+    page.goto(f"{live_server.url}/#models")
+
+    expect(page.locator("#model-table .trow").nth(4)).to_contain_text("尚無到期的評估日")
+
+
+def test_month_labels_are_escaped(page: Page, live_server: LiveServer, scored: Seed) -> None:
+    def tampered(route: Route) -> None:
+        response = route.fetch()
+        body = response.json()
+        body["data"][0]["month"] = "2023-<img src=x onerror=window.__x=1>"
+        route.fulfill(response=response, body=json.dumps(body))
+
+    page.route("**/api/models/ic-monthly?*", tampered)
+    page.goto(f"{live_server.url}/#models")
+
+    expect(page.locator("#ic-chart rect.bar-model")).to_have_count(24)
+    expect(page.locator("#ic-chart img")).to_have_count(0)

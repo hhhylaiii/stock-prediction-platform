@@ -25,7 +25,7 @@
   };
   const ALERT_REASONS = { below_threshold: '低於門檻', outside_range: '超出範圍', above_baseline: '輸給 baseline', missing_reference: '缺參考值' };
   const ALERT_METRICS = { ic: 'IC', coverage: '覆蓋率', brier: 'Brier' };
-  const OBJECTIVES = { rank: '排名', regression: '絕對報酬', quantile: '分位數', volatility: '波動率', classification: '上漲機率' };
+  const OBJECTIVES = { rank: '排名', regression: '絕對報酬', quantile: '報酬區間', volatility: '波動率', classification: '上漲機率' };
   const SEVERITY = { info: ['通過', 'in'], warning: ['警告', 'warn'], error: ['錯誤', 'warn'] };
 
   const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -602,7 +602,6 @@
     overlay.addEventListener('pointerleave', () => { hover.style.display = 'none'; tip.style.display = 'none'; });
   }
 
-  const ROLE_NAMES = { rank: '排名', regression: '絕對報酬', quantile: '報酬區間', volatility: '波動率', classification: '上漲機率' };
   const pct1 = v => (v * 100).toFixed(1) + '%';
   const num3 = v => (v < 0 ? '−' : '') + Math.abs(v).toFixed(3);
   const has = v => v !== null && v !== undefined;
@@ -633,7 +632,7 @@
 
   function modelRowHtml(row) {
     const degraded = row.status === 'degraded' ? '<span class="faint small">　降級中</span>' : '';
-    return '<div class="trow model-cols"><div class="num">' + esc(ROLE_NAMES[row.objective] || row.objective) + '<span class="faint small">　' + row.horizon + ' 日</span></div>' +
+    return '<div class="trow model-cols"><div class="num">' + esc(OBJECTIVES[row.objective] || row.objective) + '<span class="faint small">　' + row.horizon + ' 日</span></div>' +
       '<div>' + esc(modelName(row.model_type)) + degraded + '</div>' +
       '<div class="muted version">' + esc(row.version) + '</div>' +
       '<div class="muted">' + esc(monthOf(row.train_start)) + ' 到 ' + esc(monthOf(row.train_end)) + '</div>' +
@@ -673,7 +672,7 @@
       ticks.map(v => '<line x1="' + padL + '" x2="' + (W - padR) + '" y1="' + f1(y(v)) + '" y2="' + f1(y(v)) + '" stroke="' + (v === 0 ? '#4A4A46' : '#2A2A28') + '"></line><text x="' + (padL - 8) + '" y="' + f1(y(v) + 4) + '" text-anchor="end" fill="#8A887F" font-size="12">' + v.toFixed(2) + '</text>').join('') +
       '<g class="hl" style="display:none"><rect y="' + padT + '" width="' + f1(gw) + '" height="' + innerH + '" fill="rgba(255,255,255,0.04)"></rect></g>' +
       rows.map((row, i) => bar('bar-model', i, row.model, -gw / 2 + 2) + bar('bar-baseline', i, row.baseline, 1)).join('') +
-      rows.map((row, i) => (i % 3 === 0 || i === rows.length - 1) ? '<text x="' + f1(padL + i * gw + gw / 2) + '" y="' + (H - 8) + '" text-anchor="middle" fill="#8A887F" font-size="12">' + row.month.slice(2, 4) + '/' + row.month.slice(5) + '</text>' : '').join('') +
+      rows.map((row, i) => (i % 3 === 0 || i === rows.length - 1) ? '<text x="' + f1(padL + i * gw + gw / 2) + '" y="' + (H - 8) + '" text-anchor="middle" fill="#8A887F" font-size="12">' + esc(row.month.slice(2, 4) + '/' + row.month.slice(5)) + '</text>' : '').join('') +
       '<rect class="overlay" x="' + padL + '" y="' + padT + '" width="' + innerW + '" height="' + innerH + '" fill="transparent"></rect></svg>' +
       '<div class="tip" style="display:none;top:6px"><div class="t"></div><div class="b"></div></div>';
     const svg = host.querySelector('svg'), overlay = host.querySelector('.overlay'), hl = host.querySelector('.hl'), hlRect = hl.querySelector('rect');
