@@ -193,14 +193,14 @@ def test_an_unknown_kind_of_report_fails(page: Callable[[str], bytes], old: str,
         ("2024-11-14 18:03:20", date(2024, 11, 14)),
         ("2024-11-14 23:10:00", date(2024, 11, 15)),
         ("2024-11-16 10:00:00", date(2024, 11, 18)),
-        ("2024-11-14 23:00:00", date(2024, 11, 15)),
-        ("2024-11-14 22:59:59", date(2024, 11, 14)),
+        ("2024-11-14 22:40:00", date(2024, 11, 15)),
+        ("2024-11-14 22:39:59", date(2024, 11, 14)),
     ],
 )
 def test_a_filing_counts_from_the_session_whose_evening_run_can_see_it(
     calendar: TradingDays, uploaded: str, session: date
 ) -> None:
-    assert filing_session(at(uploaded), calendar, time(23, 0)) == session
+    assert filing_session(at(uploaded), calendar, time(22, 40)) == session
 
 
 @pytest.fixture
@@ -496,7 +496,7 @@ def test_a_single_dataset_fetch_is_refused() -> None:
 def test_the_source_is_registered_with_its_own_limits() -> None:
     assert ADAPTERS["mops"] is MopsAdapter
     assert settings.ETL_RATE_LIMITS["mops"]["min_interval"] >= 3.0
-    assert settings.FILING_VISIBLE_BEFORE == "23:00"
+    assert settings.FILING_VISIBLE_BEFORE == "22:40"
 
 
 @pytest.mark.usefixtures("listed", "calendar_in_db")

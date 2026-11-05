@@ -172,7 +172,7 @@ DATAGOV_BASE_URL = env.str("DATAGOV_BASE_URL", default="https://data.gov.tw")
 DATAGOV_TIMEOUT = env.float("DATAGOV_TIMEOUT", default=60.0)
 MOPS_DOC_BASE_URL = env.str("MOPS_DOC_BASE_URL", default="https://doc.twse.com.tw")
 MOPS_TIMEOUT = env.float("MOPS_TIMEOUT", default=60.0)
-FILING_VISIBLE_BEFORE = env.str("FILING_VISIBLE_BEFORE", default="23:00")
+FILING_VISIBLE_BEFORE = env.str("FILING_VISIBLE_BEFORE", default="22:40")
 ETL_RATE_LIMITS: dict[str, dict[str, float]] = {
     "twse": {
         "min_interval": env.float("TWSE_MIN_INTERVAL", default=3.5),
