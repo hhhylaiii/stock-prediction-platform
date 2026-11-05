@@ -14,7 +14,7 @@ from django.db import IntegrityError, transaction
 
 from apps.research.features.store import export_year
 from apps.research.holdout import HoldoutError, claim_holdout
-from apps.research.models import FeatureDaily, ModelRun
+from apps.research.models import BacktestMetric, FeatureDaily, ModelRun
 from apps.research.prediction_cache import fold_path, fold_record
 from apps.research.runs import (
     LIBRARIES,
@@ -344,8 +344,35 @@ def test_drop_run_removes_its_rows_models_and_cached_predictions(artifacts: Path
     assert kept.exists()
 
 
+def backtest(run_key: str) -> BacktestMetric:
+    return BacktestMetric.objects.create(
+        run_key=run_key,
+        model_type="ridge",
+        objective="rank",
+        horizon=20,
+        metric="rank_ic",
+        grain="total",
+        period_start=d("2014-01-02"),
+        period_end=d("2024-12-31"),
+        value=0.02,
+    )
+
+
+def test_drop_run_removes_its_backtest_metrics(artifacts: Path) -> None:
+    record_run(run(), {"run": 0})
+    backtest("wf1")
+    backtest("wf2")
+    backtest("wf3")
+
+    assert drop_run("wf1") == 1
+    assert drop_run("wf3") == 0
+
+    assert list(BacktestMetric.objects.values_list("run_key", flat=True)) == ["wf2"]
+
+
 def test_drop_run_keeps_a_run_with_a_holdout_claim(artifacts: Path) -> None:
     record_run(run(), {"run": 0})
+    backtest("wf1")
     path = cached(artifacts, "wf1")
     claim_holdout("rank", "wf1", d("2025-03-31"))
 
@@ -353,6 +380,7 @@ def test_drop_run_keeps_a_run_with_a_holdout_claim(artifacts: Path) -> None:
         drop_run("wf1")
 
     assert ModelRun.objects.exists()
+    assert BacktestMetric.objects.filter(run_key="wf1").exists()
     assert model_path("wf1", "wf1.ridge.h20.f000").exists()
     assert path.exists()
 
@@ -376,12 +404,14 @@ def test_drop_run_keeps_a_run_past_candidate(artifacts: Path, status: str) -> No
     record_run(run(), {"run": 0})
     record_run(run("wf1.ridge.h20.f001"))
     ModelRun.objects.filter(run_id="wf1.ridge.h20.f001").update(status=status)
+    backtest("wf1")
     path = cached(artifacts, "wf1")
 
     with pytest.raises(RunError, match=f"{status} models, which drop_run keeps"):
         drop_run("wf1")
 
     assert ModelRun.objects.count() == 2
+    assert BacktestMetric.objects.filter(run_key="wf1").exists()
     assert model_path("wf1", "wf1.ridge.h20.f000").exists()
     assert path.exists()
 

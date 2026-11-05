@@ -16,7 +16,7 @@ from django.db import transaction
 
 from apps.research.features.store import existing_partition
 from apps.research.holdout import HoldoutTicket, authorize_folds, is_holdout, require_key
-from apps.research.models import HoldoutRun, ModelRun, ModelStatus
+from apps.research.models import BacktestMetric, HoldoutRun, ModelRun, ModelStatus
 from apps.research.prediction_cache import fold_path, fold_record
 from apps.research.ranges import years
 from apps.research.walkforward import Fold
@@ -136,7 +136,7 @@ def _remove(directory: Path) -> None:
 
 
 def drop_run(run_key: str) -> int:
-    """Delete a run's model_run rows, model files and cached predictions.
+    """Delete a run's model_run rows, backtest metrics, model files and cached predictions.
 
     Holdout runs stay, and so does the feature screening once any holdout run exists.
     """
@@ -154,6 +154,7 @@ def drop_run(run_key: str) -> int:
                 "change or remove them by hand"
             )
         ModelRun.objects.filter(run_id__in=[row.run_id for row in rows]).delete()
+        BacktestMetric.objects.filter(run_key=run_key).delete()
     _remove(models)
     _remove(cache)
     return len(rows)
