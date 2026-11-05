@@ -21,7 +21,7 @@ from apps.research.prediction_cache import fold_cached, fold_record
 from apps.research.ranges import years
 from apps.research.walkforward import Fold
 
-LIBRARIES = ("django", "numpy", "pandas", "pyarrow", "scikit-learn")
+LIBRARIES = ("django", "numpy", "pandas", "pyarrow", "scikit-learn", "lightgbm")
 MODEL_SUFFIX = ".pkl"
 CHUNK = 1 << 20
 SCREENING_MODEL = "screening"
