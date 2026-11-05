@@ -83,6 +83,26 @@ uv run python manage.py check_quality --date 2026-10-28
 - `catchup` 預設補到前一交易日；`--dry-run` 只列出每個 dataset 缺哪些日子。
 - `reprocess` 只用 raw 表重建，不發請求；只支援證交所、櫃買。
 
+## 財報實際公告日回補
+
+Phase 1 的 `financial_statement.announce_date` 是法定截止日的下一個交易日。證交所電子書（`doc.twse.com.tw` t57sb01）列出每份財報的上傳時間，一次性回補把它改成實際可用的交易日：
+
+```bash
+uv run python manage.py backfill --source mops --dataset statement_filing --from 2009-01-01
+uv run python manage.py backfill --source mops --dataset statement_filing --from 2009-01-01 --resume
+```
+
+- 每檔只查 `financial_statement` 有資料的年度，每年一次請求，約 3.2 萬次，3.5 秒間隔約 35 小時；中斷後用 `--resume` 接著跑，拒收的代號用 `--retry-rejected <run_id>` 重跑。
+- 上傳時間在交易日 23:00（`FILING_VISIBLE_BEFORE`）之前算當天，之後或非交易日算下一個交易日；英文版不算。
+- 只會提早（plan K2）。比原值晚的（晚交或更正後重傳）不改，每檔寫一列 `data_quality_log`（`statement_filed_later`，warning）；看筆數：
+
+```bash
+docker compose exec db psql -U twp -d twp -c \
+  "select count(*), sum(jsonb_array_length(detail->'filed_later')) from data_quality_log where check_name = 'statement_filed_later'"
+```
+
+- 月營收沒有歷史申報日可查，維持 Phase 1 的保守值。
+
 ## 告警
 
 warning 與 error 一律寫 log；`.env` 設了 `ALERT_WEBHOOK_URL` 就另外 POST JSON：
