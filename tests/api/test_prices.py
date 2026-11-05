@@ -83,6 +83,18 @@ def test_missing_and_untraded_sessions_stay_as_empty_bars(client: Client) -> Non
     assert (bars[2]["close"], bars[2]["volume"], bars[2]["turnover"]) == (None, 0, 0)
 
 
+def test_sessions_missing_at_the_window_start_stay_as_empty_bars(client: Client) -> None:
+    days = LAST_70[-8:]
+    add_stock()
+    add_bars("2330", [*days[:2], *days[5:]], [10.0] * 5)
+
+    body = envelope_of(client.get("/api/stocks/2330/prices", {"days": 6}))
+
+    assert [bar["date"] for bar in body["data"]] == [day.isoformat() for day in days[2:]]
+    assert [bar["close"] for bar in body["data"]] == [None, None, None, 10.0, 10.0, 10.0]
+    assert body["meta"]["start_date"] == days[2].isoformat()
+
+
 def test_series_of_a_new_listing_starts_at_its_first_bar(client: Client) -> None:
     add_stock()
     add_bars("2330", LAST_70[-5:], [10.0] * 5)

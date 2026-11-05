@@ -229,7 +229,6 @@ REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [],
     "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.AllowAny"],
     "DEFAULT_THROTTLE_CLASSES": ["apps.api.throttling.ApiThrottle"],
-    "DEFAULT_METADATA_CLASS": None,
     "EXCEPTION_HANDLER": "apps.api.envelope.exception_handler",
     "NUM_PROXIES": env.int("API_NUM_PROXIES", default=0),
 }

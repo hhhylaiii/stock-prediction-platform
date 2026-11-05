@@ -26,13 +26,22 @@ def test_unknown_api_path_is_a_not_found_envelope(client: Client) -> None:
 
 
 @pytest.mark.parametrize("method", ["post", "put", "patch", "delete", "options"])
-def test_only_reads_are_allowed(client: Client, method: str) -> None:
-    response = getattr(client, method)("/api/etl/runs")
+@pytest.mark.parametrize("path", ["/api/etl/runs", "/api/stocks/2330", "/api/data-quality"])
+def test_only_reads_are_allowed(client: Client, method: str, path: str) -> None:
+    response = getattr(client, method)(path)
 
     assert response.status_code == 405
+    assert response["Allow"] == "GET, HEAD"
     body = envelope_of(response)
     assert body["success"] is False
     assert body["error"]["code"] == "method_not_allowed"
+
+
+@pytest.mark.parametrize("method", ["get", "head", "post", "options"])
+def test_unknown_paths_are_not_found_for_every_method(client: Client, method: str) -> None:
+    response = getattr(client, method)("/api/no-such-endpoint")
+
+    assert response.status_code == 404
 
 
 def test_invalid_query_lists_the_failing_fields(client: Client) -> None:

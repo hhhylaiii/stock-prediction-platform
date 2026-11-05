@@ -11,6 +11,7 @@ class EnvelopePagination(PageNumberPagination):
     """Page-number pages of API_PAGE_SIZE; ?page_size= may shrink or grow up to the cap."""
 
     page_size_query_param = "page_size"
+    last_page_strings = ()
 
     def __init__(self) -> None:
         self.page_size = settings.API_PAGE_SIZE

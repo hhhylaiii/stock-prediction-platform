@@ -3,15 +3,16 @@
 from datetime import date
 from typing import Any
 
+from django.db.models import Max, Min
 from django.shortcuts import get_object_or_404
 from rest_framework.exceptions import NotFound
 from rest_framework.request import Request
 from rest_framework.response import Response
-from rest_framework.views import APIView
 
 from apps.api.envelope import envelope
 from apps.api.params import PriceQuery, parse
 from apps.api.sessions import load_calendar, trailing_sessions
+from apps.api.views import ReadOnlyView
 from apps.market.adjust import PRICE_COLUMNS, adjusted
 from apps.market.models import DailyPrice, StockMaster
 
@@ -43,7 +44,7 @@ def quote(bars: list[dict[str, Any]]) -> dict[str, Any] | None:
     tail = {"volume": latest["volume"], "turnover": latest["turnover"]}
     if len(bars) == 1:
         empty = dict.fromkeys(
-            ("previous_date", "previous_close", "reference_price", "change", "change_pct")
+            ("previous_date", "previous_close", "reference_price", "change", "change_ratio")
         )
         return {**head, **empty, **tail}
     previous = bars[1]
@@ -54,7 +55,7 @@ def quote(bars: list[dict[str, Any]]) -> dict[str, Any] | None:
         "previous_close": float(previous["close"]),
         "reference_price": round(reference, PRICE_DIGITS),
         "change": round(close - reference, PRICE_DIGITS),
-        "change_pct": round(close / reference - 1, RATIO_DIGITS),
+        "change_ratio": round(close / reference - 1, RATIO_DIGITS),
         **tail,
     }
 
@@ -71,7 +72,7 @@ def bar(day: date, row: dict[str, Any] | None, anchor_factor: float) -> dict[str
     return {"date": day, **prices, "volume": row["volume"], "turnover": row["turnover"]}
 
 
-class StockDetailView(APIView):
+class StockDetailView(ReadOnlyView):
     def get(self, request: Request, stock_id: str) -> Response:
         stock = get_object_or_404(StockMaster, stock_id=stock_id)
         bars = list(
@@ -82,27 +83,27 @@ class StockDetailView(APIView):
         return envelope({**master_fields(stock), "quote": quote(bars)})
 
 
-class StockPricesView(APIView):
+class StockPricesView(ReadOnlyView):
     def get(self, request: Request, stock_id: str) -> Response:
         days = parse(PriceQuery, request)["days"]
         if not StockMaster.objects.filter(stock_id=stock_id).exists():
             raise NotFound(f"stock {stock_id} is not in stock_master")
         prices = DailyPrice.objects.filter(stock_id=stock_id)
-        anchor = prices.order_by("-date").values("date", "adj_factor").first()
-        if anchor is None:
+        span = prices.aggregate(first=Min("date"), last=Max("date"))
+        if span["last"] is None:
             meta = {"days": days, "start_date": None, "end_date": None, "adjusted_to": None}
             return envelope([], meta)
-        sessions = trailing_sessions(load_calendar(), anchor["date"], days)
+        sessions = trailing_sessions(load_calendar(), span["last"], days)
         rows = {
             row["date"]: row
-            for row in prices.filter(date__range=(sessions[0], sessions[-1])).values(*BAR_FIELDS)
+            for row in prices.filter(date__range=(sessions[0], span["last"])).values(*BAR_FIELDS)
         }
-        first = min(rows, default=anchor["date"])
-        window = [day for day in sessions if rows and day >= first]
+        anchor_factor = rows[span["last"]]["adj_factor"]
+        window = [day for day in sessions if day >= span["first"]]
         meta = {
             "days": days,
             "start_date": window[0] if window else None,
             "end_date": window[-1] if window else None,
-            "adjusted_to": anchor["date"],
+            "adjusted_to": span["last"],
         }
-        return envelope([bar(day, rows.get(day), anchor["adj_factor"]) for day in window], meta)
+        return envelope([bar(day, rows.get(day), anchor_factor) for day in window], meta)

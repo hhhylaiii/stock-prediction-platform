@@ -18,6 +18,7 @@ class PriceQuery(serializers.Serializer[Any]):
 
 class RunQuery(serializers.Serializer[Any]):
     date = serializers.DateField(required=False)
+    scope = serializers.ChoiceField(choices=["day", "covering"], default="day")
 
 
 class QualityQuery(serializers.Serializer[Any]):

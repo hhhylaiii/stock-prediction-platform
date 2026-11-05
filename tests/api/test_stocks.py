@@ -38,7 +38,7 @@ def test_stock_detail_returns_master_fields_and_latest_quote(client: Client) -> 
             "previous_close": 1062.0,
             "reference_price": 1062.0,
             "change": 23.0,
-            "change_pct": round(1085 / 1062 - 1, 6),
+            "change_ratio": round(1085 / 1062 - 1, 6),
             "volume": 1_000_002,
             "turnover": 1_085_000_000,
         },
@@ -54,7 +54,7 @@ def test_change_on_an_ex_dividend_day_is_against_the_reference_price(client: Cli
     assert quote["previous_close"] == 100.0
     assert quote["reference_price"] == 95.0
     assert quote["change"] == 1.0
-    assert quote["change_pct"] == round(96 / 95 - 1, 6)
+    assert quote["change_ratio"] == round(96 / 95 - 1, 6)
 
 
 def test_a_day_without_trades_keeps_the_last_traded_quote(client: Client) -> None:
@@ -78,7 +78,7 @@ def test_a_single_bar_has_no_change(client: Client) -> None:
     assert quote["previous_close"] is None
     assert quote["reference_price"] is None
     assert quote["change"] is None
-    assert quote["change_pct"] is None
+    assert quote["change_ratio"] is None
 
 
 def test_stock_without_prices_has_no_quote(client: Client) -> None:

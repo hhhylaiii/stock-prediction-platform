@@ -33,20 +33,19 @@ def add_run(
     )
 
 
-def test_runs_covering_the_date_in_start_order(client: Client) -> None:
+def test_default_scope_lists_that_day_s_increment_in_start_order(client: Client) -> None:
     tpex = add_run("daily_price", OCT_30, OCT_30, taipei(2026, 10, 30, 15, 33), source="tpex")
     twse = add_run("daily_price", OCT_30, OCT_30, taipei(2026, 10, 30, 15, 31))
-    backfill = add_run(
-        "TaiwanStockPrice", date(2010, 1, 4), OCT_30, taipei(2026, 10, 1), source="finmind"
-    )
+    add_run("TaiwanStockPrice", date(2010, 1, 4), OCT_30, taipei(2026, 10, 1), source="finmind")
+    add_run("trading_calendar_refresh", date(2026, 10, 1), OCT_29, taipei(2026, 10, 30, 15, 10))
     add_run("daily_price", OCT_29, OCT_29, taipei(2026, 10, 29, 15, 31))
 
     response = client.get("/api/etl/runs", {"date": "2026-10-30"})
 
     assert response.status_code == 200
     body = envelope_of(response)
-    assert [run["run_id"] for run in body["data"]] == [backfill.pk, twse.pk, tpex.pk]
-    assert body["data"][1] == {
+    assert [run["run_id"] for run in body["data"]] == [twse.pk, tpex.pk]
+    assert body["data"][0] == {
         "run_id": twse.pk,
         "source": "twse",
         "dataset": "daily_price",
@@ -60,11 +59,37 @@ def test_runs_covering_the_date_in_start_order(client: Client) -> None:
     }
     assert body["meta"] == {
         "date": "2026-10-30",
-        "total": 3,
+        "scope": "day",
+        "total": 2,
         "page": 1,
         "page_size": 20,
         "pages": 1,
     }
+
+
+def test_covering_scope_adds_multi_day_runs_over_the_date(client: Client) -> None:
+    twse = add_run("daily_price", OCT_30, OCT_30, taipei(2026, 10, 30, 15, 31))
+    backfill = add_run(
+        "TaiwanStockPrice", date(2010, 1, 4), OCT_30, taipei(2026, 10, 1), source="finmind"
+    )
+    refresh = add_run(
+        "trading_calendar_refresh", date(2026, 10, 1), OCT_30, taipei(2026, 11, 2, 15, 10)
+    )
+    add_run("trading_calendar_refresh", date(2026, 10, 1), OCT_29, taipei(2026, 10, 30, 15, 10))
+    add_run("daily_price", date(2026, 11, 2), date(2026, 11, 2), taipei(2026, 11, 2, 15, 31))
+
+    body = envelope_of(client.get("/api/etl/runs", {"date": "2026-10-30", "scope": "covering"}))
+
+    assert [run["run_id"] for run in body["data"]] == [backfill.pk, twse.pk, refresh.pk]
+    assert body["meta"]["scope"] == "covering"
+
+
+@pytest.mark.parametrize("scope", ["all", "DAY"])
+def test_unknown_scope_is_invalid(client: Client, scope: str) -> None:
+    response = client.get("/api/etl/runs", {"date": "2026-10-30", "scope": scope})
+
+    assert response.status_code == 400
+    assert set(envelope_of(response)["error"]["fields"]) == {"scope"}
 
 
 def test_failed_and_running_runs_are_listed_with_their_error(client: Client) -> None:
@@ -91,11 +116,12 @@ def test_date_defaults_to_the_latest_session_on_or_before_today(client: Client) 
     assert [entry["run_id"] for entry in body["data"]] == [run.pk]
 
 
-@time_machine.travel(taipei(2027, 1, 4, 10), tick=False)
-def test_date_defaults_to_the_calendar_end_when_today_is_past_it(client: Client) -> None:
-    body = envelope_of(client.get("/api/etl/runs"))
+@time_machine.travel(taipei(2026, 12, 1, 10), tick=False)
+def test_today_past_the_calendar_reports_it_outdated(client: Client) -> None:
+    response = client.get("/api/etl/runs")
 
-    assert body["meta"]["date"] == "2026-11-30"
+    assert response.status_code == 503
+    assert envelope_of(response)["error"]["code"] == "calendar_outdated"
 
 
 def test_pages_hold_twenty_runs(client: Client) -> None:
@@ -108,6 +134,7 @@ def test_pages_hold_twenty_runs(client: Client) -> None:
     assert len(first["data"]) == 20
     assert first["meta"] == {
         "date": "2026-10-30",
+        "scope": "day",
         "total": 25,
         "page": 1,
         "page_size": 20,
@@ -127,7 +154,7 @@ def test_page_size_is_capped_at_100(client: Client) -> None:
     assert huge["meta"]["page_size"] == 100
 
 
-@pytest.mark.parametrize("page", ["2", "abc"])
+@pytest.mark.parametrize("page", ["2", "abc", "last", "0"])
 def test_page_out_of_range_is_not_found(client: Client, page: str) -> None:
     add_run("daily_price", OCT_30, OCT_30, taipei(2026, 10, 30, 15, 31))
 
@@ -143,6 +170,7 @@ def test_an_empty_day_is_one_empty_page(client: Client) -> None:
     assert body["data"] == []
     assert body["meta"] == {
         "date": "2026-10-30",
+        "scope": "day",
         "total": 0,
         "page": 1,
         "page_size": 20,

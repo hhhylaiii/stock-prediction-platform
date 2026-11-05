@@ -2,7 +2,9 @@ from datetime import date
 
 import pytest
 import time_machine
+from django.db import connection
 from django.test import Client
+from django.test.utils import CaptureQueriesContext
 from pytest_django import DjangoAssertNumQueries
 
 from apps.etl.models import DataQualityLog
@@ -100,13 +102,17 @@ def test_window_counts_sessions_and_skips_holidays(client: Client) -> None:
 
 
 @time_machine.travel(FRIDAY_NIGHT, tick=False)
-def test_logs_outside_the_window_are_left_out(client: Client) -> None:
+def test_only_logs_inside_the_window_are_loaded(client: Client) -> None:
     log(OCT_28, "row_count", Severity.ERROR)
     log(date(2026, 10, 31), "row_count", Severity.ERROR)
 
-    days = envelope_of(client.get("/api/data-quality", {"days": 2}))["data"]
+    with CaptureQueriesContext(connection) as queries:
+        days = envelope_of(client.get("/api/data-quality", {"days": 2}))["data"]
 
     assert [entry["checks"] for entry in days] == [[], []]
+    loaded = [query["sql"] for query in queries if "data_quality_log" in query["sql"]]
+    assert len(loaded) == 1
+    assert "BETWEEN '2026-10-29'::date AND '2026-10-30'::date" in loaded[0]
 
 
 @time_machine.travel(FRIDAY_NIGHT, tick=False)
@@ -132,8 +138,16 @@ def test_weekend_anchors_on_the_last_session(client: Client) -> None:
     assert body["meta"]["end_date"] == "2026-10-30"
 
 
-@time_machine.travel(taipei(2027, 2, 1, 9), tick=False)
-def test_today_past_the_calendar_anchors_on_its_last_session(client: Client) -> None:
+@time_machine.travel(taipei(2026, 12, 1, 9), tick=False)
+def test_today_past_the_calendar_reports_it_outdated(client: Client) -> None:
+    response = client.get("/api/data-quality", {"days": 1})
+
+    assert response.status_code == 503
+    assert envelope_of(response)["error"]["code"] == "calendar_outdated"
+
+
+@time_machine.travel(taipei(2026, 11, 30, 23), tick=False)
+def test_the_calendar_s_last_day_is_still_served(client: Client) -> None:
     body = envelope_of(client.get("/api/data-quality", {"days": 1}))
 
     assert body["meta"]["end_date"] == "2026-11-30"

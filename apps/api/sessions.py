@@ -17,7 +17,7 @@ class CalendarUnavailable(APIException):
 class CalendarOutdated(APIException):
     status_code = 503
     default_code = "calendar_outdated"
-    default_detail = "Prices run past the end of the trading calendar."
+    default_detail = "Today or the latest prices fall after the end of the trading calendar."
 
 
 def load_calendar() -> TradingDays:
@@ -28,9 +28,12 @@ def load_calendar() -> TradingDays:
 
 
 def latest_session(calendar: TradingDays) -> date:
-    """The last session on or before today in Asia/Taipei, or before the calendar end."""
+    """The last session on or before today in Asia/Taipei."""
+    today = timezone.localdate()
+    if today > calendar.end:
+        raise CalendarOutdated(f"today {today} is after the calendar end {calendar.end}")
     try:
-        return calendar.latest_on_or_before(min(timezone.localdate(), calendar.end))
+        return calendar.latest_on_or_before(today)
     except OutsideCalendarError as exc:
         raise CalendarUnavailable(str(exc)) from exc
 
