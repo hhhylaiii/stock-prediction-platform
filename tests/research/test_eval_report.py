@@ -41,6 +41,17 @@ def reports() -> tuple[RankReport, RankReport]:
     )
 
 
+def assert_tables_are_rectangular(text: str) -> None:
+    """Every row of each Markdown table holds as many cells as its header."""
+    widths: list[int] = []
+    for line in [*text.splitlines(), ""]:
+        if line.startswith("|"):
+            widths.append(line.count("|"))
+            continue
+        assert len(set(widths)) <= 1, widths
+        widths = []
+
+
 def test_report_renders_every_section_from_a_synthetic_prediction_set() -> None:
     frame = panel()
     five, twenty = reports()
@@ -112,6 +123,13 @@ def test_report_renders_every_section_from_a_synthetic_prediction_set() -> None:
         line.startswith(f"| {holdout.index} | holdout | {holdout.test_start}") for line in lines
     )
     assert "| 1 | a, b | — |" in text
+    twenty_section = text.split("## 排名 20 日")[1].split("## 特徵重要度")[0]
+    assert "贏 baseline" not in twenty_section
+    calm = cast(pd.Series, coverage.loc[1])
+    assert f"| 1 | {calm['coverage'] * 100:.1f}% | {calm['width']:.4f} |" in text
+    assert coverage.index.tolist() == [1, 2, 3, 4, 5, "all"]
+    assert all(f"| {bucket} | " in text for bucket in (2, 3, 4, 5))
+    assert_tables_are_rectangular(text)
     assert "| 2 | b, c | 1 |" in text
     top = cast(pd.Series, deciles[5].loc[("all", "D10")])
     assert (
@@ -178,11 +196,17 @@ def test_rank_metrics_hold_total_fold_year_month_and_liquidity_rows() -> None:
         assert years["value"].tolist() == pytest.approx(five.by_year[column].tolist())
         terciles = rows[(rows["segment"] != "") & (rows["metric"] == metric)]
         assert terciles["segment"].tolist() == ["liq_t1", "liq_t2", "liq_t3"]
+        assert set(terciles["grain"]) == {"total"}
+        assert set(terciles["period_start"]) == {research()[0].test_start}
+        assert set(terciles["period_end"]) == {research()[-1].eval_end}
         assert terciles["value"].tolist() == pytest.approx(five.by_liquidity[column].tolist())
     months = rows[(rows["grain"] == "month") & (rows["metric"] == "rank_ic")]
     assert months["value"].tolist() == pytest.approx(five.monthly.tolist())
     assert months["period_start"].tolist() == five.monthly.index.tolist()
     assert months["period_end"].iloc[1] == date(2016, 10, 31)
+    days = rows[(rows["grain"] == "month") & (rows["metric"] == "rank_ic_days")]
+    assert days["period_start"].tolist() == five.monthly_days.index.tolist()
+    assert days["value"].tolist() == five.monthly_days.astype(float).tolist()
     assert set(rows["metric"]) == set(RANK_METRICS)
     assert rows.duplicated(["metric", "grain", "period_start", "period_end", "segment"]).sum() == 0
 
@@ -200,7 +224,8 @@ def test_writing_rank_metrics_replaces_the_group_and_keeps_others() -> None:
         "period_end": date(2010, 1, 31),
         "value": 0.5,
     }
-    BacktestMetric.objects.create(model_type="lightgbm", **other)
+    for name in RANK_METRICS:
+        BacktestMetric.objects.create(model_type="lightgbm", **{**other, "metric": name})
     BacktestMetric.objects.create(model_type="ridge", **other)
     BacktestMetric.objects.create(model_type="lightgbm", **{**other, "horizon": 20})
     BacktestMetric.objects.create(model_type="lightgbm", **{**other, "objective": "regression"})
@@ -221,6 +246,14 @@ def test_writing_rank_metrics_replaces_the_group_and_keeps_others() -> None:
     assert not stored.filter(period_start=date(2010, 1, 1)).exists()
     assert BacktestMetric.objects.filter(model_type="ridge").count() == 1
     assert BacktestMetric.objects.filter(period_start=date(2010, 1, 1)).count() == 5
+    assert not BacktestMetric.objects.filter(
+        model_type="lightgbm",
+        horizon=5,
+        objective="rank",
+        run_key="rank-x",
+        metric__in=RANK_METRICS,
+        period_start=date(2010, 1, 1),
+    ).exists()
     assert BacktestMetric.objects.filter(metric="decile_spread").count() == 1
     beat = stored.get(metric="beat_baseline_share", grain="total")
     assert beat.value == pytest.approx(five.beat_share)
@@ -259,8 +292,12 @@ def test_percent_cells_without_a_value_render_a_bare_dash() -> None:
     coverage = coverage_report(frame, "fwd_ret_open", "q10", "q90", folds())
     consistency = consistency_report(frame, "q10", "q50", "q90", "vol", "prob", folds())
 
-    text = render_report("rank-x lightgbm", [], coverage=coverage, consistency=consistency)
+    blank = rank_report(frame.assign(score=np.nan), "score", 5, folds())
+
+    text = render_report("rank-x lightgbm", [blank], coverage=coverage, consistency=consistency)
 
     assert "| 全體 | — | — |" in text
     assert "| 上漲機率與 q50 矛盾 | — | — | 0 | 0 |" in text
     assert "—%" not in text
+    assert "- IC 為正的研究摺比例：—\n" in text
+    assert "nan" not in text

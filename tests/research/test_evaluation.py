@@ -144,6 +144,9 @@ def test_rank_report_counts_tradable_universe_rows_of_research_folds() -> None:
     months = pd.Index([day.replace(day=1) for day in days.index])
     assert report.monthly.index.tolist() == sorted(set(months))
     assert report.monthly.iloc[0] == pytest.approx(days[months == months.min()].mean())
+    assert report.monthly_days.index.tolist() == report.monthly.index.tolist()
+    assert report.monthly_days.iloc[0] == (months == months.min()).sum()
+    assert report.monthly_days.sum() == report.total.n_days
 
 
 def test_beat_share_compares_model_and_baseline_on_the_same_rows() -> None:

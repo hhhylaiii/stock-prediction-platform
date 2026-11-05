@@ -38,6 +38,7 @@ RANK_METRICS = (
     "beat_baseline_folds",
     "neutral_rank_ic",
     "neutral_rank_ic_nw_t",
+    "rank_ic_days",
 )
 SAMPLES = {"all": "全部", "liquid": "成交金額前三分之一"}
 LIQUIDITY_NAMES = {"1": "低", "2": "中", "3": "高"}
@@ -257,11 +258,12 @@ def rank_metrics(report: RankReport, run_key: str, model_type: str) -> pd.DataFr
             ("rank_ic", MetricGrain.YEAR, first, last, mean, ""),
             ("rank_ic_nw_t", MetricGrain.YEAR, first, last, spread, ""),
         ]
-    monthly = zip(report.monthly.index.tolist(), report.monthly.tolist(), strict=True)
-    rows += [
-        ("rank_ic", MetricGrain.MONTH, month, _month_end(month), value, "")
-        for month, value in monthly
-    ]
+    monthly = zip(report.monthly.index.tolist(), report.monthly, report.monthly_days, strict=True)
+    for month, value, days in monthly:
+        rows += [
+            ("rank_ic", MetricGrain.MONTH, month, _month_end(month), value, ""),
+            ("rank_ic_days", MetricGrain.MONTH, month, _month_end(month), float(days), ""),
+        ]
     frame = pd.DataFrame(
         rows, columns=["metric", "grain", "period_start", "period_end", "value", "segment"]
     )
