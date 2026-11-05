@@ -35,9 +35,14 @@ dev = [
     "time-machine>=2.15",
     "types-requests>=2.32",
 ]
+research = [
+    "xgboost>=3; sys_platform == 'darwin'",
+    "xgboost-cpu>=3; sys_platform != 'darwin'",
+]
 
 [tool.uv]
 package = false
+default-groups = ["dev", "research"]
 
 [tool.ruff]
 line-length = 100

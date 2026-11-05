@@ -19,7 +19,7 @@ RUN apt-get update \
 WORKDIR /app
 
 COPY pyproject.toml uv.lock .python-version ./
-RUN uv sync --frozen --no-dev --no-install-project
+RUN uv sync --frozen --no-dev --no-group research --no-install-project
 
 COPY --chown=app:app . .
 RUN python manage.py collectstatic --noinput
