@@ -247,10 +247,15 @@ def test_a_restatement_sets_the_date_even_when_corrected_or_early(
     }
 
 
-def test_the_affiliates_report_is_not_an_announcement(page: Callable[[str], bytes]) -> None:
+@pytest.mark.parametrize(
+    "supplement", ["關係企業合併報表", "關係企業合併報表重編", "關係企業合併報表(重編)"]
+)
+def test_the_affiliates_report_is_not_an_announcement(
+    page: Callable[[str], bytes], supplement: str
+) -> None:
     listing = text(page("2330_99"))
     assert listing.count("英文版-母公司財報") == 4
-    supplemented = listing.replace("英文版-母公司財報", "關係企業合併報表", 1)
+    supplemented = listing.replace("英文版-母公司財報", supplement, 1)
     assert parse_listing(supplemented, "2330", 99) == parse_listing(listing, "2330", 99)
 
 

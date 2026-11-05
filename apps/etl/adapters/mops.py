@@ -192,9 +192,15 @@ def parse_listing(page: str, code: str, roc_year: int) -> list[Filing]:
         if len(row) != len(header):
             raise SchemaChangedError(f"doc.twse {code} {roc_year} row has {len(row)} cells")
         cells = {name: row[index] for name, index in position.items()}
-        if ENGLISH not in cells[DETAIL] and cells[DETAIL] not in SUPPLEMENTS:
+        if ENGLISH not in cells[DETAIL] and _report(cells[DETAIL])[0] not in SUPPLEMENTS:
             filings.append(_filing(cells, code, roc_year))
     return filings
+
+
+def _report(detail: str) -> tuple[str, bool]:
+    """The report named by a detail, and whether that upload restates it."""
+    mark = next((mark for mark in RESTATED_MARKS if detail.endswith(mark)), "")
+    return detail.removesuffix(mark), bool(mark)
 
 
 def _filing(cells: dict[str, str], code: str, roc_year: int) -> Filing:
@@ -203,9 +209,8 @@ def _filing(cells: dict[str, str], code: str, roc_year: int) -> Filing:
         raise SchemaChangedError(
             f"doc.twse {code} {roc_year} listed {cells[CODE]!r} {cells[YEAR]!r}"
         )
-    mark = next((mark for mark in RESTATED_MARKS if cells[DETAIL].endswith(mark)), "")
-    restated = bool(mark)
-    fin_type = REPORT_TYPES.get(cells[DETAIL].removesuffix(mark))
+    report, restated = _report(cells[DETAIL])
+    fin_type = REPORT_TYPES.get(report)
     if cells[KIND] != FINANCIAL_REPORT or fin_type is None:
         raise SchemaChangedError(
             f"doc.twse {code} {roc_year} has an unknown report {cells[KIND]!r} {cells[DETAIL]!r}"
