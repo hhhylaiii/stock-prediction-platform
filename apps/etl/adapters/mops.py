@@ -1,4 +1,4 @@
-"""MOPS: when each financial report was filed, and the daily scan of new filings (SPEC §3, §5)."""
+"""MOPS: when each financial report was filed, and the daily scans of new filings (SPEC §3, §5)."""
 
 import logging
 import re
@@ -16,11 +16,21 @@ from django.utils import timezone
 
 from apps.etl.adapters.base import BaseAdapter
 from apps.etl.client import SourceClient
-from apps.etl.deadlines import statement_deadline
+from apps.etl.deadlines import revenue_deadline, statement_deadline
 from apps.etl.errors import SchemaChangedError, SourceError
 from apps.etl.filings import FILING_COLUMNS, Filing, apply_statement_filings
 from apps.etl.models import EtlRun, RawMops
 from apps.etl.ratelimit import RateLimiter, RetryableError
+from apps.etl.revenue_scan import (
+    ORIGINS,
+    REVENUE_COLUMNS,
+    Figures,
+    insert_new_revenues,
+    open_months,
+    parse_revenue_page,
+    revenue_rows,
+    without_generation_time,
+)
 from apps.etl.statement_scan import SCAN_COLUMNS, insert_new_statements, scan_session
 from apps.etl.statement_summary import (
     MARKETS,
@@ -39,6 +49,9 @@ from apps.market.models import FinancialStatement, FinType
 MOPS_MIN_INTERVAL = 5.0
 STATEMENT_FILING = "statement_filing"
 STATEMENT_SCAN = "statement_scan"
+REVENUE_SCAN = "revenue_scan"
+SCANS = frozenset({STATEMENT_SCAN, REVENUE_SCAN})
+REVENUE_PATH = "/nas/t21"
 SUMMARY_PATH = "/mops/web/ajax_"
 SUMMARY_ENCODING = "utf-8"
 EXPORT_NAME = re.compile(r"name='filename' value='[^']*'")
@@ -137,6 +150,15 @@ class MopsSummaryClient(SourceClient):
         }
         body = self.post_content(f"{self.base_url}{SUMMARY_PATH}{report}", form)
         return {"report": report, **form}, body.decode(SUMMARY_ENCODING, errors="replace")
+
+    def revenue(
+        self, market: str, roc_year: int, month: int, origin: int
+    ) -> tuple[dict[str, str], str]:
+        """One market's revenue page of a month, for domestic (0) or foreign (1) companies."""
+        name = f"t21sc03_{roc_year}_{month}_{origin}.html"
+        body = self.get_content(f"{self.base_url}{REVENUE_PATH}/{market}/{name}", {})
+        params = {"market": market, "year": str(roc_year), "month": str(month)}
+        return {**params, "origin": str(origin)}, body.decode(PAGE_ENCODING, errors="replace")
 
 
 class _Rows(HTMLParser):
@@ -239,7 +261,7 @@ def _uploaded_at(text: str, code: str, roc_year: int) -> datetime:
 class MopsAdapter(BaseAdapter):
     source = "mops"
     raw_model = RawMops
-    datasets = frozenset({STATEMENT_FILING, STATEMENT_SCAN})
+    datasets = frozenset({STATEMENT_FILING, *SCANS})
     per_stock = True
 
     def __init__(
@@ -253,7 +275,7 @@ class MopsAdapter(BaseAdapter):
         self.summaries = MopsSummaryClient.build(limiter, session)
 
     def run(self, dataset: str, start: date, end: date, stock_id: str | None = None) -> EtlRun:
-        """The scan reads today's summaries; filing dates go stock by stock through backfill."""
+        """Scans read today's pages; filing dates go stock by stock through backfill."""
         self.require_dataset(dataset)
         if dataset == STATEMENT_FILING:
             raise ValueError(f"{self.source}/{dataset} goes stock by stock; use manage.py backfill")
@@ -266,10 +288,10 @@ class MopsAdapter(BaseAdapter):
         self, dataset: str, start: date, end: date, stock_id: str | None = None
     ) -> pd.DataFrame:
         self.require_dataset(dataset)
-        if dataset == STATEMENT_SCAN:
+        if dataset in SCANS:
             if stock_id is not None:
                 raise ValueError(f"{self.source}/{dataset} covers the whole market, not {stock_id}")
-            return self._scan(end)
+            return self._scan(end) if dataset == STATEMENT_SCAN else self._revenue_scan(end)
         if stock_id is None:
             raise ValueError(f"{self.source}/{dataset} goes stock by stock; give a stock")
         filings: list[Filing] = []
@@ -287,6 +309,8 @@ class MopsAdapter(BaseAdapter):
             return raw_df
         if dataset == STATEMENT_SCAN:
             return raw_df[raw_df[VALUE_COLUMNS].notna().any(axis=1)].reset_index(drop=True)
+        if dataset == REVENUE_SCAN:
+            return raw_df
         records = []
         for key, group in raw_df.groupby(["stock_id", "period", "fin_type"], sort=True):
             restated = group.loc[group["restated"], "uploaded_at"]
@@ -296,9 +320,10 @@ class MopsAdapter(BaseAdapter):
 
     def upsert(self, dataset: str, frame: pd.DataFrame) -> int:
         self.require_dataset(dataset)
-        if dataset == STATEMENT_SCAN:
+        if dataset in SCANS:
             session = scan_session(timezone.now(), self.calendar)
-            return insert_new_statements(frame, timezone.localdate(), session)
+            insert = insert_new_statements if dataset == STATEMENT_SCAN else insert_new_revenues
+            return insert(frame, timezone.localdate(), session)
         if frame.empty:
             return 0
         cutoff = time.fromisoformat(settings.FILING_VISIBLE_BEFORE)
@@ -339,6 +364,33 @@ class MopsAdapter(BaseAdapter):
                 if companies.keys() & found[report].keys():
                     raise SchemaChangedError(f"MOPS {report} {period} lists a company twice")
                 found[report] |= companies
+        return found
+
+    def _revenue_scan(self, day: date) -> pd.DataFrame:
+        """Each open month in both markets; a month past its deadline must have filers."""
+        records = []
+        for period in open_months(day, int(settings.REVENUE_SCAN_DAYS_AFTER)):
+            listed: set[str] = set()
+            for market in MARKETS:
+                companies = self._revenue_pages(market, period, listed)
+                if not companies and revenue_deadline(period) < day:
+                    raise SchemaChangedError(f"MOPS t21sc03 {market} {period} came back empty")
+                listed |= companies.keys()
+                records.extend(revenue_rows(companies, period))
+        return pd.DataFrame(records, columns=REVENUE_COLUMNS, dtype=object)
+
+    def _revenue_pages(self, market: str, period: str, listed: set[str]) -> dict[str, Figures]:
+        """Domestic and foreign pages, kept as raw first; a company may appear only once."""
+        year, month = int(period[:4]), int(period[5:])
+        found: dict[str, Figures] = {}
+        for origin in ORIGINS:
+            params, page = self.summaries.revenue(market, year - ROC_OFFSET, month, origin)
+            identity = {"html": without_generation_time(page)}
+            self.save_raw(REVENUE_SCAN, params, {"html": page}, identity)
+            companies = parse_revenue_page(page, market, origin, period)
+            if companies.keys() & (found.keys() | listed):
+                raise SchemaChangedError(f"MOPS t21sc03 {period} lists a company twice")
+            found |= companies
         return found
 
 

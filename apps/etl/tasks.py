@@ -15,7 +15,7 @@ from django.db.models import Min
 from django.utils import timezone
 
 from apps.etl.adapters import build_adapter
-from apps.etl.adapters.mops import STATEMENT_SCAN
+from apps.etl.adapters.mops import REVENUE_SCAN, STATEMENT_SCAN
 from apps.etl.alerts import dispatch
 from apps.etl.catchup import catch_up
 from apps.etl.errors import SourceError, SourceNotReadyError
@@ -23,6 +23,7 @@ from apps.etl.master_refresh import refresh_stock_master
 from apps.etl.models import DataQualityLog
 from apps.etl.quality import CHECKS, alerting, run_checks, should_run_prediction
 from apps.etl.ratelimit import RetryableError, ThrottledError
+from apps.etl.revenue_scan import open_months
 from apps.etl.runs import covered_days
 from apps.etl.statement_summary import open_periods
 from apps.market.calendar import TradingDays
@@ -105,11 +106,11 @@ def _session_today(slot: str | None = None) -> tuple[TradingDays, date] | None:
     return (calendar, today) if calendar.is_trading_day(today) else None
 
 
-def _landed(day: date) -> DataQualityLog:
+def _landed(day: date, scans: frozenset[tuple[str, str]] = frozenset()) -> DataQualityLog:
     """The daily datasets without a run for the session; a gate dataset among them is an error."""
     missing = sorted(
         f"{source}/{dataset}"
-        for source, dataset in _daily_jobs()
+        for source, dataset in _daily_jobs() | scans
         if day not in covered_days(source, dataset, [day])
     )
     blocking = [key for key in missing if key.split("/")[1] in GATE_DATASETS]
@@ -117,8 +118,10 @@ def _landed(day: date) -> DataQualityLog:
     return _replace_log(day, ETL_RUNS_CHECK, severity, {"missing": missing, "blocking": blocking})
 
 
-def _audit(day: date, calendar: TradingDays) -> list[DataQualityLog]:
-    results = [*run_checks(day, calendar), _landed(day)]
+def _audit(
+    day: date, calendar: TradingDays, scans: frozenset[tuple[str, str]] = frozenset()
+) -> list[DataQualityLog]:
+    results = [*run_checks(day, calendar), _landed(day, scans)]
     dispatch(results)
     return results
 
@@ -252,6 +255,18 @@ def statement_scan(self: Task[Any, Any], slot: str) -> str:
     return _run_once(self, "mops", STATEMENT_SCAN, today, calendar)
 
 
+@shared_task(bind=True, max_retries=None, name="etl.revenue_scan")
+def revenue_scan(self: Task[Any, Any], slot: str) -> str:
+    """MOPS monthly revenue pages on sessions while a month is being filed; outside the gate."""
+    session = _session_today(slot)
+    if session is None:
+        return "closed"
+    calendar, today = session
+    if not open_months(today, settings.REVENUE_SCAN_DAYS_AFTER):
+        return "no month open"
+    return _run_once(self, "mops", REVENUE_SCAN, today, calendar)
+
+
 @shared_task(name="etl.check_quality")
 def check_quality() -> int:
     """The five daily checks after the evening ETL, plus which daily datasets did not land."""
@@ -259,7 +274,7 @@ def check_quality() -> int:
     if session is None:
         return 0
     calendar, today = session
-    return len(_audit(today, calendar))
+    return len(_audit(today, calendar, _scans_due(today)))
 
 
 @shared_task(name="etl.us_close")
@@ -331,6 +346,15 @@ def _run_once(
     except Exception as exc:
         return _failed(what, exc)
     return f"success: {run.rows} rows"
+
+
+def _scans_due(day: date) -> frozenset[tuple[str, str]]:
+    """MOPS scans the session should have run; only its own evening check can still act on them."""
+    due = {
+        STATEMENT_SCAN: bool(open_periods(day, settings.STATEMENT_SCAN_DAYS_AFTER)),
+        REVENUE_SCAN: bool(open_months(day, settings.REVENUE_SCAN_DAYS_AFTER)),
+    }
+    return frozenset(("mops", dataset) for dataset, open_now in due.items() if open_now)
 
 
 def _daily_jobs() -> set[tuple[str, str]]:

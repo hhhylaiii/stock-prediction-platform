@@ -22,6 +22,7 @@ from config.celery import app
 DAY = date(2026, 10, 28)
 TAIPEI = ZoneInfo("Asia/Taipei")
 DAILY_JOBS = {(job.source, job.dataset) for jobs in tasks.BATCHES.values() for job in jobs}
+SCANS = {("mops", "statement_scan"), ("mops", "revenue_scan")}
 
 pytestmark = pytest.mark.usefixtures("october_2026_in_db")
 
@@ -109,6 +110,8 @@ def test_the_beat_schedule_covers_the_daily_etl_in_taipei_time() -> None:
         "etl-notices-again": crontab(hour=22, minute=40),
         "etl-statements": crontab(hour=19, minute=0),
         "etl-statements-late": crontab(hour=22, minute=40),
+        "etl-revenue": crontab(hour=19, minute=0),
+        "etl-revenue-late": crontab(hour=22, minute=40),
         "etl-check-quality": crontab(hour=22, minute=50),
         "etl-us-close": crontab(hour=5, minute=30),
         "etl-weekly-holding": crontab(hour=10, minute=0, day_of_week="sat"),
@@ -375,6 +378,9 @@ def test_sessions_missed_since_the_schedule_began_are_audited(
     assert set(audited.values_list("date", flat=True)) == set(since_start)
     assert audited.get(date=began).severity == "info"
     assert {call[0][0] for call in sent} == set(since_start[1:])
+    listed = [key for row in audited for key in row.detail["missing"]]
+    assert listed
+    assert not [key for key in listed if key.startswith("mops/")]
 
 
 def test_a_day_without_trading_is_not_prepared(
@@ -432,12 +438,40 @@ def test_only_a_missing_gate_dataset_makes_the_landed_row_an_error(
     absent: set[tuple[str, str]],
     severity: str,
 ) -> None:
-    landed(DAY, DAILY_JOBS - absent)
+    landed(DAY, (DAILY_JOBS | SCANS) - absent)
     today(DAY)
     tasks.check_quality()
     row = DataQualityLog.objects.get(check_name="etl_runs")
     assert row.severity == severity
     assert row.detail == {"missing": sorted(f"{s}/{d}" for s, d in absent), "blocking": []}
+
+
+def test_a_scan_due_without_a_successful_run_warns(
+    today: Callable[..., None],
+    sent: list[list[tuple[date, str, str]]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    landed(DAY, DAILY_JOBS)
+    EtlRun.objects.create(
+        source="mops", dataset="revenue_scan", start_date=DAY, end_date=DAY, status="failed"
+    )
+    today(DAY)
+    tasks.check_quality()
+    row = DataQualityLog.objects.get(check_name="etl_runs")
+    assert row.severity == "warning"
+    assert row.detail == {"missing": ["mops/revenue_scan", "mops/statement_scan"], "blocking": []}
+    months = tasks.open_months
+    monkeypatch.setattr("apps.etl.tasks.open_months", lambda day, days_after: [])
+    tasks.check_quality()
+    assert DataQualityLog.objects.get(check_name="etl_runs").detail["missing"] == [
+        "mops/statement_scan"
+    ]
+    monkeypatch.setattr("apps.etl.tasks.open_months", months)
+    monkeypatch.setattr("apps.etl.tasks.open_periods", lambda day, days_after: [])
+    tasks.check_quality()
+    assert DataQualityLog.objects.get(check_name="etl_runs").detail["missing"] == [
+        "mops/revenue_scan"
+    ]
 
 
 def test_the_us_close_loads_the_last_session_and_logs_stale_series(
@@ -571,6 +605,50 @@ def test_an_unreachable_statement_scan_is_retried(
     fake = adapter(RetryableError("connection reset"))
     today(DAY, time(22, 40))
     assert tasks.statement_scan.apply(args=("STATEMENTS_LATE",)).get() == "success: 3 rows"
+    assert len(fake.runs) == 2
+
+
+def test_the_last_revenue_scan_runs_with_the_last_statement_scan() -> None:
+    assert settings.ETL_AT["REVENUE_LATE"] == settings.FILING_VISIBLE_BEFORE
+    entries = {
+        entry["args"]
+        for entry in settings.CELERY_BEAT_SCHEDULE.values()
+        if entry["task"] == "etl.revenue_scan"
+    }
+    assert entries == {("REVENUE",), ("REVENUE_LATE",)}
+
+
+def test_the_revenue_scan_runs_today_while_a_month_is_open(
+    today: Callable[..., None], adapter: Callable[..., FakeAdapter]
+) -> None:
+    fake = adapter()
+    today(DAY, time(19, 0))
+    assert tasks.revenue_scan.apply(args=("REVENUE",)).get() == "success: 3 rows"
+    assert fake.runs == [("revenue_scan", DAY, DAY)]
+
+
+def test_the_revenue_scan_skips_closed_days_early_slots_and_quiet_days(
+    today: Callable[..., None],
+    adapter: Callable[..., FakeAdapter],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = adapter()
+    today(date(2026, 10, 25), time(19, 0))
+    assert tasks.revenue_scan.apply(args=("REVENUE",)).get() == "closed"
+    today(DAY, time(18, 59))
+    assert tasks.revenue_scan.apply(args=("REVENUE",)).get() == "closed"
+    monkeypatch.setattr("apps.etl.tasks.open_months", lambda day, days_after: [])
+    today(DAY, time(19, 0))
+    assert tasks.revenue_scan.apply(args=("REVENUE",)).get() == "no month open"
+    assert fake.runs == []
+
+
+def test_an_unreachable_revenue_scan_is_retried(
+    today: Callable[..., None], adapter: Callable[..., FakeAdapter]
+) -> None:
+    fake = adapter(RetryableError("connection reset"))
+    today(DAY, time(22, 40))
+    assert tasks.revenue_scan.apply(args=("REVENUE_LATE",)).get() == "success: 3 rows"
     assert len(fake.runs) == 2
 
 

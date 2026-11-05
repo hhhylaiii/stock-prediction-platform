@@ -10,6 +10,7 @@ from django.db import transaction
 
 from apps.etl.filings import filing_session
 from apps.etl.models import DataQualityLog
+from apps.etl.quality import replace_day_log
 from apps.etl.statement_summary import TYPE_MISMATCH_CHECK, VALUE_COLUMNS
 from apps.market.calendar import TradingDays
 from apps.market.models import FinancialStatement
@@ -53,8 +54,8 @@ def insert_new_statements(frame: pd.DataFrame, day: date, session: date) -> int:
                 other_figures.append({**key, "fin_type": record["fin_type"], "fields": fields})
     with transaction.atomic():
         FinancialStatement.objects.bulk_create(new)
-        _replace_log(day, TYPE_MISMATCH_CHECK, Severity.WARNING, other_type)
-        _replace_log(day, SOURCE_MISMATCH_CHECK, Severity.INFO, other_figures)
+        replace_day_log(day, TYPE_MISMATCH_CHECK, Severity.WARNING, _detail(other_type))
+        replace_day_log(day, SOURCE_MISMATCH_CHECK, Severity.INFO, _detail(other_figures))
     return len(new)
 
 
@@ -88,9 +89,5 @@ def _plain(value: Any) -> Any:
     return str(value) if isinstance(value, Decimal) else value
 
 
-def _replace_log(day: date, check: str, severity: str, statements: list[dict[str, Any]]) -> None:
-    DataQualityLog.objects.filter(date=day, check_name=check).delete()
-    if statements:
-        DataQualityLog.objects.create(
-            date=day, check_name=check, severity=severity, detail={"statements": statements}
-        )
+def _detail(statements: list[dict[str, Any]]) -> dict[str, Any] | None:
+    return {"statements": statements} if statements else None

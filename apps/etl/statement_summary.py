@@ -4,12 +4,12 @@ import re
 from collections.abc import Iterable, Mapping
 from datetime import date, timedelta
 from decimal import Decimal
-from html.parser import HTMLParser
 from typing import Any
 
 from apps.etl.deadlines import statement_deadline
 from apps.etl.errors import SchemaChangedError
 from apps.etl.filings import quarter_end
+from apps.etl.html_cells import TableCells
 from apps.market.models import FinType
 
 INCOME, BALANCE, CASH_FLOW = "t163sb04", "t163sb05", "t163sb20"
@@ -66,42 +66,6 @@ Row = Mapping[str, float | None]
 Summary = Mapping[str, Mapping[str, Row]]
 
 
-class _Cells(HTMLParser):
-    """Rows of cell text, each tagged with its table; a cell ends at either </td> or </th>."""
-
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
-        self.rows: list[tuple[int, list[str]]] = []
-        self._tables: list[int] = []
-        self._opened = 0
-        self._cell: list[str] | None = None
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag == "table":
-            self._opened += 1
-            self._tables.append(self._opened)
-        elif tag == "tr":
-            self.rows.append((self._tables[-1] if self._tables else 0, []))
-        elif tag in ("td", "th") and self.rows:
-            self._close()
-            self._cell = []
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag in ("td", "th"):
-            self._close()
-        elif tag == "table" and self._tables:
-            self._tables.pop()
-
-    def handle_data(self, data: str) -> None:
-        if self._cell is not None:
-            self._cell.append(data)
-
-    def _close(self) -> None:
-        if self._cell is not None:
-            self.rows[-1][1].append("".join(self._cell).strip())
-            self._cell = None
-
-
 def parse_summary(
     page: str, market: str, season: int, report: str
 ) -> dict[str, dict[str, float | None]]:
@@ -114,7 +78,7 @@ def parse_summary(
     expected = f"{MARKET_LABELS[market]}公司{SEASON_LABELS[season]}資料"
     if titles[0] != expected or THOUSANDS_NOTE not in page:
         raise SchemaChangedError(f"MOPS summary {titles[0]!r} is not {expected!r} in thousands")
-    parser = _Cells()
+    parser = TableCells()
     parser.feed(page)
     companies: dict[str, dict[str, float | None]] = {}
     header: list[str] | None = None

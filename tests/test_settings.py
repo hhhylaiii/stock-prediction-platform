@@ -135,6 +135,15 @@ def test_the_statement_scan_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.usefixtures("isolated_env")
+def test_the_revenue_scan_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in ("REVENUE_SCAN_DAYS_AFTER", "ETL_AT_REVENUE", "FILING_VISIBLE_BEFORE"):
+        monkeypatch.delenv(name, raising=False)
+    module = _fresh_import("config.settings.dev")
+    assert module.REVENUE_SCAN_DAYS_AFTER == 20
+    assert (module.ETL_AT["REVENUE"], module.ETL_AT["REVENUE_LATE"]) == ("19:00", "22:40")
+
+
+@pytest.mark.usefixtures("isolated_env")
 def test_doc_twse_is_asked_six_seconds_apart_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("MOPS_MIN_INTERVAL", raising=False)
     module = _fresh_import("config.settings.dev")
