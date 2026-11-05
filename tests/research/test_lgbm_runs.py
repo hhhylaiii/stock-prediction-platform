@@ -202,7 +202,7 @@ def test_labels_rewritten_during_the_fit_stop_the_fold(
     assert missing_folds("rank-wf1", MODEL, [fold]) == [fold.index]
 
 
-def test_recipe_changes_with_the_features_the_seed_and_the_round_cap(
+def test_recipe_changes_with_the_features_seed_and_lightgbm_settings(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     first = recipe(KEPT, 0)
@@ -210,8 +210,16 @@ def test_recipe_changes_with_the_features_the_seed_and_the_round_cap(
     assert recipe(KEPT, 0) == first
     assert recipe(KEPT[:2], 0) != first
     assert recipe(KEPT, 1) != first
-    monkeypatch.setattr(lgbm_runs, "MAX_ROUNDS", 10)
-    assert recipe(KEPT, 0) != first
+    for name, value in [
+        ("MAX_ROUNDS", 10),
+        ("BASE_PARAMS", {**BASE_PARAMS, "num_leaves": 63}),
+        ("EARLY_STOPPING_ROUNDS", 50),
+        ("FEVAL_EVERY", 5),
+    ]:
+        with monkeypatch.context() as patched:
+            patched.setattr(lgbm_runs, name, value)
+            assert recipe(KEPT, 0) != first, name
+    assert recipe(KEPT, 0) == first
 
 
 def test_holdout_folds_wait_for_the_frozen_design(panel: Path) -> None:
