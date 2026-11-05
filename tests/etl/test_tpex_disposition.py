@@ -14,6 +14,7 @@ from apps.etl.models import EtlRun, RawTpex
 from apps.etl.ratelimit import RateLimiter
 from apps.market.calendar import NotATradingDayError, TradingDays
 from apps.market.models import DispositionEvent
+from tests.conftest import load_trading_days
 
 BASE = "https://www.tpex.org.tw/www/zh-tw"
 ATTENTION = f"{BASE}/bulletin/attention"
@@ -94,6 +95,51 @@ def test_attention_of_2010(adapter_2010: TpexAdapter, load_fixture: Callable[[st
     events = _events(adapter_2010, "attention", date(2010, 1, 5), date(2010, 1, 5))
     assert ("3162", date(2010, 1, 4), "attention", date(2010, 1, 4)) in events
     assert len(events) == 3
+
+
+@pytest.fixture
+def adapter_feb_2010(twse_limiter: RateLimiter) -> TpexAdapter:
+    return TpexAdapter(load_trading_days("twse_2010_01_02.json"), twse_limiter)
+
+
+@responses.activate
+@pytest.mark.django_db
+def test_attention_counts_its_placeholder_days_in_the_total(
+    adapter_feb_2010: TpexAdapter, load_fixture: Callable[[str], Any]
+) -> None:
+    payload = load_fixture("tpex/disposition/attention_201002.json")
+    assert payload["tables"][0]["subtitle"].endswith("總累計次數: 31")
+    responses.post(ATTENTION, json=payload)
+    events = _events(adapter_feb_2010, "attention", date(2010, 2, 1), date(2010, 2, 26))
+    assert ("6248", date(2010, 2, 6), "attention", date(2010, 2, 6)) in events
+    assert ("1107", date(2010, 2, 26), "attention", date(2010, 2, 26)) in events
+    assert len(events) == 27
+
+
+@pytest.mark.parametrize(
+    ("fixture", "dataset", "total", "month"),
+    [
+        ("attention_201002.json", "attention", 30, (date(2010, 2, 1), date(2010, 2, 26))),
+        ("attention_201002.json", "attention", 28, (date(2010, 2, 1), date(2010, 2, 26))),
+        ("disposal_201001.json", "disposition", 8, (date(2010, 1, 4), date(2010, 1, 29))),
+    ],
+)
+@responses.activate
+@pytest.mark.django_db
+def test_a_total_matching_neither_count_is_a_schema_change(
+    adapter_feb_2010: TpexAdapter,
+    load_fixture: Callable[[str], Any],
+    fixture: str,
+    dataset: str,
+    total: int,
+    month: tuple[date, date],
+) -> None:
+    payload = load_fixture(f"tpex/disposition/{fixture}")
+    table = payload["tables"][0]
+    table["subtitle"] = table["subtitle"].rsplit(":", 1)[0] + f": {total}"
+    responses.post(ATTENTION if dataset == "attention" else DISPOSAL, json=payload)
+    with pytest.raises(SchemaChangedError, match=f"of {total} rows"):
+        adapter_feb_2010.fetch(dataset, *month)
 
 
 @responses.activate
