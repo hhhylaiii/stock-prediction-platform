@@ -18,16 +18,17 @@ from apps.etl.client import SourceClient
 from apps.etl.errors import SchemaChangedError, SourceError
 from apps.etl.filings import FILING_COLUMNS, Filing, apply_statement_filings
 from apps.etl.models import EtlRun, RawMops
-from apps.etl.ratelimit import RateLimiter
+from apps.etl.ratelimit import RateLimiter, RetryableError
 from apps.market.calendar import TradingDays
 from apps.market.models import FinancialStatement, FinType
 
-MOPS_MIN_INTERVAL = 3.0
+MOPS_MIN_INTERVAL = 5.0
 STATEMENT_FILING = "statement_filing"
 LISTING_PATH = "/server-java/t57sb01"
 REPORT_KIND = "A"
 PAGE_ENCODING = "cp950"
 NO_REPORTS = "查無所需資料"
+TOO_MANY_QUERIES = "查詢過量"
 FISCAL_YEAR = re.compile(r"會計期間：\s*([^<\s]+)")
 CALENDAR_YEAR = "曆年制"
 CODE, YEAR, KIND, DETAIL, UPLOADED, CORRECTION = (
@@ -41,6 +42,8 @@ CODE, YEAR, KIND, DETAIL, UPLOADED, CORRECTION = (
 HEADER = (CODE, YEAR, KIND, DETAIL, UPLOADED, CORRECTION)
 FINANCIAL_REPORT = "財務報告書"
 ENGLISH = "英文版"
+SUPPLEMENTS = frozenset({"關係企業合併報表"})
+RESTATED = "(重編)"
 REPORT_TYPES = {
     "IFRSs合併財報": FinType.CONSOLIDATED,
     "母子公司合併報表": FinType.CONSOLIDATED,
@@ -76,8 +79,15 @@ class MopsClient(SourceClient):
             "seamon": "",
             "mtype": REPORT_KIND,
         }
-        body = self.get_content(f"{self.base_url}{LISTING_PATH}", params)
-        return params, body.decode(PAGE_ENCODING, errors="replace")
+        url = f"{self.base_url}{LISTING_PATH}"
+        return params, self.limiter.call(lambda: self._page(url, params))
+
+    def _page(self, url: str, params: dict[str, str]) -> str:
+        """A page asking to query less is a failure the limiter backs off from and retries."""
+        page = self._receive("GET", url, params=params).content.decode(PAGE_ENCODING, "replace")
+        if TOO_MANY_QUERIES in page:
+            raise RetryableError(f"{self.label} asked to query less for {params['co_id']}")
+        return page
 
 
 class _Rows(HTMLParser):
@@ -133,7 +143,7 @@ def parse_listing(page: str, code: str, roc_year: int) -> list[Filing]:
         if len(row) != len(header):
             raise SchemaChangedError(f"doc.twse {code} {roc_year} row has {len(row)} cells")
         cells = {name: row[index] for name, index in position.items()}
-        if ENGLISH not in cells[DETAIL]:
+        if ENGLISH not in cells[DETAIL] and cells[DETAIL] not in SUPPLEMENTS:
             filings.append(_filing(cells, code, roc_year))
     return filings
 
@@ -144,7 +154,8 @@ def _filing(cells: dict[str, str], code: str, roc_year: int) -> Filing:
         raise SchemaChangedError(
             f"doc.twse {code} {roc_year} listed {cells[CODE]!r} {cells[YEAR]!r}"
         )
-    fin_type = REPORT_TYPES.get(cells[DETAIL])
+    restated = cells[DETAIL].endswith(RESTATED)
+    fin_type = REPORT_TYPES.get(cells[DETAIL].removesuffix(RESTATED))
     if cells[KIND] != FINANCIAL_REPORT or fin_type is None:
         raise SchemaChangedError(
             f"doc.twse {code} {roc_year} has an unknown report {cells[KIND]!r} {cells[DETAIL]!r}"
@@ -155,6 +166,7 @@ def _filing(cells: dict[str, str], code: str, roc_year: int) -> Filing:
         fin_type=fin_type.value,
         uploaded_at=_uploaded_at(cells[UPLOADED], code, roc_year),
         corrected=cells[CORRECTION] != NOT_CORRECTED,
+        restated=restated,
     )
 
 
@@ -202,12 +214,16 @@ class MopsAdapter(BaseAdapter):
         return pd.DataFrame(filings, columns=FILING_COLUMNS)
 
     def normalize(self, dataset: str, raw_df: pd.DataFrame) -> pd.DataFrame:
-        """The first upload of each report type is the announcement; a correction is noted."""
+        """The first upload of each report type, or its last restatement, is the announcement."""
         self.require_dataset(dataset)
         if raw_df.empty:
             return raw_df
-        grouped = raw_df.groupby(["stock_id", "period", "fin_type"], as_index=False, sort=True)
-        return grouped.agg(uploaded_at=("uploaded_at", "min"), corrected=("corrected", "any"))
+        records = []
+        for key, group in raw_df.groupby(["stock_id", "period", "fin_type"], sort=True):
+            restated = group.loc[group["restated"], "uploaded_at"]
+            uploaded = restated.max() if len(restated) else group["uploaded_at"].min()
+            records.append((*key, uploaded, bool(group["corrected"].any()), bool(len(restated))))
+        return pd.DataFrame(records, columns=FILING_COLUMNS)
 
     def upsert(self, dataset: str, frame: pd.DataFrame) -> int:
         self.require_dataset(dataset)

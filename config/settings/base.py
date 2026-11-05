@@ -214,7 +214,7 @@ ETL_RATE_LIMITS: dict[str, dict[str, float]] = {
         "cooldown": env.float("YAHOO_COOLDOWN", default=900.0),
     },
     "mops": {
-        "min_interval": env.float("MOPS_MIN_INTERVAL", default=3.5),
+        "min_interval": env.float("MOPS_MIN_INTERVAL", default=6.0),
         "max_retries": env.int("MOPS_MAX_RETRIES", default=4),
         "backoff_base": env.float("MOPS_BACKOFF_BASE", default=5.0),
         "backoff_max": env.float("MOPS_BACKOFF_MAX", default=120.0),

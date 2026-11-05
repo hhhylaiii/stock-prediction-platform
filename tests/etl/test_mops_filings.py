@@ -9,22 +9,35 @@ import pandas as pd
 import pytest
 import responses
 from django.conf import settings
+from django.core.exceptions import ImproperlyConfigured
 from django.core.management import call_command
 from django.core.management.base import CommandError
 from responses import matchers
 
 from apps.etl.adapters import ADAPTERS
-from apps.etl.adapters.mops import STATEMENT_FILING, MopsAdapter, parse_listing
+from apps.etl.adapters.mops import (
+    MOPS_MIN_INTERVAL,
+    STATEMENT_FILING,
+    MopsAdapter,
+    parse_listing,
+)
 from apps.etl.errors import SchemaChangedError
-from apps.etl.filings import FILED_LATE_CHECK, FILED_LATER_CHECK, filing_session
+from apps.etl.filings import (
+    FILED_LATE_CHECK,
+    FILED_LATER_CHECK,
+    FILING_COLUMNS,
+    RESTATED_CHECK,
+    filing_session,
+)
 from apps.etl.models import DataQualityLog, EtlRun, RawMops
-from apps.etl.ratelimit import RateLimit, RateLimiter
+from apps.etl.ratelimit import RateLimit, RateLimiter, RetryableError
 from apps.market.calendar import TradingDays
 from apps.market.models import FinancialStatement, FinType, Market, StockMaster, TradingCalendar
+from tests.etl.conftest import RecordingSleep
 
 URL = "https://doc.twse.com.tw/server-java/t57sb01"
 TAIPEI = ZoneInfo("Asia/Taipei")
-LIMIT = RateLimit(min_interval=3.5, max_retries=2, backoff_base=1.0, backoff_max=2.0, cooldown=5.0)
+LIMIT = RateLimit(min_interval=6.0, max_retries=2, backoff_base=1.0, backoff_max=2.0, cooldown=5.0)
 CONSOLIDATED = FinType.CONSOLIDATED.value
 INDIVIDUAL = FinType.INDIVIDUAL.value
 
@@ -167,6 +180,68 @@ def test_an_unreadable_upload_time_fails(page: Callable[[str], bytes], shown: st
         parse_listing(broken, "2330", 113)
 
 
+def test_restated_reports_are_marked_with_their_own_upload(page: Callable[[str], bytes]) -> None:
+    found = parse_listing(text(page("1213_107")), "1213", 107)
+    q4 = [(f.fin_type, f.uploaded_at, f.restated) for f in found if f.period == "2018-Q4"]
+    assert q4 == [
+        (CONSOLIDATED, at("2019-04-08 18:18:18"), False),
+        (INDIVIDUAL, at("2019-04-08 18:20:07"), False),
+        (CONSOLIDATED, at("2019-09-18 10:38:45"), True),
+        (INDIVIDUAL, at("2019-09-18 10:40:57"), True),
+    ]
+    assert not any(f.restated for f in found if f.period != "2018-Q4")
+
+
+@pytest.mark.django_db
+def test_a_restated_period_is_announced_by_its_restatement_and_logged(
+    adapter: MopsAdapter, page: Callable[[str], bytes]
+) -> None:
+    statement("1213", "2018-Q3", CONSOLIDATED, date(2018, 12, 3))
+    statement("1213", "2018-Q4", CONSOLIDATED, date(2019, 4, 2))
+    listing = pd.DataFrame(parse_listing(text(page("1213_107")), "1213", 107))
+    normalized = adapter.normalize(STATEMENT_FILING, listing)
+    q4 = normalized[normalized["period"] == "2018-Q4"]
+    assert q4[["fin_type", "uploaded_at", "restated"]].values.tolist() == [
+        [CONSOLIDATED, at("2019-09-18 10:38:45"), True],
+        [INDIVIDUAL, at("2019-09-18 10:40:57"), True],
+    ]
+    adapter.upsert(STATEMENT_FILING, normalized)
+    assert announced("1213") == {
+        ("2018-Q3", CONSOLIDATED): date(2018, 11, 15),
+        ("2018-Q4", CONSOLIDATED): date(2019, 9, 18),
+    }
+    assert logged(RESTATED_CHECK) == {
+        "1213": [("2018-Q4", CONSOLIDATED, "2019-04-02", "2019-09-18")]
+    }
+    assert FILED_LATE_CHECK not in {row.check_name for row in DataQualityLog.objects.all()}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("uploaded", "session"),
+    [("2025-09-10 10:00:00", date(2025, 9, 10)), ("2025-03-20 10:00:00", date(2025, 3, 20))],
+)
+def test_a_restatement_sets_the_date_even_when_corrected_or_early(
+    adapter: MopsAdapter, uploaded: str, session: date
+) -> None:
+    statement("2330", "2024-Q4", CONSOLIDATED, date(2025, 4, 1))
+    frame = pd.DataFrame(
+        [("2330", "2024-Q4", CONSOLIDATED, at(uploaded), True, True)], columns=FILING_COLUMNS
+    )
+    adapter.upsert(STATEMENT_FILING, frame)
+    assert announced("2330") == {("2024-Q4", CONSOLIDATED): session}
+    assert logged(RESTATED_CHECK) == {
+        "2330": [("2024-Q4", CONSOLIDATED, "2025-04-01", session.isoformat())]
+    }
+
+
+def test_the_affiliates_report_is_not_an_announcement(page: Callable[[str], bytes]) -> None:
+    listing = text(page("2330_99"))
+    assert listing.count("英文版-母公司財報") == 4
+    supplemented = listing.replace("英文版-母公司財報", "關係企業合併報表", 1)
+    assert parse_listing(supplemented, "2330", 99) == parse_listing(listing, "2330", 99)
+
+
 def test_companies_without_subsidiaries_file_individual_reports(
     page: Callable[[str], bytes],
 ) -> None:
@@ -216,10 +291,10 @@ def listed(db: None) -> None:
 def filings(*rows: tuple[str, str, str, str, bool]) -> pd.DataFrame:
     return pd.DataFrame(
         [
-            (code, period, kind, at(uploaded), corrected)
+            (code, period, kind, at(uploaded), corrected, False)
             for code, period, kind, uploaded, corrected in rows
         ],
-        columns=["stock_id", "period", "fin_type", "uploaded_at", "corrected"],
+        columns=FILING_COLUMNS,
     )
 
 
@@ -394,6 +469,36 @@ def test_only_years_with_statements_are_asked_for(
 
 @pytest.mark.usefixtures("listed")
 @responses.activate
+def test_a_page_asking_to_query_less_is_retried_after_a_pause(
+    adapter: MopsAdapter, page: Callable[[str], bytes], fake_sleep: RecordingSleep
+) -> None:
+    serve("2330", 113, page("throttled"))
+    serve("2330", 113, page("2330_113"))
+    statement("2330", "2024-Q1", CONSOLIDATED, date(2024, 6, 3))
+    found = adapter.fetch(STATEMENT_FILING, date(2024, 1, 1), date(2024, 12, 31), "2330")
+    assert len(responses.calls) == 2
+    assert len(found) == 5
+    assert RawMops.objects.count() == 1
+    assert "查詢過量" not in RawMops.objects.get().payload["html"]
+    assert LIMIT.backoff(0) in fake_sleep.calls
+    assert LIMIT.cooldown not in fake_sleep.calls
+
+
+@pytest.mark.usefixtures("listed")
+@responses.activate
+def test_asking_too_often_fails_the_run_once_retries_run_out(
+    adapter: MopsAdapter, page: Callable[[str], bytes]
+) -> None:
+    serve("2330", 113, page("throttled"))
+    statement("2330", "2024-Q1", CONSOLIDATED, date(2024, 6, 3))
+    with pytest.raises(RetryableError, match="query less"):
+        adapter.fetch(STATEMENT_FILING, date(2024, 1, 1), date(2024, 12, 31), "2330")
+    assert len(responses.calls) == LIMIT.max_retries + 1
+    assert not RawMops.objects.exists()
+
+
+@pytest.mark.usefixtures("listed")
+@responses.activate
 def test_a_broken_page_is_kept_as_raw_before_failing(adapter: MopsAdapter) -> None:
     serve("2330", 113, "<html><body>系統維護中</body></html>".encode("cp950"))
     statement("2330", "2024-Q1", CONSOLIDATED, date(2024, 6, 3))
@@ -407,16 +512,31 @@ def test_a_dataset_run_needs_a_stock(adapter: MopsAdapter) -> None:
         adapter.run(STATEMENT_FILING, date(2024, 1, 1), date(2024, 12, 31))
 
 
+def test_the_last_restatement_dates_the_period(adapter: MopsAdapter) -> None:
+    frame = pd.DataFrame(
+        [
+            ("1213", "2018-Q4", CONSOLIDATED, at("2019-04-08 18:18:18"), False, False),
+            ("1213", "2018-Q4", CONSOLIDATED, at("2019-10-02 09:00:00"), False, True),
+            ("1213", "2018-Q4", CONSOLIDATED, at("2019-09-18 10:38:45"), False, True),
+        ],
+        columns=FILING_COLUMNS,
+    )
+    normalized = adapter.normalize(STATEMENT_FILING, frame)
+    assert normalized[["uploaded_at", "restated"]].values.tolist() == [
+        [at("2019-10-02 09:00:00"), True]
+    ]
+
+
 def test_normalize_keeps_the_first_upload_of_each_report_type(
     adapter: MopsAdapter,
 ) -> None:
     frame = pd.DataFrame(
         [
-            ("2330", "2010-Q1", INDIVIDUAL, at("2010-04-20 10:00:00"), False),
-            ("2330", "2010-Q1", INDIVIDUAL, at("2010-04-29 10:00:00"), False),
-            ("2330", "2010-Q2", CONSOLIDATED, at("2010-08-27 10:00:00"), True),
+            ("2330", "2010-Q1", INDIVIDUAL, at("2010-04-20 10:00:00"), False, False),
+            ("2330", "2010-Q1", INDIVIDUAL, at("2010-04-29 10:00:00"), False, False),
+            ("2330", "2010-Q2", CONSOLIDATED, at("2010-08-27 10:00:00"), True, False),
         ],
-        columns=["stock_id", "period", "fin_type", "uploaded_at", "corrected"],
+        columns=FILING_COLUMNS,
     )
     normalized = adapter.normalize(STATEMENT_FILING, frame)
     assert normalized.to_dict("records") == [
@@ -426,6 +546,7 @@ def test_normalize_keeps_the_first_upload_of_each_report_type(
             "fin_type": INDIVIDUAL,
             "uploaded_at": at("2010-04-20 10:00:00"),
             "corrected": False,
+            "restated": False,
         },
         {
             "stock_id": "2330",
@@ -433,6 +554,7 @@ def test_normalize_keeps_the_first_upload_of_each_report_type(
             "fin_type": CONSOLIDATED,
             "uploaded_at": at("2010-08-27 10:00:00"),
             "corrected": True,
+            "restated": False,
         },
     ]
 
@@ -444,8 +566,8 @@ def test_a_statement_without_its_report_type_uses_the_other_report(
     statement("2330", "2010-Q1", CONSOLIDATED, date(2010, 6, 1))
     statement("2330", "2010-Q2", CONSOLIDATED, date(2010, 9, 1))
     frame = pd.DataFrame(
-        [("2330", "2010-Q1", INDIVIDUAL, at("2010-04-20 10:00:00"), False)],
-        columns=["stock_id", "period", "fin_type", "uploaded_at", "corrected"],
+        [("2330", "2010-Q1", INDIVIDUAL, at("2010-04-20 10:00:00"), False, False)],
+        columns=FILING_COLUMNS,
     )
     assert adapter.upsert(STATEMENT_FILING, frame) == 1
     assert announced("2330") == {
@@ -493,9 +615,15 @@ def test_a_single_dataset_fetch_is_refused() -> None:
         call_command("fetch", source="mops", dataset=STATEMENT_FILING, date="2024-11-14")
 
 
+def test_doc_twse_refuses_requests_closer_than_five_seconds() -> None:
+    limiter = RateLimiter(RateLimit(4.9, 1, 1.0, 1.0, 1.0))
+    with pytest.raises(ImproperlyConfigured, match="at least 5 seconds"):
+        MopsAdapter(weekdays(date(2024, 1, 1), date(2024, 12, 31)), limiter)
+
+
 def test_the_source_is_registered_with_its_own_limits() -> None:
     assert ADAPTERS["mops"] is MopsAdapter
-    assert settings.ETL_RATE_LIMITS["mops"]["min_interval"] >= 3.0
+    assert settings.ETL_RATE_LIMITS["mops"]["min_interval"] >= MOPS_MIN_INTERVAL
     assert settings.FILING_VISIBLE_BEFORE == "22:40"
 
 

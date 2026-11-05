@@ -115,6 +115,13 @@ def test_finmind_interval_follows_the_quota_of_the_token(
 
 
 @pytest.mark.usefixtures("isolated_env")
+def test_doc_twse_is_asked_six_seconds_apart_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MOPS_MIN_INTERVAL", raising=False)
+    module = _fresh_import("config.settings.dev")
+    assert module.ETL_RATE_LIMITS["mops"]["min_interval"] == 6.0
+
+
+@pytest.mark.usefixtures("isolated_env")
 @pytest.mark.parametrize("value", [None, ""])
 def test_research_cache_defaults_under_artifacts(
     monkeypatch: pytest.MonkeyPatch, value: str | None
