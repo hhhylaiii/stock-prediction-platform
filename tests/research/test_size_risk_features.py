@@ -225,9 +225,10 @@ def test_sector_ids_are_twse_industry_codes_of_the_unified_names() -> None:
         [listing(str(1000 + k), rising(3), industry=name) for k, name in enumerate(names)],
         ignore_index=True,
     )
-    empty = pd.Series(NAN, index=panel.index)
+    technical = pd.DataFrame({"tech_mom_250_20": NAN}, index=panel.index)
+    fundamental = pd.DataFrame({"fund_ep": NAN}, index=panel.index)
 
-    features = second_batch_industry_features(panel, empty, empty)
+    features = second_batch_industry_features(panel, technical, fundamental)
 
     assert list(features.columns) == [
         "stock_id",
@@ -243,6 +244,7 @@ def test_neutral_features_subtract_the_day_median_of_universe_stocks_in_the_indu
     rows = [
         ("2330", "半導體業", True, 0.1, 0.05),
         ("2303", "半導體業", True, 0.3, 0.07),
+        ("2454", "半導體業", True, 0.8, 0.02),
         ("2317", "半導體業", False, 0.9, 0.01),
         ("1101", "水泥工業", False, 0.2, 0.04),
         ("9999", "", True, 0.5, NAN),
@@ -251,13 +253,18 @@ def test_neutral_features_subtract_the_day_median_of_universe_stocks_in_the_indu
         [listing(s, rising(2), industry=i, in_universe=u) for s, i, u, _, _ in rows],
         ignore_index=True,
     )
-    momentum = pd.Series([m for *_, m, _ in rows for _ in range(2)], index=panel.index)
-    earnings = pd.Series([e for *_, e in rows for _ in range(2)], index=panel.index)
 
-    features = second_batch_industry_features(panel, momentum, earnings)
+    def column(k: int) -> list[float]:
+        return [float(row[k]) for row in rows for _ in range(2)]
+
+    technical = pd.DataFrame({"tech_ret_1d": 9.0, "tech_mom_250_20": column(3)}, index=panel.index)
+    fundamental = pd.DataFrame({"fund_bp": 9.0, "fund_ep": column(4)}, index=panel.index)
+
+    features = second_batch_industry_features(panel, technical, fundamental)
 
     neutral = [at(features, s, 1, "ind_mom_neutral") for s, *_ in rows]
-    assert neutral == pytest.approx([-0.1, 0.1, 0.7, -0.1, 0.2])
-    assert at(features, "2330", 1, "ind_ep_neutral") == pytest.approx(0.05 - 0.06)
-    assert at(features, "1101", 1, "ind_ep_neutral") == pytest.approx(0.04 - 0.06)
+    assert neutral == pytest.approx([-0.2, 0.0, 0.5, 0.6, -0.2, 0.1])
+    assert at(features, "2330", 1, "ind_ep_neutral") == pytest.approx(0.0)
+    assert at(features, "2454", 1, "ind_ep_neutral") == pytest.approx(0.02 - 0.05)
+    assert at(features, "1101", 1, "ind_ep_neutral") == pytest.approx(0.04 - 0.05)
     assert math.isnan(at(features, "9999", 1, "ind_ep_neutral"))

@@ -61,7 +61,7 @@ def compute_features(panel: pd.DataFrame) -> pd.DataFrame:
         second_batch_technical_features(panel),
         size_liquidity_features(panel),
         industry_risk_features(panel),
-        second_batch_industry_features(panel, technical["tech_mom_250_20"], fundamental["fund_ep"]),
+        second_batch_industry_features(panel, technical, fundamental),
         chip_features(panel),
         second_batch_chip_features(panel),
         fundamental,

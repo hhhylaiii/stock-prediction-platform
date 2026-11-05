@@ -151,14 +151,14 @@ def _neutral(values: pd.Series, panel: pd.DataFrame, industry: pd.Series) -> pd.
 
 
 def second_batch_industry_features(
-    panel: pd.DataFrame, momentum: pd.Series, earnings: pd.Series
+    panel: pd.DataFrame, technical: pd.DataFrame, fundamental: pd.DataFrame
 ) -> pd.DataFrame:
     """TWSE industry code and industry-neutral 250-20 momentum and earnings yield."""
     require_sorted(panel)
     industry = canonical_industry(panel["industry"])
     columns = {
         "ind_sector_id": industry.map(dict(SECTOR_CODES)).astype("float64"),
-        "ind_mom_neutral": _neutral(momentum, panel, industry),
-        "ind_ep_neutral": _neutral(earnings, panel, industry),
+        "ind_mom_neutral": _neutral(technical["tech_mom_250_20"], panel, industry),
+        "ind_ep_neutral": _neutral(fundamental["fund_ep"], panel, industry),
     }
     return feature_frame(panel, columns, feature_names(Group.INDUSTRY_RISK, batch=2))
