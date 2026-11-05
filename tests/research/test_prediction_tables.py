@@ -157,6 +157,7 @@ def test_prediction_upsert_is_idempotent(model_run: ModelRun) -> None:
         ({"score": None}, "prediction_rank_pct_with_score"),
         ({"pct": None}, "prediction_rank_pct_with_score"),
         ({"rank": None}, "prediction_rank_pct_with_score"),
+        ({"ret_pred": 0.02}, "prediction_ret_pred_is_q50"),
     ],
 )
 def test_prediction_check_constraints(

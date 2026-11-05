@@ -310,6 +310,12 @@ class Prediction(models.Model):
                 condition=ordered("q10", "q50") & ordered("q50", "q90") & ordered("q10", "q90"),
                 name="prediction_quantiles_ordered",
             ),
+            models.CheckConstraint(
+                condition=models.Q(ret_pred=models.F("q50"))
+                | models.Q(ret_pred__isnull=True)
+                | models.Q(q50__isnull=True),
+                name="prediction_ret_pred_is_q50",
+            ),
         ]
 
     def __str__(self) -> str:

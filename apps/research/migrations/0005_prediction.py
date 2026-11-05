@@ -144,6 +144,15 @@ class Migration(migrations.Migration):
                         ),
                         name="prediction_quantiles_ordered",
                     ),
+                    models.CheckConstraint(
+                        condition=models.Q(
+                            ("ret_pred", models.F("q50")),
+                            ("ret_pred__isnull", True),
+                            ("q50__isnull", True),
+                            _connector="OR",
+                        ),
+                        name="prediction_ret_pred_is_q50",
+                    ),
                 ],
             },
         ),
