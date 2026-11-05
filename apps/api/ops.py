@@ -19,6 +19,7 @@ from apps.api.sessions import latest_session, load_calendar, trailing_sessions
 from apps.api.views import ReadOnlyView
 from apps.etl.models import DataQualityLog, EtlRun
 from apps.etl.quality import CHECKS
+from apps.research.evaluation import ALERT_SHARE
 
 Severity = DataQualityLog.Severity
 SEVERITY_ORDER = (Severity.INFO, Severity.WARNING, Severity.ERROR)
@@ -44,7 +45,7 @@ class EtlRunSerializer(serializers.ModelSerializer[EtlRun]):
 
 
 def session_summary(day: date, logs: list[dict[str, Any]]) -> dict[str, Any]:
-    """A session's data checks judge the day; model output checks are listed apart and do not."""
+    """Data checks set the worst; any error still fails the day, as the prediction gate rules."""
     model = [entry for entry in logs if entry["check_name"].startswith(MODEL_CHECK_PREFIXES)]
     data = [entry for entry in logs if not entry["check_name"].startswith(MODEL_CHECK_PREFIXES)]
     ran = {entry["check_name"] for entry in data}
@@ -52,7 +53,7 @@ def session_summary(day: date, logs: list[dict[str, Any]]) -> dict[str, Any]:
     worst = max((entry["severity"] for entry in data), key=SEVERITY_ORDER.index, default=None)
     return {
         "date": day,
-        "passed": not missing and worst != Severity.ERROR,
+        "passed": not missing and all(entry["severity"] != Severity.ERROR for entry in logs),
         "worst": worst,
         "missing_checks": missing,
         "checks": [{field: entry[field] for field in CHECK_FIELDS} for entry in data],
@@ -96,6 +97,7 @@ class DataQualityView(ReadOnlyView):
             "start_date": sessions[0],
             "end_date": sessions[-1],
             "checks": list(CHECKS),
+            "output_alert_share": ALERT_SHARE,
         }
         return envelope(data, meta)
 
