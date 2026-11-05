@@ -15,8 +15,14 @@
     index_freshness: '市場指數的最新收盤',
     etl_runs: '每日資料集都已更新',
     stock_master: '股票清單異動',
-    us_close: '美股收盤'
+    us_close: '美股收盤',
+    output_width_ratio: '區間寬度比異常',
+    output_odds_vs_q50: '機率與中位數矛盾',
+    monitor_unscored: '到期預測缺 label',
+    model_alert: '模型告警'
   };
+  const OUTPUT_ALERT_SHARE = 0.1;
+  const ALERT_REASONS = { below_threshold: '滾動 IC 低於門檻', outside_range: '超出範圍', above_baseline: '輸給 baseline', missing_reference: '缺參考值' };
   const SEVERITY = { info: ['通過', 'in'], warning: ['警告', 'warn'], error: ['錯誤', 'warn'] };
 
   const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -446,6 +452,32 @@
       '<div class="muted small">' + esc(checkSummary(check)) + '</div></div></div>';
   }
 
+  function modelCheckState(check) {
+    const d = check.detail || {};
+    const stocks = fmtInt(d.flagged || 0) + '／' + fmtInt(d.n_stocks || 0) + ' 檔';
+    switch (check.check_name) {
+      case 'output_width_ratio':
+      case 'output_odds_vs_q50':
+        if ((d.share || 0) > OUTPUT_ALERT_SHARE) return ['warn', '警告，' + stocks];
+        return ['', d.flagged ? '少量標記，' + stocks : '沒有標記'];
+      case 'monitor_unscored': return ['warn', fmtInt(sizeOf(d.runs)) + ' 筆'];
+      case 'model_alert': return ['warn', (ALERT_REASONS[d.reason] || String(d.reason || '')) + (d.run_id ? '（' + d.run_id + '）' : '')];
+      default: return [check.severity === 'info' ? '' : 'warn', (SEVERITY[check.severity] || [check.severity])[0]];
+    }
+  }
+
+  function modelCheckHtml(check) {
+    const [cls, text] = modelCheckState(check);
+    return '<div class="check"><i class="' + cls + '"></i><div><div>' + esc(CHECKS[check.check_name] || check.check_name) + '</div><div class="muted small">' + esc(text) + '</div></div></div>';
+  }
+
+  function renderModelChecks(data) {
+    const sub = document.getElementById('model-checks-sub'), host = document.getElementById('model-checks');
+    const day = data.find(entry => (entry.model_checks || []).length);
+    sub.textContent = day ? day.date + ' 的預測輸出；區間寬度比與機率矛盾的標記超過 ' + Math.round(OUTPUT_ALERT_SHARE * 100) + '% 才算警告。' : '';
+    host.innerHTML = day ? day.model_checks.map(modelCheckHtml).join('') : '<p class="placeholder">還沒有模型輸出檢查。</p>';
+  }
+
   async function renderQuality() {
     const sub = document.getElementById('quality-sub'), host = document.getElementById('quality'), days = document.getElementById('quality-days');
     try {
@@ -459,10 +491,13 @@
         return '<div class="trow short qh-cols"><div class="muted">' + esc(day.date) + '</div><div class="res"><i class="' + verdict.cls + '"></i><span>' + esc(verdict.label) + '</span></div>' +
           '<div class="muted small">' + (day.worst ? '最嚴重：' + esc((SEVERITY[day.worst] || [day.worst])[0]) : '') + (day.missing_checks.length && day.checks.length ? '，缺 ' + day.missing_checks.length + ' 項' : '') + '</div></div>';
       }).join('') + '</div>';
+      renderModelChecks(data);
     } catch (err) {
       sub.textContent = '';
       host.innerHTML = errorBox(err);
       days.innerHTML = '';
+      document.getElementById('model-checks-sub').textContent = '';
+      document.getElementById('model-checks').innerHTML = errorBox(err);
     }
   }
 
