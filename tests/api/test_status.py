@@ -82,10 +82,25 @@ def test_status_reports_prices_predictions_quality_and_last_update(
         "price_date": "2026-10-30",
         "prediction_date": "2026-10-30",
         "predictions_ready": True,
-        "quality": {"date": "2026-10-30", "passed": True, "worst": "info", "missing_checks": []},
+        "quality": {
+            "date": "2026-10-30",
+            "passed": True,
+            "worst": "info",
+            "missing_checks": [],
+            "warnings": 0,
+        },
         "updated_at": "2026-10-30T23:04:00+08:00",
         "degraded": [],
     }
+
+
+@time_machine.travel(FRIDAY_NIGHT, tick=False)
+def test_warnings_are_counted_for_the_strip(client: Client, loaded: None) -> None:
+    DataQualityLog.objects.filter(date=OCT_30, check_name__in=CHECKS[:2]).update(severity="warning")
+
+    quality = envelope_of(client.get("/api/status"))["data"]["quality"]
+
+    assert (quality["passed"], quality["worst"], quality["warnings"]) == (True, "warning", 2)
 
 
 @time_machine.travel(MONDAY_MORNING, tick=False)
@@ -116,6 +131,7 @@ def test_new_prices_before_their_checks_are_not_ready(client: Client, loaded: No
         "passed": False,
         "worst": None,
         "missing_checks": list(CHECKS),
+        "warnings": 0,
     }
     assert data["updated_at"] == "2026-11-02T15:40:00+08:00"
 
@@ -184,6 +200,7 @@ def test_an_empty_database_reports_nothing_loaded(client: Client, db: None) -> N
             "passed": False,
             "worst": None,
             "missing_checks": list(CHECKS),
+            "warnings": 0,
         },
         "updated_at": None,
         "degraded": [],

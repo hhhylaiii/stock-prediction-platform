@@ -28,6 +28,7 @@
 <section class="view" id="view-today">
 <h1>今日預測</h1>
 <p class="lead">每個交易日收盤後，對上市櫃普通股產出未來 5 日與 20 日的排名與預測報酬，以及 20 日的 80% 價格區間與漲幅超過 5% 的機率。<a href="#models">查看模型與資料</a></p>
+<p class="sub" id="today-meta"></p>
 
 <div class="controls">
 <div class="control"><span>預測期間</span>
@@ -44,7 +45,7 @@
 <button type="button" class="ghost" id="watch-only" aria-pressed="false" hidden>只看追蹤</button>
 <label class="search">
 <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="7" cy="7" r="4.5"></circle><path d="M10.5 10.5L14 14"></path></svg>
-<input type="search" id="q" placeholder="搜尋代號或名稱" aria-label="搜尋代號或名稱" autocomplete="off">
+<input type="search" id="q" placeholder="搜尋代號或名稱" aria-label="搜尋代號或名稱" autocomplete="off" maxlength="32">
 </label>
 </div>
 
@@ -53,10 +54,10 @@
 <div class="thead rank-cols">
 <div>排名</div><div>股票</div><div>市場</div><div class="right">收盤</div>
 <div class="right" id="ret-head">20 日預測報酬</div><div class="right">預測價</div>
-<div style="grid-column:span 2">80% 預測區間（價格）</div>
+<div style="grid-column:span 2" id="band-head">80% 預測區間（價格）</div>
 <div class="right" id="prob-head">漲幅超過 5% 機率</div><div class="right">昨日排名</div>
 </div>
-<div id="rows"><div class="empty" id="today-empty">預測資料尚未產出。模型上線後，這裡會列出全市場的排名。</div></div>
+<div id="rows"><div class="empty">載入中…</div></div>
 </div>
 </div>
 <div class="tfoot">
