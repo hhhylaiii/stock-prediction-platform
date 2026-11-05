@@ -9,7 +9,13 @@ from typing import Any
 import pandas as pd
 from django.db import transaction
 
-from apps.api.serving import MONITOR_LOOKBACK_MONTHS, Slot, months_before, served_monitor
+from apps.api.serving import (
+    MONITOR_DAYS,
+    MONITOR_LOOKBACK_MONTHS,
+    Slot,
+    months_before,
+    served_monitor,
+)
 from apps.etl.alerts import dispatch
 from apps.etl.models import DataQualityLog
 from apps.market.calendar import OutsideCalendarError, TradingDays
@@ -33,7 +39,6 @@ from apps.research.models import (
     ModelStatus,
     Prediction,
 )
-from apps.research.runs import SCREENING_MODEL
 
 WIDTH_CHECK = "output_width_ratio"
 ODDS_CHECK = "output_odds_vs_q50"
@@ -43,7 +48,7 @@ CHECKS = (WIDTH_CHECK, ODDS_CHECK, UNSCORED_CHECK, ALERT_CHECK)
 IC_THRESHOLD = "rolling_ic_threshold"
 BRIER_BASELINE = "brier_baseline"
 DEGRADED_ON = "degraded_on"
-WINDOW = 60
+WINDOW = MONITOR_DAYS
 COVERAGE_BOUNDS = (0.70, 0.90)
 OUTPUTS = ["score", "ret_pred", "q10", "q50", "q90", "vol_pred", "prob_up_5pct"]
 LABELS = ["fwd_rank_pct", "fwd_ret_open", "fwd_vol_20d", "fwd_up_5pct"]
@@ -264,24 +269,12 @@ RULES: Mapping[str, Rule] = {
 }
 
 
-def recent_values(objective: str, horizon: int, metric: str, day: date) -> list[float]:
-    """The slot's last 60 out-of-sample values up to the day, chained over runs like the API."""
+def recent_rows(objective: str, horizon: int, metric: str, day: date) -> list[dict[str, Any]]:
+    """The slot's last 60 out-of-sample rows with the metric up to the day, newest first."""
     slot = Slot(objective, horizon)
     window = {slot: (months_before(day, MONITOR_LOOKBACK_MONTHS), day)}
     rows = served_monitor(window).get(slot, [])
-    return [row[metric] for row in reversed(rows) if row[metric] is not None][:WINDOW]
-
-
-def _serving(objective: str) -> ModelRun | None:
-    """The watched run serving an objective now: active before degraded, then the newest."""
-    runs = ModelRun.objects.filter(objective=objective, status__in=WATCHED).exclude(
-        model_type=SCREENING_MODEL
-    )
-    return min(
-        runs,
-        key=lambda run: (WATCHED.index(run.status), -run.created_at.timestamp(), run.run_id),
-        default=None,
-    )
+    return [row for row in reversed(rows) if row[metric] is not None][:WINDOW]
 
 
 def _breach(run: ModelRun, rule: Rule, horizon: int, values: list[float]) -> dict[str, Any] | None:
@@ -302,17 +295,22 @@ def _breach(run: ModelRun, rule: Rule, horizon: int, values: list[float]) -> dic
 
 
 def run_alerts(matured: Mapping[int, date]) -> list[dict[str, Any]]:
-    """Entries of serving runs whose slot's 60-day mean breaches its rule or lacks its reference."""
+    """Per slot, the entry of the watched run serving its latest matured day when the mean breaches.
+
+    The run judged is the one whose monitor row is newest in the window, so reruns of past days
+    judge the run that served them, not whichever run serves today.
+    """
     found = []
     for objective, rule in RULES.items():
-        run = _serving(objective)
-        if run is None:
-            continue
         for horizon in rule.horizons:
             if horizon not in matured:
                 continue
-            values = recent_values(objective, horizon, rule.metric, matured[horizon])
-            entry = _breach(run, rule, horizon, values) if len(values) == WINDOW else None
+            rows = recent_rows(objective, horizon, rule.metric, matured[horizon])
+            if len(rows) < WINDOW:
+                continue
+            run = ModelRun.objects.get(pk=rows[0]["run_id"])
+            values = [row[rule.metric] for row in rows]
+            entry = _breach(run, rule, horizon, values) if run.status in WATCHED else None
             if entry is not None:
                 found.append(entry)
     return found

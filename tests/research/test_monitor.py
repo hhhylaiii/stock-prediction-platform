@@ -1,4 +1,5 @@
 from datetime import date, timedelta
+from io import StringIO
 from typing import Any
 
 import numpy as np
@@ -368,6 +369,11 @@ def status(run: ModelRun) -> str:
     return ModelRun.objects.get(pk=run.pk).status
 
 
+def alerts_on(day: date) -> list[dict[str, Any]]:
+    rows = DataQualityLog.objects.filter(date=day, check_name=ALERT_CHECK)
+    return [entry for row in rows for entry in row.detail["runs"]]
+
+
 def alerts() -> list[dict[str, Any]]:
     rows = DataQualityLog.objects.filter(date=DAY, check_name=ALERT_CHECK)
     assert rows.count() <= 1
@@ -511,10 +517,11 @@ def test_in_sample_days_and_days_beyond_six_months_do_not_count() -> None:
 def test_the_active_run_is_judged_before_a_newer_degraded_one_and_screening_runs_never() -> None:
     limits = {IC_THRESHOLD: {"20": 0.0}}
     active = make_run("prod.rank", "rank", params=limits)
-    make_run("prod.rank.newer", "rank", status="degraded", params=limits)
+    newer = make_run("prod.rank.newer", "rank", status="degraded", params=limits)
     screening = make_run("prod.rank.screen", "rank", params=limits)
     ModelRun.objects.filter(pk=screening.pk).update(model_type=SCREENING_MODEL)
-    history(active, "ic", [-0.5] * 60)
+    for run in (active, newer, screening):
+        history(run, "ic", [-0.5] * 60)
 
     result = run_monitor(DAY, calendar())
 
@@ -532,6 +539,35 @@ def test_days_after_the_matured_date_do_not_count() -> None:
     run_monitor(DAY, calendar())
 
     assert (status(run), alerts()) == ("active", [])
+
+
+def test_runs_serving_one_horizon_each_are_judged_on_their_own_slot() -> None:
+    limits = {IC_THRESHOLD: {"5": 0.0, "20": 0.0}}
+    long = make_run("rank-h20", "rank", params=limits)
+    short = make_run("rank-h5", "rank", params=limits)
+    history(long, "ic", [-0.5] * 60, horizon=20)
+    history(short, "ic", [0.05] * 60, horizon=5)
+    out = StringIO()
+
+    call_command("monitor", date=DAY.isoformat(), stdout=out)
+
+    assert (status(long), status(short)) == ("degraded", "active")
+    assert [(row["run_id"], row["horizon"]) for row in alerts()] == [(long.run_id, 20)]
+    assert "degraded rank-h20" in out.getvalue()
+
+
+def test_rerunning_a_past_day_judges_the_run_that_served_it_not_todays() -> None:
+    limits = {IC_THRESHOLD: {"20": 0.0}}
+    old = make_run("prod.rank.old", "rank", "retired", limits, train_end=date(2025, 12, 31))
+    new = make_run("prod.rank", "rank", params=limits, train_end=date(2026, 9, 1))
+    history(old, "ic", [-0.5] * 60, end=date(2026, 6, 5))
+    history(old, "ic", [0.1] * 60)
+    past = calendar().shift(date(2026, 6, 5), 20)
+
+    run_monitor(past, calendar())
+
+    assert (status(new), alerts_on(past)) == ("active", [])
+    assert DEGRADED_ON not in ModelRun.objects.get(pk=new.pk).params
 
 
 @pytest.mark.parametrize(("short", "long", "breached"), [(-0.01, -0.01, 5), (0.01, -0.03, 20)])
@@ -625,7 +661,9 @@ def test_command_runs_a_trading_day_and_refuses_other_days(
     rank = make_run("prod.rank", "rank")
     seed_matured({"rank": rank}, 5, 9)
 
-    call_command("monitor", date="2026-09-30")
+    out = StringIO()
+    call_command("monitor", date="2026-09-30", stdout=out)
+    assert "degraded none" in out.getvalue()
 
     assert ModelMonitor.objects.filter(run=rank, horizon=5).exists()
     ModelMonitor.objects.all().delete()

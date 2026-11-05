@@ -102,6 +102,7 @@ def panel(seed: int) -> tuple[pd.DataFrame, pd.DataFrame]:
         logistic_h20=frame["logistic_h20"].mask(stuck, 0.99),
     )
     frame["fwd_rank_pct"] = frame["truth"].mask(stuck).groupby(frame["date"]).rank(pct=True)
+    frame["fwd_rank_pct_5"] = (-frame["truth"]).mask(stuck).groupby(frame["date"]).rank(pct=True)
     frame["fwd_up_5pct"] = frame["truth"] > 0.05
     return frame, frame
 
@@ -115,7 +116,7 @@ def store(frame: pd.DataFrame, model: str, columns: list[str]) -> None:
 
 
 def write_labels(frame: pd.DataFrame) -> None:
-    names = ["stock_id", "date", "fwd_rank_pct", "fwd_up_5pct", "untradable_t1"]
+    names = ["stock_id", "date", "fwd_rank_pct_5", "fwd_rank_pct", "fwd_up_5pct", "untradable_t1"]
     columns = zip(*(frame[name] for name in names), strict=True)
     LabelDaily.objects.bulk_create(
         LabelDaily(
@@ -126,14 +127,14 @@ def write_labels(frame: pd.DataFrame) -> None:
             fwd_up_5pct=bool(up) if horizon == 20 else None,
             untradable_t1=bool(stuck),
         )
-        for stock, day, pct, up, stuck in columns
-        for horizon in (5, 20)
+        for stock, day, short, long, up, stuck in columns
+        for horizon, pct in ((5, short), (20, long))
     )
 
 
-def expected_threshold(frame: pd.DataFrame, column: str) -> float:
+def expected_threshold(frame: pd.DataFrame, column: str, label: str) -> float:
     rows = frame[frame["in_universe"] & ~frame["untradable_t1"] & frame["date"].map(counted)]
-    ic = daily_rank_ic(rows, column)
+    ic = daily_rank_ic(rows.assign(fwd_rank_pct=rows[label]), column)
     means = ic.rolling(60).mean().dropna()
     return float(means.quantile(0.05))
 
@@ -148,9 +149,13 @@ def test_thresholds_come_from_research_folds_of_the_cache_and_label_daily() -> N
     thresholds = research_ic_thresholds("wf1", "lightgbm", FOLDS)
 
     assert set(thresholds) == {5, 20}
-    assert thresholds[5] == pytest.approx(expected_threshold(frame, "lightgbm_h5"))
-    assert thresholds[20] == pytest.approx(expected_threshold(frame, "lightgbm_h20"))
-    assert thresholds[5] > 0
+    assert thresholds[5] == pytest.approx(
+        expected_threshold(frame, "lightgbm_h5", "fwd_rank_pct_5")
+    )
+    assert thresholds[20] == pytest.approx(
+        expected_threshold(frame, "lightgbm_h20", "fwd_rank_pct")
+    )
+    assert thresholds[5] < 0 < thresholds[20]
 
 
 @pytest.mark.django_db
