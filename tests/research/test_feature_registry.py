@@ -9,6 +9,8 @@ from apps.research.features.registry import (
     feature,
     feature_names,
 )
+from apps.research.features.transforms import STOCK_LEVEL
+from apps.research.management.commands.ic_report import UNSCREENED
 
 FIRST_BATCH_GROUPS = {
     Group.TECHNICAL: 22,
@@ -125,3 +127,11 @@ def test_lookups_by_group_and_batch() -> None:
     assert feature("tech_limit_up_t").group is Group.TECHNICAL
     with pytest.raises(KeyError, match="tech_nope"):
         feature("tech_nope")
+
+
+def test_the_second_batch_stays_out_of_screening_and_training() -> None:
+    second = set(feature_names(batch=2))
+
+    assert len(second) == 14
+    assert not second & set(STOCK_LEVEL)
+    assert not second & set(UNSCREENED)

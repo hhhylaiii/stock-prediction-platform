@@ -172,7 +172,7 @@ class LabelDaily(models.Model):
 
 
 class FeatureDaily(models.Model):
-    """Raw first-batch features per stock and trading day; transforms run in the pipeline."""
+    """Raw features of both batches per stock and trading day; transforms run in the pipeline."""
 
     pk = models.CompositePrimaryKey("stock_id", "date")
     stock_id = models.CharField(max_length=10)
@@ -242,13 +242,28 @@ class FeatureDaily(models.Model):
     mkt_tsm_adr_gap = models.FloatField(null=True, blank=True)
     mkt_usdtwd_chg_20d = models.FloatField(null=True, blank=True)
     mkt_business_signal = models.FloatField(null=True, blank=True)
+    tech_parkinson_vol_20d = models.FloatField(null=True, blank=True)
+    tech_gap_1d = models.FloatField(null=True, blank=True)
+    tech_close_loc_5d = models.FloatField(null=True, blank=True)
+    tech_max_ret_20d = models.FloatField(null=True, blank=True)
+    tech_skew_60d = models.FloatField(null=True, blank=True)
+    chip_day_trade_ratio_5d = models.FloatField(null=True, blank=True)
+    chip_fi_holding_chg_20d = models.FloatField(null=True, blank=True)
+    chip_it_net_20d = models.FloatField(null=True, blank=True)
+    chip_fi_buy_streak = models.FloatField(null=True, blank=True)
+    ind_sector_id = models.FloatField(null=True, blank=True)
+    ind_mom_neutral = models.FloatField(null=True, blank=True)
+    ind_ep_neutral = models.FloatField(null=True, blank=True)
+    fund_days_to_ex_date = models.FloatField(null=True, blank=True)
+    mkt_days_to_quarter_end = models.FloatField(null=True, blank=True)
 
     class Meta:
         db_table = "feature_daily"
         indexes = [models.Index(fields=["date"], name="feature_daily_date_idx")]
         constraints = [
             models.CheckConstraint(
-                condition=finite(*feature_names(batch=1)), name="feature_daily_finite"
+                condition=finite(*feature_names(batch=1), *feature_names(batch=2)),
+                name="feature_daily_finite",
             ),
         ]
 

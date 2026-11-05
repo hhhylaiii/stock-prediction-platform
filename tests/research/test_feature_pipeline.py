@@ -21,7 +21,7 @@ from apps.market.models import (
     TradingCalendar,
     WeeklyHolding,
 )
-from apps.research.features.build import FRAME_COLUMNS, build_feature_frame
+from apps.research.features.build import FEATURE_COLUMNS, FRAME_COLUMNS, build_feature_frame
 from apps.research.features.registry import feature_names
 from apps.research.features.store import export_year, read_partitions, write_features
 from apps.research.models import FeatureDaily
@@ -110,13 +110,19 @@ def inputs(stock_id: str) -> None:
 def stored() -> pd.DataFrame:
     rows = FeatureDaily.objects.order_by("date", "stock_id").values_list(*FRAME_COLUMNS)
     frame = pd.DataFrame(list(rows), columns=FRAME_COLUMNS)
-    return frame.astype(dict.fromkeys(feature_names(batch=1), "float64"))
+    return frame.astype(dict.fromkeys(FEATURE_COLUMNS, "float64"))
 
 
 def test_feature_daily_holds_the_first_batch_raw_values() -> None:
     names = [field.name for field in FeatureDaily._meta.concrete_fields if not field.primary_key]
 
-    assert names == ["stock_id", "date", "in_universe", *feature_names(batch=1)]
+    assert names == [
+        "stock_id",
+        "date",
+        "in_universe",
+        *feature_names(batch=1),
+        *feature_names(batch=2),
+    ]
 
 
 def test_the_frame_has_one_row_per_listed_stock_and_trading_day_in_range() -> None:
@@ -154,6 +160,9 @@ def test_every_input_group_reaches_the_frame() -> None:
     assert row["chip_big_holder_pct_chg_1w"] == pytest.approx(2.5)
     assert row["chip_holder_count_chg_1w"] == pytest.approx((1_100 + 1_111) / (1_000 + 1_011) - 1)
     assert row["fund_bp"] == pytest.approx(0.5)
+    k = len(CALENDAR.between(d("2015-06-01"), d("2016-03-02"))) - 1
+    assert row["tech_gap_1d"] == pytest.approx((100 + 0.1 * k) / (100 + 0.1 * (k - 1)) - 1)
+    assert row["mkt_days_to_quarter_end"] == len(CALENDAR.between(d("2016-03-03"), d("2016-03-31")))
     k = len(CALENDAR.between(d("2015-12-01"), d("2016-03-02"))) - 1
     assert row["mkt_taiex_ret_5d"] == pytest.approx(taiex_close(k) / taiex_close(k - 5) - 1)
 
