@@ -1,12 +1,14 @@
 """Which model runs serve a prediction date, and the run each displayed field is read from."""
 
+import calendar
+from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date, datetime
 from statistics import fmean
 from typing import Any
 
-from django.db.models import Max, Q, QuerySet
+from django.db.models import F, Max, Q, QuerySet
 
 from apps.research.models import ModelMonitor, ModelObjective, ModelStatus, Prediction
 from apps.research.runs import SCREENING_MODEL
@@ -16,6 +18,8 @@ SERVING = (ModelStatus.ACTIVE, ModelStatus.DEGRADED)
 DEFAULT_HORIZON = 20
 MONITOR_DAYS = 60
 MONITOR_DIGITS = 4
+MONITOR_LOOKBACK_MONTHS = 6
+MONITOR_FIELDS = ("ic", "coverage", "width", "brier", "auc", "direction_acc", "mae")
 RUN_FIELDS = (
     "run_key",
     "model_type",
@@ -122,18 +126,45 @@ def ranks_on(day: date, horizon: int, stock_ids: list[str]) -> dict[str, int | N
     return dict(rows)
 
 
-def recent_mean(
-    run: ServingRun | None, day: date | None, horizon: int, field: str
-) -> tuple[float | None, int]:
-    """Mean of a model_monitor column over the run's last 60 evaluated dates up to the day."""
+def months_before(day: date, count: int) -> date:
+    """The same day count months earlier, clamped to that month's last day."""
+    year, month = divmod(day.year * 12 + day.month - 1 - count, 12)
+    return date(year, month + 1, min(day.day, calendar.monthrange(year, month + 1)[1]))
+
+
+def served_monitor(windows: dict[Slot, tuple[date, date]]) -> dict[Slot, list[dict[str, Any]]]:
+    """Per slot and day in (after, through], the monitor row of the run that served it, OOS only."""
+    if not windows:
+        return {}
+    condition = Q()
+    for slot, (after, through) in windows.items():
+        condition |= Q(
+            run__objective=slot.objective, horizon=slot.horizon, date__gt=after, date__lte=through
+        )
+    rows = (
+        ModelMonitor.objects.filter(condition, date__gt=F("run__train_end"))
+        .exclude(run__status=ModelStatus.CANDIDATE)
+        .exclude(run__model_type=SCREENING_MODEL)
+        .values("date", *MONITOR_FIELDS, *SERVING_FIELDS)
+    )
+    by_day: dict[tuple[Slot, date], list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        by_day[(Slot(row["run__objective"], row["horizon"]), row["date"])].append(row)
+    served: dict[Slot, list[dict[str, Any]]] = defaultdict(list)
+    for (slot, _), candidates in sorted(by_day.items(), key=lambda item: item[0][1]):
+        best = best_runs((serving_run(row) for row in candidates), [slot])[slot]
+        served[slot].append(next(row for row in candidates if row["run_id"] == best.run_id))
+    return served
+
+
+def recent_mean(run: ServingRun | None, day: date | None, field: str) -> tuple[float | None, int]:
+    """Mean of a monitor column over the slot's last 60 evaluated days up to the day."""
     if run is None or day is None:
         return None, 0
-    values = list(
-        ModelMonitor.objects.filter(run_id=run.run_id, horizon=horizon, date__lte=day)
-        .exclude(**{f"{field}__isnull": True})
-        .order_by("-date")
-        .values_list(field, flat=True)[:MONITOR_DAYS]
-    )
+    slot = Slot(run.objective, run.horizon)
+    window = {slot: (months_before(day, MONITOR_LOOKBACK_MONTHS), day)}
+    rows = served_monitor(window).get(slot, [])
+    values = [row[field] for row in reversed(rows) if row[field] is not None][:MONITOR_DAYS]
     if not values:
         return None, 0
     return round(fmean(values), MONITOR_DIGITS), len(values)
