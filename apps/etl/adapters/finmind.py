@@ -23,6 +23,7 @@ from apps.etl.adapters.finmind_datasets import (
 )
 from apps.etl.adapters.finmind_fundamentals import monthly_revenues, statements
 from apps.etl.client import SourceClient
+from apps.etl.dividend_dates import announcement_session, fill_announce_dates
 from apps.etl.errors import SchemaChangedError, SourceRequestError
 from apps.etl.models import RawFinmind
 from apps.etl.ratelimit import RateLimiter, ThrottledError
@@ -243,6 +244,9 @@ class FinmindAdapter(BaseAdapter):
                 end=raw_df.attrs["end"],
                 reductions=parts["TaiwanStockCapitalReductionReferencePrice"],
                 splits=parts["TaiwanStockSplitPrice"],
+                session=announcement_session(
+                    self.calendar, clock_time.fromisoformat(settings.FILING_VISIBLE_BEFORE)
+                ),
             )
         elif dataset == "monthly_revenue":
             frame = monthly_revenues(
@@ -312,6 +316,9 @@ class FinmindAdapter(BaseAdapter):
             (*EVENT_FIELDS, "adj_factor"),
         )
         rows += upsert(DividendEvent, frame[~with_factor], ("stock_id", "ex_date"), EVENT_FIELDS)
+        fill_announce_dates(
+            stock_id, dict(zip(frame["ex_date"], frame["announce_date"], strict=True))
+        )
         refresh_adj_factor(stock_id)
         return rows
 

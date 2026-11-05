@@ -2,9 +2,10 @@
 
 import logging
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from datetime import date
+from datetime import date, datetime, time
 from decimal import Decimal, InvalidOperation
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -13,6 +14,9 @@ from apps.market.models import ShareChangeReason
 
 logger = logging.getLogger(__name__)
 Row = Mapping[str, Any]
+Session = Callable[[datetime], date]
+TAIPEI = ZoneInfo("Asia/Taipei")
+DAY_END = time(23, 59, 59)
 PRICE_KEYS = ("date", "stock_id", "open", "max", "min", "close", "Trading_Volume", "Trading_money")
 PRICE_COLUMNS = ["stock_id", "date", "open", "high", "low", "close", "volume", "turnover"]
 POLICY_KEYS = (
@@ -38,6 +42,7 @@ EVENT_COLUMNS = [
     "cash_dividend",
     "stock_dividend",
     "adj_factor",
+    "announce_date",
 ]
 VALUATION_KEYS = ("date", "stock_id", "PER", "PBR", "dividend_yield")
 VALUATION_COLUMNS = ["stock_id", "date", "pe", "pb", "dividend_yield"]
@@ -167,6 +172,37 @@ def _ratio(row: Row, after_key: str, before_key: str, label: str) -> float | Non
     return None
 
 
+def ex_date_announcements(
+    policy: Iterable[Row], stock_id: str, session: Session
+) -> dict[date, date | None]:
+    """The session each ex-date was first announced in; none if that comes after the ex-date."""
+    seen: dict[date, date] = {}
+    for row in checked_rows(policy, POLICY_KEYS, "TaiwanStockDividend", stock_id):
+        day = _optional_day(row.get("AnnouncementDate"), "TaiwanStockDividend")
+        if day is None:
+            continue
+        moment = session(datetime.combine(day, _clock(row.get("AnnouncementTime")), TAIPEI))
+        for _, ex_key, _ in DIVIDEND_PARTS:
+            ex_date = _optional_day(row[ex_key], "TaiwanStockDividend")
+            if ex_date is not None:
+                seen[ex_date] = min(seen.get(ex_date, moment), moment)
+    late = sorted(ex for ex, moment in seen.items() if moment > ex)
+    if late:
+        logger.warning("%s: announced after the ex-date %s, left without a date", stock_id, late)
+    return {ex: (None if moment > ex else moment) for ex, moment in seen.items()}
+
+
+def _clock(value: Any) -> time:
+    """A missing announcement time counts as the end of the day."""
+    text = str(value or "").strip()
+    if not text:
+        return DAY_END
+    try:
+        return time.fromisoformat(text)
+    except ValueError:
+        raise SchemaChangedError(f"FinMind TaiwanStockDividend has a bad time {value!r}") from None
+
+
 def dividend_events(
     policy: Iterable[Row],
     results: Iterable[Row],
@@ -175,8 +211,11 @@ def dividend_events(
     end: date = date.max,
     reductions: Iterable[Row] = (),
     splits: Iterable[Row] = (),
+    session: Session | None = None,
 ) -> pd.DataFrame:
     """One event per ex-date in range; capital reductions and splits add factor-only events."""
+    policy = list(policy)
+    announced = {} if session is None else ex_date_announcements(policy, stock_id, session)
     events: dict[date, dict[str, Any]] = {}
 
     def event(day: date) -> dict[str, Any]:
@@ -221,6 +260,7 @@ def dividend_events(
                 "cash_dividend": found["cash"].quantize(DIVIDEND_PLACES).normalize(),
                 "stock_dividend": found["stock"].quantize(DIVIDEND_PLACES).normalize(),
                 "adj_factor": factor,
+                "announce_date": announced.get(ex_date),
             }
         )
     return pd.DataFrame(records, columns=EVENT_COLUMNS, dtype=object)
