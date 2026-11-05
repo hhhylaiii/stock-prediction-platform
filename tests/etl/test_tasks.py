@@ -22,6 +22,7 @@ from config.celery import app
 DAY = date(2026, 10, 28)
 TAIPEI = ZoneInfo("Asia/Taipei")
 DAILY_JOBS = {(job.source, job.dataset) for jobs in tasks.BATCHES.values() for job in jobs}
+SCANS = {("mops", "statement_scan"), ("mops", "revenue_scan")}
 
 pytestmark = pytest.mark.usefixtures("october_2026_in_db")
 
@@ -368,7 +369,7 @@ def test_sessions_missed_since_the_schedule_began_are_audited(
     monkeypatch.setattr("apps.etl.tasks.call_command", lambda name, **kwargs: None)
     began = date(2026, 10, 20)
     checked(began, ("etl_runs", "error"))
-    landed(began, DAILY_JOBS)
+    landed(began, DAILY_JOBS | SCANS)
     today(DAY, time(15, 10))
     tasks.prepare_day()
     audited = DataQualityLog.objects.filter(check_name="etl_runs")
@@ -434,12 +435,32 @@ def test_only_a_missing_gate_dataset_makes_the_landed_row_an_error(
     absent: set[tuple[str, str]],
     severity: str,
 ) -> None:
-    landed(DAY, DAILY_JOBS - absent)
+    landed(DAY, (DAILY_JOBS | SCANS) - absent)
     today(DAY)
     tasks.check_quality()
     row = DataQualityLog.objects.get(check_name="etl_runs")
     assert row.severity == severity
     assert row.detail == {"missing": sorted(f"{s}/{d}" for s, d in absent), "blocking": []}
+
+
+def test_a_scan_due_without_a_successful_run_warns(
+    today: Callable[..., None],
+    sent: list[list[tuple[date, str, str]]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    landed(DAY, DAILY_JOBS)
+    EtlRun.objects.create(
+        source="mops", dataset="revenue_scan", start_date=DAY, end_date=DAY, status="failed"
+    )
+    today(DAY)
+    tasks.check_quality()
+    row = DataQualityLog.objects.get(check_name="etl_runs")
+    assert row.severity == "warning"
+    assert row.detail == {"missing": ["mops/revenue_scan", "mops/statement_scan"], "blocking": []}
+    monkeypatch.setattr("apps.etl.tasks.open_months", lambda day, days_after: [])
+    monkeypatch.setattr("apps.etl.tasks.open_periods", lambda day, days_after: [])
+    tasks.check_quality()
+    assert DataQualityLog.objects.get(check_name="etl_runs").severity == "info"
 
 
 def test_the_us_close_loads_the_last_session_and_logs_stale_series(

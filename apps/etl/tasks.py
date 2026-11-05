@@ -110,7 +110,7 @@ def _landed(day: date) -> DataQualityLog:
     """The daily datasets without a run for the session; a gate dataset among them is an error."""
     missing = sorted(
         f"{source}/{dataset}"
-        for source, dataset in _daily_jobs()
+        for source, dataset in _daily_jobs() | _scans_due(day)
         if day not in covered_days(source, dataset, [day])
     )
     blocking = [key for key in missing if key.split("/")[1] in GATE_DATASETS]
@@ -344,6 +344,15 @@ def _run_once(
     except Exception as exc:
         return _failed(what, exc)
     return f"success: {run.rows} rows"
+
+
+def _scans_due(day: date) -> set[tuple[str, str]]:
+    """MOPS scans the session should have run; a missing one warns but never holds research."""
+    due = {
+        STATEMENT_SCAN: bool(open_periods(day, settings.STATEMENT_SCAN_DAYS_AFTER)),
+        REVENUE_SCAN: bool(open_months(day, settings.REVENUE_SCAN_DAYS_AFTER)),
+    }
+    return {("mops", dataset) for dataset, open_now in due.items() if open_now}
 
 
 def _daily_jobs() -> set[tuple[str, str]]:
