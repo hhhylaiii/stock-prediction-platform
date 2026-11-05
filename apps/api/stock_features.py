@@ -7,6 +7,7 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 
 from apps.api.envelope import envelope
+from apps.api.feature_text import GROUP_LABELS, LABELS
 from apps.api.params import FeatureQuery, parse
 from apps.api.serving import ServingRun, Slot, latest_served_date, runs_on
 from apps.api.stocks import require_stock
@@ -35,6 +36,23 @@ def feature_values(stock_id: str, day: date, names: list[str]) -> dict[str, Any]
     return row or {}
 
 
+def feature_item(row: dict[str, Any], value: Any) -> dict[str, Any]:
+    """An unknown feature keeps its code as the label and has no unit or group."""
+    feature = row["feature"]
+    label, unit = LABELS.get(feature, (feature, None))
+    group = GROUPS.get(feature)
+    return {
+        "position": row["position"],
+        "feature": feature,
+        "label": label,
+        "unit": unit,
+        "group": group,
+        "group_label": None if group is None else GROUP_LABELS[group],
+        "contrib": row["contrib"],
+        "value": value,
+    }
+
+
 def contributions(stock_id: str, day: date, run: ServingRun) -> dict[str, Any]:
     rows = list(
         PredictionContrib.objects.filter(
@@ -47,16 +65,7 @@ def contributions(stock_id: str, day: date, run: ServingRun) -> dict[str, Any]:
     rest = next((row for row in rows if row["feature"] == REST_FEATURE), None)
     values = feature_values(stock_id, day, [row["feature"] for row in top])
     return {
-        "items": [
-            {
-                "position": row["position"],
-                "feature": row["feature"],
-                "group": GROUPS.get(row["feature"]),
-                "contrib": row["contrib"],
-                "value": values.get(row["feature"]),
-            }
-            for row in top
-        ],
+        "items": [feature_item(row, values.get(row["feature"])) for row in top],
         "rest": None
         if rest is None
         else {"contrib": rest["contrib"], "n_features": rest["n_features"]},

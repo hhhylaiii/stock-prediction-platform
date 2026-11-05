@@ -96,10 +96,19 @@ def test_top_contributions_come_in_order_with_the_rest(client: Client, contribs:
     assert items[0] == {
         "position": 1,
         "feature": "tech_ret_60d",
+        "label": "60 日報酬",
+        "unit": "ratio",
         "group": "technical",
+        "group_label": "技術面",
         "contrib": 0.031,
         "value": 0.12,
     }
+    assert [(item["label"], item["unit"]) for item in items[1:]] == [
+        ("外資 20 日買賣超（占流通股）", "ratio"),
+        ("20 日 Parkinson 波動", "ratio"),
+        ("市值（對數）", "number"),
+        ("ROE（近四季）", "number"),
+    ]
     assert [item["value"] for item in items] == [0.12, None, None, 30.5, None]
     assert items[2]["group"] == "technical"
     assert body["data"]["rest"] == {"contrib": 0.004, "n_features": 72}
@@ -133,6 +142,19 @@ def test_only_the_serving_run_s_contributions_count(client: Client, contribs: Ru
 
     assert body["meta"]["run_id"] == "rank-h20"
     assert "mkt_taiex_ret_5d" not in [item["feature"] for item in body["data"]["items"]]
+
+
+def test_an_unknown_feature_keeps_its_code(client: Client, runs: Runs) -> None:
+    add_contribs(runs.rank20, OCT_30, 20, (("tech_future_x", 0.1),), rest=None)
+
+    item = envelope_of(client.get("/api/stocks/2330/features"))["data"]["items"][0]
+
+    assert (item["label"], item["unit"], item["group"], item["group_label"]) == (
+        "tech_future_x",
+        None,
+        None,
+        None,
+    )
 
 
 def test_an_earlier_date_without_a_rest_row(client: Client, contribs: Runs) -> None:
