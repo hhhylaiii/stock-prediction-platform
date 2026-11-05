@@ -3,8 +3,10 @@
 import math
 import statistics
 import time
+from collections import Counter
 from typing import Any
 
+from django.conf import settings
 from django.core.management.base import BaseCommand, CommandParser
 from django.test import Client
 
@@ -23,19 +25,22 @@ ENDPOINTS = (
 )
 
 
-def timed(client: Client, path: str, repeat: int) -> tuple[int, list[float]]:
-    """Status of a warm-up call, then the milliseconds of each repeated call."""
-    status = client.get(path).status_code
+def timed(client: Client, path: str, repeat: int) -> tuple[str, list[float]]:
+    """Statuses of a warm-up call and the repeats, then the milliseconds of each repeat."""
+    first = client.get(path).status_code
+    others: Counter[int] = Counter()
     spent = []
     for _ in range(repeat):
         start = time.perf_counter()
-        client.get(path)
+        status = client.get(path).status_code
         spent.append((time.perf_counter() - start) * 1000)
-    return status, spent
+        if status != first:
+            others[status] += 1
+    return "/".join([str(first), *(f"{code}×{n}" for code, n in sorted(others.items()))]), spent
 
 
 class Command(BaseCommand):
-    help = "Time each API endpoint in process; the throttle allows about 300 calls a minute."
+    help = f"Time each API endpoint in process; the throttle allows {settings.API_THROTTLE_RATE}."
 
     def add_arguments(self, parser: CommandParser) -> None:
         parser.add_argument("--stock", default="2330")
