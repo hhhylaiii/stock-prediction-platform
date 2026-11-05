@@ -203,8 +203,14 @@ test -s delisted.txt && sed 's/^/--stock /' delisted.txt | xargs uv run python m
 ```
 
 - 只看 2013-Q1 起、在下市日之前結束、而且每日掃描已經不看的季別。先問合併報表（`REPORT_ID=C`），沒有就問個別報表（`A`）；同一家公司上一季回答的種類下一季先問。
-- 只抓 standard 表沒有的季別，以及換算單季值需要的前一季。單季值和彙總表用同一套換算（`statement_rows`）。前一季也讀到的已存季別會拿來對照，不改。
-- 寫入和 log 跟彙總表歷史相同：保守公告日，`statement_viewer_mismatch` 每檔股票一列（`detail.stock_id`）。另外 `absent` 列出兩種報表都查不到的季別，例如下市前停止申報的公司。
+- 只抓 standard 表沒有的季別，以及每一季的前一季（Q1 也抓前一年 Q4，ROE 才算得出來）。單季值和彙總表用同一套換算（`statement_rows`）。前一季也讀到的已存季別會拿來對照，不改。
+- 寫入和 log 跟彙總表歷史相同：保守公告日，`statement_viewer_mismatch` 每檔股票一列（`detail.stock_id`），區間結尾是最後一季的季底，所以重跑到哪一天都是同一列。另外 `absent` 列出兩種報表都查不到的季別，例如下市前停止申報的公司；`no_revenue` 列出認不得營收科目的季別，毛利率、營益率也會跟著是空的，要人工看那家公司的科目名稱。
+- 保守公告日對晚申報的公司偏早，下市公司又常晚申報，所以補完一定要接著跑 `statement_filing`，換成實際上傳日（doc.twse 查得到下市公司）：
+
+  ```bash
+  uv run python manage.py shell -v 0 -c "from apps.etl.models import DataQualityLog as L; print('\n'.join(sorted({a['stock_id'] for log in L.objects.filter(check_name='statement_viewer_mismatch') for a in log.detail.get('added', [])})), end='')" > viewer_added.txt
+  test -s viewer_added.txt && sed 's/^/--stock /' viewer_added.txt | xargs uv run python manage.py backfill --source mops --dataset statement_filing --from 2013-01-01
+  ```
 - 91 開頭的存託憑證是外國發行人，不用這張表申報，所以排除。
 - 每家公司每季約 1 個請求，6 秒一次；全部下市公司約 1,500 個請求，約 2.5 小時。和每日掃描是同一台 mopsov，在 23:00 之後或早上跑，避開 19:00 和 22:40 前後。
 
