@@ -15,7 +15,12 @@ from django.core.management.base import CommandError
 from responses import matchers
 
 from apps.etl.adapters import ADAPTERS
-from apps.etl.adapters.mops import STATEMENT_FILING, MopsAdapter, parse_listing
+from apps.etl.adapters.mops import (
+    MOPS_MIN_INTERVAL,
+    STATEMENT_FILING,
+    MopsAdapter,
+    parse_listing,
+)
 from apps.etl.errors import SchemaChangedError
 from apps.etl.filings import (
     FILED_LATE_CHECK,
@@ -228,6 +233,13 @@ def test_a_restatement_sets_the_date_even_when_corrected_or_early(
     assert logged(RESTATED_CHECK) == {
         "2330": [("2024-Q4", CONSOLIDATED, "2025-04-01", session.isoformat())]
     }
+
+
+def test_the_affiliates_report_is_not_an_announcement(page: Callable[[str], bytes]) -> None:
+    listing = text(page("2330_99"))
+    assert listing.count("英文版-母公司財報") == 4
+    supplemented = listing.replace("英文版-母公司財報", "關係企業合併報表", 1)
+    assert parse_listing(supplemented, "2330", 99) == parse_listing(listing, "2330", 99)
 
 
 def test_companies_without_subsidiaries_file_individual_reports(
@@ -500,6 +512,21 @@ def test_a_dataset_run_needs_a_stock(adapter: MopsAdapter) -> None:
         adapter.run(STATEMENT_FILING, date(2024, 1, 1), date(2024, 12, 31))
 
 
+def test_the_last_restatement_dates_the_period(adapter: MopsAdapter) -> None:
+    frame = pd.DataFrame(
+        [
+            ("1213", "2018-Q4", CONSOLIDATED, at("2019-04-08 18:18:18"), False, False),
+            ("1213", "2018-Q4", CONSOLIDATED, at("2019-10-02 09:00:00"), False, True),
+            ("1213", "2018-Q4", CONSOLIDATED, at("2019-09-18 10:38:45"), False, True),
+        ],
+        columns=FILING_COLUMNS,
+    )
+    normalized = adapter.normalize(STATEMENT_FILING, frame)
+    assert normalized[["uploaded_at", "restated"]].values.tolist() == [
+        [at("2019-10-02 09:00:00"), True]
+    ]
+
+
 def test_normalize_keeps_the_first_upload_of_each_report_type(
     adapter: MopsAdapter,
 ) -> None:
@@ -596,7 +623,7 @@ def test_doc_twse_refuses_requests_closer_than_five_seconds() -> None:
 
 def test_the_source_is_registered_with_its_own_limits() -> None:
     assert ADAPTERS["mops"] is MopsAdapter
-    assert settings.ETL_RATE_LIMITS["mops"]["min_interval"] == 6.0
+    assert settings.ETL_RATE_LIMITS["mops"]["min_interval"] >= MOPS_MIN_INTERVAL
     assert settings.FILING_VISIBLE_BEFORE == "22:40"
 
 

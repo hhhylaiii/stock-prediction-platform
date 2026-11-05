@@ -42,6 +42,7 @@ CODE, YEAR, KIND, DETAIL, UPLOADED, CORRECTION = (
 HEADER = (CODE, YEAR, KIND, DETAIL, UPLOADED, CORRECTION)
 FINANCIAL_REPORT = "財務報告書"
 ENGLISH = "英文版"
+SUPPLEMENTS = frozenset({"關係企業合併報表"})
 RESTATED = "(重編)"
 REPORT_TYPES = {
     "IFRSs合併財報": FinType.CONSOLIDATED,
@@ -142,7 +143,7 @@ def parse_listing(page: str, code: str, roc_year: int) -> list[Filing]:
         if len(row) != len(header):
             raise SchemaChangedError(f"doc.twse {code} {roc_year} row has {len(row)} cells")
         cells = {name: row[index] for name, index in position.items()}
-        if ENGLISH not in cells[DETAIL]:
+        if ENGLISH not in cells[DETAIL] and cells[DETAIL] not in SUPPLEMENTS:
             filings.append(_filing(cells, code, roc_year))
     return filings
 
