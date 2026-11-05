@@ -1,9 +1,11 @@
 """Settings shared by every environment; values come from environment variables."""
 
+from datetime import time
 from pathlib import Path
 
 import environ
 from celery.schedules import crontab
+from django.core.exceptions import ImproperlyConfigured
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
@@ -115,6 +117,8 @@ ETL_AT = {
         ("BUSINESS_SIGNAL", "10:00"),
     )
 } | {"STATEMENTS_LATE": FILING_VISIBLE_BEFORE}
+if time.fromisoformat(FILING_VISIBLE_BEFORE) >= time.fromisoformat(ETL_AT["CHECK_QUALITY"]):
+    raise ImproperlyConfigured("FILING_VISIBLE_BEFORE must come before ETL_AT_CHECK_QUALITY")
 
 
 def _at(name: str, **fields: str) -> crontab:
