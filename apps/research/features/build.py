@@ -2,7 +2,6 @@
 
 from datetime import date
 
-import numpy as np
 import pandas as pd
 
 from apps.market.calendar import TradingDays
@@ -14,6 +13,7 @@ from apps.research.features.chip import (
     load_holding_changes,
     second_batch_chip_features,
 )
+from apps.research.features.dividend import attach_ex_dates
 from apps.research.features.fundamental import attach_fundamentals, fundamental_features
 from apps.research.features.inputs import load_feature_panel
 from apps.research.features.market import (
@@ -22,25 +22,30 @@ from apps.research.features.market import (
     load_market_features,
 )
 from apps.research.features.registry import feature_names
-from apps.research.features.size_risk import industry_risk_features, size_liquidity_features
+from apps.research.features.size_risk import (
+    industry_risk_features,
+    second_batch_industry_features,
+    size_liquidity_features,
+)
 from apps.research.features.technical import (
     second_batch_technical_features,
     technical_features,
 )
 
 FEATURE_COLUMNS = [*feature_names(batch=1), *feature_names(batch=2)]
-PENDING = ["ind_sector_id", "ind_mom_neutral", "ind_ep_neutral", "fund_days_to_ex_date"]
 FRAME_COLUMNS = ["stock_id", "date", "in_universe", *FEATURE_COLUMNS]
 FIRST_BATCH_COLUMNS = ["stock_id", "date", "in_universe", *feature_names(batch=1)]
 FRAME_TYPES: dict[str, str] = {"in_universe": "bool", **dict.fromkeys(FEATURE_COLUMNS, "float64")}
 
 
 def _with_inputs(panel: pd.DataFrame, calendar: TradingDays, end: date) -> pd.DataFrame:
-    """Panel with chips, holdings, fundamentals and market features from its first day on."""
+    """Panel with chips, holdings, fundamentals, ex-dates and market features from its first day."""
     first = panel["date"].min()
     chips = attach_chips(panel, load_chips(first, end))
     holdings = attach_holding_changes(chips, load_holding_changes(calendar, first, end))
-    funds = attach_fundamentals(holdings, calendar, first, end)
+    funds = attach_ex_dates(
+        attach_fundamentals(holdings, calendar, first, end), calendar, first, end
+    )
     return attach_market_features(funds, load_market_features(calendar, first, end))
 
 
@@ -49,16 +54,18 @@ def compute_features(panel: pd.DataFrame) -> pd.DataFrame:
 
     The second batch is stored for later evaluation; screening and training read the first only.
     """
+    technical = technical_features(panel)
+    fundamental = fundamental_features(panel)
     groups = [
-        technical_features(panel),
+        technical,
         second_batch_technical_features(panel),
         size_liquidity_features(panel),
         industry_risk_features(panel),
+        second_batch_industry_features(panel, technical["tech_mom_250_20"], fundamental["fund_ep"]),
         chip_features(panel),
         second_batch_chip_features(panel),
-        fundamental_features(panel),
-        panel[MARKET_NAMES],
-        pd.DataFrame(dict.fromkeys(PENDING, np.nan), index=panel.index),
+        fundamental,
+        panel[[*MARKET_NAMES, "fund_days_to_ex_date"]],
     ]
     values = pd.concat(
         [group.drop(columns=["stock_id", "date"], errors="ignore") for group in groups], axis=1

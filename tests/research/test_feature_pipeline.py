@@ -15,6 +15,7 @@ from apps.market.models import (
     DailyChip,
     DailyPrice,
     DailyValuation,
+    DividendEvent,
     IndexDaily,
     SharesOutstanding,
     StockMaster,
@@ -151,6 +152,12 @@ def test_the_frame_has_one_row_per_listed_stock_and_trading_day_in_range() -> No
 def test_every_input_group_reaches_the_frame() -> None:
     listed("2330", "2015-06-01", "2016-04-29")
     inputs("2330")
+    DividendEvent.objects.create(
+        stock_id="2330",
+        ex_date=d("2016-03-07"),
+        cash_dividend=1,
+        announce_date=d("2016-02-24"),
+    )
 
     frame = build_feature_frame(CALENDAR, d("2016-03-01"), d("2016-04-15"))
 
@@ -162,6 +169,8 @@ def test_every_input_group_reaches_the_frame() -> None:
     assert row["fund_bp"] == pytest.approx(0.5)
     k = len(CALENDAR.between(d("2015-06-01"), d("2016-03-02"))) - 1
     assert row["tech_gap_1d"] == pytest.approx((100 + 0.1 * k) / (100 + 0.1 * (k - 1)) - 1)
+    assert row["fund_days_to_ex_date"] == 3.0
+    assert row["ind_sector_id"] == 1.0
     assert row["mkt_days_to_quarter_end"] == len(CALENDAR.between(d("2016-03-03"), d("2016-03-31")))
     k = len(CALENDAR.between(d("2015-12-01"), d("2016-03-02"))) - 1
     assert row["mkt_taiex_ret_5d"] == pytest.approx(taiex_close(k) / taiex_close(k - 5) - 1)
