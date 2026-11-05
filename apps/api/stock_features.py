@@ -7,7 +7,7 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 
 from apps.api.envelope import envelope
-from apps.api.feature_text import GROUP_LABELS, LABELS
+from apps.api.feature_text import LABELS
 from apps.api.params import FeatureQuery, parse
 from apps.api.serving import ServingRun, Slot, latest_served_date, runs_on
 from apps.api.stocks import require_stock
@@ -40,14 +40,12 @@ def feature_item(row: dict[str, Any], value: Any) -> dict[str, Any]:
     """An unknown feature keeps its code as the label and has no unit or group."""
     feature = row["feature"]
     label, unit = LABELS.get(feature, (feature, None))
-    group = GROUPS.get(feature)
     return {
         "position": row["position"],
         "feature": feature,
         "label": label,
         "unit": unit,
-        "group": group,
-        "group_label": None if group is None else GROUP_LABELS[group],
+        "group": GROUPS.get(feature),
         "contrib": row["contrib"],
         "value": value,
     }

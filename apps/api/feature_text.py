@@ -2,20 +2,12 @@
 
 RATIO = "ratio"
 PERCENT = "percent"
+POINTS = "points"
 NUMBER = "number"
 COUNT = "count"
 FLAG = "flag"
 CATEGORY = "category"
-UNITS = (RATIO, PERCENT, NUMBER, COUNT, FLAG, CATEGORY)
-
-GROUP_LABELS = {
-    "technical": "技術面",
-    "size_liquidity": "規模與流動性",
-    "chip": "籌碼面",
-    "fundamental": "基本面",
-    "industry_risk": "產業與風險",
-    "market": "市場層級",
-}
+UNITS = (RATIO, PERCENT, POINTS, NUMBER, COUNT, FLAG, CATEGORY)
 
 LABELS: dict[str, tuple[str, str]] = {
     "tech_ret_1d": ("1 日報酬", RATIO),
@@ -29,7 +21,7 @@ LABELS: dict[str, tuple[str, str]] = {
     "tech_vol_20d": ("20 日波動（年化）", PERCENT),
     "tech_vol_60d": ("60 日波動（年化）", PERCENT),
     "tech_volume_ratio_5_20": ("5 日與 20 日成交量比", NUMBER),
-    "tech_turnover_rate_5d": ("5 日週轉率", PERCENT),
+    "tech_turnover_rate_5d": ("5 日平均日週轉率", PERCENT),
     "tech_rsi_14": ("RSI（14）", NUMBER),
     "tech_kd_k": ("KD 的 K 值", NUMBER),
     "tech_kd_d": ("KD 的 D 值", NUMBER),
@@ -67,8 +59,8 @@ LABELS: dict[str, tuple[str, str]] = {
     "fund_gross_margin": ("毛利率", PERCENT),
     "fund_op_margin": ("營益率", PERCENT),
     "fund_debt_ratio": ("負債比", PERCENT),
-    "fund_gm_yoy_chg": ("毛利率較去年同季變化", RATIO),
-    "fund_opm_yoy_chg": ("營益率較去年同季變化", RATIO),
+    "fund_gm_yoy_chg": ("毛利率較去年同季變化", POINTS),
+    "fund_opm_yoy_chg": ("營益率較去年同季變化", POINTS),
     "fund_cfo_to_ni": ("營業現金流對淨利（近四季）", NUMBER),
     "fund_days_since_fs": ("距最近財報公告（交易日）", COUNT),
     "risk_beta_250d": ("250 日 beta", NUMBER),
@@ -92,7 +84,7 @@ LABELS: dict[str, tuple[str, str]] = {
     "chip_fi_buy_streak": ("外資連續買超（交易日）", COUNT),
     "ind_sector_id": ("所屬產業", CATEGORY),
     "ind_mom_neutral": ("動能減產業中位數", RATIO),
-    "ind_ep_neutral": ("E/P 減產業中位數", RATIO),
+    "ind_ep_neutral": ("E/P 減產業中位數", POINTS),
     "fund_days_to_ex_date": ("距下次除息（交易日）", COUNT),
     "mkt_days_to_quarter_end": ("距季末（交易日）", COUNT),
 }

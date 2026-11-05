@@ -99,7 +99,6 @@ def test_top_contributions_come_in_order_with_the_rest(client: Client, contribs:
         "label": "60 日報酬",
         "unit": "ratio",
         "group": "technical",
-        "group_label": "技術面",
         "contrib": 0.031,
         "value": 0.12,
     }
@@ -149,12 +148,7 @@ def test_an_unknown_feature_keeps_its_code(client: Client, runs: Runs) -> None:
 
     item = envelope_of(client.get("/api/stocks/2330/features"))["data"]["items"][0]
 
-    assert (item["label"], item["unit"], item["group"], item["group_label"]) == (
-        "tech_future_x",
-        None,
-        None,
-        None,
-    )
+    assert (item["label"], item["unit"], item["group"]) == ("tech_future_x", None, None)
 
 
 def test_an_earlier_date_without_a_rest_row(client: Client, contribs: Runs) -> None:

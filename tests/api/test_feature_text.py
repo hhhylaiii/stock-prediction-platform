@@ -1,5 +1,5 @@
-from apps.api.feature_text import GROUP_LABELS, LABELS, UNITS
-from apps.research.features.registry import FEATURES, Group
+from apps.api.feature_text import LABELS, UNITS
+from apps.research.features.registry import FEATURES
 
 
 def test_every_registered_feature_has_a_label_and_a_known_unit() -> None:
@@ -12,5 +12,9 @@ def test_labels_are_distinct() -> None:
     assert len(labels) == len(set(labels))
 
 
-def test_every_group_has_a_label() -> None:
-    assert set(GROUP_LABELS) == {group.value for group in Group}
+def test_point_differences_are_not_shown_as_percentages() -> None:
+    assert {name for name, (_, unit) in LABELS.items() if unit == "points"} == {
+        "fund_gm_yoy_chg",
+        "fund_opm_yoy_chg",
+        "ind_ep_neutral",
+    }
