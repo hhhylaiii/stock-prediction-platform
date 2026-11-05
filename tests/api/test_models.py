@@ -8,8 +8,9 @@ from pytest_django import DjangoAssertNumQueries
 
 from apps.api.model_runs import MONTH_DAYS, MONTH_IC
 from apps.research.eval_report import RANK_METRICS
-from apps.research.models import BacktestMetric, ModelMonitor, ModelRun
+from apps.research.models import BacktestMetric, HoldoutRun, ModelMonitor, ModelRun, Prediction
 from tests.api.conftest import (
+    OCT_29,
     OCT_30,
     Runs,
     add_model_run,
@@ -52,17 +53,36 @@ def by_slot(body: dict[str, Any]) -> dict[tuple[str, int], dict[str, Any]]:
     return {(row["objective"], row["horizon"]): row for row in body["data"]}
 
 
+SWITCH = date(2026, 9, 30)
+
+
+def ic_on(n: int) -> float:
+    return 0.02 + 0.01 * (n % 5)
+
+
 @pytest.fixture
 def monitored(runs: Runs) -> Runs:
+    """The rank line: an old run serves until the switch, the current one after it."""
     days = sessions_until(OCT_30)
-    ics = [0.02 + 0.01 * (n % 5) for n in range(len(days))]
+    old = add_model_run("rank-old", "rank", status="retired", train_end=date(2026, 6, 30))
     ModelMonitor.objects.bulk_create(
-        ModelMonitor(run=runs.rank20, date=day, horizon=20, ic=ic, n_stocks=1800)
-        for day, ic in zip(days, ics, strict=True)
+        ModelMonitor(
+            run=old if day <= SWITCH else runs.rank20,
+            date=day,
+            horizon=20,
+            ic=ic_on(n),
+            n_stocks=1800,
+        )
+        for n, day in enumerate(days)
     )
     ModelMonitor.objects.bulk_create(
         ModelMonitor(run=runs.rank20, date=day, horizon=20, ic=0.9, n_stocks=1800)
-        for day in (date(2026, 3, 2), date(2026, 4, 30))
+        for day in days
+        if day <= SWITCH
+    )
+    ModelMonitor.objects.bulk_create(
+        ModelMonitor(run=old, date=day, horizon=20, ic=0.9, n_stocks=1800)
+        for day in (date(2026, 3, 2), date(2026, 4, 30), *[day for day in days if day > SWITCH])
     )
     ModelMonitor.objects.bulk_create(
         ModelMonitor(run=runs.quantile, date=day, horizon=20, coverage=0.79, width=0.13, n_stocks=9)
@@ -105,6 +125,7 @@ def test_every_serving_model_is_listed_in_page_order(client: Client, runs: Runs)
         "2026-09-30",
     )
     assert first["served_on"] == "2026-10-30"
+    assert first["created_at"] == "2026-10-01T00:00:00+08:00"
 
 
 def test_recent_scores_average_the_last_six_months_of_monitoring(
@@ -112,13 +133,13 @@ def test_recent_scores_average_the_last_six_months_of_monitoring(
 ) -> None:
     rows = by_slot(envelope_of(client.get("/api/models")))
     days = sessions_until(OCT_30)
-    ics = [0.02 + 0.01 * (n % 5) for n in range(len(days))]
-    window = days
+    ics = [ic_on(n) for n in range(len(days))]
 
     rank = rows[("rank", 20)]["recent"]
-    assert (rank["start"], rank["end"], rank["days"]) == ("2026-05-01", "2026-10-30", len(window))
+    assert (rank["start"], rank["end"], rank["days"]) == ("2026-05-01", "2026-10-30", len(days))
     assert rank["ic"] == round(fmean(ics), 4)
     assert rank["icir"] == round(fmean(ics) / stdev(ics), 4)
+    assert rank["run_ids"] == ["rank-old", "rank-h20"]
     assert (
         rows[("quantile", 20)]["recent"]["coverage"],
         rows[("quantile", 20)]["recent"]["width"],
@@ -129,6 +150,32 @@ def test_recent_scores_average_the_last_six_months_of_monitoring(
     assert rows[("classification", 20)]["recent"]["auc"] == 0.58
     assert rows[("regression", 5)]["recent"]["mae"] == 0.058
     assert rows[("volatility", 20)]["recent"]["days"] == 0
+
+
+def test_recent_scores_skip_days_inside_a_run_s_training_window(client: Client, runs: Runs) -> None:
+    days = sessions_until(OCT_30)
+    ModelMonitor.objects.bulk_create(
+        ModelMonitor(
+            run=runs.rank20, date=day, horizon=20, ic=0.5 if day <= SWITCH else 0.01, n_stocks=9
+        )
+        for day in days
+    )
+    for run_id, status, model_type in (
+        ("rank-cand", "candidate", "lightgbm"),
+        ("screening", "active", "screening"),
+    ):
+        other = add_model_run(
+            run_id, "rank", status=status, model_type=model_type, train_end=date(2026, 1, 30)
+        )
+        ModelMonitor.objects.bulk_create(
+            ModelMonitor(run=other, date=day, horizon=20, ic=0.9, n_stocks=9)
+            for day in days
+            if day <= SWITCH
+        )
+
+    rank = by_slot(envelope_of(client.get("/api/models")))[("rank", 20)]["recent"]
+
+    assert (rank["days"], rank["ic"]) == (len([day for day in days if day > SWITCH]), 0.01)
 
 
 def test_rank_models_carry_research_totals_and_the_ridge_baseline(
@@ -149,6 +196,7 @@ def test_rank_models_carry_research_totals_and_the_ridge_baseline(
         period=(date(2020, 1, 2), date(2020, 6, 30)),
     )
     add_metric("lightgbm", "neutral_rank_ic", 0.8, run_key="rank-other")
+    add_metric("lightgbm", "decile_excess", 0.3)
     add_metric("lightgbm", "rank_ic", 0.7, horizon=5)
 
     rows = by_slot(envelope_of(client.get("/api/models")))
@@ -169,14 +217,57 @@ def test_rank_models_carry_research_totals_and_the_ridge_baseline(
         "model_type": "ridge",
         "metrics": {"rank_ic": 0.027, "rank_icir": 0.41},
     }
+    assert (rows[("rank", 20)]["metric_run_key"], rows[("rank", 20)]["metric_source"]) == (
+        "rank-serving",
+        "self",
+    )
     assert rows[("rank", 5)]["research"]["metrics"] == {"rank_ic": 0.7}
     assert rows[("rank", 5)]["baseline"] is None
     assert (rows[("quantile", 20)]["research"], rows[("quantile", 20)]["baseline"]) == (None, None)
+    assert rows[("quantile", 20)]["metric_source"] is None
+
+
+def test_the_run_s_params_name_its_research_run_key(client: Client, runs: Runs) -> None:
+    ModelRun.objects.filter(pk="rank-h20").update(params={"research_run_key": "rank-research"})
+    add_metric("lightgbm", "rank_ic", 0.8)
+    add_metric("lightgbm", "rank_ic", 0.041, run_key="rank-research")
+    add_metric("ridge", "rank_ic", 0.027, run_key="rank-research")
+
+    rank = by_slot(envelope_of(client.get("/api/models")))[("rank", 20)]
+
+    assert rank["research"]["metrics"] == {"rank_ic": 0.041}
+    assert rank["baseline"]["metrics"] == {"rank_ic": 0.027}
+    assert (rank["metric_run_key"], rank["metric_source"]) == ("rank-research", "params")
+
+
+def test_without_own_metrics_the_latest_rank_holdout_is_read(client: Client, runs: Runs) -> None:
+    for attempt, run_key in ((1, "rank-frozen"), (2, "rank-refrozen")):
+        HoldoutRun.objects.create(
+            scope="rank", attempt=attempt, run_key=run_key, last_date=OCT_30, reason="again"
+        )
+        add_metric("lightgbm", "rank_ic", 0.01 * attempt, run_key=run_key)
+    HoldoutRun.objects.create(scope="return", attempt=1, run_key="return-frozen", last_date=OCT_30)
+    add_metric("lightgbm", "rank_ic", 0.9, run_key="return-frozen")
+
+    rank = by_slot(envelope_of(client.get("/api/models")))[("rank", 20)]
+
+    assert rank["research"]["metrics"] == {"rank_ic": 0.02}
+    assert (rank["metric_run_key"], rank["metric_source"]) == ("rank-refrozen", "holdout")
+
+
+def test_a_non_rank_run_sharing_a_run_key_gets_no_rank_research(client: Client, runs: Runs) -> None:
+    ModelRun.objects.filter(pk="quantile-h20").update(run_key="rank-serving")
+    add_metric("lightgbm", "rank_ic", 0.041)
+
+    quantile = by_slot(envelope_of(client.get("/api/models")))[("quantile", 20)]
+
+    assert (quantile["research"], quantile["baseline"]) == (None, None)
 
 
 def test_a_serving_ridge_model_is_not_its_own_baseline(client: Client, runs: Runs) -> None:
     ModelRun.objects.filter(pk="rank-h20").update(model_type="ridge")
     add_metric("ridge", "rank_ic", 0.027)
+    add_metric("lightgbm", "rank_ic", 0.5)
 
     rank = by_slot(envelope_of(client.get("/api/models")))[("rank", 20)]
 
@@ -190,9 +281,10 @@ def test_candidates_screening_and_retired_runs_are_not_listed(client: Client, ru
         ("rank-cand", "candidate", "lightgbm"),
         ("screening", "active", "screening"),
     ):
-        add_predictions(
-            add_model_run(run_id, "rank", status=status, model_type=model_type), OCT_30, 20, rows
+        newer = add_model_run(
+            run_id, "rank", status=status, model_type=model_type, created_at=taipei(2026, 10, 20)
         )
+        add_predictions(newer, OCT_30, 20, rows)
     ModelRun.objects.filter(pk="vol-h20").update(status="retired")
 
     body = envelope_of(client.get("/api/models"))
@@ -204,6 +296,24 @@ def test_candidates_screening_and_retired_runs_are_not_listed(client: Client, ru
         "quantile-h20",
         "prob-h20",
     ]
+
+
+def test_each_slot_follows_its_own_latest_served_day(client: Client, runs: Runs) -> None:
+    ModelRun.objects.filter(pk="rank-h5").update(status="retired")
+
+    rows = by_slot(envelope_of(client.get("/api/models")))
+
+    assert ("rank", 5) not in rows
+    assert rows[("regression", 5)]["run_id"] == "reg-h5"
+
+
+def test_a_slot_that_stopped_earlier_shows_its_own_last_day(client: Client, runs: Runs) -> None:
+    Prediction.objects.filter(run=runs.vol, date=OCT_30).delete()
+    add_predictions(runs.vol, OCT_29, 20, {"2330": {"vol_pred": 0.3}})
+
+    vol = by_slot(envelope_of(client.get("/api/models")))[("volatility", 20)]
+
+    assert vol["served_on"] == "2026-10-29"
 
 
 def test_a_degraded_model_stays_listed(client: Client, runs: Runs) -> None:
@@ -224,7 +334,7 @@ def test_models_query_count(
     add_metric("lightgbm", "rank_ic", 0.041)
     add_metric("ridge", "rank_ic", 0.027)
 
-    with django_assert_max_num_queries(7):
+    with django_assert_max_num_queries(9):
         client.get("/api/models")
 
 
@@ -250,11 +360,12 @@ MONTHS = month_starts(date(2022, 11, 1), 26)
 
 
 def add_months(model_type: str, horizon: int = 20, run_key: str = "rank-serving") -> None:
+    """26 months; two negative ones, a 10-day month and a 2-day last month."""
     for n, start in enumerate(MONTHS):
         period = (start, month_end(start))
         value = (0.03 if model_type == "lightgbm" else 0.02) + (-0.06 if n in (4, 9) else 0.0)
         add_metric(model_type, "rank_ic", value, "month", period, horizon=horizon, run_key=run_key)
-        days = 2.0 if start == MONTHS[-1] else 21.0
+        days = 2.0 if start == MONTHS[-1] else 10.0 if start == MONTHS[-2] else 21.0
         add_metric(
             model_type, "rank_ic_days", days, "month", period, horizon=horizon, run_key=run_key
         )
@@ -263,6 +374,10 @@ def add_months(model_type: str, horizon: int = 20, run_key: str = "rank-serving"
 def test_monthly_ic_returns_the_last_24_months_against_ridge(client: Client, runs: Runs) -> None:
     add_months("lightgbm")
     add_months("ridge")
+    add_metric("lightgbm", "rank_ic_nw_t", 9.0, "month", (MONTHS[2], month_end(MONTHS[2])))
+    add_metric(
+        "lightgbm", "rank_ic", -0.5, "month", (MONTHS[-1], month_end(MONTHS[-1])), segment="liq_t1"
+    )
 
     body = envelope_of(client.get("/api/models/ic-monthly"))
 
@@ -277,15 +392,16 @@ def test_monthly_ic_returns_the_last_24_months_against_ridge(client: Client, run
         "days": 21,
         "complete": True,
     }
-    assert (data[-1]["days"], data[-1]["complete"]) == (2, False)
+    assert (data[-2]["days"], data[-2]["complete"]) == (10, True)
+    assert (data[-1]["days"], data[-1]["complete"], data[-1]["model"]) == (2, False, 0.03)
     assert body["meta"] == {
         "horizon": 20,
         "run_key": "rank-serving",
         "model_type": "lightgbm",
         "baseline": "ridge",
-        "source": "serving",
+        "source": "self",
         "min_days": 10,
-        "above_baseline": 24,
+        "above_baseline": 23,
         "negative": 2,
     }
 
@@ -303,16 +419,28 @@ def test_monthly_ic_for_five_days_reads_the_five_day_rows(client: Client, runs: 
     assert data[0]["baseline"] is None
 
 
-def test_before_any_model_serves_the_latest_research_run_is_shown(client: Client, db: None) -> None:
-    add_months("lightgbm", run_key="rank-old")
-    add_months("lightgbm", run_key="rank-new")
-    BacktestMetric.objects.filter(run_key="rank-new").update(created_at=taipei(2030, 1, 1))
-    BacktestMetric.objects.filter(run_key="rank-new", metric="rank_ic").update(value=0.05)
+def test_before_any_model_serves_the_rank_holdout_is_shown(client: Client, db: None) -> None:
+    add_months("lightgbm", run_key="rank-frozen")
+    add_months("ridge", run_key="rank-frozen")
+    BacktestMetric.objects.filter(model_type="ridge").update(created_at=taipei(2030, 1, 1))
+    add_months("lightgbm", run_key="rank-experiment")
+    BacktestMetric.objects.filter(run_key="rank-experiment").update(created_at=taipei(2031, 1, 1))
+    HoldoutRun.objects.create(scope="rank", attempt=1, run_key="rank-frozen", last_date=OCT_30)
 
     body = envelope_of(client.get("/api/models/ic-monthly", {"months": "2"}))
 
-    assert [row["model"] for row in body["data"]] == [0.05, 0.05]
-    assert (body["meta"]["run_key"], body["meta"]["source"]) == ("rank-new", "research")
+    assert [(row["model"], row["baseline"]) for row in body["data"]] == [(0.03, 0.02), (0.03, 0.02)]
+    assert body["meta"]["run_key"] == "rank-frozen"
+    assert (body["meta"]["model_type"], body["meta"]["source"]) == ("lightgbm", "holdout")
+
+
+def test_unfound_research_is_an_empty_chart_not_a_guess(client: Client, runs: Runs) -> None:
+    add_months("lightgbm", run_key="rank-experiment")
+
+    body = envelope_of(client.get("/api/models/ic-monthly"))
+
+    assert body["data"] == []
+    assert (body["meta"]["run_key"], body["meta"]["source"]) == (None, None)
 
 
 def test_no_monthly_metrics_is_an_empty_chart(client: Client, db: None) -> None:
@@ -341,5 +469,5 @@ def test_monthly_ic_query_count(
     add_months("lightgbm")
     add_months("ridge")
 
-    with django_assert_max_num_queries(4):
+    with django_assert_max_num_queries(6):
         client.get("/api/models/ic-monthly")
