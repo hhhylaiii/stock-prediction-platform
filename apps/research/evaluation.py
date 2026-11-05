@@ -236,8 +236,24 @@ def band_width(vol: pd.Series) -> pd.Series:
     return width
 
 
+def wide_bands(frame: pd.DataFrame, q10: str, q90: str, vol: str) -> pd.Series:
+    """Rows holding both bands, flagged where the volatility band is not 0.5–2 times q90 − q10."""
+    banded = shared_rows(frame, [q10, q90, vol])
+    ratio = band_width(banded[vol]) / (banded[q90] - banded[q10])
+    low, high = WIDTH_RATIO_BOUNDS
+    return ~ratio.between(low, high)
+
+
+def odds_against_q50(frame: pd.DataFrame, q50: str, prob: str) -> pd.Series:
+    """Rows holding both outputs, flagged where the up-move odds contradict q50."""
+    voted = shared_rows(frame, [q50, prob])
+    return ((voted[prob] > EVEN_ODDS) & (voted[q50] < UP_THRESHOLD)) | (
+        (voted[prob] < EVEN_ODDS) & (voted[q50] > UP_THRESHOLD)
+    )
+
+
 def _shares(rows: pd.DataFrame, flagged: pd.Series) -> dict[str, float]:
-    daily = flagged.astype(np.float64).groupby(rows[DATE]).mean()
+    daily = flagged.astype(np.float64).groupby(rows.loc[flagged.index, DATE]).mean()
     return {
         "mean_share": float(daily.mean()) if len(daily) else math.nan,
         "max_share": float(daily.max()) if len(daily) else math.nan,
@@ -257,15 +273,8 @@ def consistency_report(
 ) -> pd.DataFrame:
     """Daily shares of research universe rows whose bands disagree or whose odds contradict q50."""
     universe = research_rows(frame[frame["in_universe"].astype(bool)], folds)
-    banded = shared_rows(universe, [q10, q90, vol])
-    ratio = band_width(banded[vol]) / (banded[q90] - banded[q10])
-    low, high = WIDTH_RATIO_BOUNDS
-    voted = shared_rows(universe, [q50, prob])
-    against = ((voted[prob] > EVEN_ODDS) & (voted[q50] < UP_THRESHOLD)) | (
-        (voted[prob] < EVEN_ODDS) & (voted[q50] > UP_THRESHOLD)
-    )
     table = {
-        "width_ratio": _shares(banded, ~ratio.between(low, high)),
-        "contradiction": _shares(voted, against),
+        "width_ratio": _shares(universe, wide_bands(universe, q10, q90, vol)),
+        "contradiction": _shares(universe, odds_against_q50(universe, q50, prob)),
     }
     return pd.DataFrame.from_dict(table, orient="index")[CONSISTENCY_COLUMNS]
