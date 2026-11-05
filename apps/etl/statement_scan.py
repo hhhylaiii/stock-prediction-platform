@@ -49,7 +49,7 @@ def insert_new_statements(frame: pd.DataFrame, day: date, session: date) -> int:
         elif record["fin_type"] not in rows:
             other_type.append({**key, "stored": min(rows), "found": record["fin_type"]})
         else:
-            fields = _differences(rows[record["fin_type"]], record)
+            fields = figure_differences(rows[record["fin_type"]], record)
             if fields:
                 other_figures.append({**key, "fin_type": record["fin_type"], "fields": fields})
     with transaction.atomic():
@@ -72,7 +72,7 @@ def _stored(frame: pd.DataFrame) -> dict[tuple[str, str], dict[str, FinancialSta
     return stored
 
 
-def _differences(row: FinancialStatement, record: dict[str, Any]) -> dict[str, list[Any]]:
+def figure_differences(row: FinancialStatement, record: dict[str, Any]) -> dict[str, list[Any]]:
     """Figures the summary gives differently from the stored row (SPEC §8.5)."""
     fields = {}
     for name in VALUE_COLUMNS:
