@@ -1,11 +1,15 @@
 import json
+from datetime import timedelta
 
 import pytest
-from playwright.sync_api import Page, expect
+from django.utils import timezone
+from playwright.sync_api import Page, Route, expect
 from pytest_django.live_server_helper import LiveServer
 
 from apps.etl.models import EtlRun
-from apps.research.models import ModelMonitor, ModelRun, Prediction
+from apps.market.models import TradingCalendar
+from apps.research.models import FeatureDaily, ModelMonitor, ModelRun, Prediction
+from tests.api.conftest import add_predictions
 from tests.e2e.conftest import EXTRA_STOCKS, TPEX_EXTRAS, XSS_NAME, Seed, at
 
 pytestmark = pytest.mark.e2e
@@ -55,6 +59,8 @@ def test_five_days_reads_the_five_day_models(
     expect(second).to_contain_text("+1.0%")
     expect(second.locator(".prob")).to_have_text("—")
     expect(page.locator("#ret-head")).to_have_text("5 日預測報酬")
+    expect(page.locator("#band-head")).to_have_text("80% 預測區間（僅 20 日）")
+    expect(page.locator("#rows .band")).to_have_count(0)
 
 
 def test_market_and_search_filter_on_the_server(
@@ -131,12 +137,24 @@ def test_degraded_models_monitoring_and_band_sources_are_shown(
         ModelMonitor(run_id="rank-h20", date=day, horizon=20, ic=0.05, n_stocks=25)
         for day in predicted.sessions[-5:]
     )
+    ModelMonitor.objects.bulk_create(
+        ModelMonitor(run_id="quantile-h20", date=day, horizon=20, coverage=0.8, n_stocks=1)
+        for day in predicted.sessions[-5:]
+    )
+    Prediction.objects.filter(run_id="vol-h20", stock_id=EXTRA_STOCKS[0]).delete()
+    FeatureDaily.objects.create(
+        stock_id=EXTRA_STOCKS[0], date=predicted.last_session, in_universe=True, tech_vol_20d=0.3
+    )
     page.goto(live_server.url)
 
     expect(page.locator("#rows .trow").nth(1)).to_contain_text("（波動率區間）")
+    expect(page.locator(f"a[href='#stock-{EXTRA_STOCKS[0]}']")).to_contain_text(
+        "（近 20 日波動估計）"
+    )
     meta = page.locator("#today-meta")
     expect(meta).to_contain_text("rank IC 0.050")
-    expect(meta).to_contain_text("區間改用波動率區間")
+    expect(meta).to_contain_text("80% 區間的實際覆蓋率 80%")
+    expect(meta).to_contain_text("1 個模型降級中，結果僅供參考，區間改用波動率區間")
     status = page.locator("#status")
     expect(status).to_contain_text("1 個模型降級中")
     expect(status).to_contain_text("23:04 更新")
@@ -175,6 +193,7 @@ def test_watch_only_follows_the_horizon_and_the_search(
     page.add_init_script("localStorage.setItem('twp-watch', JSON.stringify(['2330']))")
     page.goto(live_server.url)
     page.locator("#watch-only").click()
+    expect(page.locator("#count")).to_have_text("追蹤中的 1 檔")
     expect(page.locator("#today-meta")).to_contain_text("LightGBM 2026-10")
     requests: list[str] = []
     page.on("request", lambda request: requests.append(request.url))
@@ -210,3 +229,71 @@ def test_the_status_strip_reads_the_status_endpoint(
     expect(status).to_contain_text(f"{seeded.last_session.isoformat()} 收盤資料")
     expect(status).to_contain_text("品質檢查通過（1 項警告）")
     expect(status).to_contain_text("預測尚未產出")
+
+
+def test_watch_only_shares_the_requests_still_in_flight(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    held: list[Route] = []
+    page.add_init_script("localStorage.setItem('twp-watch', JSON.stringify(['2330']))")
+    page.route("**/api/stocks/2330/predictions", lambda route: held.append(route))
+    page.goto(live_server.url)
+    expect(page.locator("#rows .trow")).to_have_count(20)
+
+    page.locator("#watch-only").click()
+    page.get_by_role("button", name="5 日").click()
+    page.get_by_role("button", name="20 日").click()
+    page.wait_for_timeout(300)
+
+    assert len(held) == 1
+    held[0].continue_()
+    expect(page.locator("#count")).to_have_text("追蹤中的 1 檔")
+
+
+def test_coming_back_to_today_refreshes_the_watched_stocks(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    page.add_init_script("localStorage.setItem('twp-watch', JSON.stringify(['2330']))")
+    page.goto(live_server.url)
+    expect(page.locator("#rows .trow")).to_have_count(20)
+    page.locator("#watch-only").click()
+    expect(page.locator("#count")).to_have_text("追蹤中的 1 檔")
+    expect(page.locator("#rows .trow .rank")).to_have_text("1")
+
+    page.locator("[data-nav=models]").click()
+    Prediction.objects.filter(
+        run_id="rank-h20", stock_id="2330", date=predicted.last_session
+    ).update(rank=7)
+    page.locator("[data-nav=today]").click()
+
+    expect(page.locator("#rows .trow .rank")).to_have_text("7")
+
+
+def test_a_stock_missing_from_the_master_shows_dashes(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    add_predictions(
+        ModelRun.objects.get(pk="rank-h20"),
+        predicted.last_session,
+        20,
+        {"7777": {"score": -1.0, "rank": 26, "pct": 0.0}},
+    )
+    page.goto(live_server.url)
+
+    page.locator("#next-page").click()
+
+    row = page.locator("a[href='#stock-7777']")
+    expect(row.locator(".name")).to_have_text("—")
+    expect(row.locator(".market")).to_have_text("—")
+
+
+def test_the_status_strip_says_when_no_prices_exist(
+    page: Page, live_server: LiveServer, transactional_db: None
+) -> None:
+    today = timezone.localdate()
+    TradingCalendar.objects.bulk_create(
+        TradingCalendar(date=today + timedelta(days=n), is_trading_day=True) for n in range(-10, 10)
+    )
+    page.goto(live_server.url)
+
+    expect(page.locator("#status")).to_contain_text("尚無收盤資料")

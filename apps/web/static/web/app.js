@@ -102,6 +102,7 @@
     document.querySelectorAll('[data-mkt]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.mkt === state.mkt)));
     document.getElementById('ret-head').textContent = state.h + ' 日預測報酬';
     document.getElementById('prob-head').textContent = '漲幅超過 5% 機率' + (state.h === 20 ? '' : '（僅 20 日）');
+    document.getElementById('band-head').textContent = '80% 預測區間' + (state.h === 20 ? '（價格）' : '（僅 20 日）');
     watchOnlyBtn.hidden = state.watch.size === 0;
     watchOnlyBtn.textContent = '只看追蹤（' + state.watch.size + '）';
     watchOnlyBtn.setAttribute('aria-pressed', String(watchingOnly()));
@@ -109,7 +110,7 @@
   const watchingOnly = () => state.watchOnly && state.watch.size > 0;
 
   function bandHtml(row) {
-    const iv = row.interval;
+    const iv = state.h === 20 ? row.interval : null;
     if (!iv) return '<div class="range"></div><div class="faint small">—</div>';
     const [lo, hi] = RANGE_SPAN[state.h];
     const at = x => Math.max(0, Math.min(100, (x * 100 - lo) / (hi - lo) * 100));
@@ -123,9 +124,9 @@
   function todayRowHtml(row) {
     return '<a class="trow rank-cols" href="#stock-' + encodeURIComponent(row.stock_id) + '">' +
       '<div class="num rank">' + (row.rank === null ? '—' : row.rank) + '</div>' +
-      '<div class="stockcell"><span class="muted">' + esc(row.stock_id) + '</span><span class="name">' + esc(row.name || '') + '</span>' +
+      '<div class="stockcell"><span class="muted">' + esc(row.stock_id) + '</span><span class="name">' + esc(row.name || '—') + '</span>' +
       (row.in_universe ? '' : '<span class="faint small">訓練範圍外</span>') + '</div>' +
-      '<div class="faint small">' + esc(row.market_label || '') + '</div>' +
+      '<div class="faint small market">' + esc(row.market_label || '—') + '</div>' +
       '<div class="right">' + priceOf(row.close) + '</div>' +
       '<div class="right num" style="color:' + colorOf(row.ret_pred || 0) + '">' + pctOf(row.ret_pred, 1) + '</div>' +
       '<div class="right">' + priceOf(row.price_pred) + '</div>' +
@@ -144,19 +145,22 @@
     if (monitor.rank_ic !== null && monitor.rank_ic !== undefined) parts.push('近 ' + monitor.rank_ic_days + ' 個評估日 rank IC ' + monitor.rank_ic.toFixed(3));
     if (monitor.coverage !== null && monitor.coverage !== undefined) parts.push('80% 區間的實際覆蓋率 ' + Math.round(monitor.coverage * 100) + '%');
     const degraded = meta.degraded || [];
-    if (degraded.length) parts.push(degraded.length + ' 個模型降級中，結果僅供參考' + (degraded.includes('interval') ? '，區間改用波動率區間' : ''));
+    const degradedRuns = new Set((meta.models || []).filter(model => degraded.includes(model.role)).map(model => model.run_id)).size;
+    if (degraded.length) parts.push(degradedRuns + ' 個模型降級中，結果僅供參考' + (degraded.includes('interval') ? '，區間改用波動率區間' : ''));
     return parts.join('，') + '。';
   }
 
-  async function watchedStocks() {
+  function watchedStocks() {
     const key = [...state.watch].join(',');
-    if (state.watchCache && state.watchCache.key === key) return state.watchCache.results;
-    const settled = await Promise.allSettled([...state.watch].map(code => api.get('stocks/' + code + '/predictions')));
-    const failed = settled.find(result => result.status === 'rejected' && result.reason.status !== 404);
-    if (failed) throw failed.reason;
-    const results = settled.filter(result => result.status === 'fulfilled').map(result => result.value.data);
-    state.watchCache = { key: key, results: results };
-    return results;
+    if (state.watchCache && state.watchCache.key === key) return state.watchCache.promise;
+    const promise = Promise.allSettled([...state.watch].map(code => api.get('stocks/' + code + '/predictions'))).then(settled => {
+      const failed = settled.find(result => result.status === 'rejected' && result.reason.status !== 404);
+      if (failed) throw failed.reason;
+      return settled.filter(result => result.status === 'fulfilled').map(result => result.value.data);
+    });
+    state.watchCache = { key: key, promise: promise };
+    promise.catch(() => { if (state.watchCache && state.watchCache.promise === promise) state.watchCache = null; });
+    return promise;
   }
 
   async function watchedToday() {
@@ -473,7 +477,7 @@
     Object.keys(views).forEach(k => { views[k].hidden = k !== name; });
     document.querySelectorAll('[data-nav]').forEach(a => { if (a.dataset.nav === name) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current'); });
     document.querySelector('[data-nav="stock"]').setAttribute('href', '#stock-' + encodeURIComponent(state.stock));
-    if (name === 'today') loadToday();
+    if (name === 'today') { state.watchCache = null; loadToday(); }
     if (name === 'stock') renderStock(code);
     if (name === 'models') { renderEtl(); renderQuality(); }
     renderStatus();
