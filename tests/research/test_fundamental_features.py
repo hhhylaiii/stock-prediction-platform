@@ -179,8 +179,8 @@ def test_consolidated_statements_win_over_individual_ones() -> None:
     signals = statement_signals(pd.concat([consolidated, individual, only_individual]))
 
     assert one(signals, "2015-Q4")["eps_ttm"] == pytest.approx(4.0)
-    assert math.isnan(one(signals, "2016-Q1")["eps_ttm"])
-    assert one(signals, "2016-Q1")["fund_gross_margin"] == pytest.approx(0.4)
+    assert one(signals, "2016-Q1")["eps_ttm"] == pytest.approx(6.0)
+    assert math.isnan(one(signals, "2016-Q1")["fund_cfo_to_ni"])
 
 
 def test_quarterly_revenue_growth_compares_the_same_quarter_a_year_earlier() -> None:
@@ -195,43 +195,51 @@ def test_quarterly_revenue_growth_compares_the_same_quarter_a_year_earlier() -> 
     assert math.isnan(one(signals, "2016-Q2")["fund_rev_yoy_q"])
 
 
-BASIS_READS = [
-    "eps_ttm",
-    "fund_eps_yoy",
-    "fund_roe_ttm",
-    "fund_cfo_to_ni",
-    "fund_gm_yoy_chg",
-    "fund_opm_yoy_chg",
-    "fund_rev_yoy_q",
-]
+SCOPE_READS = ["fund_cfo_to_ni", "fund_gm_yoy_chg", "fund_opm_yoy_chg", "fund_rev_yoy_q"]
+PARENT_READS = ["eps_ttm", "fund_roe_ttm"]
 
 
-def test_a_change_of_statement_basis_breaks_ttm_and_yearly_comparisons() -> None:
+def test_a_change_of_statement_basis_breaks_only_signals_of_consolidation_scope() -> None:
     switched = quarters("2012-Q1", 12).assign(fin_type=["individual"] * 4 + ["consolidated"] * 8)
 
     signals = statement_signals(switched)
 
-    assert one(signals, "2012-Q4")["eps_ttm"] == pytest.approx(4.0)
-    assert one(signals, "2013-Q1")[BASIS_READS].isna().all()
-    assert one(signals, "2013-Q1")["fund_gross_margin"] == pytest.approx(0.4)
-    assert math.isnan(one(signals, "2013-Q3")["eps_ttm"])
+    first = one(signals, "2013-Q1")
+    assert first[SCOPE_READS].isna().all()
+    assert first[PARENT_READS].tolist() == pytest.approx([4.0, 0.2])
+    assert first["fund_gross_margin"] == pytest.approx(0.4)
+    assert math.isnan(one(signals, "2013-Q3")["fund_cfo_to_ni"])
     fourth = one(signals, "2013-Q4")
-    assert fourth["eps_ttm"] == pytest.approx(4.0)
-    assert fourth[["fund_gm_yoy_chg", "fund_rev_yoy_q", "fund_eps_yoy"]].isna().all()
-    first = one(signals, "2014-Q1")
-    assert first[["fund_gm_yoy_chg", "fund_rev_yoy_q"]].tolist() == pytest.approx([0.0, 0.0])
-    assert math.isnan(first["fund_eps_yoy"])
-    assert one(signals, "2014-Q4")["fund_eps_yoy"] == pytest.approx(0.0)
+    assert fourth["fund_cfo_to_ni"] == pytest.approx(1.2)
+    assert fourth["fund_eps_yoy"] == pytest.approx(0.0)
+    assert fourth[["fund_gm_yoy_chg", "fund_rev_yoy_q"]].isna().all()
+    later = one(signals, "2014-Q1")
+    assert later[["fund_gm_yoy_chg", "fund_rev_yoy_q"]].tolist() == pytest.approx([0.0, 0.0])
 
 
 def test_a_quarter_filed_on_the_other_basis_breaks_the_quarters_around_it() -> None:
     kinds = ["consolidated"] * 4 + ["individual"] + ["consolidated"] * 4
     signals = statement_signals(quarters("2015-Q1", 9).assign(fin_type=kinds))
 
-    assert math.isnan(one(signals, "2016-Q1")["eps_ttm"])
-    assert math.isnan(one(signals, "2016-Q2")["eps_ttm"])
-    assert math.isnan(one(signals, "2016-Q4")["eps_ttm"])
-    assert one(signals, "2017-Q1")["eps_ttm"] == pytest.approx(4.0)
+    assert [one(signals, f"2016-Q{q}")["eps_ttm"] for q in (1, 2, 4)] == pytest.approx([4.0] * 3)
+    assert math.isnan(one(signals, "2016-Q2")["fund_cfo_to_ni"])
+    assert math.isnan(one(signals, "2016-Q4")["fund_cfo_to_ni"])
+    assert one(signals, "2017-Q1")["fund_cfo_to_ni"] == pytest.approx(1.2)
+
+
+def test_monthly_signals_reading_both_sides_of_2013_01_are_missing() -> None:
+    signals = revenue_signals(months("2012-01", [100.0] * 12 + [400.0] * 15))
+
+    def value(period: str, name: str) -> float:
+        return float(one(signals, period)[name])
+
+    assert value("2012-12", "fund_rev_mom") == pytest.approx(0.0)
+    assert math.isnan(value("2013-01", "fund_rev_mom"))
+    assert value("2013-02", "fund_rev_mom") == pytest.approx(0.0)
+    assert all(math.isnan(value(f"2013-{m:02d}", "fund_rev_yoy")) for m in range(1, 13))
+    assert value("2014-01", "fund_rev_yoy") == pytest.approx(0.0)
+    assert math.isnan(value("2014-02", "fund_rev_3m_yoy"))
+    assert value("2014-03", "fund_rev_3m_yoy") == pytest.approx(0.0)
 
 
 def test_features_divide_ttm_eps_by_the_carried_raw_close() -> None:

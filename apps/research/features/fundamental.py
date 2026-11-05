@@ -32,6 +32,8 @@ STATEMENT_INPUTS: Mapping[str, tuple[int, ...]] = {
     "fund_cfo_to_ni": TTM_LAGS,
     "fund_rev_yoy_q": (TTM_QUARTERS,),
 }
+BASIS_COLUMNS = frozenset({"revenue", "gross_margin", "op_margin", "operating_cf"})
+CONSOLIDATED_MONTH = 2013 * 12
 SIGNAL_COLUMNS = [
     "stock_id",
     "period",
@@ -69,7 +71,10 @@ PASSED = [*REVENUE_INPUTS, *list(STATEMENT_INPUTS)[1:], "fund_days_since_fs"]
 
 
 class _Lags:
-    """Values of earlier periods of the same stock, missing where the statement basis changed."""
+    """Earlier periods of the same stock; consolidation-scope values break where the basis changed.
+
+    Parent-attributable figures (eps, net income, roe) match on both bases, so they carry over.
+    """
 
     def __init__(self, frame: pd.DataFrame) -> None:
         self.frame = frame
@@ -79,7 +84,7 @@ class _Lags:
     def __call__(self, column: str, lag: int) -> pd.Series:
         keys = pd.MultiIndex.from_arrays([self.frame["stock_id"], self.frame["number"] - lag])
         values = pd.Series(self.lookup[column].reindex(keys).to_numpy(), index=self.frame.index)
-        if self.basis is None:
+        if self.basis is None or column not in BASIS_COLUMNS:
             return values
         earlier = self.lookup["fin_type"].reindex(keys).to_numpy()
         return values.where(earlier == self.basis.to_numpy())
@@ -129,7 +134,16 @@ def revenue_signals(revenue: pd.DataFrame) -> pd.DataFrame:
         "fund_rev_3m_yoy": _growth(three, base),
         "fund_rev_mom": _growth(now, lag("revenue", 1)),
     }
-    return _signals(lag, values, REVENUE_INPUTS)
+    kept = {
+        name: value.mask(_across_consolidation(frame["number"], REVENUE_INPUTS[name]))
+        for name, value in values.items()
+    }
+    return _signals(lag, kept, REVENUE_INPUTS)
+
+
+def _across_consolidation(numbers: pd.Series, lags: Sequence[int]) -> pd.Series:
+    """Whether a monthly signal reads months on both sides of 2013-01, when revenue consolidated."""
+    return (numbers - max(lags) < CONSOLIDATED_MONTH) & (numbers >= CONSOLIDATED_MONTH)
 
 
 def _preferred(statements: pd.DataFrame) -> pd.DataFrame:
