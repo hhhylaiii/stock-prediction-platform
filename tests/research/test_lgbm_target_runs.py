@@ -10,7 +10,9 @@ from django.core.management.base import CommandError
 
 from apps.market.models import DailyPrice, StockMaster
 from apps.research import lgbm_runs, target_models
+from apps.research.baseline_runs import MAX_RUN_KEY
 from apps.research.gbdt import BASE_PARAMS, seeded
+from apps.research.holdout import HoldoutError
 from apps.research.lgbm_runs import MODEL, recipe, run_folds, run_id
 from apps.research.management.commands import train
 from apps.research.metrics.forecast import (
@@ -18,12 +20,25 @@ from apps.research.metrics.forecast import (
     pinball_loss,
     reliability_table,
 )
-from apps.research.models import LabelDaily, ModelRun
-from apps.research.prediction_cache import fold_notes, load_fold_predictions
+from apps.research.models import LabelDaily, ModelRun, ModelStatus
+from apps.research.prediction_cache import (
+    fold_notes,
+    fold_path,
+    load_fold_predictions,
+    missing_folds,
+)
 from apps.research.runs import SCREENING_MODEL, label_hash, load_model
-from apps.research.target_models import huber_delta, raw_inputs
+from apps.research.target_models import huber_delta, raw_inputs, sorted_quantiles
 from apps.research.training import training_rows
-from tests.research.run_panels import CONFIG, KEPT, STOCKS, UNSCREENED, research, weekdays
+from tests.research.run_panels import (
+    CONFIG,
+    KEPT,
+    STOCKS,
+    UNSCREENED,
+    folds,
+    research,
+    weekdays,
+)
 
 pytestmark = pytest.mark.django_db
 
@@ -67,7 +82,7 @@ def test_return_folds_cache_huber_predictions_on_five_day_labels(panel: Path) ->
 
     cached = load_fold_predictions("return-wf1", MODEL, fold)
     test_days = [day for day in weekdays() if fold.test_start <= day <= fold.test_end]
-    assert cached.columns.tolist() == ["date", "stock_id", "in_universe", "lightgbm_h5"]
+    assert cached.columns.tolist() == ["date", "stock_id", "in_universe", "lightgbm_ret_h5"]
     assert len(cached) == len(test_days) * len(STOCKS)
     run = ModelRun.objects.get(run_id=f"return-wf1.lightgbm.h5.f{fold.index:03d}")
     assert (run.model_type, run.objective, run.seed) == ("lightgbm", "regression", 2)
@@ -86,7 +101,7 @@ def test_return_folds_cache_huber_predictions_on_five_day_labels(panel: Path) ->
     )
     assert run.params["delta"] == pytest.approx(huber_delta(train["fwd_ret_open"]))
     scored = evaluated(panel, cached, fold, 5, "fwd_ret_open")
-    mae = (scored["lightgbm_h5"] - scored["fwd_ret_open"]).abs().mean()
+    mae = (scored["lightgbm_ret_h5"] - scored["fwd_ret_open"]).abs().mean()
     assert run.params["oos_mae"] == pytest.approx(mae)
     assert run.params["oos_mae_zero"] == pytest.approx(scored["fwd_ret_open"].abs().mean())
     assert run.ic_mean is not None
@@ -106,8 +121,38 @@ def test_saved_return_model_reproduces_the_cache(panel: Path) -> None:
     assert saved["market_bins"] == bins.edges
     cached = load_fold_predictions("return-wf1", MODEL, fold)
     np.testing.assert_allclose(
-        cached["lightgbm_h5"].to_numpy(), saved["booster"].predict(test[FEATURES])
+        cached["lightgbm_ret_h5"].to_numpy(), saved["booster"].predict(test[FEATURES])
     )
+
+
+def test_saved_interval_models_reproduce_the_cache(
+    panel: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(target_models, "ECE_LIMIT", -1.0)
+    fold = research()[0]
+    run_folds("interval", [fold], "interval-wf1", panel)
+
+    raw = raw_frame(panel)
+    inputs, bins = raw_inputs(
+        raw[raw["date"].between(fold.train_start, fold.test_end)], fold, FEATURES
+    )
+    test = inputs[inputs["date"].between(fold.test_start, fold.test_end)][FEATURES]
+    cached = load_fold_predictions("interval-wf1", MODEL, fold)
+    saved = {
+        str(objective): load_model("interval-wf1", run_id("interval-wf1", objective, 20, fold))
+        for objective in lgbm_runs.INTERVAL_TAGS
+    }
+    assert all(model["market_bins"] == bins.edges for model in saved.values())
+    boosters = saved["quantile"]["boosters"]
+    quantiles = sorted_quantiles({name: boosters[name].predict(test) for name in boosters})
+    for name in ("q10", "q50", "q90"):
+        np.testing.assert_allclose(cached[f"lightgbm_{name}_h20"], quantiles[name])
+    vol = np.exp(saved["volatility"]["booster"].predict(test))
+    np.testing.assert_allclose(cached["lightgbm_vol_h20"], vol)
+    prob = saved["classification"]
+    raw_prob = prob["booster"].predict(test)
+    np.testing.assert_allclose(cached["lightgbm_prob_raw_h20"], raw_prob)
+    np.testing.assert_allclose(cached["lightgbm_prob_h20"], prob["calibrator"].predict(raw_prob))
 
 
 def test_interval_folds_cache_sorted_quantiles_volatility_and_probability(panel: Path) -> None:
@@ -264,12 +309,66 @@ def test_recipes_differ_by_scope_and_follow_each_target_setting(
 
 def test_the_longest_run_ids_fit_the_model_run_key() -> None:
     fold = research()[0]
-    longest = "interval-" + "x" * 31
+    longest = "interval-" + "x" * (MAX_RUN_KEY - len("interval-"))
     limit = ModelRun._meta.get_field("run_id").max_length
     assert limit is not None
 
     ids = [run_id(longest, objective, 20, fold) for objective in lgbm_runs.INTERVAL_TAGS]
     assert max(len(value) for value in ids) <= limit
+
+
+@pytest.mark.parametrize(
+    ("scope", "fit", "horizon"),
+    [("return", "fit_return", 5), ("interval", "fit_probability", 20)],
+)
+def test_labels_rewritten_during_a_target_fit_stop_the_fold(
+    panel: Path, monkeypatch: pytest.MonkeyPatch, scope: str, fit: str, horizon: int
+) -> None:
+    fold = research()[0]
+    real = getattr(lgbm_runs, fit)
+
+    def relabelling(*args: Any, **kwargs: Any) -> Any:
+        fitted = real(*args, **kwargs)
+        LabelDaily.objects.filter(date=fold.train_start, horizon=horizon).update(fwd_ret_open=0.5)
+        return fitted
+
+    monkeypatch.setattr(lgbm_runs, fit, relabelling)
+
+    with pytest.raises(RuntimeError, match="label_daily changed"):
+        run_folds(scope, [fold], f"{scope}-wf1", panel)
+
+    assert not ModelRun.objects.filter(run_key=f"{scope}-wf1").exists()
+    assert missing_folds(f"{scope}-wf1", MODEL, [fold]) == [fold.index]
+
+
+def test_an_interval_fold_with_a_promoted_model_keeps_its_cache(panel: Path) -> None:
+    fold = research()[0]
+    run_folds("interval", [fold], "interval-wf1", panel)
+    promoted = run_id("interval-wf1", "volatility", 20, fold)
+    ModelRun.objects.filter(run_id=promoted).update(status=ModelStatus.ACTIVE)
+
+    with pytest.raises(lgbm_runs.RunError, match=promoted):
+        run_folds("interval", [fold], "interval-wf1", panel, rerun=True)
+
+    assert fold_path("interval-wf1", MODEL, fold.index).exists()
+
+
+@pytest.mark.parametrize("scope", ["return", "interval"])
+def test_target_holdout_folds_wait_for_the_frozen_design(panel: Path, scope: str) -> None:
+    held = [fold for fold in folds() if fold.holdout]
+
+    with pytest.raises(HoldoutError, match="holdout"):
+        run_folds(scope, held, f"{scope}-wf1", panel)
+
+
+def test_a_fold_without_test_labels_names_the_fold(panel: Path) -> None:
+    fold = research()[0]
+    LabelDaily.objects.filter(date__range=(fold.test_start, fold.eval_end), horizon=5).delete()
+
+    with pytest.raises(RuntimeError, match=f"fold {fold.index} has no labelled fwd_ret_open"):
+        run_folds("return", [fold], "return-wf1", panel)
+
+    assert not ModelRun.objects.filter(run_key="return-wf1").exists()
 
 
 def test_target_folds_need_the_screening(panel: Path) -> None:

@@ -167,7 +167,7 @@ def _plain(value: float) -> float | None:
 
 
 def _mean(values: np.ndarray) -> float | None:
-    return _plain(float(np.mean(values))) if len(values) else None
+    return _plain(float(np.mean(values)))
 
 
 def _gains(booster: lgb.Booster, features: list[str]) -> dict[str, float]:
@@ -180,9 +180,7 @@ def _edges(bins: MarketBins) -> dict[str, list[float]]:
 
 
 def _oos(scores: np.ndarray, evaluated: pd.DataFrame, horizon: int) -> Mapping[str, float | None]:
-    """The fold's OOS daily rank IC mean, ICIR and Newey-West t; empty without rows."""
-    if evaluated.empty:
-        return NO_IC
+    """The fold's OOS daily rank IC mean, ICIR and Newey-West t."""
     summary = summarize_ic(daily_rank_ic(evaluated.assign(_score=scores), "_score"), lag=horizon)
     return {
         "ic_mean": _plain(summary.mean),
@@ -192,9 +190,15 @@ def _oos(scores: np.ndarray, evaluated: pd.DataFrame, horizon: int) -> Mapping[s
 
 
 def _evaluated(job: Job, inputs: pd.DataFrame, labels: pd.DataFrame, label: str) -> pd.DataFrame:
-    """Tradable universe rows of test_start..eval_end with a known label."""
+    """Tradable universe rows of test_start..eval_end with a known label; none is an error."""
     inside = inputs[job.read.window(job.fold.test_start, job.fold.eval_end)]
-    return training_rows(inside, labels, label)
+    rows = training_rows(inside, labels, label)
+    if rows.empty:
+        raise RuntimeError(
+            f"fold {job.fold.index} has no labelled {label} rows in test_start..eval_end; "
+            "build labels first"
+        )
+    return rows
 
 
 def _run(
@@ -278,7 +282,7 @@ def _return(job: Job) -> FoldFit:
     run = _run(job, ModelObjective.REGRESSION, RETURN_HORIZON, RETURN_LABEL, params, oos)
     model = {"booster": booster, "market_bins": dict(bins.edges)}
     column = np.asarray(booster.predict(inputs[job.read.test][features]))
-    return FoldFit({f"{MODEL}_h{RETURN_HORIZON}": column}, [(run, model)])
+    return FoldFit({f"{MODEL}_ret_h{RETURN_HORIZON}": column}, [(run, model)])
 
 
 def _quantiles(boosters: Mapping[str, Boosted], frame: pd.DataFrame, features: list[str]) -> Any:
@@ -301,7 +305,7 @@ def _quantile(job: Job, inputs: pd.DataFrame, labels: pd.DataFrame, bins: Market
         "valid_loss": {name: _plain(fit.valid_score) for name, fit in boosters.items()},
         "market_bins": _edges(bins),
         "oos_coverage": _mean((actual >= scored["q10"]) & (actual <= scored["q90"])),
-        "oos_pinball": _plain(float(sum(pinball))) if len(actual) else None,
+        "oos_pinball": _plain(float(sum(pinball))),
         "importance_gain": _gains(boosters["q50"].booster, features),
     }
     run = _run(job, ModelObjective.QUANTILE, VOL_DAYS, RETURN_LABEL, params)
@@ -335,8 +339,6 @@ def _volatility(job: Job, inputs: pd.DataFrame, labels: pd.DataFrame, bins: Mark
 
 def _calibration(scored: pd.DataFrame, column: str, suffix: str) -> dict[str, float | None]:
     """Pooled OOS ECE and Brier score of one probability column against the outcome up."""
-    if scored.empty:
-        return {f"oos_ece{suffix}": None, f"oos_brier{suffix}": None}
     table = reliability_table(scored, "up", column, target_models.ECE_BINS)
     return {
         f"oos_ece{suffix}": _plain(expected_calibration_error(table)),
