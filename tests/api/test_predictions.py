@@ -1,6 +1,5 @@
 import math
 import time
-from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
@@ -8,9 +7,14 @@ import pytest
 from django.test import Client
 from pytest_django import DjangoAssertNumQueries
 
-from apps.market.models import Market, TradingCalendar
+from apps.market.models import TradingCalendar
 from apps.research.models import FeatureDaily, ModelMonitor, ModelRun, Prediction
 from tests.api.conftest import (
+    NOV_2,
+    OCT_28,
+    OCT_29,
+    OCT_30,
+    Runs,
     add_bars,
     add_model_run,
     add_predictions,
@@ -21,107 +25,6 @@ from tests.api.conftest import (
 )
 
 pytestmark = pytest.mark.usefixtures("calendar_in_db")
-
-OCT_28, OCT_29, OCT_30 = date(2026, 10, 28), date(2026, 10, 29), date(2026, 10, 30)
-NOV_2 = date(2026, 11, 2)
-
-
-@dataclass(frozen=True)
-class Runs:
-    rank20: ModelRun
-    quantile: ModelRun
-    vol: ModelRun
-    prob: ModelRun
-    rank5: ModelRun
-    reg5: ModelRun
-
-
-def seed_market() -> None:
-    add_stock()
-    add_stock(stock_id="2317", name="鴻海", industry="其他電子業")
-    add_stock(stock_id="6488", name="環球晶", market=Market.TPEX)
-    add_stock(stock_id="8299", name="群聯", market=Market.TPEX)
-    add_bars("2330", [OCT_29, OCT_30], [990.0, 1000.0])
-    add_bars("2317", [OCT_29, OCT_30], [198.0, 200.0])
-    add_bars("6488", [OCT_29, OCT_30], [490.0, 500.0])
-    add_bars("8299", [OCT_29, OCT_30], [800.0, None])
-
-
-@pytest.fixture
-def runs(db: None) -> Runs:
-    seed_market()
-    seeded = Runs(
-        rank20=add_model_run("rank-h20", "rank"),
-        quantile=add_model_run("quantile-h20", "quantile"),
-        vol=add_model_run("vol-h20", "volatility"),
-        prob=add_model_run("prob-h20", "classification"),
-        rank5=add_model_run("rank-h5", "rank"),
-        reg5=add_model_run("reg-h5", "regression"),
-    )
-    add_predictions(
-        seeded.rank20,
-        OCT_30,
-        20,
-        {
-            "2330": {"score": 0.9, "rank": 1, "pct": 0.99},
-            "6488": {"score": 0.5, "rank": 2, "pct": 0.5},
-            "2317": {"score": 0.1, "rank": 3, "pct": 0.01},
-            "8299": {"score": 0.3, "in_universe": False},
-        },
-    )
-    add_predictions(
-        seeded.rank20,
-        OCT_29,
-        20,
-        {
-            "6488": {"score": 0.8, "rank": 1, "pct": 0.99},
-            "2330": {"score": 0.4, "rank": 2, "pct": 0.5},
-            "2317": {"score": 0.1, "rank": 3, "pct": 0.01},
-        },
-    )
-    add_predictions(
-        seeded.quantile,
-        OCT_30,
-        20,
-        {
-            "2330": {"q10": -0.05, "q50": 0.04, "q90": 0.12, "ret_pred": 0.04},
-            "2317": {"q10": -0.1, "q50": -0.02, "q90": 0.05, "ret_pred": -0.02},
-            "8299": {"q10": -0.2, "q50": 0.0, "q90": 0.2, "ret_pred": 0.0, "in_universe": False},
-        },
-    )
-    add_predictions(
-        seeded.vol,
-        OCT_30,
-        20,
-        {code: {"vol_pred": 0.3} for code in ("2330", "2317", "6488", "8299")},
-    )
-    add_predictions(
-        seeded.prob,
-        OCT_30,
-        20,
-        {
-            "2330": {"prob_up_5pct": 0.6},
-            "2317": {"prob_up_5pct": 0.2},
-            "6488": {"prob_up_5pct": 0.4},
-        },
-    )
-    add_predictions(
-        seeded.rank5,
-        OCT_30,
-        5,
-        {
-            "2317": {"score": 0.7, "rank": 1, "pct": 0.99},
-            "2330": {"score": 0.2, "rank": 2, "pct": 0.5},
-            "6488": {"score": 0.1, "rank": 3, "pct": 0.01},
-        },
-    )
-    add_predictions(
-        seeded.reg5,
-        OCT_30,
-        5,
-        {"2317": {"ret_pred": 0.02}, "2330": {"ret_pred": 0.01}, "6488": {"ret_pred": -0.01}},
-    )
-    return seeded
 
 
 def by_code(body: dict[str, Any]) -> dict[str, dict[str, Any]]:
