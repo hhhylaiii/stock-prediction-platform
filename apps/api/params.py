@@ -5,6 +5,9 @@ from typing import Any
 from rest_framework import serializers
 from rest_framework.request import Request
 
+from apps.api.serving import DEFAULT_HORIZON
+from apps.market.models import Market
+
 
 def parse(query: type[serializers.Serializer[Any]], request: Request) -> dict[str, Any]:
     serializer = query(data=request.query_params)
@@ -23,3 +26,10 @@ class RunQuery(serializers.Serializer[Any]):
 
 class QualityQuery(serializers.Serializer[Any]):
     days = serializers.IntegerField(min_value=1, max_value=120, default=30)
+
+
+class PredictionQuery(serializers.Serializer[Any]):
+    horizon = serializers.ChoiceField(choices=[5, 20], default=DEFAULT_HORIZON)
+    date = serializers.DateField(required=False)
+    market = serializers.ChoiceField(choices=Market.values, required=False)
+    q = serializers.CharField(max_length=32, required=False, allow_blank=True)
