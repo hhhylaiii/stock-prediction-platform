@@ -71,6 +71,7 @@ class RankReport:
     total: ICSummary
     positive_share: float
     beat_share: float
+    compared_folds: int
     by_liquidity: pd.DataFrame
     neutralized: ICSummary
     monthly: pd.Series
@@ -92,14 +93,19 @@ def _beats(
     baseline: str,
     folds: Sequence[Fold],
     horizon: int,
-) -> tuple[pd.DataFrame, float]:
-    """Fold table with model and baseline IC on rows both score, and the research folds won."""
+) -> tuple[pd.DataFrame, float, int]:
+    """Fold table with model and baseline IC on rows both score; share and count of folds compared.
+
+    A fold without an IC on either side has no verdict and stays out of the share.
+    """
     paired = ic_by_fold(daily_rank_ic(shared, score), folds, horizon)["mean"]
     compared = ic_by_fold(daily_rank_ic(shared, baseline), folds, horizon)["mean"]
-    table = by_fold.assign(paired_mean=paired, baseline_mean=compared, beats=paired > compared)
+    beats = (paired > compared).astype("boolean").mask(paired.isna() | compared.isna())
+    table = by_fold.assign(paired_mean=paired, baseline_mean=compared, beats=beats)
     research = [fold.index for fold in folds if fold.research]
-    scored = table.loc[research].dropna(subset=["paired_mean", "baseline_mean"])
-    return table, float(scored["beats"].mean()) if len(scored) else math.nan
+    verdicts = table.loc[research, "beats"].dropna()
+    share = float(verdicts.astype(np.float64).mean()) if len(verdicts) else math.nan
+    return table, share, len(verdicts)
 
 
 def _by_liquidity(
@@ -129,10 +135,10 @@ def rank_report(
     ic = daily_rank_ic(rows, score)
     counted = research_ic(ic, chosen)
     by_fold = ic_by_fold(ic, chosen, horizon)
-    beat = math.nan
+    beat, compared = math.nan, 0
     if baseline is not None:
         shared = shared_rows(rows, [score, baseline])
-        by_fold, beat = _beats(by_fold, shared, score, baseline, chosen, horizon)
+        by_fold, beat, compared = _beats(by_fold, shared, score, baseline, chosen, horizon)
     return RankReport(
         horizon=horizon,
         folds=chosen,
@@ -141,6 +147,7 @@ def rank_report(
         total=summarize_ic(counted, horizon),
         positive_share=positive_fold_share(by_fold),
         beat_share=beat,
+        compared_folds=compared,
         by_liquidity=_by_liquidity(rows, score, horizon, chosen),
         neutralized=summarize_ic(research_ic(neutralized_rank_ic(rows, score), chosen), horizon),
         monthly=_monthly(counted),

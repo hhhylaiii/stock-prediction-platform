@@ -18,7 +18,7 @@ from apps.research.evaluation import (
     rank_report,
 )
 from apps.research.metrics.deciles import top_liquidity, tranche_summary
-from apps.research.metrics.forecast import daily_coverage
+from apps.research.metrics.forecast import daily_coverage, daily_width
 from apps.research.metrics.ic import (
     daily_rank_ic,
     ic_by_fold,
@@ -180,6 +180,11 @@ def test_a_baseline_without_a_fold_leaves_the_model_metrics_whole() -> None:
     assert report.total == rank_report(frame, "score", 20, folds()).total
     assert report.positive_share == 1.0
     assert report.beat_share == pytest.approx(2 / 3)
+    assert report.compared_folds == 3
+    beats = report.by_fold["beats"]
+    assert pd.isna(beats[research()[3].index])
+    assert not beats[research()[0].index]
+    assert beats[research()[1].index]
 
 
 def test_liquidity_terciles_and_neutralized_ic() -> None:
@@ -247,6 +252,8 @@ def test_importance_drift_ranks_top_features_and_counts_overlap() -> None:
     assert kept[3] == 0
     assert drift.frequency.to_dict() == {"b": 2, "c": 2, "e": 2, "a": 1, "d": 1, "f": 1}
     assert list(drift.frequency.index) == ["b", "c", "e", "a", "d", "f"]
+    gap = importance_drift({1: gains[1], 3: gains[3]}, top=3)
+    assert gap.by_fold["kept"][3] == 2
 
 
 def prices(frame: pd.DataFrame, seed: int = 1) -> pd.DataFrame:
@@ -323,6 +330,7 @@ def test_coverage_report_buckets_research_rows_by_volatility() -> None:
     rows = frame[inside(frame, research()) & ~dropped]
     overall = daily_coverage(rows, "fwd_ret_open", "q10", "q90").mean()
     assert table.loc["all", "coverage"] == pytest.approx(overall)
+    assert table.loc["all", "width"] == pytest.approx(daily_width(rows, "q10", "q90").mean())
 
 
 def test_consistency_report_counts_wide_bands_and_contradictions_per_day() -> None:
@@ -376,3 +384,18 @@ def test_exact_bounds_are_consistent_and_an_alert_needs_more_than_ten_percent() 
     assert report.loc["width_ratio", "mean_share"] == 0.0
     assert report.loc["contradiction", "max_share"] == pytest.approx(0.1)
     assert report.loc["contradiction", "days_over"] == 0
+
+
+def test_consistency_counts_untradable_rows_and_skips_rows_missing_an_output() -> None:
+    frame = panel()
+    stuck = frame["stock_id"].isin(STOCKS[:10])
+    frame.loc[stuck, "untradable_t1"] = True
+    frame.loc[stuck, "vol"] = math.asinh(0.3) / VOL_SCALE
+    frame.loc[stuck, "prob"] = 0.9
+    frame.loc[frame["stock_id"].isin(STOCKS[10:30]), "vol"] = np.nan
+    frame.loc[frame["stock_id"].isin(STOCKS[30:50]), "prob"] = np.nan
+
+    report = consistency_report(frame, "q10", "q50", "q90", "vol", "prob", folds())
+
+    assert report.loc["width_ratio", "mean_share"] == pytest.approx(10 / 80)
+    assert report.loc["contradiction", "mean_share"] == pytest.approx(10 / 80)
