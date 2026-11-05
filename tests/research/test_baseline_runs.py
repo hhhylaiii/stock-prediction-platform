@@ -391,6 +391,16 @@ def test_command_stops_at_the_last_date(command: Path, settings: Any) -> None:
     assert len(indices) < len(research())
 
 
+def test_a_full_run_checks_the_screening_before_the_shuffle_check(
+    command: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(train, "shuffle_check", lambda *args: pytest.fail("shuffle ran"))
+    ModelRun.objects.filter(model_type=SCREENING_MODEL).delete()
+
+    with pytest.raises(CommandError, match="interval baselines fit on the screened features"):
+        call_command("train", scope="interval", run_key="interval-wf1")
+
+
 def test_command_explains_a_missing_screening(command: Path) -> None:
     ModelRun.objects.filter(model_type=SCREENING_MODEL).delete()
 

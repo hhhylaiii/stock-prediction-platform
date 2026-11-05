@@ -257,6 +257,16 @@ def test_command_trains_lightgbm_rank_folds(command: Path) -> None:
     assert missing_folds("rank-wf1", BASELINE, research()[:1]) == [0]
 
 
+def test_a_full_run_checks_the_screening_before_the_shuffle_check(
+    command: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(train, "shuffle_check", lambda *args: pytest.fail("shuffle ran"))
+    ModelRun.objects.filter(model_type=SCREENING_MODEL).delete()
+
+    with pytest.raises(CommandError, match="no feature screening"):
+        call_command("train", model="lightgbm", scope="rank", run_key="rank-wf1")
+
+
 def test_command_keeps_lightgbm_to_the_rank_scope(command: Path) -> None:
     with pytest.raises(CommandError, match="rank scope"):
         call_command("train", model="lightgbm", scope="interval", run_key="interval-wf1")

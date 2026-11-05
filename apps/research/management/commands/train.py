@@ -10,7 +10,14 @@ from django.core.management.base import BaseCommand, CommandError
 from apps.etl.management.options import as_date
 from apps.market.calendar import CalendarError, TradingDays
 from apps.research import lgbm_runs
-from apps.research.baseline_runs import BASELINE, SCOPES, check_run_key, run_folds, shuffle_check
+from apps.research.baseline_runs import (
+    BASELINE,
+    SCOPES,
+    check_run_key,
+    run_folds,
+    scope_features,
+    shuffle_check,
+)
 from apps.research.holdout import HoldoutError, is_holdout
 from apps.research.labels import latest_price_date
 from apps.research.runs import RunError
@@ -109,7 +116,8 @@ class Command(BaseCommand):
             raise CommandError(f"--model {lgbm_runs.MODEL} fits the rank scope only so far")
         try:
             check_run_key(scope, run_key)
-        except ValueError as error:
+            scope_features(scope)
+        except (ValueError, RunError) as error:
             raise CommandError(str(error)) from error
         if options["folds"] is None:
             self._shuffle(folds, options["seed"])
