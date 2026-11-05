@@ -7,13 +7,17 @@ import pandas as pd
 import pytest
 
 from apps.research import gbdt, target_models
+from apps.research.features.transforms import winsorize
 from apps.research.gbdt import split_validation
+from apps.research.metrics.forecast import expected_calibration_error, reliability_table
 from apps.research.runs import Screened
 from apps.research.target_models import (
     HUBER_MAD_SCALE,
     QUANTILES,
     RETURN_LABEL,
+    UP,
     UP_LABEL,
+    VOL_FLOOR,
     VOL_LABEL,
     fit_probability,
     fit_quantiles,
@@ -24,6 +28,7 @@ from apps.research.target_models import (
     raw_inputs,
     sorted_quantiles,
 )
+from apps.research.training import training_rows
 from apps.research.walkforward import Fold, WalkForwardConfig, generate_folds
 from tests.research.conftest import weekday_calendar
 
@@ -40,29 +45,32 @@ def fold() -> Fold:
 
 
 def panel(start: date, end: date, seed: int = 0) -> pd.DataFrame:
-    """Raw features and labels: tech_ret_20d moves returns, tech_vol_20d sets their spread."""
+    """Raw features and labels: tech_ret_20d moves returns, tech_vol_20d sets their spread.
+
+    A few rows sit outside the universe, cannot trade at t+1 or have no labels yet.
+    """
     days = CALENDAR.between(start, end)
     rng = np.random.default_rng(seed)
     size = len(days) * STOCKS
     signal = rng.normal(size=size)
     vol = np.tile(np.linspace(0.15, 0.6, STOCKS), len(days))
     ret = 0.02 * signal + vol * 0.08 * rng.normal(size=size)
-    frame = pd.DataFrame(
+    unlabelled = rng.random(size) < 0.03
+    return pd.DataFrame(
         {
             "date": np.repeat(np.array(days, dtype=object), STOCKS),
             "stock_id": np.tile([f"{1000 + k}" for k in range(STOCKS)], len(days)),
-            "in_universe": True,
+            "in_universe": rng.random(size) > 0.05,
             "tech_ret_20d": signal,
             "tech_vol_20d": vol,
             "fund_ep": np.where(rng.random(size) < 0.1, np.nan, rng.normal(0.05, 0.02, size)),
             "mkt_taiex_ret_5d": np.repeat(rng.normal(0, 0.02, len(days)), STOCKS),
-            RETURN_LABEL: ret,
-            VOL_LABEL: vol * np.exp(0.1 * rng.normal(size=size)),
-            UP_LABEL: ret > 0.05,
-            "untradable_t1": False,
+            RETURN_LABEL: np.where(unlabelled, np.nan, ret),
+            VOL_LABEL: np.where(unlabelled, np.nan, vol * np.exp(0.1 * rng.normal(size=size))),
+            UP_LABEL: pd.Series(ret > 0.05, dtype=object).where(~unlabelled, None),
+            "untradable_t1": rng.random(size) < 0.05,
         }
     )
-    return frame
 
 
 def split(frame: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -75,9 +83,16 @@ def split(frame: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
 def data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     window = fold()
     raw, labels = split(panel(window.train_start, window.test_end))
-    inputs, _ = raw_inputs(raw, window, MARKET)
+    inputs, _ = raw_inputs(raw, window, FEATURES)
     test = inputs[inputs["date"].between(window.test_start, window.test_end)]
-    return inputs, labels, test.merge(labels, on=["stock_id", "date"])
+    return inputs, labels, training_rows(test, labels, RETURN_LABEL)
+
+
+def trainable(inputs: pd.DataFrame, labels: pd.DataFrame, label: str) -> pd.DataFrame:
+    """The training window's universe rows tradable at t+1 with a known label."""
+    window = fold()
+    inside = inputs[inputs["date"].between(window.train_start, window.train_end)]
+    return training_rows(inside, labels, label)
 
 
 @pytest.fixture
@@ -128,8 +143,8 @@ def test_raw_inputs_bin_market_features_on_the_training_window_only() -> None:
     )
     shocked.loc[shocked["date"] == window.train_start, "mkt_taiex_ret_5d"] = np.nan
 
-    inputs, bins = raw_inputs(shocked, window, MARKET)
-    reference, _ = raw_inputs(raw, window, MARKET)
+    inputs, bins = raw_inputs(shocked, window, FEATURES)
+    reference, _ = raw_inputs(raw, window, FEATURES)
 
     train = shocked[shocked["date"].between(window.train_start, window.train_end)]
     daily = train.drop_duplicates("date")["mkt_taiex_ret_5d"]
@@ -139,9 +154,28 @@ def test_raw_inputs_bin_market_features_on_the_training_window_only() -> None:
     assert set(inputs["mkt_taiex_ret_5d"].dropna().unique()) <= {0.0, 1.0, 2.0, 3.0, 4.0}
     assert (inputs.loc[inputs["date"] > window.train_end, "mkt_taiex_ret_5d"] == 4.0).all()
     assert inputs.loc[inputs["date"] == window.train_start, "mkt_taiex_ret_5d"].isna().all()
-    pd.testing.assert_frame_equal(inputs[STOCK], raw[STOCK])
-    assert inputs["fund_ep"].isna().equals(raw["fund_ep"].isna())
+    assert list(bins.edges) == MARKET
     assert reference["mkt_taiex_ret_5d"].notna().all()
+
+
+def test_raw_inputs_winsorize_stock_features_without_scoring_them() -> None:
+    window = fold()
+    raw, _ = split(panel(window.train_start, window.test_end))
+
+    inputs, _ = raw_inputs(raw, window, FEATURES)
+
+    pd.testing.assert_frame_equal(inputs[STOCK], winsorize(raw, STOCK)[STOCK])
+    assert not inputs["tech_ret_20d"].equals(raw["tech_ret_20d"])
+    assert inputs["tech_ret_20d"].std() == pytest.approx(raw["tech_ret_20d"].std(), rel=0.05)
+    assert inputs["fund_ep"].isna().equals(raw["fund_ep"].isna())
+
+
+def test_raw_inputs_refuse_features_outside_both_groups() -> None:
+    window = fold()
+    raw, _ = split(panel(window.train_start, window.test_end))
+
+    with pytest.raises(ValueError, match="in_universe"):
+        raw_inputs(raw, window, [*FEATURES, "in_universe"])
 
 
 def test_huber_delta_is_one_and_a_half_median_absolute_deviations() -> None:
@@ -163,17 +197,17 @@ def test_fit_return_uses_huber_with_the_window_delta(
 
     fitted = fit_return(inputs, labels, window, FEATURES, seed=1, max_rounds=200)
 
-    train = labels.merge(inputs[["stock_id", "date"]])
-    inside = train["date"].between(window.train_start, window.train_end)
-    assert fitted.delta == pytest.approx(huber_delta(train.loc[inside, RETURN_LABEL]))
+    train = trainable(inputs, labels, RETURN_LABEL)
+    assert len(train) < len(labels[labels["date"].between(window.train_start, window.train_end)])
+    assert fitted.delta == pytest.approx(huber_delta(train[RETURN_LABEL]))
     params, label = train_calls[0]
     assert (params["objective"], params["alpha"], params["metric"]) == (
         "huber",
         pytest.approx(fitted.delta),
         "huber",
     )
-    fit, _ = split_validation(train[inside], window)
-    np.testing.assert_allclose(np.sort(label), np.sort(fit[RETURN_LABEL]))
+    fit, _ = split_validation(train, window)
+    np.testing.assert_allclose(label, fit[RETURN_LABEL])
     predicted = fitted.boosted.booster.predict(test[FEATURES])
     assert np.corrcoef(predicted, test[RETURN_LABEL])[0, 1] > 0.1
 
@@ -213,30 +247,35 @@ def test_sorted_quantiles_uncross_each_row() -> None:
     np.testing.assert_array_equal(ordered["q90"], [0.04, 0.03, 0.0])
 
 
-def test_fit_volatility_regresses_log_volatility_and_skips_flat_rows(
+def test_fit_volatility_regresses_log_volatility_floored_for_flat_rows(
     data: tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame],
     train_calls: list[tuple[dict[str, Any], np.ndarray]],
 ) -> None:
     inputs, labels, test = data
     window = fold()
-    flat = labels.assign(**{VOL_LABEL: labels[VOL_LABEL].where(labels["stock_id"] != "1000", 0.0)})
+    flat = labels.assign(
+        **{
+            VOL_LABEL: labels[VOL_LABEL]
+            .where(labels["stock_id"] != "1000", 0.0)
+            .where(labels["stock_id"] != "1001", 1e-9)
+        }
+    )
 
     fitted = fit_volatility(inputs, flat, window, FEATURES, seed=1, max_rounds=200)
 
     params, label = train_calls[0]
     assert (params["objective"], params["metric"]) == ("regression", "l2")
-    fit, _ = split_validation(
-        flat[
-            (flat["stock_id"] != "1000")
-            & flat["date"].between(window.train_start, window.train_end)
-        ],
-        window,
-    )
-    assert len(label) == len(fit)
-    assert label.max() < 0
+    fit, _ = split_validation(trainable(inputs, flat, VOL_LABEL), window)
+    np.testing.assert_allclose(label, np.log(fit[VOL_LABEL].clip(lower=VOL_FLOOR)))
+    assert label.min() == pytest.approx(np.log(VOL_FLOOR))
+    assert VOL_FLOOR == 0.01
     predicted = target_models.volatility(fitted, test, FEATURES)
     assert (predicted > 0).all()
     assert np.corrcoef(predicted, test[VOL_LABEL])[0, 1] > 0.8
+
+
+def test_probability_calibration_settings() -> None:
+    assert (target_models.ECE_LIMIT, target_models.ECE_BINS) == (0.05, 10)
 
 
 @pytest.mark.parametrize(("limit", "calibrated"), [(1.0, False), (-1.0, True)])
@@ -249,24 +288,34 @@ def test_fit_probability_calibrates_on_the_validation_tail_only_when_ece_is_high
     inputs, labels, test = data
     window = fold()
     monkeypatch.setattr(target_models, "ECE_LIMIT", limit)
-    seen: list[int] = []
+    seen: list[np.ndarray] = []
     fit = target_models.IsotonicRegression.fit
 
     def spy(self: Any, x: Any, y: Any, *args: Any, **kwargs: Any) -> Any:
-        seen.append(len(x))
+        seen.append(np.asarray(x))
         return fit(self, x, y, *args, **kwargs)
 
     monkeypatch.setattr(target_models.IsotonicRegression, "fit", spy)
 
     fitted = fit_probability(inputs, labels, window, FEATURES, seed=1, max_rounds=200)
 
-    train = labels[labels["date"].between(window.train_start, window.train_end)]
-    _, valid = split_validation(train, window)
-    assert 0 <= fitted.ece <= 1
+    _, valid = split_validation(trainable(inputs, labels, UP_LABEL), window)
+    scored = valid.assign(prob=fitted.boosted.valid_scores)
+    scored[UP] = scored[UP_LABEL].astype(float)
+    assert fitted.ece == pytest.approx(
+        expected_calibration_error(reliability_table(scored, UP, "prob", 10))
+    )
     assert (fitted.calibrator is not None) is calibrated
-    assert seen == ([len(valid)] if calibrated else [])
+    assert len(seen) == (1 if calibrated else 0)
+    if seen:
+        np.testing.assert_array_equal(seen[0], fitted.boosted.valid_scores)
     probs = fitted.predict(test, FEATURES)
+    raw = np.asarray(fitted.boosted.booster.predict(test[FEATURES]))
+    if fitted.calibrator is None:
+        np.testing.assert_array_equal(probs, raw)
+    else:
+        np.testing.assert_array_equal(probs, fitted.calibrator.predict(raw))
+        assert not np.allclose(probs, raw)
     assert ((probs >= 0) & (probs <= 1)).all()
-    raw = fitted.boosted.booster.predict(test[FEATURES])
     order = np.argsort(raw)
     assert (np.diff(probs[order]) >= -1e-12).all()

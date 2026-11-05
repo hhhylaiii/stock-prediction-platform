@@ -7,8 +7,9 @@ import numpy as np
 import pandas as pd
 from sklearn.isotonic import IsotonicRegression
 
+from apps.research.baselines import QUANTILES
 from apps.research.features.registry import FEATURES as REGISTRY
-from apps.research.features.transforms import STOCK_LEVEL, MarketBins, market_bins
+from apps.research.features.transforms import STOCK_LEVEL, MarketBins, market_bins, winsorize
 from apps.research.gbdt import MAX_ROUNDS, Boosted, boost, split_validation
 from apps.research.metrics.forecast import expected_calibration_error, reliability_table
 from apps.research.runs import Screened
@@ -21,7 +22,7 @@ UP_LABEL = "fwd_up_5pct"
 LOG_VOL = "log_fwd_vol_20d"
 UP = "up"
 HUBER_MAD_SCALE = 1.5
-QUANTILES = {"q10": 0.1, "q50": 0.5, "q90": 0.9}
+VOL_FLOOR = 0.01
 ECE_LIMIT = 0.05
 ECE_BINS = 10
 MARKET_LEVEL = [spec.name for spec in REGISTRY if spec.batch == 1 and spec.market_level]
@@ -37,12 +38,17 @@ def raw_features(screened: Screened) -> list[str]:
 
 
 def raw_inputs(
-    raw: pd.DataFrame, fold: Fold, market: Sequence[str]
+    raw: pd.DataFrame, fold: Fold, features: Sequence[str]
 ) -> tuple[pd.DataFrame, MarketBins]:
-    """Raw features with market features cut into training-window quintiles; gaps stay NaN."""
+    """Stock features winsorized but not scored, market features cut into training quintiles."""
+    stock = [name for name in features if name in STOCK_LEVEL]
+    market = [name for name in features if name in MARKET_LEVEL]
+    unknown = [name for name in features if name not in stock and name not in market]
+    if unknown:
+        raise ValueError(f"the raw-value models take stock or market features, not {unknown}")
     train = raw[raw["date"].between(fold.train_start, fold.train_end)]
     bins = market_bins(train, market)
-    return bins.apply(raw), bins
+    return bins.apply(winsorize(raw, stock)), bins
 
 
 def _rows(inputs: pd.DataFrame, labels: pd.DataFrame, fold: Fold, label: str) -> pd.DataFrame:
@@ -118,10 +124,9 @@ def fit_volatility(
     seed: int,
     max_rounds: int = MAX_ROUNDS,
 ) -> Boosted:
-    """L2 regression of log forward volatility; rows without volatility have no log."""
+    """L2 regression of log forward volatility, floored so flat rows keep a finite label."""
     rows = _rows(inputs, labels, fold, VOL_LABEL)
-    rows = rows[rows[VOL_LABEL] > 0]
-    logged = rows.assign(**{LOG_VOL: np.log(rows[VOL_LABEL])})
+    logged = rows.assign(**{LOG_VOL: np.log(rows[VOL_LABEL].clip(lower=VOL_FLOOR))})
     params = {"objective": "regression", "metric": "l2"}
     return boost(logged, fold, features, LOG_VOL, seed, params, max_rounds=max_rounds)
 
