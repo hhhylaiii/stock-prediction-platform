@@ -75,15 +75,16 @@ class RankReport:
     by_liquidity: pd.DataFrame
     neutralized: ICSummary
     monthly: pd.Series
+    monthly_days: pd.Series
 
     @property
     def leak(self) -> bool:
         return leaks(self.horizon, self.total.mean)
 
 
-def _monthly(ic: pd.Series) -> pd.Series:
-    months = pd.Index([day.replace(day=1) for day in ic.index], dtype=object)
-    return ic.groupby(months).mean().rename_axis("month")
+def _months(ic: pd.Series) -> pd.Index:
+    months: pd.Index = pd.Index([day.replace(day=1) for day in ic.index], dtype=object)
+    return months.rename("month")
 
 
 def _beats(
@@ -150,7 +151,8 @@ def rank_report(
         compared_folds=compared,
         by_liquidity=_by_liquidity(rows, score, horizon, chosen),
         neutralized=summarize_ic(research_ic(neutralized_rank_ic(rows, score), chosen), horizon),
-        monthly=_monthly(counted),
+        monthly=counted.groupby(_months(counted)).mean(),
+        monthly_days=counted.groupby(_months(counted)).size(),
     )
 
 
