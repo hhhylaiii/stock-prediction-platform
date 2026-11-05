@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 
 from django.core.management.base import BaseCommand, CommandError, CommandParser
@@ -12,7 +12,9 @@ class Command(BaseCommand):
     help = "Score predictions maturing on a trading day and check that day's outputs."
 
     def add_arguments(self, parser: CommandParser) -> None:
-        parser.add_argument("--date", help="Trading day, YYYY-MM-DD; defaults to the latest one.")
+        parser.add_argument(
+            "--date", help="Trading day, YYYY-MM-DD; defaults to the last one before today."
+        )
 
     def handle(self, *args: Any, **options: Any) -> None:
         try:
@@ -21,7 +23,7 @@ class Command(BaseCommand):
             day = (
                 date.fromisoformat(str(raw))
                 if raw
-                else calendar.latest_on_or_before(timezone.localdate())
+                else calendar.latest_on_or_before(timezone.localdate() - timedelta(days=1))
             )
             result = run_monitor(day, calendar)
         except (CalendarError, MonitorError, ValueError) as exc:

@@ -3,6 +3,7 @@
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date
+from typing import Any
 
 import pandas as pd
 from django.db import transaction
@@ -32,7 +33,8 @@ from apps.research.models import (
 
 WIDTH_CHECK = "output_width_ratio"
 ODDS_CHECK = "output_odds_vs_q50"
-CHECKS = (WIDTH_CHECK, ODDS_CHECK)
+UNSCORED_CHECK = "monitor_unscored"
+CHECKS = (WIDTH_CHECK, ODDS_CHECK, UNSCORED_CHECK)
 OUTPUTS = ["score", "ret_pred", "q10", "q50", "q90", "vol_pred", "prob_up_5pct"]
 LABELS = ["fwd_rank_pct", "fwd_ret_open", "fwd_vol_20d", "fwd_up_5pct"]
 METRICS = ["ic", "coverage", "brier", "direction_acc", "mae", "width", "auc"]
@@ -44,6 +46,11 @@ TARGET: Mapping[str, str] = {
     ModelObjective.CLASSIFICATION: "fwd_up_5pct",
 }
 WATCHED = (ModelStatus.ACTIVE, ModelStatus.DEGRADED)
+BANDS: Mapping[str, list[str]] = {
+    ModelObjective.QUANTILE: ["q10", "q50", "q90"],
+    ModelObjective.VOLATILITY: ["vol_pred"],
+    ModelObjective.CLASSIFICATION: ["prob_up_5pct"],
+}
 Scores = dict[str, float | None]
 
 
@@ -96,21 +103,26 @@ def _matured_rows(day: date, horizon: int) -> pd.DataFrame:
     predictions = Prediction.objects.filter(date=day, horizon=horizon, in_universe=True)
     fields = ["run_id", "run__objective", "stock_id", *OUTPUTS]
     frame = pd.DataFrame(list(predictions.values_list(*fields)), columns=fields)
-    labels = LabelDaily.objects.filter(date=day, horizon=horizon).values_list("stock_id", *LABELS)
-    known = pd.DataFrame(list(labels), columns=["stock_id", *LABELS])
+    fields = ["stock_id", "untradable_t1", *LABELS]
+    labels = LabelDaily.objects.filter(date=day, horizon=horizon).values_list(*fields)
+    known = pd.DataFrame(list(labels), columns=fields)
     known["fwd_up_5pct"] = known["fwd_up_5pct"].map({True: 1.0, False: 0.0})
     joined = frame.merge(known, on="stock_id", how="left")
     numbers = joined[[*OUTPUTS, *LABELS]].astype(float)
     return joined.drop(columns=[*OUTPUTS, *LABELS]).join(numbers).assign(date=day)
 
 
-def score_matured(day: date, horizon: int) -> int:
-    """Rewrite model_monitor for every run predicting the date; runs without labels get none."""
+def score_matured(day: date, horizon: int) -> tuple[int, list[str]]:
+    """Rewrite model_monitor of runs predicting the date; return the count and runs left unscored.
+
+    Rows count as in research: universe, tradable at the next open, label known.
+    """
     rows = _matured_rows(day, horizon)
-    found = []
+    found, unscored = [], []
     for (run_id, objective), part in rows.groupby(["run_id", "run__objective"]):
-        kept = part[part[TARGET[str(objective)]].notna()]
+        kept = part[part[TARGET[str(objective)]].notna() & part["untradable_t1"].eq(False)]
         if kept.empty:
+            unscored.append(str(run_id))
             continue
         scores = {**dict.fromkeys(METRICS), **SCORERS[str(objective)](kept)}
         found.append(
@@ -118,33 +130,45 @@ def score_matured(day: date, horizon: int) -> int:
                 run_id=str(run_id), date=day, horizon=horizon, n_stocks=len(kept), **scores
             )
         )
-    runs = rows["run_id"].unique().tolist()
-    ModelMonitor.objects.filter(date=day, horizon=horizon, run_id__in=runs).delete()
+    scored = [row.run_id for row in found]
+    ModelMonitor.objects.filter(date=day, horizon=horizon, run_id__in=scored).delete()
     ModelMonitor.objects.bulk_create(found)
-    return len(found)
+    return len(found), unscored
+
+
+def _served_runs(day: date) -> dict[str, str]:
+    """Per objective, the run serving the day's 20-day rows: active, then degraded, then newest."""
+    rows = Prediction.objects.filter(date=day, horizon=INTERVAL_HORIZON, run__status__in=WATCHED)
+    fields = ["run_id", "run__objective", "run__status", "run__created_at"]
+    runs = sorted(
+        set(rows.values_list(*fields)),
+        key=lambda run: (WATCHED.index(run[2]), -run[3].timestamp(), run[0]),
+    )
+    chosen: dict[str, str] = {}
+    for run_id, objective, _, _ in runs:
+        chosen.setdefault(objective, run_id)
+    return chosen
 
 
 def _outputs_on(day: date) -> pd.DataFrame:
-    """Each universe stock's 20-day outputs that day, from the watched run of each objective."""
-    rows = Prediction.objects.filter(
-        date=day, horizon=INTERVAL_HORIZON, in_universe=True, run__status__in=WATCHED
-    )
-    fields = ["stock_id", "run__objective", "run__status", "q10", "q50", "q90"]
-    fields += ["vol_pred", "prob_up_5pct"]
-    frame = pd.DataFrame(list(rows.values_list(*fields)), columns=fields)
-    frame = frame.assign(active=frame["run__status"] == ModelStatus.ACTIVE).sort_values(
-        ["stock_id", "active"], ascending=[True, False]
-    )
-    parts = {
-        ModelObjective.QUANTILE: ["q10", "q50", "q90"],
-        ModelObjective.VOLATILITY: ["vol_pred"],
-        ModelObjective.CLASSIFICATION: ["prob_up_5pct"],
-    }
-    merged = pd.DataFrame({"stock_id": pd.Series(sorted(set(frame["stock_id"])), dtype=object)})
-    for objective, columns in parts.items():
-        chosen = frame[frame["run__objective"] == objective].drop_duplicates("stock_id")
-        merged = merged.merge(chosen[["stock_id", *columns]], on="stock_id", how="left")
-    return merged.astype({name: float for column in parts.values() for name in column})
+    """Each universe stock's 20-day outputs that day from the one run serving each objective."""
+    merged = pd.DataFrame({"stock_id": pd.Series([], dtype=object)})
+    for objective, run_id in _served_runs(day).items():
+        columns = BANDS.get(objective)
+        if columns is None:
+            continue
+        rows = Prediction.objects.filter(
+            run_id=run_id, date=day, horizon=INTERVAL_HORIZON, in_universe=True
+        )
+        part = pd.DataFrame(
+            list(rows.values_list("stock_id", *columns)), columns=["stock_id", *columns]
+        )
+        merged = merged.merge(part, on="stock_id", how="outer")
+    for columns in BANDS.values():
+        for name in columns:
+            if name not in merged:
+                merged[name] = float("nan")
+    return merged.astype({name: float for columns in BANDS.values() for name in columns})
 
 
 def _consistency_row(
@@ -175,8 +199,17 @@ def consistency_checks(day: date) -> list[DataQualityLog]:
     ]
 
 
+def _unscored_row(day: date, missed: list[dict[str, Any]]) -> list[DataQualityLog]:
+    """One warning naming the runs whose matured predictions had no countable label."""
+    if not missed:
+        return []
+    detail = {"runs": missed}
+    severity = DataQualityLog.Severity.WARNING
+    return [DataQualityLog(date=day, check_name=UNSCORED_CHECK, severity=severity, detail=detail)]
+
+
 def _alerting(row: DataQualityLog) -> bool:
-    return bool(row.detail["share"] > ALERT_SHARE)
+    return row.check_name == UNSCORED_CHECK or bool(row.detail["share"] > ALERT_SHARE)
 
 
 @dataclass(frozen=True)
@@ -191,8 +224,15 @@ def run_monitor(day: date, calendar: TradingDays) -> MonitorResult:
         raise MonitorError(f"{day} is not a trading day")
     matured = matured_dates(calendar, day)
     with transaction.atomic():
-        scored = sum(score_matured(when, horizon) for horizon, when in matured.items())
-        logs = consistency_checks(day)
+        scored, missed = 0, []
+        for horizon, when in matured.items():
+            count, unscored = score_matured(when, horizon)
+            scored += count
+            missed += [
+                {"run_id": run_id, "date": when.isoformat(), "horizon": horizon}
+                for run_id in unscored
+            ]
+        logs = [*consistency_checks(day), *_unscored_row(day, missed)]
         DataQualityLog.objects.filter(date=day, check_name__in=CHECKS).delete()
         DataQualityLog.objects.bulk_create(logs)
     dispatch([row for row in logs if _alerting(row)])

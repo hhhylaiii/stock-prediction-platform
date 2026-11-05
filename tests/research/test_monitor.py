@@ -6,6 +6,7 @@ import pandas as pd
 import pytest
 from django.core.management import call_command
 from django.core.management.base import CommandError
+from django.utils import timezone
 
 from apps.etl.models import DataQualityLog
 from apps.market.calendar import TradingDays
@@ -23,6 +24,7 @@ from apps.research.metrics.ic import daily_rank_ic
 from apps.research.models import LabelDaily, ModelMonitor, ModelRun, Prediction
 from apps.research.monitor import (
     ODDS_CHECK,
+    UNSCORED_CHECK,
     WIDTH_CHECK,
     run_monitor,
 )
@@ -96,7 +98,7 @@ def label(day: date, horizon: int, frame: pd.DataFrame) -> None:
 
 
 def truth(seed: int) -> pd.DataFrame:
-    """Labels of every stock; the last universe stock has none and the first is flat."""
+    """Labels: the last universe stock has none, the first is flat, the second untradable."""
     rng = np.random.default_rng(seed)
     stocks = [*STOCKS, *OUTSIDE]
     ret = rng.normal(0, 0.1, len(stocks))
@@ -115,6 +117,9 @@ def truth(seed: int) -> pd.DataFrame:
     missing = frame["stock_id"] == STOCKS[-1]
     frame.loc[missing, ["fwd_ret", "fwd_ret_open", "fwd_rank_pct", "fwd_vol_20d"]] = np.nan
     frame["fwd_up_5pct"] = frame["fwd_up_5pct"].astype(object).where(~missing, None)
+    stuck = frame["stock_id"] == STOCKS[1]
+    frame.loc[stuck, ["fwd_ret", "fwd_ret_open", "fwd_rank_pct"]] = [0.5, 0.5, np.nan]
+    frame.loc[stuck, ["untradable_t1", "fwd_up_5pct"]] = [True, True]
     return frame
 
 
@@ -201,11 +206,15 @@ def test_each_objective_is_scored_on_universe_rows_with_a_label() -> None:
 
     run_monitor(DAY, calendar())
 
-    kept5 = five[five["in_universe"] & five["fwd_ret_open"].notna()]
-    kept20 = twenty[twenty["in_universe"] & twenty["fwd_ret_open"].notna()]
-    assert len(kept20) == 39
+    tradable5, tradable20 = (
+        ~five["untradable_t1"].astype(bool),
+        ~twenty["untradable_t1"].astype(bool),
+    )
+    kept5 = five[five["in_universe"] & five["fwd_ret_open"].notna() & tradable5]
+    kept20 = twenty[twenty["in_universe"] & twenty["fwd_ret_open"].notna() & tradable20]
+    assert len(kept20) == 38
     rank = stored(runs["rank"], 20)
-    assert rank.n_stocks == 39
+    assert rank.n_stocks == 38
     assert rank.ic == pytest.approx(first(daily_rank_ic(kept20, "score")))
     assert stored(runs["rank"], 5).ic == pytest.approx(first(daily_rank_ic(kept5, "score")))
     regression = stored(runs["regression"], 5)
@@ -232,22 +241,31 @@ def test_each_objective_is_scored_on_universe_rows_with_a_label() -> None:
     assert classification.brier == pytest.approx(first(daily_brier(chance, "up", "prob_up_5pct")))
     assert classification.auc == pytest.approx(first(daily_auc(chance, "up", "prob_up_5pct")))
     for row in (rank, quantile, volatility, classification):
-        assert row.n_stocks == 39
+        assert row.n_stocks == 38
     assert (regression.ic, regression.coverage, regression.brier) == (None, None, None)
     assert (rank.mae, classification.mae, volatility.coverage) == (None, None, None)
 
 
-def test_runs_whose_predictions_have_no_label_yet_are_not_written() -> None:
+def test_predictions_without_labels_are_flagged_and_keep_earlier_scores(
+    dispatched: list[DataQualityLog],
+) -> None:
     rank = make_run("prod.rank", "rank")
     labels = truth(6)
     predict(
         rank, matured(5), 5, outputs(labels, 6)[["stock_id", "in_universe", "score", "rank", "pct"]]
     )
     label(matured(5), 5, labels.assign(fwd_rank_pct=np.nan, fwd_ret_open=np.nan))
+    ModelMonitor.objects.create(run=rank, date=matured(5), horizon=5, ic=0.02, n_stocks=40)
 
     run_monitor(DAY, calendar())
 
-    assert not ModelMonitor.objects.exists()
+    assert ModelMonitor.objects.get(run=rank, horizon=5).ic == 0.02
+    unscored = logged(UNSCORED_CHECK)
+    assert unscored.severity == "warning"
+    assert unscored.detail == {
+        "runs": [{"run_id": rank.run_id, "date": matured(5).isoformat(), "horizon": 5}]
+    }
+    assert [row.check_name for row in dispatched] == [UNSCORED_CHECK]
 
 
 def consistent_outputs(stocks: list[str], in_universe: bool) -> pd.DataFrame:
@@ -372,13 +390,19 @@ def test_rerunning_a_day_changes_nothing_and_leaves_other_checks_alone() -> None
     assert not own.filter(severity="error").exists()
 
 
-def test_command_runs_a_trading_day_and_refuses_other_days() -> None:
+def test_command_runs_a_trading_day_and_refuses_other_days(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     rank = make_run("prod.rank", "rank")
     seed_matured({"rank": rank}, 5, 9)
 
     call_command("monitor", date="2026-09-30")
 
     assert ModelMonitor.objects.filter(run=rank, horizon=5).exists()
+    ModelMonitor.objects.all().delete()
+    monkeypatch.setattr(timezone, "localdate", lambda: date(2026, 10, 1))
+    call_command("monitor")
+    assert ModelMonitor.objects.filter(run=rank, horizon=5, date=matured(5)).exists()
     with pytest.raises(CommandError, match="2026-09-25"):
         call_command("monitor", date="2026-09-25")
     with pytest.raises(monitor.MonitorError, match="not a trading day"):
@@ -392,7 +416,7 @@ def test_every_run_with_predictions_is_scored_whatever_its_status(state: str) ->
 
     run_monitor(DAY, calendar())
 
-    assert ModelMonitor.objects.get(run=run, horizon=5).n_stocks == 39
+    assert ModelMonitor.objects.get(run=run, horizon=5).n_stocks == 38
     assert status(run) == state
 
 
@@ -426,3 +450,30 @@ def test_consistency_reads_the_active_run_first_and_never_a_retired_one() -> Non
     Prediction.objects.filter(run=runs["quantile"]).delete()
     run_monitor(DAY, calendar())
     assert not DataQualityLog.objects.filter(check_name=WIDTH_CHECK).exists()
+
+
+def test_consistency_reads_one_run_per_objective_as_the_api_serves() -> None:
+    runs = seed_today(narrow=0, against=0)
+    Prediction.objects.filter(run=runs["quantile"], stock_id__in=STOCKS[:10]).delete()
+    stale = make_run("prod.quantile.old", "quantile", status="degraded")
+    narrow = consistent_outputs(STOCKS[:10], True).assign(q10=-0.001, q90=0.001)
+    predict(stale, DAY, 20, narrow[["stock_id", "in_universe", "q10", "q50", "q90"]])
+
+    run_monitor(DAY, calendar())
+
+    assert logged(WIDTH_CHECK).detail["flagged"] == 0
+    assert logged(WIDTH_CHECK).detail["n_stocks"] == 30
+    newer = make_run("prod.quantile.new", "quantile")
+    ModelRun.objects.filter(pk=newer.pk).update(
+        created_at=runs["quantile"].created_at + timedelta(days=1)
+    )
+    predict(
+        newer,
+        DAY,
+        20,
+        consistent_outputs(STOCKS, True).assign(q10=-0.001, q90=0.001)[
+            ["stock_id", "in_universe", "q10", "q50", "q90"]
+        ],
+    )
+    run_monitor(DAY, calendar())
+    assert logged(WIDTH_CHECK).detail["flagged"] == 40
