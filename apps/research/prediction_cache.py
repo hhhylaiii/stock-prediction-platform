@@ -81,28 +81,13 @@ def _check(fold: Fold, predictions: pd.DataFrame) -> None:
         raise ValueError("predictions repeat a (date, stock_id) pair")
 
 
-def save_fold_predictions(
-    run_key: str,
-    model: str,
-    fold: Fold,
-    predictions: pd.DataFrame,
-    ticket: HoldoutTicket | None = None,
-    notes: Mapping[str, str] | None = None,
-) -> Path:
-    """Write one model's fold atomically, without the index; holdout folds need a ticket."""
-    path = fold_path(run_key, model, fold.index)
-    authorize_folds([fold], run_key, ticket)
-    once = is_holdout(fold)
-    if (once and path.exists()) or _holds_holdout(path):
-        raise HoldoutError(
-            f"holdout fold {fold.index} of {run_key}/{model} is written once and exists"
-        )
-    _check(fold, predictions)
+def _staged(path: Path, fold: Fold, predictions: pd.DataFrame, notes: Mapping[str, str]) -> str:
+    """Temporary file beside path holding the predictions, the fold record and the notes."""
     table = pa.Table.from_pandas(predictions, preserve_index=False)
     metadata = {
         **(table.schema.metadata or {}),
         FOLD_METADATA: json.dumps(fold_record(fold)).encode(),
-        NOTES_METADATA: json.dumps(dict(notes or {})).encode(),
+        NOTES_METADATA: json.dumps(dict(notes)).encode(),
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     handle, temporary = tempfile.mkstemp(dir=path.parent, prefix=f".{path.stem}-", suffix=".tmp")
@@ -111,20 +96,76 @@ def save_fold_predictions(
         pq.write_table(table.replace_schema_metadata(metadata), temporary)
         with open(temporary, "rb") as written:
             os.fsync(written.fileno())
-        _publish(temporary, path, once)
+    except BaseException:
+        Path(temporary).unlink(missing_ok=True)
+        raise
+    return temporary
+
+
+def save_fold_predictions(
+    run_key: str,
+    model: str,
+    fold: Fold,
+    predictions: pd.DataFrame,
+    notes: Mapping[str, str] | None = None,
+) -> Path:
+    """Write one model's research fold atomically, without the index."""
+    path = fold_path(run_key, model, fold.index)
+    if is_holdout(fold):
+        raise HoldoutError(f"fold {fold.index} is holdout; save_holdout_fold writes its models")
+    if _holds_holdout(path):
+        raise HoldoutError(
+            f"holdout fold {fold.index} of {run_key}/{model} is written once and exists"
+        )
+    _check(fold, predictions)
+    temporary = _staged(path, fold, predictions, notes or {})
+    try:
+        os.replace(temporary, path)
     finally:
         Path(temporary).unlink(missing_ok=True)
     return path
 
 
-def _publish(temporary: str, path: Path, once: bool) -> None:
-    if not once:
-        os.replace(temporary, path)
-        return
+def save_holdout_fold(
+    run_key: str,
+    fold: Fold,
+    predictions: Mapping[str, pd.DataFrame],
+    ticket: HoldoutTicket | None,
+    notes: Mapping[str, Mapping[str, str]] | None = None,
+) -> list[Path]:
+    """Write every model's predictions of a holdout fold in one call; the fold is written once."""
+    if not is_holdout(fold):
+        raise ValueError(f"fold {fold.index} is not holdout; save_fold_predictions writes it")
+    authorize_folds([fold], run_key, ticket)
+    paths = {model: fold_path(run_key, model, fold.index) for model in predictions}
+    if not paths:
+        raise ValueError(f"holdout fold {fold.index} needs the predictions of its models")
+    stray = sorted(set(notes or {}) - paths.keys())
+    if stray:
+        raise ValueError(f"notes name models without predictions: {stray}")
+    if fold_cached(run_key, fold.index):
+        raise HoldoutError(f"holdout fold {fold.index} of {run_key} is written once and exists")
+    for frame in predictions.values():
+        _check(fold, frame)
+    staged: dict[str, str] = {}
+    try:
+        for model, frame in predictions.items():
+            staged[model] = _staged(paths[model], fold, frame, (notes or {}).get(model, {}))
+        for model, temporary in staged.items():
+            _link(temporary, paths[model])
+    finally:
+        for temporary in staged.values():
+            Path(temporary).unlink(missing_ok=True)
+    return list(paths.values())
+
+
+def _link(temporary: str, path: Path) -> None:
     try:
         os.link(temporary, path)
     except FileExistsError as error:
-        raise HoldoutError(f"holdout fold file {path.name} appeared while writing") from error
+        raise HoldoutError(
+            f"holdout fold file {path.parent.name}/{path.name} appeared while writing"
+        ) from error
 
 
 def _holds_holdout(path: Path) -> bool:

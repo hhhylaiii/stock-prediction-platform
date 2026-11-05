@@ -23,6 +23,7 @@ from apps.research.prediction_cache import (
     load_predictions,
     missing_folds,
     save_fold_predictions,
+    save_holdout_fold,
 )
 from apps.research.walkforward import Fold, WalkForwardConfig, generate_folds
 
@@ -219,32 +220,53 @@ def test_dates_must_be_plain_dates(research: list[Fold], wrap: Callable[[date], 
         save_fold_predictions(RUN, MODEL, fold, stamped)
 
 
+def holdout_of(folds: list[Fold]) -> Fold:
+    return next(fold for fold in folds if fold.holdout)
+
+
+def both(fold: Fold, score: float = 0.1) -> dict[str, pd.DataFrame]:
+    return {MODEL: predictions(fold, score), OTHER: predictions(fold, score + 0.1)}
+
+
+@pytest.mark.django_db
 def test_holdout_fold_without_a_ticket_is_not_written(folds: list[Fold]) -> None:
-    fold = next(fold for fold in folds if fold.holdout)
+    fold = holdout_of(folds)
 
-    with pytest.raises(HoldoutError):
+    with pytest.raises(HoldoutError, match="save_holdout_fold"):
         save_fold_predictions(RUN, MODEL, fold, predictions(fold))
-    assert not fold_path(RUN, MODEL, fold.index).exists()
+    for ticket in (None, claim_holdout("return", "return-v1", LAST)):
+        with pytest.raises(HoldoutError):
+            save_holdout_fold(RUN, fold, both(fold), ticket)
+    assert not fold_cached(RUN, fold.index)
 
 
 @pytest.mark.django_db
-def test_holdout_fold_is_written_with_a_recorded_ticket(folds: list[Fold]) -> None:
-    fold = next(fold for fold in folds if fold.holdout)
+def test_holdout_fold_writes_every_model_with_a_recorded_ticket(folds: list[Fold]) -> None:
+    fold = holdout_of(folds)
     ticket = claim_holdout("rank", RUN, LAST)
 
-    save_fold_predictions(RUN, MODEL, fold, predictions(fold), ticket)
+    paths = save_holdout_fold(RUN, fold, both(fold), ticket, notes={OTHER: {"seed": "7"}})
 
+    assert paths == [fold_path(RUN, MODEL, fold.index), fold_path(RUN, OTHER, fold.index)]
     assert load_fold_predictions(RUN, MODEL, fold)["stock_id"].tolist() == ["2330", "2317", "2330"]
+    assert load_fold_predictions(RUN, OTHER, fold)["score"].iloc[0] == pytest.approx(0.2)
+    assert fold_notes(RUN, MODEL, fold.index) == {}
+    assert fold_notes(RUN, OTHER, fold.index) == {"seed": "7"}
 
 
 @pytest.mark.django_db
-def test_holdout_fold_is_written_once(folds: list[Fold]) -> None:
-    fold = next(fold for fold in folds if fold.holdout)
+def test_holdout_fold_is_written_once_for_every_model(folds: list[Fold]) -> None:
+    fold = holdout_of(folds)
     ticket = claim_holdout("rank", RUN, LAST)
-    save_fold_predictions(RUN, MODEL, fold, predictions(fold, 0.1), ticket)
+    save_holdout_fold(RUN, fold, both(fold, 0.1), ticket)
 
-    with pytest.raises(HoldoutError, match="written once"):
-        save_fold_predictions(RUN, MODEL, fold, predictions(fold, 0.9), ticket)
+    for again in (both(fold, 0.8), {"late": predictions(fold, 0.9)}):
+        with pytest.raises(HoldoutError, match="written once"):
+            save_holdout_fold(RUN, fold, again, ticket)
+    with pytest.raises(HoldoutError):
+        save_fold_predictions(RUN, "late", fold, predictions(fold, 0.9))
+
+    assert not fold_path(RUN, "late", fold.index).exists()
     assert load_fold_predictions(RUN, MODEL, fold)["score"].iloc[0] == 0.1
 
 
@@ -252,7 +274,7 @@ def test_holdout_fold_is_written_once(folds: list[Fold]) -> None:
 def test_holdout_fold_written_meanwhile_is_kept(
     folds: list[Fold], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    fold = next(fold for fold in folds if fold.holdout)
+    fold = holdout_of(folds)
     ticket = claim_holdout("rank", RUN, LAST)
     target = fold_path(RUN, MODEL, fold.index)
     write = prediction_cache.pq.write_table
@@ -263,9 +285,50 @@ def test_holdout_fold_written_meanwhile_is_kept(
 
     monkeypatch.setattr(prediction_cache.pq, "write_table", racing)
     with pytest.raises(HoldoutError, match="appeared"):
-        save_fold_predictions(RUN, MODEL, fold, predictions(fold), ticket)
+        save_holdout_fold(RUN, fold, {MODEL: predictions(fold)}, ticket)
     assert target.read_bytes() == b"other"
     assert [path.name for path in target.parent.iterdir()] == [target.name]
+
+
+@pytest.mark.django_db
+def test_holdout_fold_with_a_bad_model_writes_none(
+    folds: list[Fold], cache_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fold = holdout_of(folds)
+    ticket = claim_holdout("rank", RUN, LAST)
+    bad = predictions(fold).drop(columns="stock_id")
+
+    with pytest.raises(ValueError, match="stock_id"):
+        save_holdout_fold(RUN, fold, {MODEL: predictions(fold), OTHER: bad}, ticket)
+    with pytest.raises(ValueError, match="notes"):
+        save_holdout_fold(RUN, fold, {MODEL: predictions(fold)}, ticket, notes={OTHER: {}})
+    with pytest.raises(ValueError, match="models"):
+        save_holdout_fold(RUN, fold, {}, ticket)
+    write = prediction_cache.pq.write_table
+    calls = []
+
+    def broken(table: object, where: str, *args: object, **kwargs: object) -> None:
+        calls.append(where)
+        write(table, where, *args, **kwargs)
+        if len(calls) == 2:
+            raise OSError("disk full")
+
+    monkeypatch.setattr(prediction_cache.pq, "write_table", broken)
+    with pytest.raises(OSError, match="disk full"):
+        save_holdout_fold(RUN, fold, both(fold), ticket)
+
+    assert not fold_cached(RUN, fold.index)
+    assert [path for path in cache_dir.rglob("*") if path.is_file()] == []
+
+
+@pytest.mark.django_db
+def test_research_folds_are_not_written_as_holdout(research: list[Fold], cache_dir: Path) -> None:
+    fold = research[0]
+    ticket = claim_holdout("rank", RUN, LAST)
+
+    with pytest.raises(ValueError, match="not holdout"):
+        save_holdout_fold(RUN, fold, both(fold), ticket)
+    assert not cache_dir.exists()
 
 
 @pytest.mark.django_db
@@ -273,9 +336,9 @@ def test_research_fold_of_another_layout_cannot_replace_a_holdout_file(
     long_calendar: TradingDays, folds: list[Fold]
 ) -> None:
     shifted = generate_folds(long_calendar, LAST, WalkForwardConfig(first_test=date(2015, 1, 1)))
-    holdout = next(fold for fold in shifted if fold.holdout)
+    holdout = holdout_of(shifted)
     ticket = claim_holdout("rank", RUN, LAST)
-    save_fold_predictions(RUN, MODEL, holdout, predictions(holdout, 0.1), ticket)
+    save_holdout_fold(RUN, holdout, {MODEL: predictions(holdout, 0.1)}, ticket)
     research = next(fold for fold in folds if fold.index == holdout.index)
 
     assert not research.holdout
@@ -362,21 +425,6 @@ def test_a_fold_is_cached_once_any_model_holds_it(research: list[Fold]) -> None:
     assert fold_cached(RUN, fold.index)
     assert not fold_cached(RUN, research[1].index)
     assert not fold_cached("rank-v2", fold.index)
-
-
-@pytest.mark.django_db
-def test_each_model_writes_its_holdout_fold_once(folds: list[Fold]) -> None:
-    fold = next(fold for fold in folds if fold.holdout)
-    ticket = claim_holdout("rank", RUN, LAST)
-    save_fold_predictions(RUN, MODEL, fold, predictions(fold, 0.1), ticket)
-    save_fold_predictions(RUN, OTHER, fold, predictions(fold, 0.2), ticket)
-
-    for model in (MODEL, OTHER):
-        with pytest.raises(HoldoutError, match="written once"):
-            save_fold_predictions(RUN, model, fold, predictions(fold, 0.9), ticket)
-
-    assert load_fold_predictions(RUN, MODEL, fold)["score"].iloc[0] == 0.1
-    assert load_fold_predictions(RUN, OTHER, fold)["score"].iloc[0] == 0.2
 
 
 @pytest.mark.parametrize("model", ["../escape", "a/b", "..", "Baseline", ""])
