@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import date, timedelta
 from io import StringIO
 from pathlib import Path
@@ -549,6 +550,15 @@ def test_folds_another_model_cached_still_run_their_baselines(panel: Path) -> No
 
     assert run_folds("return", [first, second], "return-wf1", panel) == [first.index, second.index]
     assert run_folds("return", [first, second], "return-wf1", panel) == []
+
+
+def test_folds_cached_for_other_boundaries_rerun(panel: Path) -> None:
+    fold = research()[0]
+    run_folds("return", [fold], "return-wf1", panel)
+    moved = replace(fold, tuning=not fold.tuning)
+
+    assert run_folds("return", [moved], "return-wf1", panel) == [fold.index]
+    assert run_folds("return", [moved], "return-wf1", panel) == []
 
 
 @pytest.mark.parametrize(
