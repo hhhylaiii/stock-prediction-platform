@@ -10,10 +10,10 @@ from django.core.management import call_command
 from django.core.management.base import CommandError
 
 from apps.market.models import DailyPrice, StockMaster
-from apps.research import baseline_runs, lgbm_runs
+from apps.research import baseline_runs, gbdt, lgbm_runs
 from apps.research.baseline_runs import BASELINE
 from apps.research.features.store import export_year
-from apps.research.gbdt import BASE_PARAMS, seeded
+from apps.research.gbdt import BASE_PARAMS, Bagged, seeded
 from apps.research.holdout import HoldoutError
 from apps.research.lgbm_runs import MODEL, recipe, run_folds
 from apps.research.management.commands import train
@@ -219,6 +219,10 @@ def test_recipe_changes_with_the_features_seed_and_lightgbm_settings(
         with monkeypatch.context() as patched:
             patched.setattr(lgbm_runs, name, value)
             assert recipe("rank", KEPT, 0) != first, name
+    bagged = recipe("rank", KEPT, 0, bags=2)
+    with monkeypatch.context() as patched:
+        patched.setattr(gbdt, "BAG_STRIDE", 4)
+        assert recipe("rank", KEPT, 0, bags=2) != bagged
     assert recipe("rank", KEPT, 0) == first
 
 
@@ -273,3 +277,64 @@ def test_a_full_run_checks_the_screening_before_the_shuffle_check(
 
     with pytest.raises(CommandError, match="no feature screening"):
         call_command("train", model="lightgbm", scope="rank", run_key="rank-wf1")
+
+
+def test_bagged_rank_folds_average_their_seeds_and_record_them(panel: Path) -> None:
+    fold = research()[0]
+
+    run_folds("rank", [fold], "rank-wf1", panel, seed=1, bags=2)
+
+    run = ModelRun.objects.get(run_id=f"rank-wf1.lightgbm.h20.f{fold.index:03d}")
+    assert (run.params["bags"], run.params["bag_seeds"]) == (2, [1, 4])
+    booster = load_model("rank-wf1", run.run_id)
+    assert isinstance(booster, Bagged)
+    assert len(booster.boosters) == 2
+    raw = pd.read_parquet(panel / "year=2016" / "part-0.parquet")
+    inputs = rank_inputs(raw[raw["date"].between(fold.train_start, fold.test_end)], KEPT)
+    test = inputs[inputs["date"].between(fold.test_start, fold.test_end)]
+    cached = load_fold_predictions("rank-wf1", MODEL, fold)
+    np.testing.assert_allclose(cached["lightgbm_h20"].to_numpy(), booster.predict(test[KEPT]))
+    assert fold_notes("rank-wf1", MODEL, fold.index)["recipe"] == recipe("rank", KEPT, 1, bags=2)
+    assert recipe("rank", KEPT, 1, bags=2) != recipe("rank", KEPT, 1)
+    assert run_folds("rank", [fold], "rank-wf1", panel, seed=1, bags=2) == []
+    assert run_folds("rank", [fold], "rank-wf1", panel, seed=1) == [fold.index]
+    single = ModelRun.objects.get(run_id=run.run_id)
+    assert (single.params["bags"], single.params["bag_seeds"]) == (1, [1])
+
+
+def test_command_bags_lightgbm_and_refuses_bagged_baselines(command: Path) -> None:
+    call_command("train", model="lightgbm", scope="rank", run_key="rank-wf1", folds="0", bags=2)
+
+    assert ModelRun.objects.get(run_id="rank-wf1.lightgbm.h5.f000").params["bags"] == 2
+    with pytest.raises(CommandError, match="--bags"):
+        call_command("train", scope="rank", run_key="rank-wf1", folds="0", bags=2)
+
+
+def test_a_bag_without_seeds_is_refused_before_any_cache_is_touched(command: Path) -> None:
+    fold = research()[0]
+    run_folds("rank", [fold], "rank-wf1", command)
+
+    with pytest.raises(ValueError, match="at least one"):
+        run_folds("rank", [fold], "rank-wf1", command, rerun=True, bags=0)
+    assert fold_path("rank-wf1", MODEL, fold.index).exists()
+    with pytest.raises(CommandError, match="at least one"):
+        call_command("train", model="lightgbm", scope="rank", run_key="rank-wf1", folds="0", bags=0)
+
+
+def test_missing_and_rerun_folds_skip_the_fingerprint(
+    panel: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(lgbm_runs, "_stale", lambda *args: pytest.fail("fingerprinted"))
+    fold = research()[0]
+
+    assert run_folds("rank", [fold], "rank-wf1", panel) == [fold.index]
+    assert run_folds("rank", [fold], "rank-wf1", panel, rerun=True) == [fold.index]
+
+
+def test_a_full_run_refuses_an_empty_bag_before_the_shuffle_check(
+    command: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(train, "shuffle_check", lambda *args: pytest.fail("shuffle ran"))
+
+    with pytest.raises(CommandError, match="at least one"):
+        call_command("train", model="lightgbm", scope="rank", run_key="rank-wf1", bags=0)

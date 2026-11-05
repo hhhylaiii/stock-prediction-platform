@@ -77,12 +77,15 @@ def fit_return(
     features: Sequence[str],
     seed: int,
     max_rounds: int = MAX_ROUNDS,
+    bags: int = 1,
 ) -> ReturnFit:
     """Huber regression of the forward open-to-close return, delta from the window's MAD."""
     rows = _rows(inputs, labels, fold, RETURN_LABEL)
     delta = huber_delta(rows[RETURN_LABEL])
     params = {"objective": "huber", "alpha": delta, "metric": "huber"}
-    boosted = boost(rows, fold, features, RETURN_LABEL, seed, params, max_rounds=max_rounds)
+    boosted = boost(
+        rows, fold, features, RETURN_LABEL, seed, params, max_rounds=max_rounds, bags=bags
+    )
     return ReturnFit(boosted, delta)
 
 
@@ -93,6 +96,7 @@ def fit_quantiles(
     features: Sequence[str],
     seed: int,
     max_rounds: int = MAX_ROUNDS,
+    bags: int = 1,
 ) -> dict[str, Boosted]:
     """One quantile booster per alpha of the forward return, each stopping on its own loss."""
     rows = _rows(inputs, labels, fold, RETURN_LABEL)
@@ -105,6 +109,7 @@ def fit_quantiles(
             seed,
             {"objective": "quantile", "alpha": alpha, "metric": "quantile"},
             max_rounds=max_rounds,
+            bags=bags,
         )
         for name, alpha in QUANTILES.items()
     }
@@ -123,12 +128,13 @@ def fit_volatility(
     features: Sequence[str],
     seed: int,
     max_rounds: int = MAX_ROUNDS,
+    bags: int = 1,
 ) -> Boosted:
     """L2 regression of log forward volatility, floored so flat rows keep a finite label."""
     rows = _rows(inputs, labels, fold, VOL_LABEL)
     logged = rows.assign(**{LOG_VOL: np.log(rows[VOL_LABEL].clip(lower=VOL_FLOOR))})
     params = {"objective": "regression", "metric": "l2"}
-    return boost(logged, fold, features, LOG_VOL, seed, params, max_rounds=max_rounds)
+    return boost(logged, fold, features, LOG_VOL, seed, params, max_rounds=max_rounds, bags=bags)
 
 
 def volatility(boosted: Boosted, frame: pd.DataFrame, features: Sequence[str]) -> np.ndarray:
@@ -156,12 +162,13 @@ def fit_probability(
     features: Sequence[str],
     seed: int,
     max_rounds: int = MAX_ROUNDS,
+    bags: int = 1,
 ) -> ProbabilityFit:
     """Binary booster of a 20-day gain above 5%, calibrated on the validation tail if needed."""
     rows = _rows(inputs, labels, fold, UP_LABEL)
     rows = rows.assign(**{UP: rows[UP_LABEL].astype(np.float64)})
     params = {"objective": "binary", "metric": "binary_logloss"}
-    boosted = boost(rows, fold, features, UP, seed, params, max_rounds=max_rounds)
+    boosted = boost(rows, fold, features, UP, seed, params, max_rounds=max_rounds, bags=bags)
     _, valid = split_validation(rows, fold)
     scored = valid.assign(prob=boosted.valid_scores)
     ece = expected_calibration_error(reliability_table(scored, UP, "prob", ECE_BINS))

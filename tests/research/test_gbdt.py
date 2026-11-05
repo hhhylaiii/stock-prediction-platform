@@ -9,11 +9,15 @@ from scipy.stats import spearmanr
 
 from apps.research import gbdt
 from apps.research.gbdt import (
+    BAG_STRIDE,
     BASE_PARAMS,
     EARLY_STOPPING_ROUNDS,
     FEVAL_EVERY,
+    Bagged,
     DailyRankIC,
+    bag_seeds,
     boost,
+    refit,
     seeded,
     split_validation,
 )
@@ -192,6 +196,7 @@ def test_boost_stops_on_validation_ic_then_refits_the_whole_window(
     fit, _ = split_validation(rows, window)
     assert calls[0] == (len(fit), 400, True)
     assert calls[1] == (len(rows), boosted.rounds, False)
+    assert isinstance(boosted.booster, lgb.Booster)
     assert boosted.booster.num_trees() == boosted.rounds
     assert 1 <= boosted.rounds < 400
     assert (boosted.rounds - 1) % FEVAL_EVERY == 0
@@ -254,3 +259,84 @@ def test_boost_with_a_builtin_metric_stops_on_that_loss(probe_rounds: list[int])
     assert probe_rounds == [boosted.rounds + EARLY_STOPPING_ROUNDS]
     assert probe_rounds[0] < 1000
     assert 0.2 < boosted.valid_score < 0.3
+
+
+def test_bag_seeds_never_share_a_lightgbm_seed() -> None:
+    seeds = bag_seeds(7, 5)
+
+    assert seeds == [7, 10, 13, 16, 19]
+    assert BAG_STRIDE == 3
+    derived = [value for seed in seeds for value in seeded(seed).values()]
+    assert len(set(derived)) == len(derived)
+
+
+def test_bag_seeds_need_at_least_one_bag() -> None:
+    with pytest.raises(ValueError, match="at least one"):
+        bag_seeds(0, 0)
+
+
+def test_refit_trains_every_row_for_exactly_the_given_rounds() -> None:
+    rows = training_window()
+
+    booster = refit(rows, FEATURES, LABEL, seed=2, rounds=37)
+
+    assert booster.num_trees() == 37
+    again = refit(rows, FEATURES, LABEL, seed=2, rounds=37)
+    np.testing.assert_array_equal(booster.predict(rows[FEATURES]), again.predict(rows[FEATURES]))
+
+
+@pytest.fixture
+def train_calls(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """Params and round counts of every lgb.train call, probes marked by valid_sets."""
+    calls: list[dict[str, Any]] = []
+    train = lgb.train
+
+    def spy(params: dict[str, Any], train_set: lgb.Dataset, **kwargs: Any) -> lgb.Booster:
+        calls.append(
+            {**params, "_probe": "valid_sets" in kwargs, "_rounds": kwargs.get("num_boost_round")}
+        )
+        return train(params, train_set, **kwargs)
+
+    monkeypatch.setattr(gbdt.lgb, "train", spy)
+    return calls
+
+
+def test_boost_with_bags_probes_once_and_refits_each_seed_for_the_same_rounds(
+    train_calls: list[dict[str, Any]],
+) -> None:
+    rows, window = training_window(), fold()
+
+    boosted = boost(
+        rows, window, FEATURES, LABEL, seed=4, feval=DailyRankIC, max_rounds=200, bags=3
+    )
+
+    probes = [call for call in train_calls if call["_probe"]]
+    refits = [call for call in train_calls if not call["_probe"]]
+    assert [call["seed"] for call in probes] == [4]
+    assert [call["seed"] for call in refits] == bag_seeds(4, 3)
+    assert {call["_rounds"] for call in refits} == {boosted.rounds}
+    assert isinstance(boosted.booster, Bagged)
+    members = boosted.booster.boosters
+    assert len(members) == 3
+    test = panel(window.test_start, window.test_end, seed=9)
+    expected = np.mean([member.predict(test[FEATURES]) for member in members], axis=0)
+    np.testing.assert_allclose(boosted.booster.predict(test[FEATURES]), expected)
+    gains = np.mean([member.feature_importance("gain") for member in members], axis=0)
+    np.testing.assert_allclose(boosted.booster.feature_importance("gain"), gains)
+    assert len({tuple(member.predict(test[FEATURES][:5])) for member in members}) == 3
+
+
+def test_boost_with_one_bag_returns_the_booster_lightgbm_trains_directly() -> None:
+    rows, window = training_window(), fold()
+
+    one = boost(rows, window, FEATURES, LABEL, seed=4, feval=DailyRankIC, max_rounds=200)
+
+    assert isinstance(one.booster, lgb.Booster)
+    direct = lgb.train(
+        {**BASE_PARAMS, **seeded(4)},
+        lgb.Dataset(rows[FEATURES], label=rows[LABEL]),
+        num_boost_round=one.rounds,
+    )
+    np.testing.assert_array_equal(
+        one.booster.predict(rows[FEATURES]), direct.predict(rows[FEATURES])
+    )

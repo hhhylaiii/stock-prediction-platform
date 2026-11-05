@@ -27,6 +27,7 @@ BASE_PARAMS: dict[str, Any] = {
 EARLY_STOPPING_ROUNDS = 100
 FEVAL_EVERY = 10
 MAX_ROUNDS = 5000
+BAG_STRIDE = 3
 RANK_IC = "daily_rank_ic"
 
 Feval = Callable[[np.ndarray, Any], tuple[str, float, bool]]
@@ -36,6 +37,27 @@ FevalFactory = Callable[[pd.Series, pd.Series], Feval]
 def seeded(seed: int) -> dict[str, int]:
     """LightGBM's row, bagging and feature-sampling seeds, distinct and derived from one seed."""
     return {"seed": seed, "bagging_seed": seed + 1, "feature_fraction_seed": seed + 2}
+
+
+def bag_seeds(seed: int, bags: int) -> list[int]:
+    """Seeds of a bag, spaced so no two members share any of their three LightGBM seeds."""
+    if bags < 1:
+        raise ValueError(f"a bag needs at least one seed, not {bags}")
+    return [seed + BAG_STRIDE * member for member in range(bags)]
+
+
+@dataclass(frozen=True)
+class Bagged:
+    """Boosters of one recipe and round count under different seeds, averaged."""
+
+    boosters: tuple[lgb.Booster, ...]
+
+    def predict(self, data: Any) -> np.ndarray:
+        return np.mean([np.asarray(member.predict(data)) for member in self.boosters], axis=0)
+
+    def feature_importance(self, importance_type: str) -> np.ndarray:
+        gains = [member.feature_importance(importance_type) for member in self.boosters]
+        return np.mean(gains, axis=0)
 
 
 class DailyRankIC:
@@ -71,7 +93,7 @@ def split_validation(rows: pd.DataFrame, fold: Fold) -> tuple[pd.DataFrame, pd.D
 class Boosted:
     """The refit booster, its round count, and the probe's validation score and predictions."""
 
-    booster: lgb.Booster
+    booster: lgb.Booster | Bagged
     rounds: int
     valid_score: float
     valid_scores: np.ndarray
@@ -83,6 +105,19 @@ def _dataset(
     return lgb.Dataset(rows[list(features)], label=rows[label], reference=reference)
 
 
+def refit(
+    rows: pd.DataFrame,
+    features: Sequence[str],
+    label: str,
+    seed: int,
+    rounds: int,
+    params: Mapping[str, Any] | None = None,
+) -> lgb.Booster:
+    """A booster trained on every row for exactly the given rounds."""
+    settings = {**BASE_PARAMS, **(params or {}), **seeded(seed)}
+    return lgb.train(settings, _dataset(rows, features, label), num_boost_round=rounds)
+
+
 def boost(
     rows: pd.DataFrame,
     fold: Fold,
@@ -92,8 +127,9 @@ def boost(
     params: Mapping[str, Any] | None = None,
     feval: FevalFactory | None = None,
     max_rounds: int = MAX_ROUNDS,
+    bags: int = 1,
 ) -> Boosted:
-    """Find the best round on the validation tail, then refit every row for that many rounds."""
+    """Find the best round on the validation tail, then refit every row per bag seed."""
     fit, valid = split_validation(rows, fold)
     settings = {**BASE_PARAMS, **(params or {}), **seeded(seed)}
     if feval is not None:
@@ -111,5 +147,8 @@ def boost(
     rounds = probe.best_iteration or probe.current_iteration()
     score = next(iter(probe.best_score["valid"].values()))
     scores = np.asarray(probe.predict(valid[list(features)], num_iteration=rounds))
-    final = lgb.train(settings, _dataset(rows, features, label), num_boost_round=rounds)
+    members = [
+        refit(rows, features, label, member, rounds, params) for member in bag_seeds(seed, bags)
+    ]
+    final = members[0] if bags == 1 else Bagged(tuple(members))
     return Boosted(final, rounds, float(score), scores)
