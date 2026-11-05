@@ -1,4 +1,4 @@
-"""Fit a target family's baselines fold by fold, or run the label shuffle check (SPEC §7, §8)."""
+"""Fit baselines or LightGBM fold by fold for a target family, or run the shuffle check."""
 
 import math
 from argparse import ArgumentParser
@@ -9,13 +9,15 @@ from django.core.management.base import BaseCommand, CommandError
 
 from apps.etl.management.options import as_date
 from apps.market.calendar import CalendarError, TradingDays
-from apps.research.baseline_runs import SCOPES, check_run_key, run_folds, shuffle_check
+from apps.research import lgbm_runs
+from apps.research.baseline_runs import BASELINE, SCOPES, check_run_key, run_folds, shuffle_check
 from apps.research.holdout import HoldoutError, is_holdout
 from apps.research.labels import latest_price_date
 from apps.research.runs import RunError
 from apps.research.walkforward import Fold, WalkForwardConfig, WalkForwardError, generate_folds
 
 DEFAULT_CONFIG = WalkForwardConfig()
+MODELS = (BASELINE, lgbm_runs.MODEL)
 
 
 def fold_indices(text: str) -> set[int]:
@@ -34,9 +36,13 @@ def fold_indices(text: str) -> set[int]:
 
 
 class Command(BaseCommand):
-    help = "Fit one scope's baselines on research folds, caching predictions; or --shuffle-check."
+    help = (
+        "Fit one scope's baselines or LightGBM on research folds, caching predictions; "
+        "or --shuffle-check."
+    )
 
     def add_arguments(self, parser: ArgumentParser) -> None:
+        parser.add_argument("--model", choices=MODELS, default=BASELINE)
         parser.add_argument("--scope", choices=list(SCOPES))
         parser.add_argument("--run-key")
         parser.add_argument("--folds")
@@ -44,11 +50,13 @@ class Command(BaseCommand):
         parser.add_argument(
             "--rerun",
             action="store_true",
-            help="Refit cached folds too. A baseline cache is reused while its fold boundaries, "
+            help="Refit cached folds too. A model's cache is reused while its fold boundaries, "
             "feature partitions, labels and recipe are unchanged; other models' caches stay.",
         )
         parser.add_argument("--shuffle-check", action="store_true")
-        parser.add_argument("--seed", type=int, default=0)
+        parser.add_argument(
+            "--seed", type=int, default=0, help="Seed of the shuffle check and of LightGBM."
+        )
 
     def _folds(self, options: dict[str, Any]) -> list[Fold]:
         last = as_date(options["last_date"], "--last-date") or latest_price_date()
@@ -97,6 +105,8 @@ class Command(BaseCommand):
         scope, run_key = options["scope"], options["run_key"]
         if not scope or not run_key:
             raise CommandError("training needs --scope and --run-key")
+        if options["model"] == lgbm_runs.MODEL and scope != lgbm_runs.SCOPE:
+            raise CommandError(f"--model {lgbm_runs.MODEL} fits the rank scope only so far")
         try:
             check_run_key(scope, run_key)
         except ValueError as error:
@@ -104,7 +114,15 @@ class Command(BaseCommand):
         if options["folds"] is None:
             self._shuffle(folds, options["seed"])
         try:
-            ran = run_folds(scope, folds, run_key, settings.FEATURE_PARQUET_DIR, options["rerun"])
+            ran = self._train(scope, folds, run_key, options)
         except (HoldoutError, RunError, ValueError, FileNotFoundError, RuntimeError) as error:
             raise CommandError(str(error)) from error
         self.stdout.write(f"{run_key}: ran folds {ran}, {len(folds) - len(ran)} cached")
+
+    def _train(
+        self, scope: str, folds: list[Fold], run_key: str, options: dict[str, Any]
+    ) -> list[int]:
+        directory, rerun = settings.FEATURE_PARQUET_DIR, options["rerun"]
+        if options["model"] == lgbm_runs.MODEL:
+            return lgbm_runs.run_folds(folds, run_key, directory, options["seed"], rerun)
+        return run_folds(scope, folds, run_key, directory, rerun)

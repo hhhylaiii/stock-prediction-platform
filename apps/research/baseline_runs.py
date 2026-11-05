@@ -280,7 +280,8 @@ def fold_inputs(
     return FoldInputs(fold, raw, digest, features)
 
 
-def _require_candidates(run_key: str, fold: Fold) -> None:
+def require_candidates(run_key: str, fold: Fold) -> None:
+    """Refuse to refit a fold of a run that already has a model past candidate."""
     rows = ModelRun.objects.filter(run_key=run_key, run_id__endswith=f".f{fold.index:03d}")
     kept = sorted(rows.exclude(status=ModelStatus.CANDIDATE).values_list("run_id", flat=True))
     if kept:
@@ -291,7 +292,7 @@ def run_fold(scope: str, fold: Fold, run_key: str, directory: Path, features: li
     """Fit one fold's baselines; its old cache goes first and the new one is written last."""
     if is_holdout(fold):
         raise HoldoutError(f"fold {fold.index} is holdout; it runs once with the Phase 4 models")
-    _require_candidates(run_key, fold)
+    require_candidates(run_key, fold)
     fold_path(run_key, BASELINE, fold.index).unlink(missing_ok=True)
     labels = label_digest(scope, fold)
     inputs = fold_inputs(fold, first_day(scope, fold), fold.test_end, directory, features)
