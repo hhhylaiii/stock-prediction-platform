@@ -236,7 +236,9 @@ def check_listed_count(
         return
     allowed = {listed, len(records)} if placeholders_counted else {listed}
     if int(match.group(1)) not in allowed:
-        raise SchemaChangedError(f"{label} sent {listed} of {match.group(1)} rows")
+        raise SchemaChangedError(
+            f"{label} sent {listed} of {match.group(1)} rows ({len(records)} with empty days)"
+        )
 
 
 def full_delivery_codes(payload: dict[str, Any], day: date) -> list[str]:
