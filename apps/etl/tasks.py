@@ -106,11 +106,11 @@ def _session_today(slot: str | None = None) -> tuple[TradingDays, date] | None:
     return (calendar, today) if calendar.is_trading_day(today) else None
 
 
-def _landed(day: date) -> DataQualityLog:
+def _landed(day: date, scans: frozenset[tuple[str, str]] = frozenset()) -> DataQualityLog:
     """The daily datasets without a run for the session; a gate dataset among them is an error."""
     missing = sorted(
         f"{source}/{dataset}"
-        for source, dataset in _daily_jobs() | _scans_due(day)
+        for source, dataset in _daily_jobs() | scans
         if day not in covered_days(source, dataset, [day])
     )
     blocking = [key for key in missing if key.split("/")[1] in GATE_DATASETS]
@@ -118,8 +118,10 @@ def _landed(day: date) -> DataQualityLog:
     return _replace_log(day, ETL_RUNS_CHECK, severity, {"missing": missing, "blocking": blocking})
 
 
-def _audit(day: date, calendar: TradingDays) -> list[DataQualityLog]:
-    results = [*run_checks(day, calendar), _landed(day)]
+def _audit(
+    day: date, calendar: TradingDays, scans: frozenset[tuple[str, str]] = frozenset()
+) -> list[DataQualityLog]:
+    results = [*run_checks(day, calendar), _landed(day, scans)]
     dispatch(results)
     return results
 
@@ -272,7 +274,7 @@ def check_quality() -> int:
     if session is None:
         return 0
     calendar, today = session
-    return len(_audit(today, calendar))
+    return len(_audit(today, calendar, _scans_due(today)))
 
 
 @shared_task(name="etl.us_close")
@@ -346,13 +348,13 @@ def _run_once(
     return f"success: {run.rows} rows"
 
 
-def _scans_due(day: date) -> set[tuple[str, str]]:
-    """MOPS scans the session should have run; a missing one warns but never holds research."""
+def _scans_due(day: date) -> frozenset[tuple[str, str]]:
+    """MOPS scans the session should have run; only its own evening check can still act on them."""
     due = {
         STATEMENT_SCAN: bool(open_periods(day, settings.STATEMENT_SCAN_DAYS_AFTER)),
         REVENUE_SCAN: bool(open_months(day, settings.REVENUE_SCAN_DAYS_AFTER)),
     }
-    return {("mops", dataset) for dataset, open_now in due.items() if open_now}
+    return frozenset(("mops", dataset) for dataset, open_now in due.items() if open_now)
 
 
 def _daily_jobs() -> set[tuple[str, str]]:

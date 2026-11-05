@@ -369,7 +369,7 @@ def test_sessions_missed_since_the_schedule_began_are_audited(
     monkeypatch.setattr("apps.etl.tasks.call_command", lambda name, **kwargs: None)
     began = date(2026, 10, 20)
     checked(began, ("etl_runs", "error"))
-    landed(began, DAILY_JOBS | SCANS)
+    landed(began, DAILY_JOBS)
     today(DAY, time(15, 10))
     tasks.prepare_day()
     audited = DataQualityLog.objects.filter(check_name="etl_runs")
@@ -378,6 +378,9 @@ def test_sessions_missed_since_the_schedule_began_are_audited(
     assert set(audited.values_list("date", flat=True)) == set(since_start)
     assert audited.get(date=began).severity == "info"
     assert {call[0][0] for call in sent} == set(since_start[1:])
+    listed = [key for row in audited for key in row.detail["missing"]]
+    assert listed
+    assert not [key for key in listed if key.startswith("mops/")]
 
 
 def test_a_day_without_trading_is_not_prepared(
@@ -457,10 +460,18 @@ def test_a_scan_due_without_a_successful_run_warns(
     row = DataQualityLog.objects.get(check_name="etl_runs")
     assert row.severity == "warning"
     assert row.detail == {"missing": ["mops/revenue_scan", "mops/statement_scan"], "blocking": []}
+    months = tasks.open_months
     monkeypatch.setattr("apps.etl.tasks.open_months", lambda day, days_after: [])
+    tasks.check_quality()
+    assert DataQualityLog.objects.get(check_name="etl_runs").detail["missing"] == [
+        "mops/statement_scan"
+    ]
+    monkeypatch.setattr("apps.etl.tasks.open_months", months)
     monkeypatch.setattr("apps.etl.tasks.open_periods", lambda day, days_after: [])
     tasks.check_quality()
-    assert DataQualityLog.objects.get(check_name="etl_runs").severity == "info"
+    assert DataQualityLog.objects.get(check_name="etl_runs").detail["missing"] == [
+        "mops/revenue_scan"
+    ]
 
 
 def test_the_us_close_loads_the_last_session_and_logs_stale_series(
