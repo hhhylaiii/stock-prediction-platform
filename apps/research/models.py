@@ -297,6 +297,7 @@ class Prediction(models.Model):
         indexes = [
             models.Index(fields=["date", "horizon", "rank"], name="prediction_date_horizon_rank"),
             models.Index(fields=["stock_id", "date"], name="prediction_stock_date_idx"),
+            models.Index(fields=["run", "horizon", "date"], name="prediction_run_horizon_date"),
         ]
         constraints = [
             horizon_known("prediction"),
