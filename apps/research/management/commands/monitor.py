@@ -9,7 +9,7 @@ from apps.research.monitor import MonitorError, run_monitor
 
 
 class Command(BaseCommand):
-    help = "Score predictions maturing on a trading day and check that day's outputs."
+    help = "Score predictions maturing on a trading day, check its outputs and raise model alerts."
 
     def add_arguments(self, parser: CommandParser) -> None:
         parser.add_argument(
@@ -28,6 +28,8 @@ class Command(BaseCommand):
             result = run_monitor(day, calendar)
         except (CalendarError, MonitorError, ValueError) as exc:
             raise CommandError(str(exc)) from exc
+        degraded = ", ".join(result.degraded) or "none"
         self.stdout.write(
-            f"monitor {day}: {result.scored} model_monitor rows, {len(result.logs)} quality rows"
+            f"monitor {day}: {result.scored} model_monitor rows, "
+            f"{len(result.logs)} quality rows, degraded {degraded}"
         )

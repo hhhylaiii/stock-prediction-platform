@@ -9,6 +9,8 @@ from django.core.management.base import CommandError
 from django.utils import timezone
 
 from apps.etl.models import DataQualityLog
+from apps.etl.quality import CHECKS as ETL_CHECKS
+from apps.etl.quality import should_run_prediction
 from apps.market.calendar import TradingDays
 from apps.market.models import TradingCalendar
 from apps.research import monitor
@@ -23,6 +25,9 @@ from apps.research.metrics.forecast import (
 from apps.research.metrics.ic import daily_rank_ic
 from apps.research.models import LabelDaily, ModelMonitor, ModelRun, Prediction
 from apps.research.monitor import (
+    ALERT_CHECK,
+    BRIER_BASELINE,
+    IC_THRESHOLD,
     ODDS_CHECK,
     UNSCORED_CHECK,
     WIDTH_CHECK,
@@ -341,8 +346,152 @@ def test_consistency_without_flags_is_logged_as_info_and_without_inputs_not_at_a
     assert dispatched == []
 
 
+def history(
+    run: ModelRun, field: str, values: list[float], horizon: int = 20, end: date | None = None
+) -> None:
+    last = matured(horizon) if end is None else end
+    days = calendar().between(date(2026, 1, 2), last)[-len(values) :]
+    ModelMonitor.objects.bulk_create(
+        ModelMonitor(run=run, date=day, horizon=horizon, n_stocks=40, **{field: value})
+        for day, value in zip(days, values, strict=True)
+    )
+
+
 def status(run: ModelRun) -> str:
     return ModelRun.objects.get(pk=run.pk).status
+
+
+def alerts() -> list[dict[str, Any]]:
+    rows = DataQualityLog.objects.filter(date=DAY, check_name=ALERT_CHECK)
+    assert rows.count() <= 1
+    return [entry for row in rows for entry in row.detail["runs"]]
+
+
+def test_a_rank_run_below_its_rolling_threshold_is_degraded_and_alerted(
+    dispatched: list[DataQualityLog],
+) -> None:
+    run = make_run("prod.rank", "rank", params={IC_THRESHOLD: {"5": -1.0, "20": 0.0}})
+    history(run, "ic", [1.0] + [-0.01] * 60)
+
+    run_monitor(DAY, calendar())
+
+    assert status(run) == "degraded"
+    assert alerts() == [
+        {
+            "run_id": run.run_id,
+            "objective": "rank",
+            "horizon": 20,
+            "metric": "ic",
+            "value": pytest.approx(-0.01),
+            "threshold": 0.0,
+            "days": 60,
+            "reason": "below_threshold",
+        }
+    ]
+    assert logged(ALERT_CHECK).severity == "warning"
+    assert [row.check_name for row in dispatched] == [ALERT_CHECK]
+
+
+@pytest.mark.parametrize(
+    ("values", "params"),
+    [
+        ([-0.01] * 59, {IC_THRESHOLD: {"20": 0.0}}),
+        ([0.01] * 60, {IC_THRESHOLD: {"20": 0.0}}),
+        ([0.0] * 60, {IC_THRESHOLD: {"20": 0.0}}),
+    ],
+)
+def test_a_rank_run_short_of_sixty_days_or_at_its_threshold_stays_active(
+    values: list[float], params: dict[str, Any]
+) -> None:
+    run = make_run("prod.rank", "rank", params=params)
+    history(run, "ic", values)
+
+    run_monitor(DAY, calendar())
+
+    assert status(run) == "active"
+    assert alerts() == []
+
+
+@pytest.mark.parametrize(
+    ("objective", "field", "value", "params", "degraded"),
+    [
+        ("quantile", "coverage", 0.65, {}, True),
+        ("quantile", "coverage", 0.95, {}, True),
+        ("quantile", "coverage", 0.70, {}, False),
+        ("quantile", "coverage", 0.90, {}, False),
+        ("classification", "brier", 0.26, {BRIER_BASELINE: 0.25}, True),
+        ("classification", "brier", 0.25, {BRIER_BASELINE: 0.25}, False),
+    ],
+)
+def test_coverage_and_brier_alerts(
+    objective: str, field: str, value: float, params: dict[str, Any], degraded: bool
+) -> None:
+    run = make_run(f"prod.{objective}", objective, params=params)
+    history(run, field, [value] * 60)
+
+    run_monitor(DAY, calendar())
+
+    assert status(run) == ("degraded" if degraded else "active")
+    assert len(alerts()) == int(degraded)
+
+
+def test_a_missing_reference_is_a_warning_without_degrading(
+    dispatched: list[DataQualityLog],
+) -> None:
+    rank = make_run("prod.rank", "rank")
+    chance = make_run("prod.classification", "classification")
+    history(rank, "ic", [-0.5] * 60)
+    history(chance, "brier", [0.9] * 60)
+
+    run_monitor(DAY, calendar())
+
+    assert status(rank) == status(chance) == "active"
+    reasons = sorted((row["run_id"], row["reason"], row["threshold"]) for row in alerts())
+    assert reasons == [
+        (chance.run_id, "missing_reference", None),
+        (rank.run_id, "missing_reference", None),
+    ]
+    assert {row.check_name for row in dispatched} == {ALERT_CHECK}
+
+
+def test_degraded_runs_stay_degraded_and_retired_runs_are_left_alone() -> None:
+    limits = {IC_THRESHOLD: {"20": 0.0}}
+    kept = make_run("prod.rank.old", "rank", status="degraded", params=limits)
+    retired = make_run("prod.rank.retired", "rank", status="retired", params=limits)
+    candidate = make_run("prod.rank.next", "rank", status="candidate", params=limits)
+    for run in (kept, retired, candidate):
+        history(run, "ic", [-0.5] * 60)
+
+    result = run_monitor(DAY, calendar())
+
+    assert [status(run) for run in (kept, retired, candidate)] == [
+        "degraded",
+        "retired",
+        "candidate",
+    ]
+    assert [row["run_id"] for row in alerts()] == [kept.run_id]
+    assert result.degraded == ()
+
+
+def test_model_checks_never_write_errors_so_the_day_still_predicts() -> None:
+    limits = {IC_THRESHOLD: {"5": 0.0, "20": 0.0}, BRIER_BASELINE: 0.1}
+    runs = seed_today(narrow=30, against=30)
+    ModelRun.objects.update(params=limits)
+    history(runs["quantile"], "coverage", [0.2] * 60)
+    history(runs["classification"], "brier", [0.9] * 60)
+    for run in (make_run("prod.rank", "rank", params=limits), make_run("prod.bare", "rank")):
+        history(run, "ic", [-0.5] * 60)
+    stale = make_run("prod.regression", "regression")
+    predict(stale, matured(5), 5, outputs(truth(13), 13)[["stock_id", "in_universe", "ret_pred"]])
+    for name in ETL_CHECKS:
+        DataQualityLog.objects.create(date=DAY, check_name=name, severity="info", detail={})
+
+    run_monitor(DAY, calendar())
+
+    written = set(DataQualityLog.objects.filter(date=DAY).values_list("check_name", flat=True))
+    assert set(monitor.CHECKS) <= written
+    assert not DataQualityLog.objects.filter(severity="error").exists()
+    assert should_run_prediction(DAY)
 
 
 def snapshot() -> tuple[list[Any], list[Any], list[Any]]:
@@ -378,6 +527,8 @@ def test_rerunning_a_day_changes_nothing_and_leaves_other_checks_alone() -> None
     today.loc[:5, "prob_up_5pct"] = 0.8
     for objective in ("quantile", "volatility", "classification"):
         predict(runs[objective], DAY, 20, today[["stock_id", "in_universe", *COLUMNS[objective]]])
+    before = calendar().shift(matured(20), -1)
+    history(runs["quantile"], "coverage", [0.5] * 59, end=before)
     DataQualityLog.objects.create(date=DAY, check_name="row_count", severity="error", detail={})
 
     run_monitor(DAY, calendar())
@@ -385,6 +536,7 @@ def test_rerunning_a_day_changes_nothing_and_leaves_other_checks_alone() -> None
     run_monitor(DAY, calendar())
 
     assert snapshot() == once
+    assert status(runs["quantile"]) == "degraded"
     assert DataQualityLog.objects.filter(check_name="row_count", severity="error").count() == 1
     own = DataQualityLog.objects.filter(check_name__in=monitor.CHECKS)
     assert own.exists()
