@@ -123,5 +123,6 @@ jobs:
       - uses: actions/checkout@v7
       - run: docker compose build
       - run: docker compose run --rm web python manage.py check
+      - run: docker compose run --rm web python -c "import lightgbm"
       - if: always()
         run: docker compose down -v
