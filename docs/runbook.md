@@ -126,6 +126,21 @@ docker compose exec db psql -U twp -d twp -c \
 
 - 月營收沒有歷史申報日可查，維持 Phase 1 的保守值。
 
+## 除權息日的公告日
+
+`dividend_event.announce_date` 是除權息日第一次公開的那個 session，`fund_days_to_ex_date` 靠它判斷何時能用。
+
+- 來源是 FinMind `TaiwanStockDividend` 的 `AnnouncementDate` 加 `AnnouncementTime`。驗證過它是除權息公告，不是董事會決議：2.35 萬筆有除權息日的列裡，96% 在除權息日前 30 天內，中位數 15 天。
+- 換成 session 的規則和財報申報相同：交易日 `FILING_VISIBLE_BEFORE`（22:40）之前公告就算當天，否則算下一個交易日；沒有公告時間的算下一個交易日。同一個除權息日有多筆，取最早的。
+- 公告晚於除權息日的（多半是事後更正）留空，資料表的約束也不允許；日誌會列出來。
+- 只填空的：FinMind 是次要來源，已經有日期的列不改。FinMind 回補時一併填；現有的列用 raw 重套，不用重抓：
+
+```bash
+uv run python manage.py reapply_dividend_dates
+```
+
+- 減資、分割這類只有參考價、沒有配息公告的事件，FinMind 沒有日期，等 2.7 的預告表。
+
 ## 財報每日掃描
 
 `etl.statement_scan` 在交易日 19:00 與 22:40 讀 MOPS 彙總表，把新申報的季報寫進 `financial_statement`。
