@@ -161,6 +161,23 @@ uv run python manage.py fetch --source mops --dataset statement_scan --date $(da
 uv run python manage.py fetch --source mops --dataset revenue_scan --date $(date +%F)
 ```
 
+## MOPS 歷史回補（plan K17）
+
+FinMind 回補缺的月份、季別，用 MOPS 的月營收頁（t21sc03）和財報彙總表（t163sb04／05／20）補一次：
+
+```bash
+for y in $(seq 2013 2025); do
+  uv run python manage.py fetch --source mops --dataset revenue_history --start $y-01-01 --end $y-12-31
+  uv run python manage.py fetch --source mops --dataset statement_history --start $y-01-01 --end $y-12-31
+done
+```
+
+- 只寫入 standard 表還沒有的（股票, 期別）；財報只要同一期已有任何一種報表種類就不寫。公告日用保守值，和 FinMind 回補相同：月營收是 `revenue_visible_from`，財報是保守截止日的下一個交易日。財報補進來之後，對那些股票跑 `statement_filing` 回補，就會換成實際上傳日。
+- 已有的列不改，數字不同時每次執行記一列 info：`revenue_history_mismatch`（只比營收，yoy、mom 的算法本來就不同）、`statement_history_mismatch`（所有財報欄位，容忍值和財報掃描相同）。`detail.span` 是這次的區間，重跑同一個區間會取代。
+- 財報從 2013-Q1（IFRS）開始，這一季不抓前一季，所以 ROE 是空的。2013 年以前的月營收頁是舊版面，不支援。
+- 兩種頁面都是 MOPS 現在的狀態：彙總表只列現在還公開發行的公司，2013 年起的月營收頁也是 2026-11-04 重新產生的，所以下市公司不會出現在裡面。下市公司的財報要另外用 XBRL 檢視頁補（K17b）；月營收找不到來源（K19）。
+- 每年約 48 個月營收請求、24 到 30 個財報請求，6 秒一次。避開 19:00 和 22:40 前後，那兩個時段 worker 的每日掃描也在打 mopsov。
+
 ## 告警
 
 warning 與 error 一律寫 log；`.env` 設了 `ALERT_WEBHOOK_URL` 就另外 POST JSON：
