@@ -26,7 +26,12 @@ from apps.research.models import (
 from tests.e2e.conftest import Seed
 from tests.e2e.test_models_view import metric, month_rows
 
-pytestmark = pytest.mark.slow
+pytestmark = [
+    pytest.mark.slow,
+    pytest.mark.skipif(
+        not os.environ.get("ACCEPTANCE_OUT"), reason="set ACCEPTANCE_OUT to capture the report"
+    ),
+]
 
 STOCKS = 1842
 RANKS = ("rank-h20", "rank-h5")
@@ -135,6 +140,32 @@ def add_universe(last: date) -> list[str]:
     return codes
 
 
+def add_depth(sessions: tuple[date, ...]) -> None:
+    """Every stock predicted by every run on each earlier session, as months of serving would."""
+    codes = list(
+        StockMaster.objects.exclude(stock_id="2330")
+        .order_by("stock_id")
+        .values_list("stock_id", flat=True)
+    )
+    Prediction.objects.bulk_create(
+        (
+            Prediction(
+                run_id=run_id,
+                stock_id=code,
+                date=day,
+                horizon=horizon,
+                in_universe=True,
+                **fields(run_id, n),
+            )
+            for day in sessions[:-1]
+            for run_id, horizon in HORIZONS.items()
+            for n, code in enumerate(codes)
+        ),
+        batch_size=20_000,
+        ignore_conflicts=True,
+    )
+
+
 def add_track_record(sessions: tuple[date, ...]) -> None:
     """Daily predictions of 2330 over the window, their labels and every run's monitoring."""
     Prediction.objects.bulk_create(
@@ -231,6 +262,7 @@ def bench(predicted: Seed) -> Seed:
     StockMaster.objects.filter(stock_id="9999").update(name="測試上櫃", industry="其他業")
     add_universe(predicted.last_session)
     add_track_record(predicted.sessions)
+    add_depth(predicted.sessions)
     add_research_and_checks(predicted.last_session)
     FeatureDaily.objects.filter(stock_id="2330", date=predicted.last_session).update(**RAW_2330)
     return predicted
