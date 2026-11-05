@@ -353,3 +353,48 @@ class PredictionContrib(models.Model):
 
     def __str__(self) -> str:
         return f"{self.run_id} {self.stock_id} {self.date} {self.horizon}d {self.feature}"
+
+
+class ModelMonitor(models.Model):
+    """Matured-prediction metrics of one run per prediction date and horizon (SPEC §7)."""
+
+    pk = models.CompositePrimaryKey("run_id", "date", "horizon")
+    run = models.ForeignKey(
+        ModelRun, on_delete=models.PROTECT, db_index=False, related_name="monitors"
+    )
+    date = models.DateField()
+    horizon = models.PositiveSmallIntegerField()
+    ic = models.FloatField(null=True, blank=True)
+    coverage = models.FloatField(null=True, blank=True)
+    brier = models.FloatField(null=True, blank=True)
+    direction_acc = models.FloatField(null=True, blank=True)
+    mae = models.FloatField(null=True, blank=True)
+    width = models.FloatField(null=True, blank=True)
+    auc = models.FloatField(null=True, blank=True)
+    n_stocks = models.PositiveIntegerField()
+
+    class Meta:
+        db_table = "model_monitor"
+        constraints = [
+            horizon_known("model_monitor"),
+            models.CheckConstraint(
+                condition=finite("ic", "coverage", "brier", "direction_acc", "mae", "width", "auc"),
+                name="model_monitor_finite",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(ic__gte=-1, ic__lte=1) | models.Q(ic__isnull=True),
+                name="model_monitor_ic_range",
+            ),
+            models.CheckConstraint(
+                condition=unit_interval("coverage", "brier", "direction_acc", "auc"),
+                name="model_monitor_unit_interval",
+            ),
+            models.CheckConstraint(
+                condition=(models.Q(mae__gte=0) | models.Q(mae__isnull=True))
+                & (models.Q(width__gte=0) | models.Q(width__isnull=True)),
+                name="model_monitor_spread_gte_0",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.run_id} {self.date} {self.horizon}d"
