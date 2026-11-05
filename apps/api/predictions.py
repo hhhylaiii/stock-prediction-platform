@@ -276,17 +276,17 @@ class PredictionListView(ReadOnlyView):
             "universe": base.filter(in_universe=True).count(),
             "models": served_models(roles, runs),
             "degraded": degraded_roles(roles, runs),
-            "monitor": self.monitor(day, roles, runs, horizon),
+            "monitor": self.monitor(day, roles, runs),
             **paginator.meta(),
         }
         return envelope(merged_rows(day, horizon, roles, runs, page), meta)
 
     def monitor(
-        self, day: date | None, roles: dict[str, Slot], runs: dict[Slot, ServingRun], horizon: int
+        self, day: date | None, roles: dict[str, Slot], runs: dict[Slot, ServingRun]
     ) -> dict[str, Any]:
-        ic, ic_days = recent_mean(runs.get(roles["rank"]), day, horizon, "ic")
+        ic, ic_days = recent_mean(runs.get(roles["rank"]), day, "ic")
         band = runs.get(roles["interval"]) if "interval" in roles else None
-        coverage, coverage_days = recent_mean(band, day, 20, "coverage")
+        coverage, coverage_days = recent_mean(band, day, "coverage")
         return {
             "rank_ic": ic,
             "rank_ic_days": ic_days,

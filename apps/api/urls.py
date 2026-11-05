@@ -1,5 +1,6 @@
 from django.urls import path, re_path
 
+from apps.api.model_runs import ModelListView, MonthlyIcView
 from apps.api.ops import DataQualityView, EtlRunListView, NotFoundView
 from apps.api.predictions import PredictionListView
 from apps.api.status import StatusView
@@ -20,6 +21,8 @@ urlpatterns = [
     re_path(STOCK + r"/history$", StockHistoryView.as_view(), name="stock-history"),
     path("status", StatusView.as_view(), name="status"),
     path("predictions", PredictionListView.as_view(), name="predictions"),
+    path("models", ModelListView.as_view(), name="models"),
+    path("models/ic-monthly", MonthlyIcView.as_view(), name="models-ic-monthly"),
     path("etl/runs", EtlRunListView.as_view(), name="etl-runs"),
     path("data-quality", DataQualityView.as_view(), name="data-quality"),
     re_path(r"", NotFoundView.as_view(), name="not-found"),

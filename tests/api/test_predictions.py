@@ -321,6 +321,7 @@ def test_no_predictions_yet_is_an_empty_page(client: Client, db: None) -> None:
 
 
 def test_monitor_averages_the_last_60_evaluated_dates(client: Client, runs: Runs) -> None:
+    ModelRun.objects.filter(pk__in=["rank-h20", "quantile-h20"]).update(train_end=date(2026, 6, 30))
     days = sessions_until(OCT_30)[-62:]
     ics = {0: 0.5, len(days) - 1: None}
     ModelMonitor.objects.bulk_create(
@@ -339,6 +340,35 @@ def test_monitor_averages_the_last_60_evaluated_dates(client: Client, runs: Runs
     monitor = envelope_of(client.get("/api/predictions"))["meta"]["monitor"]
 
     assert monitor == {"rank_ic": 0.04, "rank_ic_days": 60, "coverage": 0.79, "coverage_days": 10}
+
+
+def test_monitor_chains_the_runs_that_served_and_skips_in_sample_days(
+    client: Client, runs: Runs
+) -> None:
+    switch = date(2026, 9, 30)
+    days = sessions_until(OCT_30)[-30:]
+    old = add_model_run("rank-old", "rank", status="retired", train_end=date(2026, 6, 30))
+    ModelMonitor.objects.bulk_create(
+        ModelMonitor(
+            run=old if day <= switch else runs.rank20,
+            date=day,
+            horizon=20,
+            ic=0.02 if day <= switch else 0.06,
+            n_stocks=3,
+        )
+        for day in days
+    )
+    ModelMonitor.objects.bulk_create(
+        ModelMonitor(run=runs.rank20, date=day, horizon=20, ic=0.9, n_stocks=3)
+        for day in days
+        if day <= switch
+    )
+
+    monitor = envelope_of(client.get("/api/predictions"))["meta"]["monitor"]
+
+    after = sum(day > switch for day in days)
+    expected = (0.02 * (len(days) - after) + 0.06 * after) / len(days)
+    assert (monitor["rank_ic"], monitor["rank_ic_days"]) == (round(expected, 4), len(days))
 
 
 @pytest.mark.parametrize(
