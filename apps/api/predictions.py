@@ -118,13 +118,23 @@ def previous_ranks(day: date, horizon: int, stock_ids: list[str]) -> dict[str, i
 
 
 def needs_tech_vol(
-    base: dict[str, Any], parts: dict[str, dict[str, Any]], quantile_alert: bool
+    base: dict[str, Any], parts: dict[str, dict[str, Any]], horizon: int, quantile_alert: bool
 ) -> bool:
     """A priced row whose band can come neither from quantiles nor from vol_pred."""
+    if base["close"] is None:
+        return False
     band = parts.get("interval", {})
-    usable = not quantile_alert and None not in (band.get("q10"), band.get("q90"))
-    vol = parts.get("volatility", {}).get("vol_pred")
-    return base["close"] is not None and not usable and vol is None
+    interval = choose_interval(
+        float(base["close"]),
+        horizon,
+        ret=None,
+        q10=band.get("q10"),
+        q90=band.get("q90"),
+        vol=parts.get("volatility", {}).get("vol_pred"),
+        tech_vol=None,
+        quantile_alert=quantile_alert,
+    )
+    return interval is None
 
 
 def tech_vols(day: date, stock_ids: list[str]) -> dict[str, float | None]:
@@ -245,7 +255,7 @@ class PredictionListView(ReadOnlyView):
         lacking = [
             row["stock_id"]
             for row in page
-            if needs_tech_vol(row, parts.get(row["stock_id"], {}), alert)
+            if needs_tech_vol(row, parts.get(row["stock_id"], {}), horizon, alert)
         ]
         context = {
             "horizon": horizon,

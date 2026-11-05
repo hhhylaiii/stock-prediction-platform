@@ -267,6 +267,19 @@ def test_without_a_volatility_prediction_the_band_uses_tech_vol_20d(
     assert rows["2317"]["interval_source"] == "quantile"
 
 
+def test_an_alerted_quantile_model_without_vol_pred_uses_tech_vol_20d(
+    client: Client, runs: Runs
+) -> None:
+    ModelRun.objects.filter(pk="quantile-h20").update(status="degraded")
+    Prediction.objects.filter(run=runs.vol, stock_id="2330").delete()
+    FeatureDaily.objects.create(stock_id="2330", date=OCT_30, in_universe=True, tech_vol_20d=0.5)
+
+    row = by_code(envelope_of(client.get("/api/predictions")))["2330"]
+
+    assert row["interval_source"] == "tech_vol_20d"
+    assert row["interval"]["low"] <= row["price_pred"] <= row["interval"]["high"]
+
+
 def test_no_volatility_at_all_leaves_the_band_empty(client: Client, runs: Runs) -> None:
     Prediction.objects.filter(run=runs.vol, stock_id="6488").delete()
 
@@ -352,6 +365,19 @@ def test_previous_rank_comes_from_the_run_that_served_that_day(client: Client, r
     assert (rows["2330"]["prev_rank"], rows["8299"]["prev_rank"]) == (2, None)
 
 
+def test_on_a_model_switch_the_previous_rank_comes_from_the_retired_run(
+    client: Client, runs: Runs
+) -> None:
+    ModelRun.objects.filter(pk="rank-h20").update(status="retired")
+    switched = add_model_run("rank-new", "rank", created_at=taipei(2026, 10, 30))
+    add_predictions(switched, OCT_30, 20, {"2330": {"score": 1.0, "rank": 1, "pct": 1.0}})
+
+    body = envelope_of(client.get("/api/predictions"))
+
+    assert body["meta"]["models"][0]["run_id"] == "rank-new"
+    assert by_code(body)["2330"]["prev_rank"] == 2
+
+
 def test_a_broken_calendar_only_drops_the_previous_rank(client: Client, runs: Runs) -> None:
     TradingCalendar.objects.filter(date=date(2026, 8, 3)).delete()
 
@@ -428,11 +454,16 @@ def test_bad_queries_are_invalid(client: Client, params: dict[str, str], field: 
     assert set(envelope_of(response)["error"]["fields"]) == {field}
 
 
-def test_predictions_query_count(
+def test_predictions_query_count_on_the_tech_vol_path(
     client: Client, runs: Runs, django_assert_max_num_queries: DjangoAssertNumQueries
 ) -> None:
-    with django_assert_max_num_queries(12):
-        client.get("/api/predictions")
+    Prediction.objects.filter(run=runs.vol, stock_id="6488").delete()
+    FeatureDaily.objects.create(stock_id="6488", date=OCT_30, in_universe=True, tech_vol_20d=0.5)
+
+    with django_assert_max_num_queries(13):
+        response = client.get("/api/predictions")
+
+    assert by_code(envelope_of(response))["6488"]["interval_source"] == "tech_vol_20d"
 
 
 def test_two_thousand_stocks_answer_within_half_a_second(client: Client, db: None) -> None:
