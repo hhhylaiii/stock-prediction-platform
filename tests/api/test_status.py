@@ -97,6 +97,9 @@ def test_status_reports_prices_predictions_quality_and_last_update(
 @time_machine.travel(FRIDAY_NIGHT, tick=False)
 def test_warnings_are_counted_for_the_strip(client: Client, loaded: None) -> None:
     DataQualityLog.objects.filter(date=OCT_30, check_name__in=CHECKS[:2]).update(severity="warning")
+    DataQualityLog.objects.create(
+        date=OCT_30, check_name="output_width_ratio", severity="warning", detail={"share": 0.5}
+    )
 
     quality = envelope_of(client.get("/api/status"))["data"]["quality"]
 

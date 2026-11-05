@@ -23,6 +23,7 @@ from apps.etl.quality import CHECKS
 Severity = DataQualityLog.Severity
 SEVERITY_ORDER = (Severity.INFO, Severity.WARNING, Severity.ERROR)
 CHECK_FIELDS = ("check_name", "severity", "detail")
+MODEL_CHECK_PREFIXES = ("output_", "monitor_", "model_")
 
 
 class EtlRunSerializer(serializers.ModelSerializer[EtlRun]):
@@ -43,16 +44,19 @@ class EtlRunSerializer(serializers.ModelSerializer[EtlRun]):
 
 
 def session_summary(day: date, logs: list[dict[str, Any]]) -> dict[str, Any]:
-    """A session's checks; passed means every check ran and none is an error, as the gate rules."""
-    ran = {entry["check_name"] for entry in logs}
+    """A session's data checks judge the day; model output checks are listed apart and do not."""
+    model = [entry for entry in logs if entry["check_name"].startswith(MODEL_CHECK_PREFIXES)]
+    data = [entry for entry in logs if not entry["check_name"].startswith(MODEL_CHECK_PREFIXES)]
+    ran = {entry["check_name"] for entry in data}
     missing = [check for check in CHECKS if check not in ran]
-    worst = max((entry["severity"] for entry in logs), key=SEVERITY_ORDER.index, default=None)
+    worst = max((entry["severity"] for entry in data), key=SEVERITY_ORDER.index, default=None)
     return {
         "date": day,
         "passed": not missing and worst != Severity.ERROR,
         "worst": worst,
         "missing_checks": missing,
-        "checks": [{field: entry[field] for field in CHECK_FIELDS} for entry in logs],
+        "checks": [{field: entry[field] for field in CHECK_FIELDS} for entry in data],
+        "model_checks": [{field: entry[field] for field in CHECK_FIELDS} for entry in model],
     }
 
 

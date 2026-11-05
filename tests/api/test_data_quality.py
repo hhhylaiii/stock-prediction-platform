@@ -58,6 +58,7 @@ def test_each_session_reports_its_checks_newest_first(client: Client) -> None:
         ["missing_values", "index_freshness"],
     ]
     assert days[2]["checks"] == []
+    assert [entry["model_checks"] for entry in days] == [[], [], [], []]
     assert days[0]["checks"][-1] == {
         "check_name": "trading_calendar",
         "severity": "info",
@@ -75,6 +76,43 @@ def test_each_session_reports_its_checks_newest_first(client: Client) -> None:
         "end_date": "2026-10-30",
         "checks": list(CHECKS),
     }
+
+
+@time_machine.travel(FRIDAY_NIGHT, tick=False)
+def test_model_output_checks_are_listed_apart(client: Client) -> None:
+    log_all(OCT_30)
+    log(OCT_30, "output_width_ratio", Severity.WARNING, share=0.2, flagged=9, n_stocks=45)
+    log(OCT_30, "monitor_unscored", Severity.WARNING, runs=[])
+    log(OCT_30, "model_alert", Severity.WARNING, reason="below_threshold")
+    log(OCT_30, "outputs_note", Severity.WARNING)
+
+    day = envelope_of(client.get("/api/data-quality", {"days": 1}))["data"][0]
+
+    assert (day["passed"], day["worst"]) == (True, "warning")
+    assert [check["check_name"] for check in day["model_checks"]] == [
+        "model_alert",
+        "monitor_unscored",
+        "output_width_ratio",
+    ]
+    assert day["model_checks"][-1] == {
+        "check_name": "output_width_ratio",
+        "severity": "warning",
+        "detail": {"share": 0.2, "flagged": 9, "n_stocks": 45},
+    }
+    assert "outputs_note" in [check["check_name"] for check in day["checks"]]
+    assert not {"model_alert", "monitor_unscored"} & {
+        check["check_name"] for check in day["checks"]
+    }
+
+
+@time_machine.travel(FRIDAY_NIGHT, tick=False)
+def test_model_output_checks_alone_leave_the_day_clean(client: Client) -> None:
+    log_all(OCT_30)
+    log(OCT_30, "output_odds_vs_q50", Severity.WARNING, share=0.5, flagged=1, n_stocks=2)
+
+    day = envelope_of(client.get("/api/data-quality", {"days": 1}))["data"][0]
+
+    assert (day["passed"], day["worst"], len(day["model_checks"])) == (True, "info", 1)
 
 
 @time_machine.travel(FRIDAY_NIGHT, tick=False)
