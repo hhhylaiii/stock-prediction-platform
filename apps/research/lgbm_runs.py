@@ -175,8 +175,9 @@ def _gains(booster: lgb.Booster, features: list[str]) -> dict[str, float]:
     return {name: float(gain) for name, gain in zip(features, gains, strict=True)}
 
 
-def _edges(bins: MarketBins) -> dict[str, list[float]]:
-    return {name: list(edges) for name, edges in bins.edges.items()}
+def _edges(bins: MarketBins) -> dict[str, list[float | None]]:
+    """Bin edges for params; a feature missing through the window has open edges."""
+    return {name: [_plain(edge) for edge in edges] for name, edges in bins.edges.items()}
 
 
 def _oos(scores: np.ndarray, evaluated: pd.DataFrame, horizon: int) -> Mapping[str, float | None]:

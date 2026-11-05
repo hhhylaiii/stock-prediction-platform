@@ -11,6 +11,7 @@ from django.core.management.base import CommandError
 from apps.market.models import DailyPrice, StockMaster
 from apps.research import lgbm_runs, target_models
 from apps.research.baseline_runs import MAX_RUN_KEY
+from apps.research.features.store import export_year
 from apps.research.gbdt import BASE_PARAMS, seeded
 from apps.research.holdout import HoldoutError
 from apps.research.lgbm_runs import MODEL, recipe, run_folds, run_id
@@ -20,7 +21,7 @@ from apps.research.metrics.forecast import (
     pinball_loss,
     reliability_table,
 )
-from apps.research.models import LabelDaily, ModelRun, ModelStatus
+from apps.research.models import FeatureDaily, LabelDaily, ModelRun, ModelStatus
 from apps.research.prediction_cache import (
     fold_notes,
     fold_path,
@@ -106,6 +107,7 @@ def test_return_folds_cache_huber_predictions_on_five_day_labels(panel: Path) ->
     assert run.params["oos_mae_zero"] == pytest.approx(scored["fwd_ret_open"].abs().mean())
     assert run.ic_mean is not None
     assert run.ic_mean > 0.3
+    assert set(run.params["importance_gain"]) == set(FEATURES)
 
 
 def test_saved_return_model_reproduces_the_cache(panel: Path) -> None:
@@ -153,6 +155,29 @@ def test_saved_interval_models_reproduce_the_cache(
     raw_prob = prob["booster"].predict(test)
     np.testing.assert_allclose(cached["lightgbm_prob_raw_h20"], raw_prob)
     np.testing.assert_allclose(cached["lightgbm_prob_h20"], prob["calibrator"].predict(raw_prob))
+    for objective, booster in [
+        ("quantile", boosters["q50"]),
+        ("volatility", saved["volatility"]["booster"]),
+        ("classification", prob["booster"]),
+    ]:
+        params = ModelRun.objects.get(run_id=run_id("interval-wf1", objective, 20, fold)).params
+        gains = booster.feature_importance("gain")
+        assert params["importance_gain"] == {
+            name: float(gain) for name, gain in zip(FEATURES, gains, strict=True)
+        }
+
+
+def test_a_market_feature_missing_through_the_window_records_open_bins(panel: Path) -> None:
+    fold = research()[0]
+    FeatureDaily.objects.filter(date__range=(fold.train_start, fold.train_end)).update(
+        mkt_taiex_ret_5d=None
+    )
+    export_year(2016, panel)
+
+    assert run_folds("return", [fold], "return-wf1", panel) == [fold.index]
+
+    run = ModelRun.objects.get(run_id=run_id("return-wf1", "regression", 5, fold))
+    assert run.params["market_bins"] == {"mkt_taiex_ret_5d": [None, None, None, None]}
 
 
 def test_interval_folds_cache_sorted_quantiles_volatility_and_probability(panel: Path) -> None:
