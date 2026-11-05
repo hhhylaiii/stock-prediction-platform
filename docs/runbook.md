@@ -14,6 +14,16 @@ uv run python manage.py refresh_stock_master
 - 第一次 15:10 的 `prepare_day` 會補抓前 14 天缺的日子；靠 `etl_run` 判斷缺日的 dataset（股數、注意、處置、全額交割）在排程前沒有每日紀錄，會整段補抓，股數還會重建之後的日子，每個補到的日子都跑一次品質檢查並告警。先看 `--dry-run` 的清單，太長就先在 ETL 時段外手動跑 `catchup`。
 - `refresh_stock_master` 先手動跑一次，確認第一次新增與下市的代號合理，再交給 16:00 的排程。
 
+啟動 worker 之後，確認排程真的載入了：
+
+```bash
+docker compose up -d --build --no-deps worker
+docker compose exec -T worker python manage.py shell -c "from django.conf import settings; print(len(settings.CELERY_BEAT_SCHEDULE), sorted(settings.CELERY_BEAT_SCHEDULE))"
+```
+
+- 要列出下方排程表的 15 個項目。舊映像的排程可能是空的：2026-11-01 起的 worker 用舊映像帶著空排程跑了 4 天，什麼都沒抓，直到 11/05 重建才上線。
+- 第一個時段過後再看 `docker compose logs worker | grep "Sending due task"`，確認排程有送出任務。
+
 ## 啟動
 
 ```bash
@@ -36,15 +46,15 @@ docker compose logs -f worker
 | 16:30 | `etl.run_batch afternoon` | 三大法人、本益比與淨值比、注意、處置、全額交割；證交所外資持股與發行股數 | 借券、當沖移到 21:30；櫃買外資持股與發行股數移到 18:30 |
 | 18:30 | `etl.run_batch qfii` | 櫃買外資持股與發行股數 | 櫃買每日 18:00、22:00 更新 |
 | 19:00 | `etl.statement_scan STATEMENTS` | MOPS 財報彙總表（綜合損益、資產負債、現金流量，上市、上櫃），正在申報的季別與前一季，見下方「財報每日掃描」 | 規格寫「3/31、5/15、8/14、11/14 前後各 5 天」；這裡是季底隔天到保守截止日後 45 天 |
+| 19:00 | `etl.revenue_scan REVENUE` | MOPS 月營收彙總頁（上市、上櫃，國內與國外公司），正在申報的月份，見下方「月營收每日掃描」 | 規格寫每月 1 日到 10 日；這裡是次月 1 日到截止日後 20 天 |
 | 21:30 | `etl.run_batch night` | 融資融券、借券；當沖抓當天與前兩個交易日 | 借券約 20:30、22:30 更新；當沖晚間才公布、T+2 才定案 |
 | 22:40 | `etl.run_batch notices` | 注意、處置再抓一次 | 名單可能晚於 16:30 公布，23:00 研究任務前補齊 |
 | 22:40 | `etl.statement_scan STATEMENTS_LATE` | 財報彙總表再掃一次；時間固定等於 `FILING_VISIBLE_BEFORE` | 新增 |
+| 22:40 | `etl.revenue_scan REVENUE_LATE` | 月營收彙總頁再掃一次，時間和財報的最後一次相同 | 新增 |
 | 22:50 | `etl.check_quality` | 五項品質檢查，另寫一列 `etl_runs` 列出當天沒完成的 dataset，一起送告警（見下方研究閘門） | — |
 | 05:30 | `etl.us_close` | 前一個台股交易日的費半、TSM ADR、美元台幣，每個交易日只跑一次，寫一列 `data_quality_log`（`us_close`）：費半、TSM 早於那天、或美元台幣早於再前一個交易日，就是 warning | 美元台幣在倫敦 23:59 才收盤，05:30 本來就只有前一天 |
 | 週六 10:00 | `etl.weekly_holding` | 集保股權分散表，抓最近一個已結束的週（週一才醒來也是抓上週），日期用那週最後一個交易日 | — |
 | 每月 15 日 10:00 | `etl.business_signal` | data.gov.tw 景氣燈號 | 規格寫每月 1 日；資料在次次月 15 日才公布 |
-
-MOPS 月營收掃描（19:00）在 PR 2.4b 加入。
 
 ### 研究閘門
 
@@ -132,6 +142,21 @@ docker compose exec db psql -U twp -d twp -c \
 
 ```bash
 uv run python manage.py fetch --source mops --dataset statement_scan --date $(date +%F)
+```
+
+## 月營收每日掃描
+
+`etl.revenue_scan` 在交易日 19:00 與 22:40 讀 MOPS 月營收彙總頁（`/nas/t21/{sii|otc}/t21sc03_{民國年}_{月}_{0|1}.html`，0 是國內公司、1 是國外公司），把新申報的月營收寫進 `monthly_revenue`。目前沒有其他每日來源寫月營收（FinMind 只做歷史回補），沒掃到的月份就沒有列。
+
+- 掃描期間：營收月份的次月 1 日到法定截止日（`revenue_deadline`，2026 年起是次月 15 日）後 `REVENUE_SCAN_DAYS_AFTER`（20）天，晚交的公司也收得到。每天都有一個月份在掃（4 頁），月初幾天兩個月份重疊（8 頁）。
+- 頁面大約每小時重新產生一次，頁面上的出表時間註解不算進 raw 去重。全部先存 `raw_mops`（`revenue_scan`）再解析。
+- 營收由千元換成元。yoy、mom 用頁面上的去年當月、上月營收算，分母 ≤ 0 時為空，定義和 FinMind 相同；頁面上的是更正後的最新數字，所以和 FinMind 存的不一定一樣（2026-09：1,981 家中 110 家的 yoy 不同，全部是去年或當月營收被更正過）。研究層的成長率特徵自己由營收序列算，不用這兩欄。
+- 格式檢查：標題要是請求的市場、年、月；單位要是千元；頁尾要有「全部國內／國外{市場}公司合計」；產業表要有當月營收、上月營收、去年當月營收；表外出現公司代號、格子數不符、金額不是整數、同一代號出現兩次（含跨市場），都整次失敗。還沒有人申報時頁面只寫「查無資料」，是空答案；過了截止日某個市場國內加國外都沒有公司，也整次失敗。
+- 公告日：寫入的那一刻在當天 22:50 品質檢查之前就算當天，否則下一個交易日，和財報掃描相同。已有的列不改值也不改日期；數字不同（營收不同，或 yoy、mom 差 1e-6 以上）記 info `revenue_source_mismatch`（規格 §8.5），每天一列，重跑取代。
+- 錯誤、閘門、catchup 的處理和財報掃描相同。手動掃一次（只能掃今天）：
+
+```bash
+uv run python manage.py fetch --source mops --dataset revenue_scan --date $(date +%F)
 ```
 
 ## 告警
