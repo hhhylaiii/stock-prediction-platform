@@ -161,6 +161,38 @@ uv run python manage.py fetch --source mops --dataset statement_scan --date $(da
 uv run python manage.py fetch --source mops --dataset revenue_scan --date $(date +%F)
 ```
 
+## MOPS 歷史回補（plan K17）
+
+FinMind 回補缺的月份、季別，用 MOPS 的月營收頁（t21sc03）和財報彙總表（t163sb04／05／20）補一次：
+
+```bash
+for y in $(seq 2013 2025); do
+  uv run python manage.py fetch --source mops --dataset revenue_history --start $y-01-01 --end $y-12-31
+  uv run python manage.py fetch --source mops --dataset statement_history --start $y-01-01 --end $y-12-31
+done
+uv run python manage.py fetch --source mops --dataset revenue_history --start 2026-01-01 --end 2026-09-30
+uv run python manage.py fetch --source mops --dataset statement_history --start 2026-01-01 --end 2026-06-30
+```
+
+- 一次執行逐個日曆年處理，每年記一次 checkpoint。區間裡沒有 2013 年以後的期別就拒絕；只要有每日掃描還在看的期別（截止日加上 `REVENUE_SCAN_DAYS_AFTER`／`STATEMENT_SCAN_DAYS_AFTER` 還沒過），整次就拒絕。那些期別的公告日由每日掃描用第一次看到的 session 決定。月營收從 2013-01 起，更早的頁面是另一種版面；財報從 2013-Q1（IFRS）起，這一季不抓前一季，所以 ROE 是空的。
+- 只寫入 standard 表還沒有的（股票, 期別）；財報只要同一期已有任何一種報表種類就不寫。公告日用保守值，和 FinMind 回補相同：月營收是 `revenue_visible_from`，財報是保守截止日的下一個交易日。
+- 每個年度區間記一列 info：`revenue_history_mismatch`、`statement_history_mismatch`。`date` 是區間的最後一天，重跑同一個區間（不論哪天跑）會取代那一列，沒有任何內容就不留。`detail` 有：
+  - `added`：這個區間補進來的（股票, 期別），重跑會累積保留。standard 表沒有來源欄，這是哪些列由 MOPS 補進來的唯一紀錄。
+  - `rows`：已有列的數字不同。月營收只比營收，容許差 1,000 元，因為頁面以千元為單位、FinMind 以元為單位；yoy、mom 的算法本來就不同，不比。財報比所有欄位，容忍值和財報掃描相同。已有的列不改，要不要覆寫看 plan K18。
+  - `types`：已有的列是另一種報表種類。
+  - `incomplete`：只出現在部分彙總表的公司，這些不寫入，要人工查。
+- 財報補進來之後，對那些股票跑 `statement_filing` 回補，公告日就會換成實際上傳日：
+
+  ```bash
+  uv run python manage.py shell -v 0 -c "from apps.etl.models import DataQualityLog as L; print('\n'.join(sorted({a['stock_id'] for log in L.objects.filter(check_name='statement_history_mismatch') for a in log.detail.get('added', [])})), end='')" > added.txt
+  test -s added.txt && sed 's/^/--stock /' added.txt | xargs uv run python manage.py backfill --source mops --dataset statement_filing --from 2013-01-01
+  ```
+
+  `test -s` 讓清單是空的時候不會變成全市場回補。
+
+- 兩種頁面都是 MOPS 現在的狀態：彙總表只列現在還公開發行的公司，2013 年起的月營收頁也是 2026-11-04 重新產生的，所以下市公司不會出現在裡面。下市公司的財報要另外用 XBRL 檢視頁補（K17b）；月營收找不到來源（K19）。
+- 每年約 48 個月營收請求、24 到 30 個財報請求，6 秒一次。避開 19:00 和 22:40 前後，那兩個時段 worker 的每日掃描也在打 mopsov。
+
 ## 告警
 
 warning 與 error 一律寫 log；`.env` 設了 `ALERT_WEBHOOK_URL` 就另外 POST JSON：

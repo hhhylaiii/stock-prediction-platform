@@ -2,7 +2,7 @@
 
 import logging
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Iterator, Sequence
 from datetime import date, datetime, time
 from html.parser import HTMLParser
 from typing import NamedTuple
@@ -16,10 +16,26 @@ from django.utils import timezone
 
 from apps.etl.adapters.base import BaseAdapter
 from apps.etl.client import SourceClient
-from apps.etl.deadlines import revenue_deadline, statement_deadline
+from apps.etl.deadlines import (
+    revenue_deadline,
+    revenue_visible_from,
+    statement_deadline,
+    visible_from,
+)
 from apps.etl.errors import SchemaChangedError, SourceError
 from apps.etl.filings import FILING_COLUMNS, Filing, apply_statement_filings
 from apps.etl.models import EtlRun, RawMops
+from apps.etl.mops_history import (
+    HISTORIES,
+    IFRS_FROM,
+    REVENUE_HISTORY,
+    STATEMENT_HISTORY,
+    insert_missing_history,
+    months_between,
+    periods_between,
+    quarters_between,
+    unsettled,
+)
 from apps.etl.ratelimit import RateLimiter, RetryableError
 from apps.etl.revenue_scan import (
     ORIGINS,
@@ -261,7 +277,7 @@ def _uploaded_at(text: str, code: str, roc_year: int) -> datetime:
 class MopsAdapter(BaseAdapter):
     source = "mops"
     raw_model = RawMops
-    datasets = frozenset({STATEMENT_FILING, *SCANS})
+    datasets = frozenset({STATEMENT_FILING, *SCANS, *HISTORIES})
     per_stock = True
 
     def __init__(
@@ -280,17 +296,42 @@ class MopsAdapter(BaseAdapter):
         if dataset == STATEMENT_FILING:
             raise ValueError(f"{self.source}/{dataset} goes stock by stock; use manage.py backfill")
         today = timezone.localdate()
-        if (start, end) != (today, today):
+        if dataset in SCANS and (start, end) != (today, today):
             raise ValueError(f"{self.source}/{dataset} sees only today {today}, not {start}..{end}")
+        if dataset in HISTORIES:
+            days_after = int(
+                settings.REVENUE_SCAN_DAYS_AFTER
+                if dataset == REVENUE_HISTORY
+                else settings.STATEMENT_SCAN_DAYS_AFTER
+            )
+            if not periods_between(dataset, start, end):
+                raise ValueError(
+                    f"{self.source}/{dataset} has no period from 2013 in {start}..{end}"
+                )
+            pending = unsettled(dataset, start, end, today, days_after)
+            if pending:
+                raise ValueError(f"{self.source}/{dataset} leaves {pending} to the daily scan")
         return super().run(dataset, start, end, stock_id)
+
+    def units(self, dataset: str, start: date, end: date) -> Iterator[tuple[date, date]]:
+        """History goes a calendar year at a time, each checkpointed, whatever day a period ends."""
+        if dataset in HISTORIES:
+            for year in range(start.year, end.year + 1):
+                yield max(start, date(year, 1, 1)), min(end, date(year, 12, 31))
+        else:
+            yield from super().units(dataset, start, end)
 
     def fetch(
         self, dataset: str, start: date, end: date, stock_id: str | None = None
     ) -> pd.DataFrame:
         self.require_dataset(dataset)
-        if dataset in SCANS:
+        if dataset in SCANS | HISTORIES:
             if stock_id is not None:
                 raise ValueError(f"{self.source}/{dataset} covers the whole market, not {stock_id}")
+            if dataset == REVENUE_HISTORY:
+                return self._revenue_history(start, end)
+            if dataset == STATEMENT_HISTORY:
+                return self._statement_history(start, end)
             return self._scan(end) if dataset == STATEMENT_SCAN else self._revenue_scan(end)
         if stock_id is None:
             raise ValueError(f"{self.source}/{dataset} goes stock by stock; give a stock")
@@ -307,9 +348,11 @@ class MopsAdapter(BaseAdapter):
         self.require_dataset(dataset)
         if raw_df.empty:
             return raw_df
-        if dataset == STATEMENT_SCAN:
-            return raw_df[raw_df[VALUE_COLUMNS].notna().any(axis=1)].reset_index(drop=True)
-        if dataset == REVENUE_SCAN:
+        if dataset in (STATEMENT_SCAN, STATEMENT_HISTORY):
+            kept = raw_df[raw_df[VALUE_COLUMNS].notna().any(axis=1)].reset_index(drop=True)
+            kept.attrs.update(raw_df.attrs)
+            return kept
+        if dataset in (REVENUE_SCAN, REVENUE_HISTORY):
             return raw_df
         records = []
         for key, group in raw_df.groupby(["stock_id", "period", "fin_type"], sort=True):
@@ -324,31 +367,54 @@ class MopsAdapter(BaseAdapter):
             session = scan_session(timezone.now(), self.calendar)
             insert = insert_new_statements if dataset == STATEMENT_SCAN else insert_new_revenues
             return insert(frame, timezone.localdate(), session)
+        if dataset in HISTORIES:
+            span = (frame.attrs["start"], frame.attrs["end"])
+            waiting = frame.attrs.get("incomplete", {})
+            return insert_missing_history(
+                dataset, frame, self._conservative(dataset), span, waiting
+            )
         if frame.empty:
             return 0
         cutoff = time.fromisoformat(settings.FILING_VISIBLE_BEFORE)
         return apply_statement_filings(frame, self.calendar, cutoff)
 
     def _scan(self, day: date) -> pd.DataFrame:
-        """Each open quarter against the one before; a quarter is fetched once per scan."""
+        periods = open_periods(day, int(settings.STATEMENT_SCAN_DAYS_AFTER))
+        return self._quarters(periods, day, STATEMENT_SCAN)
+
+    def _statement_history(self, start: date, end: date) -> pd.DataFrame:
+        frame = self._quarters(
+            quarters_between(start, end), timezone.localdate(), STATEMENT_HISTORY
+        )
+        frame.attrs.update(start=start, end=end)
+        return frame
+
+    def _quarters(self, periods: list[str], day: date, dataset: str) -> pd.DataFrame:
+        """Each quarter against the one before, fetched once; IFRS has nothing before 2013-Q1."""
         fetched: dict[str, Summary] = {}
 
         def summaries(period: str) -> Summary:
+            if period < IFRS_FROM:
+                return {report: {} for report in REPORTS}
             if period not in fetched:
-                fetched[period] = self._summaries(period, statement_deadline(period) < day)
+                filed = statement_deadline(period) < day
+                fetched[period] = self._summaries(period, filed, dataset)
             return fetched[period]
 
         records = []
-        for period in open_periods(day, int(settings.STATEMENT_SCAN_DAYS_AFTER)):
+        waits: dict[str, list[str]] = {}
+        for period in periods:
             current, previous = summaries(period), summaries(previous_period(period))
-            waiting = incomplete(current)
-            if waiting:
-                logger.warning("mops %s scan waits for %s", period, ", ".join(waiting))
+            waits[period] = incomplete(current)
+            if waits[period]:
+                logger.warning("mops %s scan waits for %s", period, ", ".join(waits[period]))
             for row in statement_rows(current, previous, int(period[-1])):
                 records.append({**row, "period": period})
-        return pd.DataFrame(records, columns=SCAN_COLUMNS, dtype=object)
+        frame = pd.DataFrame(records, columns=SCAN_COLUMNS, dtype=object)
+        frame.attrs["incomplete"] = waits
+        return frame
 
-    def _summaries(self, period: str, filed: bool) -> Summary:
+    def _summaries(self, period: str, filed: bool, dataset: str) -> Summary:
         """Both markets' three summaries, kept as raw first; a filed quarter cannot be empty."""
         year, season = int(period[:4]), int(period[-1])
         found: dict[str, dict[str, dict[str, float | None]]] = {}
@@ -357,7 +423,7 @@ class MopsAdapter(BaseAdapter):
             for market in MARKETS:
                 params, page = self.summaries.summary(report, market, year - ROC_OFFSET, season)
                 identity = {"html": EXPORT_NAME.sub("", page)}
-                self.save_raw(STATEMENT_SCAN, params, {"html": page}, identity)
+                self.save_raw(dataset, params, {"html": page}, identity)
                 companies = parse_summary(page, market, season, report)
                 if filed and not companies:
                     raise SchemaChangedError(f"MOPS {report} {market} {period} came back empty")
@@ -367,31 +433,48 @@ class MopsAdapter(BaseAdapter):
         return found
 
     def _revenue_scan(self, day: date) -> pd.DataFrame:
-        """Each open month in both markets; a month past its deadline must have filers."""
+        periods = open_months(day, int(settings.REVENUE_SCAN_DAYS_AFTER))
+        return self._months(periods, day, REVENUE_SCAN)
+
+    def _revenue_history(self, start: date, end: date) -> pd.DataFrame:
+        frame = self._months(months_between(start, end), timezone.localdate(), REVENUE_HISTORY)
+        frame.attrs.update(start=start, end=end)
+        return frame
+
+    def _months(self, periods: list[str], day: date, dataset: str) -> pd.DataFrame:
+        """Each month in both markets; a month past its deadline must have filers."""
         records = []
-        for period in open_months(day, int(settings.REVENUE_SCAN_DAYS_AFTER)):
+        for period in periods:
             listed: set[str] = set()
             for market in MARKETS:
-                companies = self._revenue_pages(market, period, listed)
+                companies = self._revenue_pages(market, period, listed, dataset)
                 if not companies and revenue_deadline(period) < day:
                     raise SchemaChangedError(f"MOPS t21sc03 {market} {period} came back empty")
                 listed |= companies.keys()
                 records.extend(revenue_rows(companies, period))
         return pd.DataFrame(records, columns=REVENUE_COLUMNS, dtype=object)
 
-    def _revenue_pages(self, market: str, period: str, listed: set[str]) -> dict[str, Figures]:
+    def _revenue_pages(
+        self, market: str, period: str, listed: set[str], dataset: str
+    ) -> dict[str, Figures]:
         """Domestic and foreign pages, kept as raw first; a company may appear only once."""
         year, month = int(period[:4]), int(period[5:])
         found: dict[str, Figures] = {}
         for origin in ORIGINS:
             params, page = self.summaries.revenue(market, year - ROC_OFFSET, month, origin)
             identity = {"html": without_generation_time(page)}
-            self.save_raw(REVENUE_SCAN, params, {"html": page}, identity)
+            self.save_raw(dataset, params, {"html": page}, identity)
             companies = parse_revenue_page(page, market, origin, period)
             if companies.keys() & (found.keys() | listed):
                 raise SchemaChangedError(f"MOPS t21sc03 {period} lists a company twice")
             found |= companies
         return found
+
+    def _conservative(self, dataset: str) -> Callable[[str], date]:
+        """The deadline-based date FinMind rows carry, for periods first seen long after."""
+        if dataset == REVENUE_HISTORY:
+            return lambda period: revenue_visible_from(period, self.calendar)
+        return lambda period: visible_from(statement_deadline(period), self.calendar)
 
 
 def _statement_years(stock_id: str, start: date, end: date) -> list[int]:

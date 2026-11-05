@@ -24,6 +24,7 @@ CODE_HEADER = "公司代號"
 THIS_MONTH, LAST_MONTH, LAST_YEAR = "當月營收", "上月營收", "去年當月營收"
 FIGURES = (THIS_MONTH, LAST_MONTH, LAST_YEAR)
 AMOUNT = re.compile(r"^-?\d+$")
+NOT_APPLICABLE = "不適用"
 GENERATED_AT = re.compile(r"<!--\d{2}:\d{2}:\d{2}-->")
 THOUSAND = 1000
 ROC_OFFSET = 1911
@@ -31,7 +32,7 @@ MONTHS = 12
 REVENUE_COLUMNS = ["stock_id", "period", "revenue", "yoy", "mom"]
 REVENUE_MISMATCH_CHECK = "revenue_source_mismatch"
 GROWTH_TOLERANCE = 1e-6
-Figures = tuple[int, int, int]
+Figures = tuple[int, int | None, int | None]
 
 
 def open_months(day: date, days_after: int) -> list[str]:
@@ -145,10 +146,12 @@ def _companies(rows: list[tuple[int, list[str]]], where: str) -> dict[str, Figur
             raise SchemaChangedError(f"MOPS t21sc03 {where} {code} has {len(cells)} cells")
         if code in found:
             raise SchemaChangedError(f"MOPS t21sc03 {where} lists {code} twice")
-        now, last_month, last_year = (
-            _amount(cells[header.index(name)], code, where) for name in FIGURES
+        now, last_month, last_year = (cells[header.index(name)] for name in FIGURES)
+        found[code] = (
+            _amount(now, code, where),
+            _earlier(last_month, code, where),
+            _earlier(last_year, code, where),
         )
-        found[code] = (now, last_month, last_year)
     return found
 
 
@@ -159,8 +162,13 @@ def _amount(text: str, code: str, where: str) -> int:
     return int(plain)
 
 
-def _growth(now: int, earlier: int) -> float | None:
-    return now / earlier - 1 if earlier > 0 else None
+def _earlier(text: str, code: str, where: str) -> int | None:
+    """An earlier month; 不適用 where IFRS consolidated figures have no comparable month."""
+    return None if text == NOT_APPLICABLE else _amount(text, code, where)
+
+
+def _growth(now: int, earlier: int | None) -> float | None:
+    return now / earlier - 1 if earlier is not None and earlier > 0 else None
 
 
 def _period(index: int) -> str:
