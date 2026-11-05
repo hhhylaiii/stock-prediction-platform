@@ -39,6 +39,7 @@ from apps.research.training import LINEAR_FEATURES, linear_inputs, load_labels, 
 from apps.research.walkforward import Fold
 
 RECIPE_VERSION = "1"
+BASELINE = "baseline"
 RETURN_HORIZON = 5
 MAX_RUN_KEY = 40
 SHUFFLE_HORIZON = 20
@@ -238,14 +239,15 @@ def run_fold(scope: str, fold: Fold, run_key: str, directory: Path) -> Path:
     if is_holdout(fold):
         raise HoldoutError(f"fold {fold.index} is holdout; it runs once with the Phase 4 models")
     _require_candidates(run_key, fold)
-    fold_path(run_key, fold.index).unlink(missing_ok=True)
+    fold_path(run_key, BASELINE, fold.index).unlink(missing_ok=True)
     inputs = fold_inputs(fold, first_day(scope, fold), fold.test_end, directory)
     result = SCOPES[scope](inputs, run_key)
     for item in result.trained:
         record_run(item.run, item.model, fold=fold)
     rows = inputs.raw.loc[inputs.test, ROW_KEYS].reset_index(drop=True)
     notes = {"feature_hash": inputs.feature_hash}
-    return save_fold_predictions(run_key, fold, rows.assign(**result.columns), notes=notes)
+    predictions = rows.assign(**result.columns)
+    return save_fold_predictions(run_key, BASELINE, fold, predictions, notes=notes)
 
 
 def check_run_key(scope: str, run_key: str) -> None:
@@ -261,7 +263,7 @@ def check_run_key(scope: str, run_key: str) -> None:
 
 def _stale(scope: str, run_key: str, fold: Fold, directory: Path) -> bool:
     """Whether a cached fold was fitted on feature partitions that have since changed."""
-    stored = fold_notes(run_key, fold.index).get("feature_hash")
+    stored = fold_notes(run_key, BASELINE, fold.index).get("feature_hash")
     return stored != feature_hash(first_day(scope, fold), fold.test_end, directory)
 
 
@@ -274,7 +276,7 @@ def run_folds(
     held = [fold.index for fold in chosen if is_holdout(fold)]
     if held:
         raise HoldoutError(f"folds {held} are holdout; they run once with the Phase 4 models")
-    missing = set(missing_folds(run_key, chosen))
+    missing = set(missing_folds(run_key, BASELINE, chosen))
     ran = []
     for fold in chosen:
         if rerun or fold.index in missing or _stale(scope, run_key, fold, directory):

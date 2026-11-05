@@ -203,12 +203,13 @@ def test_a_holdout_fold_needs_the_claim_of_its_run(artifacts: Path) -> None:
     assert not model_path("wf1", "wf1.ridge.h20.f044").exists()
 
 
-def test_a_holdout_fold_is_rewritten_until_its_predictions_are_cached(artifacts: Path) -> None:
+@pytest.mark.parametrize("model", ["baseline", "lightgbm"])
+def test_a_holdout_fold_is_rewritten_until_any_model_caches_it(artifacts: Path, model: str) -> None:
     ticket = claim_holdout("rank", "wf1", d("2025-03-31"))
     record_run(held_run(ic_mean=0.01), {"weights": [1.0]}, fold=HELD, ticket=ticket)
     record_run(held_run(ic_mean=0.02), {"weights": [2.0]}, fold=HELD, ticket=ticket)
-    fold_path("wf1", HELD.index).parent.mkdir(parents=True)
-    fold_path("wf1", HELD.index).write_bytes(b"cached")
+    fold_path("wf1", model, HELD.index).parent.mkdir(parents=True)
+    fold_path("wf1", model, HELD.index).write_bytes(b"cached")
 
     with pytest.raises(RunError, match="cached"):
         record_run(held_run(ic_mean=0.9), {"weights": [9.0]}, fold=HELD, ticket=ticket)
@@ -220,8 +221,8 @@ def test_a_holdout_fold_is_rewritten_until_its_predictions_are_cached(artifacts:
 def test_research_folds_of_a_claimed_run_stay_rewritable(artifacts: Path) -> None:
     claim_holdout("rank", "wf1", d("2025-03-31"))
     record_run(run("wf1.ridge.h20.f043", ic_mean=0.01), fold=STUDIED)
-    fold_path("wf1", STUDIED.index).parent.mkdir(parents=True)
-    fold_path("wf1", STUDIED.index).write_bytes(b"cached")
+    fold_path("wf1", "baseline", STUDIED.index).parent.mkdir(parents=True)
+    fold_path("wf1", "baseline", STUDIED.index).write_bytes(b"cached")
 
     record_run(run("wf1.ridge.h20.f043", ic_mean=0.03), fold=STUDIED)
 
@@ -318,10 +319,11 @@ def test_lib_versions_name_python_and_the_libraries() -> None:
 
 
 def cached(artifacts: Path, run_key: str) -> Path:
-    path = artifacts / "predictions" / run_key / "fold-000.parquet"
-    path.parent.mkdir(parents=True)
-    path.write_bytes(b"cached")
-    return path
+    for model in ("baseline", "lightgbm"):
+        path = fold_path(run_key, model, 0)
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b"cached")
+    return artifacts / "predictions" / run_key
 
 
 def test_drop_run_removes_its_rows_models_and_cached_predictions(artifacts: Path) -> None:
@@ -340,8 +342,8 @@ def test_drop_run_removes_its_rows_models_and_cached_predictions(artifacts: Path
     assert list(ModelRun.objects.values_list("run_id", flat=True)) == ["wf2.ridge.h20.f000"]
     assert not (artifacts / "models" / "wf1").exists()
     assert model_path("wf2", "wf2.ridge.h20.f000").exists()
-    assert not dropped.parent.exists()
-    assert kept.exists()
+    assert not dropped.exists()
+    assert sorted(path.name for path in kept.iterdir()) == ["baseline", "lightgbm"]
 
 
 def backtest(run_key: str) -> BacktestMetric:

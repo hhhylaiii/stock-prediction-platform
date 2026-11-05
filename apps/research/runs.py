@@ -17,7 +17,7 @@ from django.db import transaction
 from apps.research.features.store import existing_partition
 from apps.research.holdout import HoldoutTicket, authorize_folds, is_holdout, require_key
 from apps.research.models import BacktestMetric, HoldoutRun, ModelRun, ModelStatus
-from apps.research.prediction_cache import fold_path, fold_record
+from apps.research.prediction_cache import fold_cached, fold_record
 from apps.research.ranges import years
 from apps.research.walkforward import Fold
 
@@ -93,9 +93,9 @@ def _replaceable(run: ModelRun) -> None:
 
 
 def _writable(run_key: str, fold: Fold, ticket: HoldoutTicket | None) -> None:
-    """A holdout fold needs its run's ticket and is written until its predictions are cached."""
+    """A holdout fold needs its run's ticket and is written until any model caches it."""
     authorize_folds([fold], run_key, ticket)
-    if is_holdout(fold) and fold_path(run_key, fold.index).exists():
+    if is_holdout(fold) and fold_cached(run_key, fold.index):
         raise RunError(f"holdout fold {fold.index} of {run_key} is cached; it is recorded once")
 
 
