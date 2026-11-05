@@ -37,3 +37,8 @@ class PredictionQuery(serializers.Serializer[Any]):
 
 class DateQuery(serializers.Serializer[Any]):
     date = serializers.DateField(required=False)
+
+
+class FeatureQuery(serializers.Serializer[Any]):
+    horizon = serializers.ChoiceField(choices=[5, 20], default=DEFAULT_HORIZON)
+    date = serializers.DateField(required=False)
