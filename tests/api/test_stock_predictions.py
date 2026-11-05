@@ -4,8 +4,16 @@ import pytest
 from django.test import Client
 from pytest_django import DjangoAssertNumQueries
 
-from apps.research.models import FeatureDaily, ModelRun
-from tests.api.conftest import NOV_2, OCT_29, OCT_30, Runs, add_stock, envelope_of
+from apps.research.models import FeatureDaily, ModelRun, Prediction
+from tests.api.conftest import (
+    NOV_2,
+    OCT_29,
+    OCT_30,
+    Runs,
+    add_predictions,
+    add_stock,
+    envelope_of,
+)
 
 pytestmark = pytest.mark.usefixtures("calendar_in_db")
 
@@ -43,19 +51,25 @@ def test_both_horizons_merge_every_serving_model(client: Client, runs: Runs) -> 
     assert (five["degraded"], twenty["degraded"]) == ([], [])
 
 
-def test_realised_volatility_comes_from_the_prediction_date(client: Client, runs: Runs) -> None:
+def test_realised_volatility_comes_from_the_twenty_day_prediction_date(
+    client: Client, runs: Runs
+) -> None:
+    add_predictions(runs.rank5, NOV_2, 5, {"2330": {"score": 0.1, "rank": 1, "pct": 1.0}})
     for day, vol in ((OCT_29, 0.1), (OCT_30, 0.25), (NOV_2, 0.9)):
         FeatureDaily.objects.create(
             stock_id="2330", date=day, in_universe=True, tech_vol_20d=vol, tech_vol_60d=vol / 2
         )
 
     data = envelope_of(client.get("/api/stocks/2330/predictions"))["data"]
+    other = envelope_of(client.get("/api/stocks/2317/predictions"))["data"]
 
+    assert horizons_of({"data": data})[5]["date"] == "2026-11-02"
     assert data["realized_vol"] == {
         "date": "2026-10-30",
         "tech_vol_20d": 0.25,
         "tech_vol_60d": 0.125,
     }
+    assert other["realized_vol"] is None
 
 
 def test_a_degraded_model_is_named_per_horizon(client: Client, runs: Runs) -> None:
@@ -114,8 +128,16 @@ def test_a_bad_date_is_invalid(client: Client, runs: Runs) -> None:
     assert set(envelope_of(response)["error"]["fields"]) == {"date"}
 
 
-def test_stock_predictions_query_count(
+def test_stock_predictions_query_count_on_the_worst_path(
     client: Client, runs: Runs, django_assert_max_num_queries: DjangoAssertNumQueries
 ) -> None:
-    with django_assert_max_num_queries(20):
-        client.get("/api/stocks/2330/predictions")
+    Prediction.objects.filter(run=runs.vol, stock_id="6488").delete()
+    add_predictions(runs.rank5, OCT_29, 5, {"6488": {"score": 0.1, "rank": 1, "pct": 1.0}})
+    FeatureDaily.objects.create(stock_id="6488", date=OCT_30, in_universe=True, tech_vol_20d=0.5)
+
+    with django_assert_max_num_queries(22):
+        response = client.get("/api/stocks/6488/predictions")
+
+    entries = horizons_of(envelope_of(response))
+    assert [entries[h]["prediction"]["interval_source"] for h in (5, 20)] == ["tech_vol_20d"] * 2
+    assert entries[5]["prediction"]["prev_rank"] == 1

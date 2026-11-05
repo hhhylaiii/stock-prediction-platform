@@ -22,6 +22,7 @@ from apps.api.views import ReadOnlyView
 from apps.research.models import OUTPUT_HORIZONS, FeatureDaily
 
 REALIZED_FIELDS = ("date", "tech_vol_20d", "tech_vol_60d")
+REALIZED_HORIZON = 20
 
 
 def horizon_entry(stock_id: str, horizon: int, asked: date | None) -> dict[str, Any]:
@@ -42,7 +43,7 @@ def horizon_entry(stock_id: str, horizon: int, asked: date | None) -> dict[str, 
 
 
 def realized_vol(stock_id: str, day: date | None) -> dict[str, Any] | None:
-    """The stock's trailing volatility features on the latest feature day up to the prediction."""
+    """Trailing volatility features on the last feature day up to the 20-day prediction."""
     if day is None:
         return None
     row: dict[str, Any] | None = (
@@ -59,11 +60,12 @@ class StockPredictionsView(ReadOnlyView):
         query = parse(DateQuery, request)
         require_stock(stock_id)
         entries = [horizon_entry(stock_id, h, query.get("date")) for h in OUTPUT_HORIZONS]
-        latest = max((entry["date"] for entry in entries if entry["date"]), default=None)
+        by_horizon = {entry["horizon"]: entry["date"] for entry in entries}
+        anchor = by_horizon[REALIZED_HORIZON] or by_horizon[min(OUTPUT_HORIZONS)]
         return envelope(
             {
                 "stock_id": stock_id,
                 "horizons": entries,
-                "realized_vol": realized_vol(stock_id, latest),
+                "realized_vol": realized_vol(stock_id, anchor),
             }
         )
