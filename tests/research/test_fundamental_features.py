@@ -47,6 +47,7 @@ def quarters(first: str, n: int, **columns: list[float]) -> pd.DataFrame:
             "roe": 0.05,
             "debt_ratio": 0.3,
             "operating_cf": 120.0,
+            "revenue": 1000.0,
             "announce_date": date(y, q * 3 + 3, 28) + timedelta(days=45),
         }
         rows.append({**row, **{name: values[k] for name, values in columns.items()}})
@@ -102,6 +103,7 @@ STATEMENT_READS = {
     "fund_gm_yoy_chg": {0, 4},
     "fund_opm_yoy_chg": {0, 4},
     "fund_cfo_to_ni": {0, 1, 2, 3},
+    "fund_rev_yoy_q": {0, 4},
 }
 LATE = pd.Timestamp("2030-01-02")
 
@@ -178,6 +180,66 @@ def test_consolidated_statements_win_over_individual_ones() -> None:
 
     assert one(signals, "2015-Q4")["eps_ttm"] == pytest.approx(4.0)
     assert one(signals, "2016-Q1")["eps_ttm"] == pytest.approx(6.0)
+    assert math.isnan(one(signals, "2016-Q1")["fund_cfo_to_ni"])
+
+
+def test_quarterly_revenue_growth_compares_the_same_quarter_a_year_earlier() -> None:
+    revenue = [100.0, 110.0, 120.0, 130.0, 150.0, 0.0, 132.0, 130.0, 160.0, 55.0]
+    signals = statement_signals(quarters("2014-Q1", 10, revenue=revenue))
+
+    growth = {period: one(signals, period)["fund_rev_yoy_q"] for period in ("2015-Q1", "2016-Q1")}
+    assert growth == pytest.approx({"2015-Q1": 0.5, "2016-Q1": 160 / 150 - 1})
+    assert one(signals, "2015-Q2")["fund_rev_yoy_q"] == pytest.approx(-1.0)
+    assert one(signals, "2015-Q4")["fund_rev_yoy_q"] == pytest.approx(0.0)
+    assert math.isnan(one(signals, "2014-Q4")["fund_rev_yoy_q"])
+    assert math.isnan(one(signals, "2016-Q2")["fund_rev_yoy_q"])
+
+
+SCOPE_READS = ["fund_cfo_to_ni", "fund_gm_yoy_chg", "fund_opm_yoy_chg", "fund_rev_yoy_q"]
+PARENT_READS = ["eps_ttm", "fund_roe_ttm"]
+
+
+def test_a_change_of_statement_basis_breaks_only_signals_of_consolidation_scope() -> None:
+    switched = quarters("2012-Q1", 12).assign(fin_type=["individual"] * 4 + ["consolidated"] * 8)
+
+    signals = statement_signals(switched)
+
+    first = one(signals, "2013-Q1")
+    assert first[SCOPE_READS].isna().all()
+    assert first[PARENT_READS].tolist() == pytest.approx([4.0, 0.2])
+    assert first["fund_gross_margin"] == pytest.approx(0.4)
+    assert math.isnan(one(signals, "2013-Q3")["fund_cfo_to_ni"])
+    fourth = one(signals, "2013-Q4")
+    assert fourth["fund_cfo_to_ni"] == pytest.approx(1.2)
+    assert fourth["fund_eps_yoy"] == pytest.approx(0.0)
+    assert fourth[["fund_gm_yoy_chg", "fund_rev_yoy_q"]].isna().all()
+    later = one(signals, "2014-Q1")
+    assert later[["fund_gm_yoy_chg", "fund_rev_yoy_q"]].tolist() == pytest.approx([0.0, 0.0])
+
+
+def test_a_quarter_filed_on_the_other_basis_breaks_the_quarters_around_it() -> None:
+    kinds = ["consolidated"] * 4 + ["individual"] + ["consolidated"] * 4
+    signals = statement_signals(quarters("2015-Q1", 9).assign(fin_type=kinds))
+
+    assert [one(signals, f"2016-Q{q}")["eps_ttm"] for q in (1, 2, 4)] == pytest.approx([4.0] * 3)
+    assert math.isnan(one(signals, "2016-Q2")["fund_cfo_to_ni"])
+    assert math.isnan(one(signals, "2016-Q4")["fund_cfo_to_ni"])
+    assert one(signals, "2017-Q1")["fund_cfo_to_ni"] == pytest.approx(1.2)
+
+
+def test_monthly_signals_reading_both_sides_of_2013_01_are_missing() -> None:
+    signals = revenue_signals(months("2012-01", [100.0] * 12 + [400.0] * 15))
+
+    def value(period: str, name: str) -> float:
+        return float(one(signals, period)[name])
+
+    assert value("2012-12", "fund_rev_mom") == pytest.approx(0.0)
+    assert math.isnan(value("2013-01", "fund_rev_mom"))
+    assert value("2013-02", "fund_rev_mom") == pytest.approx(0.0)
+    assert all(math.isnan(value(f"2013-{m:02d}", "fund_rev_yoy")) for m in range(1, 13))
+    assert value("2014-01", "fund_rev_yoy") == pytest.approx(0.0)
+    assert math.isnan(value("2014-02", "fund_rev_3m_yoy"))
+    assert value("2014-03", "fund_rev_3m_yoy") == pytest.approx(0.0)
 
 
 def test_features_divide_ttm_eps_by_the_carried_raw_close() -> None:
@@ -198,6 +260,7 @@ def test_features_divide_ttm_eps_by_the_carried_raw_close() -> None:
         fund_gm_yoy_chg=0.01,
         fund_opm_yoy_chg=0.02,
         fund_cfo_to_ni=1.2,
+        fund_rev_yoy_q=0.05,
         fund_days_since_fs=[1.0, 2.0, 3.0, 4.0],
     )
 

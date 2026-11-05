@@ -85,6 +85,7 @@ FEATURES: tuple[FeatureSpec, ...] = (
     *_specs(FUND, "fund_bp fund_dividend_yield"),
     *_specs(FUND, "fund_roe_ttm fund_gross_margin fund_op_margin fund_debt_ratio", ANNOUNCE),
     *_specs(FUND, "fund_gm_yoy_chg fund_opm_yoy_chg fund_cfo_to_ni fund_days_since_fs", ANNOUNCE),
+    *_specs(FUND, "fund_rev_yoy_q", ANNOUNCE),
     *_specs(RISK, "risk_beta_250d risk_idio_vol_60d ind_sector_ret_20d ind_rel_ret_20d"),
     *_specs(MKT, "mkt_taiex_ret_5d mkt_taiex_ret_20d"),
     *_specs(MKT, "mkt_sox_ret_5d mkt_tsm_adr_gap mkt_usdtwd_chg_20d", US),

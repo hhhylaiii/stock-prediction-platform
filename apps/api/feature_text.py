@@ -63,6 +63,7 @@ LABELS: dict[str, tuple[str, str]] = {
     "fund_opm_yoy_chg": ("營益率較去年同季變化", POINTS),
     "fund_cfo_to_ni": ("營業現金流對淨利（近四季）", NUMBER),
     "fund_days_since_fs": ("距最近財報公告（交易日）", COUNT),
+    "fund_rev_yoy_q": ("單季營收年增", RATIO),
     "risk_beta_250d": ("250 日 beta", NUMBER),
     "risk_idio_vol_60d": ("60 日個股特有波動（年化）", PERCENT),
     "ind_sector_ret_20d": ("所屬產業 20 日報酬", RATIO),

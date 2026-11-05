@@ -30,7 +30,10 @@ STATEMENT_INPUTS: Mapping[str, tuple[int, ...]] = {
     "fund_gm_yoy_chg": (TTM_QUARTERS,),
     "fund_opm_yoy_chg": (TTM_QUARTERS,),
     "fund_cfo_to_ni": TTM_LAGS,
+    "fund_rev_yoy_q": (TTM_QUARTERS,),
 }
+BASIS_COLUMNS = frozenset({"revenue", "gross_margin", "op_margin", "operating_cf"})
+CONSOLIDATED_MONTH = 2013 * 12
 SIGNAL_COLUMNS = [
     "stock_id",
     "period",
@@ -60,6 +63,7 @@ STATEMENT_COLUMNS = [
     "roe",
     "debt_ratio",
     "operating_cf",
+    "revenue",
     "announce_date",
 ]
 NUMERIC = STATEMENT_COLUMNS[3:-1]
@@ -67,15 +71,23 @@ PASSED = [*REVENUE_INPUTS, *list(STATEMENT_INPUTS)[1:], "fund_days_since_fs"]
 
 
 class _Lags:
-    """Values of earlier periods of the same stock, by period number."""
+    """Earlier periods of the same stock; consolidation-scope values break where the basis changed.
+
+    Parent-attributable figures (eps, net income, roe) match on both bases, so they carry over.
+    """
 
     def __init__(self, frame: pd.DataFrame) -> None:
         self.frame = frame
         self.lookup = frame.set_index(["stock_id", "number"])
+        self.basis = frame.get("fin_type")
 
     def __call__(self, column: str, lag: int) -> pd.Series:
         keys = pd.MultiIndex.from_arrays([self.frame["stock_id"], self.frame["number"] - lag])
-        return pd.Series(self.lookup[column].reindex(keys).to_numpy(), index=self.frame.index)
+        values = pd.Series(self.lookup[column].reindex(keys).to_numpy(), index=self.frame.index)
+        if self.basis is None or column not in BASIS_COLUMNS:
+            return values
+        earlier = self.lookup["fin_type"].reindex(keys).to_numpy()
+        return values.where(earlier == self.basis.to_numpy())
 
     def signal(self, name: str, value: pd.Series, lags: Sequence[int]) -> pd.DataFrame:
         """Rows of one signal with the first and last announce date of the periods it reads."""
@@ -122,7 +134,16 @@ def revenue_signals(revenue: pd.DataFrame) -> pd.DataFrame:
         "fund_rev_3m_yoy": _growth(three, base),
         "fund_rev_mom": _growth(now, lag("revenue", 1)),
     }
-    return _signals(lag, values, REVENUE_INPUTS)
+    kept = {
+        name: value.mask(_across_consolidation(frame["number"], REVENUE_INPUTS[name]))
+        for name, value in values.items()
+    }
+    return _signals(lag, kept, REVENUE_INPUTS)
+
+
+def _across_consolidation(numbers: pd.Series, lags: Sequence[int]) -> pd.Series:
+    """Whether a monthly signal reads months on both sides of 2013-01, when revenue consolidated."""
+    return (numbers - max(lags) < CONSOLIDATED_MONTH) & (numbers >= CONSOLIDATED_MONTH)
 
 
 def _preferred(statements: pd.DataFrame) -> pd.DataFrame:
@@ -157,6 +178,7 @@ def statement_signals(statements: pd.DataFrame) -> pd.DataFrame:
         "fund_gm_yoy_chg": frame["gross_margin"] - lag("gross_margin", TTM_QUARTERS),
         "fund_opm_yoy_chg": frame["op_margin"] - lag("op_margin", TTM_QUARTERS),
         "fund_cfo_to_ni": ratio(_ttm(lag, frame, "operating_cf"), income.where(income > 0)),
+        "fund_rev_yoy_q": _growth(frame["revenue"], lag("revenue", TTM_QUARTERS)),
     }
     return _signals(lag, values, STATEMENT_INPUTS)
 
