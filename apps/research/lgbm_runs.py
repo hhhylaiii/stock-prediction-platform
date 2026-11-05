@@ -435,10 +435,11 @@ def _stale(
     fold: Fold,
     directory: Path,
     features: list[str],
-    seeds: tuple[int, int],
+    seed: int,
+    bags: int,
 ) -> bool:
     """Whether a cached fold's features, labels or recipe have changed since it was fitted."""
-    current = _current_notes(scope, fold, directory, features, *seeds)
+    current = _current_notes(scope, fold, directory, features, seed, bags)
     return fold_notes(run_key, MODEL, fold.index) != current
 
 
@@ -462,8 +463,11 @@ def run_folds(
     missing = set(missing_folds(run_key, MODEL, chosen))
     ran = []
     for fold in chosen:
-        stale = _stale(scope, run_key, fold, directory, features, (seed, bags))
-        if rerun or fold.index in missing or stale:
+        if (
+            rerun
+            or fold.index in missing
+            or _stale(scope, run_key, fold, directory, features, seed, bags)
+        ):
             run_fold(scope, fold, run_key, directory, features, seed, bags)
             ran.append(fold.index)
     return ran

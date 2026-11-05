@@ -304,3 +304,24 @@ def test_command_bags_lightgbm_and_refuses_bagged_baselines(command: Path) -> No
     assert ModelRun.objects.get(run_id="rank-wf1.lightgbm.h5.f000").params["bags"] == 2
     with pytest.raises(CommandError, match="--bags"):
         call_command("train", scope="rank", run_key="rank-wf1", folds="0", bags=2)
+
+
+def test_a_bag_without_seeds_is_refused_before_any_cache_is_touched(command: Path) -> None:
+    fold = research()[0]
+    run_folds("rank", [fold], "rank-wf1", command)
+
+    with pytest.raises(ValueError, match="at least one"):
+        run_folds("rank", [fold], "rank-wf1", command, rerun=True, bags=0)
+    assert fold_path("rank-wf1", MODEL, fold.index).exists()
+    with pytest.raises(CommandError, match="at least one"):
+        call_command("train", model="lightgbm", scope="rank", run_key="rank-wf1", folds="0", bags=0)
+
+
+def test_missing_and_rerun_folds_skip_the_fingerprint(
+    panel: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(lgbm_runs, "_stale", lambda *args: pytest.fail("fingerprinted"))
+    fold = research()[0]
+
+    assert run_folds("rank", [fold], "rank-wf1", panel) == [fold.index]
+    assert run_folds("rank", [fold], "rank-wf1", panel, rerun=True) == [fold.index]
