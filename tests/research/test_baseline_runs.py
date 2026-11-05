@@ -1,5 +1,5 @@
 from dataclasses import replace
-from datetime import date, timedelta
+from datetime import date
 from io import StringIO
 from pathlib import Path
 from typing import Any
@@ -11,7 +11,7 @@ from django.core.management import call_command
 from django.core.management.base import CommandError
 
 from apps.market.calendar import TradingDays
-from apps.market.models import DailyPrice, StockMaster, TradingCalendar
+from apps.market.models import DailyPrice, StockMaster
 from apps.research import baseline_runs
 from apps.research.baseline_runs import BASELINE, recipe, run_folds, shuffle_check
 from apps.research.baselines import PENALTY_GRID, historical_quantiles
@@ -28,86 +28,35 @@ from apps.research.prediction_cache import (
     missing_folds,
     save_fold_predictions,
 )
-from apps.research.runs import RunError, feature_hash, label_hash, lib_versions, load_model
-from apps.research.training import LINEAR_FEATURES, linear_inputs
-from apps.research.walkforward import Fold, WalkForwardConfig, generate_folds
-
-pytestmark = pytest.mark.django_db
-START, END = date(2016, 1, 1), date(2016, 12, 31)
-STOCKS = [f"{1100 + k}" for k in range(40)]
-CONFIG = WalkForwardConfig(
-    train_months=6,
-    test_months=1,
-    step_months=1,
-    valid_months=2,
-    data_start=START,
-    first_test=date(2016, 9, 1),
-    tuning_end=date(2016, 9, 30),
-    holdout_start=date(2016, 12, 1),
+from apps.research.runs import (
+    SCREENING_MODEL,
+    RunError,
+    feature_hash,
+    label_hash,
+    lib_versions,
+    load_model,
+)
+from apps.research.training import LINEAR_FEATURES, linear_features, linear_inputs
+from apps.research.walkforward import Fold, generate_folds
+from tests.research.run_panels import (
+    CONFIG,
+    END,
+    KEPT,
+    SCREENED,
+    START,
+    STOCKS,
+    fitted_runs,
+    folds,
+    research,
+    weekdays,
 )
 
-
-def weekdays() -> list[date]:
-    days = (START + timedelta(days=n) for n in range((END - START).days + 1))
-    return [day for day in days if day.weekday() < 5]
+pytestmark = pytest.mark.django_db
 
 
 @pytest.fixture
-def panel(settings: Any, tmp_path: Path) -> Path:
-    """A year of 40 stocks whose tech_ret_1d drives the labels; 1139 is outside the universe."""
-    settings.RESEARCH_CACHE_DIR = tmp_path / "predictions"
-    settings.MODEL_DIR = tmp_path / "models"
-    settings.FEATURE_PARQUET_DIR = tmp_path / "features"
-    rng = np.random.default_rng(3)
-    days = weekdays()
-    TradingCalendar.objects.bulk_create(
-        TradingCalendar(date=day, is_trading_day=day.weekday() < 5)
-        for day in (START + timedelta(days=n) for n in range((END - START).days + 1))
-    )
-    features, labels = [], []
-    for day in days:
-        signal = rng.normal(size=len(STOCKS))
-        noise = rng.normal(size=len(STOCKS))
-        ranks = pd.Series(signal + noise).rank(pct=True).to_numpy()
-        for k, stock in enumerate(STOCKS):
-            features.append(
-                FeatureDaily(
-                    stock_id=stock,
-                    date=day,
-                    in_universe=stock != "1139",
-                    tech_ret_1d=float(signal[k]),
-                    tech_ret_60d=0.01 * k,
-                    tech_vol_20d=0.2 + 0.01 * k,
-                )
-            )
-            ret = 0.01 * float(signal[k] + noise[k])
-            for horizon in (5, 20):
-                labels.append(
-                    LabelDaily(
-                        stock_id=stock,
-                        date=day,
-                        horizon=horizon,
-                        fwd_ret=ret,
-                        fwd_ret_open=ret,
-                        fwd_rank_pct=float(ranks[k]),
-                        fwd_vol_20d=0.3 if horizon == 20 else None,
-                        fwd_up_5pct=bool(signal[k] + noise[k] > 0.5) if horizon == 20 else None,
-                        untradable_t1=False,
-                    )
-                )
-    FeatureDaily.objects.bulk_create(features)
-    LabelDaily.objects.bulk_create(labels)
-    export_year(2016, settings.FEATURE_PARQUET_DIR)
-    return Path(settings.FEATURE_PARQUET_DIR)
-
-
-def folds() -> list[Fold]:
-    calendar = TradingDays(weekdays(), START, END)
-    return generate_folds(calendar, END, CONFIG)
-
-
-def research() -> list[Fold]:
-    return [fold for fold in folds() if not fold.holdout]
+def panel(run_panel: Path) -> Path:
+    return run_panel
 
 
 def test_rank_folds_cache_ridge_scores_for_every_test_row(panel: Path) -> None:
@@ -126,16 +75,14 @@ def test_rank_folds_cache_ridge_scores_for_every_test_row(panel: Path) -> None:
     assert run.run_key == "rank-wf1"
     assert run.objective == "rank"
     assert (run.train_start, run.train_end) == (fold.train_start, fold.train_end)
-    assert run.feature_list == LINEAR_FEATURES
+    assert run.feature_list == SCREENED
     assert run.feature_hash == feature_hash(fold.train_start, fold.test_end, panel)
     assert run.lib_versions == lib_versions()
     assert run.params["horizon"] == 20
     assert run.params["label"] == "fwd_rank_pct"
     assert run.params["fold"] == fold_record(fold)
     weights = load_model("rank-wf1", run.run_id).coef_
-    assert run.params["coefficients"] == pytest.approx(
-        dict(zip(LINEAR_FEATURES, weights, strict=True))
-    )
+    assert run.params["coefficients"] == pytest.approx(dict(zip(SCREENED, weights, strict=True)))
     assert run.params["penalty"] in PENALTY_GRID
     assert set(run.params["cv_scores"]) == {str(penalty) for penalty in PENALTY_GRID}
     assert run.ic_mean is not None
@@ -152,7 +99,7 @@ def test_rank_folds_cache_ridge_scores_for_every_test_row(panel: Path) -> None:
     assert len(daily) == len([day for day in test_days if day <= fold.eval_end])
     assert run.ic_mean == pytest.approx(daily.mean())
     assert run.icir == pytest.approx(daily.mean() / daily.std())
-    assert ModelRun.objects.count() == 2
+    assert fitted_runs().count() == 2
 
 
 def test_cached_scores_come_from_the_saved_model(panel: Path) -> None:
@@ -166,7 +113,7 @@ def test_cached_scores_come_from_the_saved_model(panel: Path) -> None:
     raw = pd.read_parquet(panel / "year=2016" / "part-0.parquet")
     inputs = linear_inputs(raw)
     test = inputs[inputs["date"].between(fold.test_start, fold.test_end)]
-    expected = model.predict(test[LINEAR_FEATURES].to_numpy(dtype=np.float64))
+    expected = model.predict(test[SCREENED].to_numpy(dtype=np.float64))
     assert cached["ridge_h5"].to_numpy() == pytest.approx(expected)
 
 
@@ -192,7 +139,7 @@ def test_return_folds_cache_the_rule_forecasts_without_model_runs(panel: Path) -
     assert (cached["zero_h5"] == 0).all()
     shares = cached.set_index("stock_id")["trailing_h5"].groupby(level=0).first()
     assert shares["1101"] == pytest.approx((1 + 0.01) ** (5 / 60) - 1)
-    assert not ModelRun.objects.exists()
+    assert not fitted_runs().exists()
 
 
 def test_interval_folds_cache_probability_quantile_and_volatility_baselines(panel: Path) -> None:
@@ -220,7 +167,10 @@ def test_interval_folds_cache_probability_quantile_and_volatility_baselines(pane
         pytest.approx(half),
     )
     assert first["techvol_h20"] == pytest.approx(0.21)
-    kinds = set(ModelRun.objects.values_list("model_type", "objective"))
+    logistic = ModelRun.objects.get(model_type="logistic")
+    assert logistic.feature_list == SCREENED
+    assert set(logistic.params["coefficients"]) == set(SCREENED)
+    kinds = set(fitted_runs().values_list("model_type", "objective"))
     assert kinds == {("logistic", "classification"), ("histq", "quantile")}
     histq = ModelRun.objects.get(model_type="histq")
     assert histq.params["quantiles"] == pytest.approx(expected)
@@ -441,6 +391,23 @@ def test_command_stops_at_the_last_date(command: Path, settings: Any) -> None:
     assert len(indices) < len(research())
 
 
+def test_a_full_run_checks_the_screening_before_the_shuffle_check(
+    command: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(train, "shuffle_check", lambda *args: pytest.fail("shuffle ran"))
+    ModelRun.objects.filter(model_type=SCREENING_MODEL).delete()
+
+    with pytest.raises(CommandError, match="interval scope fits on the screened features"):
+        call_command("train", scope="interval", run_key="interval-wf1")
+
+
+def test_command_explains_a_missing_screening(command: Path) -> None:
+    ModelRun.objects.filter(model_type=SCREENING_MODEL).delete()
+
+    with pytest.raises(CommandError, match="rank scope fits on the screened features"):
+        call_command("train", scope="rank", run_key="rank-wf1", folds="0", stdout=StringIO())
+
+
 def test_command_rerun_refits_cached_folds(command: Path) -> None:
     call_command("train", scope="return", run_key="return-wf1", folds="0", stdout=StringIO())
     out = StringIO()
@@ -474,6 +441,15 @@ def test_command_shuffle_check_passes_and_fails_by_the_limit(command: Path, sett
     settings.SHUFFLE_IC_LIMIT = 0.0
     with pytest.raises(CommandError, match="label column"):
         call_command("train", shuffle_check=True)
+
+
+def test_command_shuffle_check_runs_before_any_screening(command: Path) -> None:
+    ModelRun.objects.filter(model_type=SCREENING_MODEL).delete()
+    out = StringIO()
+
+    call_command("train", shuffle_check=True, stdout=out)
+
+    assert "shuffled OOS rank IC" in out.getvalue()
 
 
 @pytest.mark.parametrize("ic", [0.02, -0.02])
@@ -578,7 +554,7 @@ def test_cached_folds_note_their_features_labels_and_recipe(
     assert fold_notes(run_key, BASELINE, fold.index) == {
         "feature_hash": feature_hash(getattr(fold, first), fold.test_end, panel),
         "label_hash": label_hash(getattr(fold, first), getattr(fold, last), horizons),
-        "recipe": recipe(),
+        "recipe": recipe(SCREENED),
     }
 
 
@@ -626,12 +602,55 @@ def test_a_changed_recipe_reruns_cached_folds(panel: Path, monkeypatch: pytest.M
     fold = research()[0]
     run_folds("return", [fold], "return-wf1", panel)
 
-    monkeypatch.setattr(baseline_runs, "RECIPE_VERSION", "2")
+    monkeypatch.setattr(baseline_runs, "RECIPE_VERSION", f"{baseline_runs.RECIPE_VERSION}-next")
     assert run_folds("return", [fold], "return-wf1", panel) == [fold.index]
     assert run_folds("return", [fold], "return-wf1", panel) == []
 
-    monkeypatch.setattr(baseline_runs, "LINEAR_FEATURES", LINEAR_FEATURES[:-1])
+
+@pytest.mark.parametrize(("scope", "model"), [("rank", "ridge.h20"), ("interval", "logistic.h20")])
+def test_a_new_screening_reruns_the_fitted_baselines_only(
+    panel: Path, scope: str, model: str
+) -> None:
+    fold = research()[0]
+    run_folds(scope, [fold], f"{scope}-wf1", panel)
+    run_folds("return", [fold], "return-wf1", panel)
+
+    ModelRun.objects.filter(model_type=SCREENING_MODEL).update(feature_list=KEPT[:2])
+
+    assert run_folds(scope, [fold], f"{scope}-wf1", panel) == [fold.index]
+    assert run_folds("return", [fold], "return-wf1", panel) == []
+    run = ModelRun.objects.get(run_id=f"{scope}-wf1.{model}.f{fold.index:03d}")
+    assert run.feature_list == linear_features(KEPT[:2])
+
+
+@pytest.mark.parametrize("scope", ["rank", "interval"])
+def test_fitted_baselines_refuse_to_run_without_a_screening(panel: Path, scope: str) -> None:
+    fold = research()[0]
+    ModelRun.objects.filter(model_type=SCREENING_MODEL).delete()
+
+    with pytest.raises(RunError, match=f"{scope} scope fits on the screened features"):
+        run_folds(scope, [fold], f"{scope}-wf1", panel)
+
+    assert missing_folds(f"{scope}-wf1", BASELINE, [fold]) == [fold.index]
     assert run_folds("return", [fold], "return-wf1", panel) == [fold.index]
+
+
+def test_the_shuffle_check_keeps_every_first_batch_feature(
+    panel: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[list[str]] = []
+    original = baseline_runs.shuffled_oos_ic
+
+    def spy(frame: pd.DataFrame, fold: Fold, features: list[str], *args: Any) -> float:
+        seen.append(list(features))
+        return original(frame, fold, features, *args)
+
+    monkeypatch.setattr(baseline_runs, "shuffled_oos_ic", spy)
+    ModelRun.objects.filter(model_type=SCREENING_MODEL).delete()
+
+    shuffle_check(research()[0], panel, seed=0)
+
+    assert seen == [LINEAR_FEATURES]
 
 
 def test_labels_rewritten_during_the_fit_stop_the_fold(
@@ -650,5 +669,5 @@ def test_labels_rewritten_during_the_fit_stop_the_fold(
     with pytest.raises(RuntimeError, match="label_daily changed"):
         run_folds("rank", [fold], "rank-wf1", panel)
 
-    assert not ModelRun.objects.exists()
+    assert not fitted_runs().exists()
     assert missing_folds("rank-wf1", BASELINE, [fold]) == [fold.index]

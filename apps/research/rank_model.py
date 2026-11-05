@@ -1,40 +1,19 @@
 """LightGBM rank model on screened z-scored features, ranked within each day (SPEC §7)."""
 
 from collections.abc import Sequence
-from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
 
 from apps.research.features.transforms import STOCK_LEVEL, standardize
 from apps.research.gbdt import MAX_ROUNDS, Boosted, DailyRankIC, boost
-from apps.research.models import ModelRun
-from apps.research.runs import SCREENING_MODEL, RunError
+from apps.research.runs import Screened
 from apps.research.training import training_rows
 from apps.research.walkforward import Fold
 
 RANK_LABEL = "fwd_rank_pct"
 MODEL_TYPE = "lightgbm"
 ROW_COLUMNS = ["date", "stock_id", "in_universe"]
-
-
-@dataclass(frozen=True)
-class Screened:
-    kept: list[str]
-    unscreened: list[str]
-
-
-def screened_features() -> Screened:
-    """Features the recorded screening kept, and the market features it left unscreened."""
-    rows = list(
-        ModelRun.objects.filter(model_type=SCREENING_MODEL).values_list("feature_list", "params")
-    )
-    if not rows:
-        raise RunError("no feature screening is recorded; run ic_report first")
-    if len(rows) > 1:
-        raise RunError(f"{len(rows)} feature screenings are recorded; drop_run all but one")
-    kept, params = rows[0]
-    return Screened(list(kept), list(params.get("unscreened", [])))
 
 
 def _stock_level(features: Sequence[str]) -> list[str]:

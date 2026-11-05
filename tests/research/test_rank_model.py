@@ -14,14 +14,12 @@ from apps.research.metrics.ic import daily_rank_ic
 from apps.research.models import ModelRun, Prediction
 from apps.research.rank_model import (
     RANK_LABEL,
-    Screened,
     fit_rank,
     prediction_frame,
     rank_features,
     rank_inputs,
-    screened_features,
 )
-from apps.research.runs import SCREENING_MODEL, RunError
+from apps.research.runs import SCREENING_MODEL, RunError, Screened, screened_features
 from apps.research.walkforward import Fold, WalkForwardConfig, generate_folds
 from tests.research.conftest import weekday_calendar
 
