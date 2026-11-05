@@ -13,3 +13,4 @@ ETL_RATE_LIMITS = {
     **ETL_RATE_LIMITS,  # noqa: F405
     "finmind": {**ETL_RATE_LIMITS["finmind"], "min_interval": 13.0},  # noqa: F405
 }
+STATIC_ROOT = None

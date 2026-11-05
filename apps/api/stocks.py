@@ -4,7 +4,6 @@ from datetime import date
 from typing import Any
 
 from django.db.models import Max, Min
-from django.shortcuts import get_object_or_404
 from rest_framework.exceptions import NotFound
 from rest_framework.request import Request
 from rest_framework.response import Response
@@ -74,7 +73,9 @@ def bar(day: date, row: dict[str, Any] | None, anchor_factor: float) -> dict[str
 
 class StockDetailView(ReadOnlyView):
     def get(self, request: Request, stock_id: str) -> Response:
-        stock = get_object_or_404(StockMaster, stock_id=stock_id)
+        stock = StockMaster.objects.filter(stock_id=stock_id).first()
+        if stock is None:
+            raise NotFound(f"找不到股票 {stock_id}。")
         bars = list(
             DailyPrice.objects.filter(stock_id=stock_id, close__isnull=False)
             .order_by("-date")

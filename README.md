@@ -13,11 +13,15 @@
 ```bash
 cp .env.example .env
 uv sync
+uv run playwright install chromium
 docker compose up -d db redis
 uv run python manage.py migrate
 uv run python manage.py check
-uv run pytest
+uv run pytest -m "not e2e"
+uv run pytest -m e2e
 ```
+
+`-m e2e` 是 Playwright 的瀏覽器冒煙測試，要先跑過一次 `playwright install chromium`。
 
 ## 全部容器
 

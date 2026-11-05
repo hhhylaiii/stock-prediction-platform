@@ -11,7 +11,8 @@
 | 安裝依賴 | `uv sync` |
 | 起資料庫與 Redis | `docker compose up -d db redis` |
 | 全部容器 | `docker compose up -d`（web、worker、db、redis） |
-| 測試 | `uv run pytest` |
+| 測試 | `uv run pytest -m "not e2e"` |
+| e2e | `uv run pytest -m e2e`（Playwright；第一次先 `uv run playwright install chromium`） |
 | Lint 與格式 | `uv run ruff check . && uv run ruff format --check .` |
 | 型別 | `uv run mypy` |
 | Django 檢查 | `uv run python manage.py check` |

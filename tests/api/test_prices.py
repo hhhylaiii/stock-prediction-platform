@@ -141,7 +141,7 @@ def test_unknown_stock_prices_is_not_found(client: Client) -> None:
     response = client.get("/api/stocks/9999/prices")
 
     assert response.status_code == 404
-    assert envelope_of(response)["error"]["code"] == "not_found"
+    assert envelope_of(response)["error"] == {"code": "not_found", "message": "找不到股票 9999。"}
 
 
 def test_prices_past_the_calendar_report_an_outdated_calendar(client: Client) -> None:

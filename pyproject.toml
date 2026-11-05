@@ -16,6 +16,7 @@ dependencies = [
     "pyarrow>=17",
     "requests>=2.32",
     "scikit-learn>=1.5",
+    "whitenoise>=6.7",
 ]
 
 [dependency-groups]
@@ -28,6 +29,7 @@ dev = [
     "pytest>=8.3",
     "pytest-cov>=5",
     "pytest-django>=4.9",
+    "pytest-playwright>=0.5",
     "responses>=0.25",
     "ruff>=0.7",
     "time-machine>=2.15",
