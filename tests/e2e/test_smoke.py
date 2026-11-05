@@ -1,11 +1,9 @@
-import re
-
 import pytest
 from playwright.sync_api import Page, expect
 from pytest_django.live_server_helper import LiveServer
 
-from apps.etl.quality import CHECKS
-from tests.e2e.conftest import XSS_NAME, Seed
+from apps.etl.models import DataQualityLog, EtlRun
+from tests.e2e.conftest import EXTRA_RUNS, QUALITY, XSS_NAME, Seed
 
 pytestmark = pytest.mark.e2e
 
@@ -37,19 +35,49 @@ def test_watching_a_stock_is_remembered(page: Page, live_server: LiveServer, see
     expect(page.locator("#watch-only")).to_have_text("只看追蹤（1）")
 
 
-def test_models_view_lists_the_day_s_runs_and_checks(
+def test_models_view_lists_every_run_of_the_day_and_each_check(
     page: Page, live_server: LiveServer, seeded: Seed
 ) -> None:
     page.goto(f"{live_server.url}/#models")
 
     rows = page.locator("#etl .trow")
-    expect(rows).to_have_count(3)
+    expect(rows).to_have_count(3 + EXTRA_RUNS)
     expect(rows.nth(0)).to_contain_text("15:31")
     expect(rows.nth(2)).to_contain_text("失敗")
     expect(page.locator("#etl-sub")).to_contain_text(seeded.last_session.isoformat())
-    expect(page.locator("#quality .check")).to_have_count(len(CHECKS))
-    expect(page.locator("#quality-sub")).to_contain_text("全部檢查通過")
-    expect(page.locator("#status")).to_contain_text("品質檢查通過")
+    checks = page.locator("#quality .check")
+    expect(checks).to_have_count(len(QUALITY))
+    for summary in (
+        "daily_price 1,842 列，前一交易日 1,840 列",
+        "daily_price：整列 缺 1 檔、close 缺 2 檔",
+        "過期：SOX",
+    ):
+        expect(checks.filter(has_text=summary)).to_have_count(1)
+    expect(page.locator("#quality-sub")).to_contain_text("檢查通過，但有 1 項警告")
+    expect(page.locator("#status")).to_contain_text("品質檢查通過（1 項警告）")
+
+
+def test_models_view_renders_api_strings_as_text(
+    page: Page, live_server: LiveServer, seeded: Seed
+) -> None:
+    EtlRun.objects.create(
+        source="twse",
+        dataset=XSS_NAME,
+        start_date=seeded.last_session,
+        end_date=seeded.last_session,
+        status=EtlRun.Status.FAILED,
+        error=XSS_NAME,
+    )
+    DataQualityLog.objects.create(
+        date=seeded.last_session, check_name=XSS_NAME[:64], severity="warning", detail={}
+    )
+
+    page.goto(f"{live_server.url}/#models")
+
+    expect(page.locator("#etl")).to_contain_text(XSS_NAME)
+    expect(page.locator("#quality")).to_contain_text(XSS_NAME)
+    expect(page.locator("#view-models img")).to_have_count(0)
+    assert page.evaluate("window.__xss") is None
 
 
 def test_today_view_says_predictions_are_pending(
@@ -71,9 +99,67 @@ def test_stock_names_render_as_text(page: Page, live_server: LiveServer, seeded:
     assert page.evaluate("window.__xss") is None
 
 
+def test_a_non_json_gateway_error_is_shown(
+    page: Page, live_server: LiveServer, seeded: Seed
+) -> None:
+    page.route(
+        "**/api/stocks/2330",
+        lambda route: route.fulfill(
+            status=502, body="<html>bad gateway</html>", content_type="text/html"
+        ),
+    )
+
+    page.goto(f"{live_server.url}/#stock-2330")
+
+    expect(page.locator("#view-stock .error")).to_contain_text("HTTP 502")
+
+
+def test_a_dropped_connection_is_shown(page: Page, live_server: LiveServer, seeded: Seed) -> None:
+    page.route("**/api/data-quality*", lambda route: route.abort())
+
+    page.goto(f"{live_server.url}/#models")
+
+    expect(page.locator("#quality .error")).to_have_text("無法連線到伺服器。")
+    expect(page.locator("#etl .trow")).to_have_count(3 + EXTRA_RUNS)
+
+
+def test_failed_prices_keep_the_stock_header(
+    page: Page, live_server: LiveServer, seeded: Seed
+) -> None:
+    page.route("**/api/stocks/2330/prices*", lambda route: route.abort())
+
+    page.goto(f"{live_server.url}/#stock-2330")
+
+    expect(page.locator("#stock-name")).to_have_text("台積電")
+    expect(page.locator("#price-chart .error")).to_have_text("無法連線到伺服器。")
+
+
+def test_tooltip_shows_volume_in_lots(page: Page, live_server: LiveServer, seeded: Seed) -> None:
+    page.goto(f"{live_server.url}/#stock-2330")
+    overlay = page.locator("#price-chart .overlay")
+    box = overlay.bounding_box()
+    assert box is not None
+
+    overlay.hover(position={"x": box["width"] - 1, "y": box["height"] / 2})
+
+    expect(page.locator("#price-chart .tip")).to_contain_text("成交量 1,000 張")
+
+
+def test_a_bad_stock_hash_keeps_the_nav_on_the_last_good_stock(
+    page: Page, live_server: LiveServer, seeded: Seed
+) -> None:
+    page.goto(f"{live_server.url}/#stock-2330")
+    expect(page.locator("#stock-name")).to_have_text("台積電")
+
+    page.goto(f"{live_server.url}/#stock-%3Cb%3E")
+
+    expect(page.locator("#view-stock .error")).to_contain_text("找不到股票 <b>")
+    expect(page.locator("[data-nav=stock]")).to_have_attribute("href", "#stock-2330")
+
+
 def test_unknown_stock_shows_the_api_error(
     page: Page, live_server: LiveServer, seeded: Seed
 ) -> None:
     page.goto(f"{live_server.url}/#stock-0000")
 
-    expect(page.locator("#view-stock .error")).to_have_text(re.compile("找不到"))
+    expect(page.locator("#view-stock .error")).to_have_text("找不到股票 0000。")

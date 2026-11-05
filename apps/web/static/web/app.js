@@ -51,14 +51,16 @@
   function saveWatch() { try { localStorage.setItem('twp-watch', JSON.stringify([...state.watch])); } catch (e) { return; } }
 
   const statusEl = document.getElementById('status');
+  const warningCount = day => day.checks.filter(c => c.severity === 'warning').length;
 
   async function renderStatus() {
     try {
       const { data } = await api.get('data-quality', { days: 1 });
       const day = data[0];
       const ran = day.checks.length > 0;
-      const label = day.passed ? '品質檢查通過' : ran ? '品質檢查未通過' : '品質檢查尚未執行';
-      const cls = day.passed ? '' : ran ? ' warn' : ' idle';
+      const warnings = warningCount(day);
+      const label = day.passed ? '品質檢查通過' + (warnings ? '（' + warnings + ' 項警告）' : '') : ran ? '品質檢查未通過' : '品質檢查尚未執行';
+      const cls = day.passed ? (warnings ? ' warn' : '') : ran ? ' warn' : ' idle';
       statusEl.innerHTML = '<span>' + esc(day.date) + ' 交易日</span><span><i class="dot' + cls + '"></i>' + label + '</span>';
     } catch (err) {
       statusEl.innerHTML = '<span><i class="dot warn"></i>' + esc(err.message) + '</span>';
@@ -108,23 +110,22 @@
       '<div class="section"><h2>過去對本股的 20 日預測，與實際結果</h2>' + waiting + '</div>';
   }
 
-  async function renderStock() {
+  async function renderStock(code) {
     const token = ++state.stockToken;
-    const code = state.stock;
     if (!STOCK_CODE.test(code)) {
       stockEl.innerHTML = backLink + errorBox({ message: '找不到股票 ' + code + '。' });
       return;
     }
     stockEl.innerHTML = backLink + '<p class="placeholder">載入中…</p>';
-    let stock, prices;
-    try {
-      [stock, prices] = await Promise.all([api.get('stocks/' + code), api.get('stocks/' + code + '/prices', { days: PRICE_DAYS })]);
-    } catch (err) {
-      if (token === state.stockToken) stockEl.innerHTML = backLink + errorBox(err);
+    const [stock, prices] = await Promise.allSettled([api.get('stocks/' + code), api.get('stocks/' + code + '/prices', { days: PRICE_DAYS })]);
+    if (token !== state.stockToken) return;
+    if (stock.status === 'rejected') {
+      stockEl.innerHTML = backLink + errorBox(stock.reason);
       return;
     }
-    if (token !== state.stockToken) return;
-    const s = stock.data;
+    const s = stock.value.data;
+    state.stock = s.stock_id;
+    document.querySelector('[data-nav="stock"]').setAttribute('href', '#stock-' + encodeURIComponent(state.stock));
     stockEl.innerHTML = stockHtml(s);
     document.getElementById('watch-btn').addEventListener('click', e => {
       if (state.watch.has(s.stock_id)) state.watch.delete(s.stock_id); else state.watch.add(s.stock_id);
@@ -139,7 +140,9 @@
       document.getElementById('chart-legend').innerHTML = state.chart === 'candle'
         ? '<span><i class="sw-up"></i>收高於開</span><span><i class="sw-down"></i>收低於開</span><span><i class="sw-ma5"></i>5 日均線</span><span><i class="sw-ma20"></i>20 日均線</span>'
         : '<span><i class="sw-line"></i>收盤價（還原）</span>';
-      drawPriceChart(document.getElementById('price-chart'), s, prices.data, state.chart);
+      const host = document.getElementById('price-chart');
+      if (prices.status === 'rejected') host.innerHTML = errorBox(prices.reason);
+      else drawPriceChart(host, s, prices.value.data, state.chart);
     };
     document.querySelectorAll('#chart-seg [data-ct]').forEach(b => b.addEventListener('click', () => {
       state.chart = b.dataset.ct;
@@ -264,9 +267,12 @@
       case 'big_move': return fmtInt(d.count || 0) + ' 檔，已標記待查';
       case 'missing_values': {
         const cols = Object.entries(d.columns || {}).filter(([, gap]) => gap.missing > 0);
-        return (d.table || '') + (cols.length ? '：' + cols.map(([col, gap]) => col + ' 缺 ' + fmtInt(gap.missing) + ' 檔').join('、') : ' 沒有缺值');
+        return (d.table || '') + (cols.length ? '：' + cols.map(([col, gap]) => (col === 'row' ? '整列' : col) + ' 缺 ' + fmtInt(gap.missing) + ' 檔').join('、') : ' 沒有缺值');
       }
-      case 'trading_calendar': return Object.keys(d.rows || {}).length ? '有資料落在休市日：' + Object.keys(d.rows).join('、') : '沒有資料落在休市日';
+      case 'trading_calendar': {
+        const tables = Object.entries(d.rows || {});
+        return tables.length ? '有資料落在休市日：' + tables.map(([table, days]) => table + '（' + Object.keys(days).join('、') + '）').join('、') : '沒有資料落在休市日';
+      }
       case 'index_freshness': return Object.keys(d.stale || {}).length ? '過期：' + Object.keys(d.stale).join('、') : '全部在期限內';
       default: return '';
     }
@@ -283,7 +289,9 @@
     try {
       const { data } = await api.get('data-quality', { days: QUALITY_DAYS });
       const latest = data[0];
-      sub.textContent = latest.date + '：' + (latest.passed ? '全部檢查通過。' : latest.checks.length ? '有檢查未通過或尚未執行；任一項為 error 時當日不產出預測。' : '檢查尚未執行。');
+      const warnings = warningCount(latest);
+      const verdict = latest.passed ? (warnings ? '檢查通過，但有 ' + warnings + ' 項警告。' : '全部檢查通過。') : latest.checks.length ? '有檢查未通過或尚未執行；任一項為 error 時當日不產出預測。' : '檢查尚未執行。';
+      sub.textContent = latest.date + '：' + verdict;
       host.innerHTML = latest.checks.map(checkHtml).join('') +
         latest.missing_checks.map(name => '<div class="check"><i class="idle"></i><div><div>' + esc(CHECKS[name] || name) + '</div><div class="muted small">尚未執行</div></div></div>').join('');
       days.innerHTML = '<div class="list">' + data.map(day => {
@@ -299,18 +307,18 @@
   }
 
   const views = { today: document.getElementById('view-today'), stock: stockEl, models: document.getElementById('view-models') };
-  let modelsLoaded = false;
   function route() {
     let hash;
     try { hash = decodeURIComponent((location.hash || '#today').slice(1)); } catch (e) { hash = 'today'; }
     let name = 'today';
     if (hash === 'models') name = 'models';
-    else if (hash.startsWith('stock')) { name = 'stock'; const code = hash.slice('stock-'.length); if (code) state.stock = code; }
+    let code = state.stock;
+    if (hash === 'stock' || hash.startsWith('stock-')) { name = 'stock'; code = hash.slice('stock-'.length) || state.stock; }
     Object.keys(views).forEach(k => { views[k].hidden = k !== name; });
     document.querySelectorAll('[data-nav]').forEach(a => { if (a.dataset.nav === name) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current'); });
     document.querySelector('[data-nav="stock"]').setAttribute('href', '#stock-' + encodeURIComponent(state.stock));
-    if (name === 'stock') renderStock();
-    if (name === 'models' && !modelsLoaded) { modelsLoaded = true; renderEtl(); renderQuality(); }
+    if (name === 'stock') renderStock(code);
+    if (name === 'models') { renderEtl(); renderQuality(); }
     window.scrollTo(0, 0);
   }
   window.addEventListener('hashchange', route);

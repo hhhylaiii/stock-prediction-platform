@@ -119,7 +119,7 @@ def test_unknown_stock_is_a_not_found_envelope(client: Client) -> None:
     assert response.status_code == 404
     body = envelope_of(response)
     assert body["success"] is False
-    assert body["error"]["code"] == "not_found"
+    assert body["error"] == {"code": "not_found", "message": "找不到股票 9999。"}
 
 
 def test_bars_of_other_stocks_are_ignored(client: Client) -> None:

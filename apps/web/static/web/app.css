@@ -133,6 +133,7 @@ footer .wrap{padding:24px 40px 40px;color:var(--ink-3);font-size:12px;border-top
 .check i.warn{background:var(--up)}
 .check i.idle{background:transparent;border:1.5px solid var(--ink-3)}
 .res i.warn{background:var(--up)}
+.res i.idle{background:transparent;border:1.5px solid var(--ink-3)}
 .placeholder{margin-top:16px;padding:28px 8px;border-top:1px solid var(--line);color:var(--ink-2)}
 .error{margin-top:16px;padding:14px 12px;border:1px solid var(--line-strong);border-radius:4px;color:var(--ink)}
 .history{margin-top:12px}

@@ -1,19 +1,35 @@
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
+from typing import Any
 
 import pytest
 from django.core.cache import cache
 from django.utils import timezone
 
 from apps.etl.models import DataQualityLog, EtlRun
-from apps.etl.quality import CHECKS
 from apps.market.models import Market, TradingCalendar
 from tests.api.conftest import add_bars, add_stock
 
 XSS_NAME = '<img src=x onerror="window.__xss=1">'
 BAR_COUNT = 70
 GAP_INDEX = 64
+EXTRA_RUNS = 101
+POPULATION = {"missing": 0, "population": 1842, "markets": {}}
+QUALITY: tuple[tuple[str, str, dict[str, Any]], ...] = (
+    ("row_count", "info", {"table": "daily_price", "count": 1842, "previous": 1840}),
+    ("big_move", "info", {"table": "daily_price", "count": 3, "stocks": {"1101": 0.12}}),
+    (
+        "missing_values",
+        "info",
+        {
+            "table": "daily_price",
+            "columns": {"row": {**POPULATION, "missing": 1}, "close": {**POPULATION, "missing": 2}},
+        },
+    ),
+    ("trading_calendar", "info", {"rows": {}}),
+    ("index_freshness", "warning", {"stale": {"SOX": "2026-10-28"}}),
+)
 
 
 @dataclass(frozen=True)
@@ -82,7 +98,20 @@ def seeded(transactional_db: None) -> Seed:
         status=EtlRun.Status.SUCCESS,
         started_at=at(last, 9, 0),
     )
+    EtlRun.objects.bulk_create(
+        EtlRun(
+            source="tpex",
+            dataset=f"extra{n:03d}",
+            start_date=last,
+            end_date=last,
+            status=EtlRun.Status.SUCCESS,
+            rows=n,
+            started_at=at(last, 22, 0) + timedelta(seconds=n),
+        )
+        for n in range(EXTRA_RUNS)
+    )
     DataQualityLog.objects.bulk_create(
-        DataQualityLog(date=last, check_name=check, severity="info", detail={}) for check in CHECKS
+        DataQualityLog(date=last, check_name=check, severity=severity, detail=detail)
+        for check, severity, detail in QUALITY
     )
     return Seed(last_session=last, closes=closes)
