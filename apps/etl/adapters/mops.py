@@ -18,16 +18,17 @@ from apps.etl.client import SourceClient
 from apps.etl.errors import SchemaChangedError, SourceError
 from apps.etl.filings import FILING_COLUMNS, Filing, apply_statement_filings
 from apps.etl.models import EtlRun, RawMops
-from apps.etl.ratelimit import RateLimiter
+from apps.etl.ratelimit import RateLimiter, RetryableError
 from apps.market.calendar import TradingDays
 from apps.market.models import FinancialStatement, FinType
 
-MOPS_MIN_INTERVAL = 3.0
+MOPS_MIN_INTERVAL = 5.0
 STATEMENT_FILING = "statement_filing"
 LISTING_PATH = "/server-java/t57sb01"
 REPORT_KIND = "A"
 PAGE_ENCODING = "cp950"
 NO_REPORTS = "查無所需資料"
+TOO_MANY_QUERIES = "查詢過量"
 FISCAL_YEAR = re.compile(r"會計期間：\s*([^<\s]+)")
 CALENDAR_YEAR = "曆年制"
 CODE, YEAR, KIND, DETAIL, UPLOADED, CORRECTION = (
@@ -76,8 +77,15 @@ class MopsClient(SourceClient):
             "seamon": "",
             "mtype": REPORT_KIND,
         }
-        body = self.get_content(f"{self.base_url}{LISTING_PATH}", params)
-        return params, body.decode(PAGE_ENCODING, errors="replace")
+        url = f"{self.base_url}{LISTING_PATH}"
+        return params, self.limiter.call(lambda: self._page(url, params))
+
+    def _page(self, url: str, params: dict[str, str]) -> str:
+        """A page asking to query less is a failure the limiter backs off from and retries."""
+        page = self._receive("GET", url, params=params).content.decode(PAGE_ENCODING, "replace")
+        if TOO_MANY_QUERIES in page:
+            raise RetryableError(f"{self.label} asked to query less for {params['co_id']}")
+        return page
 
 
 class _Rows(HTMLParser):

@@ -18,13 +18,13 @@ from apps.etl.adapters.mops import STATEMENT_FILING, MopsAdapter, parse_listing
 from apps.etl.errors import SchemaChangedError
 from apps.etl.filings import FILED_LATE_CHECK, FILED_LATER_CHECK, filing_session
 from apps.etl.models import DataQualityLog, EtlRun, RawMops
-from apps.etl.ratelimit import RateLimit, RateLimiter
+from apps.etl.ratelimit import RateLimit, RateLimiter, RetryableError
 from apps.market.calendar import TradingDays
 from apps.market.models import FinancialStatement, FinType, Market, StockMaster, TradingCalendar
 
 URL = "https://doc.twse.com.tw/server-java/t57sb01"
 TAIPEI = ZoneInfo("Asia/Taipei")
-LIMIT = RateLimit(min_interval=3.5, max_retries=2, backoff_base=1.0, backoff_max=2.0, cooldown=5.0)
+LIMIT = RateLimit(min_interval=6.0, max_retries=2, backoff_base=1.0, backoff_max=2.0, cooldown=5.0)
 CONSOLIDATED = FinType.CONSOLIDATED.value
 INDIVIDUAL = FinType.INDIVIDUAL.value
 
@@ -390,6 +390,34 @@ def test_only_years_with_statements_are_asked_for(
     adapter.fetch(STATEMENT_FILING, date(2009, 1, 1), date(2026, 11, 4), "2330")
     assert adapter.fetch(STATEMENT_FILING, date(2009, 1, 1), date(2026, 11, 4), "0050").empty
     assert len(responses.calls) == 1
+
+
+@pytest.mark.usefixtures("listed")
+@responses.activate
+def test_a_page_asking_to_query_less_is_retried_after_a_pause(
+    adapter: MopsAdapter, page: Callable[[str], bytes], fake_sleep: Callable[[float], None]
+) -> None:
+    serve("2330", 113, page("throttled"))
+    serve("2330", 113, page("2330_113"))
+    statement("2330", "2024-Q1", CONSOLIDATED, date(2024, 6, 3))
+    found = adapter.fetch(STATEMENT_FILING, date(2024, 1, 1), date(2024, 12, 31), "2330")
+    assert len(responses.calls) == 2
+    assert len(found) == 5
+    assert RawMops.objects.count() == 1
+    assert "查詢過量" not in RawMops.objects.get().payload["html"]
+
+
+@pytest.mark.usefixtures("listed")
+@responses.activate
+def test_asking_too_often_fails_the_run_once_retries_run_out(
+    adapter: MopsAdapter, page: Callable[[str], bytes]
+) -> None:
+    serve("2330", 113, page("throttled"))
+    statement("2330", "2024-Q1", CONSOLIDATED, date(2024, 6, 3))
+    with pytest.raises(RetryableError, match="query less"):
+        adapter.fetch(STATEMENT_FILING, date(2024, 1, 1), date(2024, 12, 31), "2330")
+    assert len(responses.calls) == LIMIT.max_retries + 1
+    assert not RawMops.objects.exists()
 
 
 @pytest.mark.usefixtures("listed")
