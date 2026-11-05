@@ -16,11 +16,13 @@ from apps.market.models import FinancialStatement
 
 FILED_LATE_CHECK = "statement_filed_late"
 FILED_LATER_CHECK = "statement_filed_later"
+RESTATED_CHECK = "statement_restated"
 LOGS = {
     FILED_LATE_CHECK: DataQualityLog.Severity.INFO,
     FILED_LATER_CHECK: DataQualityLog.Severity.WARNING,
+    RESTATED_CHECK: DataQualityLog.Severity.INFO,
 }
-FILING_COLUMNS = ["stock_id", "period", "fin_type", "uploaded_at", "corrected"]
+FILING_COLUMNS = ["stock_id", "period", "fin_type", "uploaded_at", "corrected", "restated"]
 QUARTER_LAST_DAY = {1: 31, 2: 30, 3: 30, 4: 31}
 
 
@@ -30,6 +32,7 @@ class Filing(NamedTuple):
     fin_type: str
     uploaded_at: datetime
     corrected: bool
+    restated: bool = False
 
 
 def filing_session(uploaded_at: datetime, calendar: TradingDays, cutoff: time) -> date:
@@ -42,18 +45,18 @@ def filing_session(uploaded_at: datetime, calendar: TradingDays, cutoff: time) -
 
 
 def apply_statement_filings(frame: pd.DataFrame, calendar: TradingDays, cutoff: time) -> int:
-    """Uncorrected filings set the date; a corrected one may only bring the deadline forward."""
+    """Uncorrected and restated filings set the date; a corrected one may only bring it forward."""
     filings = [Filing(*row) for row in frame[FILING_COLUMNS].itertuples(index=False)]
     changed: list[tuple[FinancialStatement, date]] = []
     logs: dict[str, dict[str, list[dict[str, Any]]]] = {check: {} for check in LOGS}
     for row, filing, own in _matched(filings):
         session = _session(row, filing, calendar, cutoff)
         deadline = visible_from(statement_deadline(row.period), calendar)
-        target = min(deadline, session) if filing.corrected else session
+        target = min(deadline, session) if filing.corrected and not filing.restated else session
         if target != row.announce_date:
             changed.append((row, target))
-        if session > deadline:
-            check = FILED_LATER_CHECK if filing.corrected else FILED_LATE_CHECK
+        if filing.restated or session > deadline:
+            check = _check(filing)
             entry = _entry(row, deadline, session, own)
             logs[check].setdefault(row.stock_id, []).append(entry)
     with transaction.atomic():
@@ -78,6 +81,12 @@ def _session(row: FinancialStatement, filing: Filing, calendar: TradingDays, cut
         return filing_session(filing.uploaded_at, calendar, cutoff)
     except CalendarError as exc:
         raise SchemaChangedError(f"{row.stock_id} {row.period} filed off the calendar") from exc
+
+
+def _check(filing: Filing) -> str:
+    if filing.restated:
+        return RESTATED_CHECK
+    return FILED_LATER_CHECK if filing.corrected else FILED_LATE_CHECK
 
 
 def quarter_end(period: str) -> date:

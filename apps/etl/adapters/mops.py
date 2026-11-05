@@ -42,7 +42,7 @@ CODE, YEAR, KIND, DETAIL, UPLOADED, CORRECTION = (
 HEADER = (CODE, YEAR, KIND, DETAIL, UPLOADED, CORRECTION)
 FINANCIAL_REPORT = "財務報告書"
 ENGLISH = "英文版"
-RESTATED = "重編"
+RESTATED = "(重編)"
 REPORT_TYPES = {
     "IFRSs合併財報": FinType.CONSOLIDATED,
     "母子公司合併報表": FinType.CONSOLIDATED,
@@ -121,7 +121,7 @@ class _Rows(HTMLParser):
 
 
 def parse_listing(page: str, code: str, roc_year: int) -> list[Filing]:
-    """Original Chinese reports of the company's year; only 查無所需資料 may stand for none."""
+    """Chinese-language reports of the company's year; only 查無所需資料 may stand for none."""
     parser = _Rows()
     parser.feed(page)
     starts = [i for i, (_, row) in enumerate(parser.rows) if all(name in row for name in HEADER)]
@@ -142,7 +142,7 @@ def parse_listing(page: str, code: str, roc_year: int) -> list[Filing]:
         if len(row) != len(header):
             raise SchemaChangedError(f"doc.twse {code} {roc_year} row has {len(row)} cells")
         cells = {name: row[index] for name, index in position.items()}
-        if ENGLISH not in cells[DETAIL] and RESTATED not in cells[DETAIL]:
+        if ENGLISH not in cells[DETAIL]:
             filings.append(_filing(cells, code, roc_year))
     return filings
 
@@ -153,7 +153,8 @@ def _filing(cells: dict[str, str], code: str, roc_year: int) -> Filing:
         raise SchemaChangedError(
             f"doc.twse {code} {roc_year} listed {cells[CODE]!r} {cells[YEAR]!r}"
         )
-    fin_type = REPORT_TYPES.get(cells[DETAIL])
+    restated = cells[DETAIL].endswith(RESTATED)
+    fin_type = REPORT_TYPES.get(cells[DETAIL].removesuffix(RESTATED))
     if cells[KIND] != FINANCIAL_REPORT or fin_type is None:
         raise SchemaChangedError(
             f"doc.twse {code} {roc_year} has an unknown report {cells[KIND]!r} {cells[DETAIL]!r}"
@@ -164,6 +165,7 @@ def _filing(cells: dict[str, str], code: str, roc_year: int) -> Filing:
         fin_type=fin_type.value,
         uploaded_at=_uploaded_at(cells[UPLOADED], code, roc_year),
         corrected=cells[CORRECTION] != NOT_CORRECTED,
+        restated=restated,
     )
 
 
@@ -211,12 +213,16 @@ class MopsAdapter(BaseAdapter):
         return pd.DataFrame(filings, columns=FILING_COLUMNS)
 
     def normalize(self, dataset: str, raw_df: pd.DataFrame) -> pd.DataFrame:
-        """The first upload of each report type is the announcement; a correction is noted."""
+        """The first upload of each report type, or its last restatement, is the announcement."""
         self.require_dataset(dataset)
         if raw_df.empty:
             return raw_df
-        grouped = raw_df.groupby(["stock_id", "period", "fin_type"], as_index=False, sort=True)
-        return grouped.agg(uploaded_at=("uploaded_at", "min"), corrected=("corrected", "any"))
+        records = []
+        for key, group in raw_df.groupby(["stock_id", "period", "fin_type"], sort=True):
+            restated = group.loc[group["restated"], "uploaded_at"]
+            uploaded = restated.max() if len(restated) else group["uploaded_at"].min()
+            records.append((*key, uploaded, bool(group["corrected"].any()), bool(len(restated))))
+        return pd.DataFrame(records, columns=FILING_COLUMNS)
 
     def upsert(self, dataset: str, frame: pd.DataFrame) -> int:
         self.require_dataset(dataset)
