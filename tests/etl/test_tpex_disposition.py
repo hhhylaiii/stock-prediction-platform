@@ -102,13 +102,16 @@ def adapter_feb_2010(twse_limiter: RateLimiter) -> TpexAdapter:
     return TpexAdapter(load_trading_days("twse_2010_01_02.json"), twse_limiter)
 
 
+@pytest.mark.parametrize("total", [31, 27])
 @responses.activate
 @pytest.mark.django_db
 def test_attention_counts_its_placeholder_days_in_the_total(
-    adapter_feb_2010: TpexAdapter, load_fixture: Callable[[str], Any]
+    adapter_feb_2010: TpexAdapter, load_fixture: Callable[[str], Any], total: int
 ) -> None:
     payload = load_fixture("tpex/disposition/attention_201002.json")
-    assert payload["tables"][0]["subtitle"].endswith("總累計次數: 31")
+    table = payload["tables"][0]
+    assert table["subtitle"].endswith("總累計次數: 31")
+    table["subtitle"] = table["subtitle"].replace(": 31", f": {total}")
     responses.post(ATTENTION, json=payload)
     events = _events(adapter_feb_2010, "attention", date(2010, 2, 1), date(2010, 2, 26))
     assert ("6248", date(2010, 2, 6), "attention", date(2010, 2, 6)) in events
