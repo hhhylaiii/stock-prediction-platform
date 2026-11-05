@@ -21,7 +21,6 @@
     monitor_unscored: '到期預測缺 label',
     model_alert: '模型告警'
   };
-  const OUTPUT_ALERT_SHARE = 0.1;
   const ALERT_REASONS = { below_threshold: '滾動 IC 低於門檻', outside_range: '超出範圍', above_baseline: '輸給 baseline', missing_reference: '缺參考值' };
   const SEVERITY = { info: ['通過', 'in'], warning: ['警告', 'warn'], error: ['錯誤', 'warn'] };
 
@@ -60,7 +59,7 @@
   function saveWatch() { try { localStorage.setItem('twp-watch', JSON.stringify([...state.watch])); } catch (e) { return; } }
 
   const statusEl = document.getElementById('status');
-  const summaryOf = day => ({ worst: day.worst, missing_checks: day.missing_checks, warnings: day.checks.filter(c => c.severity === 'warning').length });
+  const summaryOf = day => ({ passed: day.passed, worst: day.worst, missing_checks: day.missing_checks, warnings: day.checks.filter(c => c.severity === 'warning').length });
   const sizeOf = v => Array.isArray(v) ? v.length : Number(v || 0);
 
   function verdictOf(day) {
@@ -68,6 +67,7 @@
     if (day.worst === 'error') return { label: '未通過', cls: 'warn', text: '有檢查未通過，當日不產出預測。' };
     if (!day.worst) return { label: '尚未執行', cls: 'idle', text: '檢查尚未執行。' };
     if (day.missing_checks.length) return { label: '尚未完成', cls: 'idle', text: '已執行的檢查沒有錯誤，還有 ' + day.missing_checks.length + ' 項尚未執行。' };
+    if (day.passed === false) return { label: '未通過', cls: 'warn', text: '模型輸出檢查有錯誤，當日不產出預測。' };
     if (warnings) return { label: '通過（' + warnings + ' 項警告）', cls: 'warn', text: '檢查通過，但有 ' + warnings + ' 項警告。' };
     return { label: '通過', cls: 'in', text: '全部檢查通過。' };
   }
@@ -452,13 +452,13 @@
       '<div class="muted small">' + esc(checkSummary(check)) + '</div></div></div>';
   }
 
-  function modelCheckState(check) {
+  function modelCheckState(check, alertShare) {
     const d = check.detail || {};
     const stocks = fmtInt(d.flagged || 0) + '／' + fmtInt(d.n_stocks || 0) + ' 檔';
     switch (check.check_name) {
       case 'output_width_ratio':
       case 'output_odds_vs_q50':
-        if ((d.share || 0) > OUTPUT_ALERT_SHARE) return ['warn', '警告，' + stocks];
+        if ((d.share || 0) > alertShare) return ['warn', '警告，' + stocks];
         return ['', d.flagged ? '少量標記，' + stocks : '沒有標記'];
       case 'monitor_unscored': return ['warn', fmtInt(sizeOf(d.runs)) + ' 筆'];
       case 'model_alert': return ['warn', (ALERT_REASONS[d.reason] || String(d.reason || '')) + (d.run_id ? '（' + d.run_id + '）' : '')];
@@ -466,22 +466,23 @@
     }
   }
 
-  function modelCheckHtml(check) {
-    const [cls, text] = modelCheckState(check);
+  function modelCheckHtml(check, alertShare) {
+    const [cls, text] = modelCheckState(check, alertShare);
     return '<div class="check"><i class="' + cls + '"></i><div><div>' + esc(CHECKS[check.check_name] || check.check_name) + '</div><div class="muted small">' + esc(text) + '</div></div></div>';
   }
 
-  function renderModelChecks(data) {
+  function renderModelChecks(data, meta) {
     const sub = document.getElementById('model-checks-sub'), host = document.getElementById('model-checks');
     const day = data.find(entry => (entry.model_checks || []).length);
-    sub.textContent = day ? day.date + ' 的預測輸出；區間寬度比與機率矛盾的標記超過 ' + Math.round(OUTPUT_ALERT_SHARE * 100) + '% 才算警告。' : '';
-    host.innerHTML = day ? day.model_checks.map(modelCheckHtml).join('') : '<p class="placeholder">還沒有模型輸出檢查。</p>';
+    const share = meta.output_alert_share;
+    sub.textContent = day ? '最近一次寫入的交易日：' + day.date + '；區間寬度比與機率矛盾的標記超過 ' + Math.round(share * 100) + '% 才算警告。' : '';
+    host.innerHTML = day ? day.model_checks.map(check => modelCheckHtml(check, share)).join('') : '<p class="placeholder">還沒有模型輸出檢查。</p>';
   }
 
   async function renderQuality() {
     const sub = document.getElementById('quality-sub'), host = document.getElementById('quality'), days = document.getElementById('quality-days');
     try {
-      const { data } = await api.get('data-quality', { days: QUALITY_DAYS });
+      const { data, meta } = await api.get('data-quality', { days: QUALITY_DAYS });
       const latest = data[0];
       sub.textContent = latest.date + '：' + verdictOf(summaryOf(latest)).text;
       host.innerHTML = latest.checks.map(checkHtml).join('') +
@@ -491,7 +492,7 @@
         return '<div class="trow short qh-cols"><div class="muted">' + esc(day.date) + '</div><div class="res"><i class="' + verdict.cls + '"></i><span>' + esc(verdict.label) + '</span></div>' +
           '<div class="muted small">' + (day.worst ? '最嚴重：' + esc((SEVERITY[day.worst] || [day.worst])[0]) : '') + (day.missing_checks.length && day.checks.length ? '，缺 ' + day.missing_checks.length + ' 項' : '') + '</div></div>';
       }).join('') + '</div>';
-      renderModelChecks(data);
+      renderModelChecks(data, meta);
     } catch (err) {
       sub.textContent = '';
       host.innerHTML = errorBox(err);

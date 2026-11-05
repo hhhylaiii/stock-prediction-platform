@@ -8,9 +8,9 @@ from tests.e2e.conftest import XSS_NAME, Seed
 pytestmark = pytest.mark.e2e
 
 
-def log(seed: Seed, check: str, severity: str, detail: dict[str, object]) -> None:
+def log(seed: Seed, check: str, severity: str, detail: dict[str, object], back: int = 1) -> None:
     DataQualityLog.objects.create(
-        date=seed.last_session, check_name=check, severity=severity, detail=detail
+        date=seed.sessions[-back], check_name=check, severity=severity, detail=detail
     )
 
 
@@ -76,3 +76,34 @@ def test_no_model_output_checks_yet(page: Page, live_server: LiveServer, seeded:
     page.goto(f"{live_server.url}/#models")
 
     expect(page.locator("#model-checks")).to_contain_text("還沒有模型輸出檢查。")
+
+
+def test_the_block_reads_the_last_day_monitored(
+    page: Page, live_server: LiveServer, seeded: Seed
+) -> None:
+    clean = {"share": 0.0, "flagged": 0, "n_stocks": 1842, "stocks": []}
+    log(seeded, "output_width_ratio", "info", clean, back=2)
+    edge = {"share": 0.1, "flagged": 184, "n_stocks": 1842, "stocks": ["2330"]}
+    log(seeded, "output_odds_vs_q50", "warning", edge, back=2)
+    log(seeded, "output_width_ratio", "info", clean, back=3)
+
+    page.goto(f"{live_server.url}/#models")
+
+    expect(page.locator("#model-checks-sub")).to_contain_text(seeded.sessions[-2].isoformat())
+    rows = page.locator("#model-checks .check")
+    expect(rows).to_have_count(2)
+    expect(rows.filter(has_text="區間寬度比異常")).to_contain_text("沒有標記")
+    odds = rows.filter(has_text="機率與中位數矛盾")
+    expect(odds).to_contain_text("少量標記，184／1,842 檔")
+    expect(odds.locator("i")).not_to_have_class("warn")
+
+
+def test_a_model_check_error_fails_the_strip_like_the_gate(
+    page: Page, live_server: LiveServer, seeded: Seed
+) -> None:
+    log(seeded, "model_alert", "error", {"reason": "outside_range"})
+
+    page.goto(f"{live_server.url}/#models")
+
+    expect(page.locator("#status")).to_contain_text("品質檢查未通過")
+    expect(page.locator("#quality-sub")).to_contain_text("模型輸出檢查有錯誤，當日不產出預測。")
