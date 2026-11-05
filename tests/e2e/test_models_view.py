@@ -115,6 +115,14 @@ def test_the_serving_models_are_listed_with_their_scores(
     expect(page.locator("#model-rules")).to_contain_text("覆蓋率不在 70%–90%")
 
 
+BARS_INSIDE_PLOT = """() => {
+  const plot = document.querySelector('#ic-chart .overlay').getBBox();
+  return [...document.querySelectorAll('#ic-chart rect.bar-model, #ic-chart rect.bar-baseline')]
+    .map(bar => bar.getBBox())
+    .every(box => box.y >= plot.y - 0.5 && box.y + box.height <= plot.y + plot.height + 0.5);
+}"""
+
+
 def test_the_monthly_chart_draws_24_months_and_marks_the_short_one(
     page: Page, live_server: LiveServer, scored: Seed
 ) -> None:
@@ -124,6 +132,7 @@ def test_the_monthly_chart_draws_24_months_and_marks_the_short_one(
     expect(chart.locator("rect.bar-model")).to_have_count(24)
     expect(chart.locator("rect.bar-baseline")).to_have_count(24)
     expect(chart.locator("rect.bar-model.partial")).to_have_count(1)
+    assert page.evaluate(BARS_INSIDE_PLOT) is True
     sub = page.locator("#ic-sub")
     expect(sub).to_contain_text("LightGBM 有 21 個月高於 Ridge")
     expect(sub).to_contain_text("負值月份 2 個")

@@ -654,11 +654,17 @@
     }
   }
 
+  function icTicks(lo, hi) {
+    const step = [0.01, 0.02, 0.05, 0.1, 0.2].find(s => (hi - lo) / s <= 5) || 0.5;
+    const first = Math.floor(lo / step + 1e-9), last = Math.max(first + 1, Math.ceil(hi / step - 1e-9));
+    return Array.from({ length: last - first + 1 }, (_, k) => Number(((first + k) * step).toFixed(2)));
+  }
+
   function drawIcChart(host, rows, meta) {
     const model = modelName(meta.model_type), baseline = modelName(meta.baseline);
     const values = rows.flatMap(row => [row.model, row.baseline]).filter(has);
     const W = 1280, H = 300, padL = 48, padR = 24, padT = 16, padB = 32, innerW = W - padL - padR, innerH = H - padT - padB;
-    const ticks = niceTicks(Math.min(0, ...values), Math.max(0, ...values), 5);
+    const ticks = icTicks(Math.min(0, ...values), Math.max(0, ...values));
     const vMin = ticks[0], vMax = ticks[ticks.length - 1];
     const y = v => padT + (vMax - v) / (vMax - vMin) * innerH, y0 = y(0), gw = innerW / rows.length;
     const bar = (cls, i, v, dx) => !has(v) ? '' : '<rect class="' + cls + (rows[i].complete ? '' : ' partial') + '" x="' + f1(padL + i * gw + gw / 2 + dx) + '" y="' + f1(Math.min(y(v), y0)) + '" width="' + f1(Math.max(2, gw / 2 - 3)) + '" height="' + f1(Math.abs(y(v) - y0)) + '" rx="2" fill="' + (cls === 'bar-model' ? 'var(--model)' : 'var(--ink-4)') + '"' + (rows[i].complete ? '' : ' fill-opacity="0.35"') + '></rect>';
