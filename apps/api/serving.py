@@ -16,7 +16,15 @@ SERVING = (ModelStatus.ACTIVE, ModelStatus.DEGRADED)
 DEFAULT_HORIZON = 20
 MONITOR_DAYS = 60
 MONITOR_DIGITS = 4
-RUN_FIELDS = ("model_type", "version", "status", "train_start", "train_end", "created_at")
+RUN_FIELDS = (
+    "run_key",
+    "model_type",
+    "version",
+    "status",
+    "train_start",
+    "train_end",
+    "created_at",
+)
 SERVING_FIELDS = ("run_id", "run__objective", "horizon", *(f"run__{name}" for name in RUN_FIELDS))
 
 
@@ -31,6 +39,7 @@ class ServingRun:
     run_id: str
     objective: str
     horizon: int
+    run_key: str
     model_type: str
     version: str
     status: str

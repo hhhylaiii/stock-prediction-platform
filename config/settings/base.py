@@ -252,6 +252,7 @@ ALERT_TIMEOUT = env.float("ALERT_TIMEOUT", default=10.0)
 API_PAGE_SIZE = env.int("API_PAGE_SIZE", default=20)
 API_MAX_PAGE_SIZE = env.int("API_MAX_PAGE_SIZE", default=100)
 API_THROTTLE_RATE = env.str("API_THROTTLE_RATE", default="300/min")
+API_FULL_MONTH_DAYS = env.int("API_FULL_MONTH_DAYS", default=10)
 REST_FRAMEWORK = {
     "DEFAULT_RENDERER_CLASSES": ["rest_framework.renderers.JSONRenderer"],
     "DEFAULT_PARSER_CLASSES": ["rest_framework.parsers.JSONParser"],
