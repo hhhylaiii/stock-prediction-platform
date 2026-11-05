@@ -5,7 +5,6 @@ import pytest
 from apps.api.pricing import (
     QUANTILE,
     VOLATILITY,
-    Interval,
     choose_interval,
     price_at,
     quantile_interval,
@@ -21,13 +20,9 @@ def test_predicted_price_is_close_times_one_plus_return() -> None:
 def test_quantile_interval_converts_both_ends_on_the_close() -> None:
     interval = quantile_interval(200.0, -0.05, 0.12)
 
-    assert interval == Interval(
-        low=pytest.approx(190.0),
-        high=pytest.approx(224.0),
-        ret_low=-0.05,
-        ret_high=0.12,
-        source=QUANTILE,
-    )
+    assert interval.low == pytest.approx(190.0)
+    assert interval.high == pytest.approx(224.0)
+    assert (interval.ret_low, interval.ret_high, interval.source) == (-0.05, 0.12, QUANTILE)
 
 
 def test_volatility_interval_is_1_28_sigma_over_the_horizon() -> None:

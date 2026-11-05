@@ -8,6 +8,7 @@ import pytest
 from django.core.cache import cache
 
 from apps.market.models import DailyPrice, Market, StockMaster, TradingCalendar
+from apps.research.models import ModelRun, Prediction
 
 TAIPEI = ZoneInfo("Asia/Taipei")
 CALENDAR_START = date(2026, 7, 1)
@@ -103,3 +104,41 @@ def add_bars(
             )
         )
     return DailyPrice.objects.bulk_create(rows)
+
+
+def add_model_run(
+    run_id: str,
+    objective: str,
+    status: str = "active",
+    model_type: str = "lightgbm",
+    version: str = "2026-10",
+    created_at: datetime | None = None,
+) -> ModelRun:
+    return ModelRun.objects.create(
+        run_id=run_id,
+        run_key=f"{objective}-serving",
+        model_type=model_type,
+        objective=objective,
+        version=version,
+        train_start=date(2023, 10, 1),
+        train_end=date(2026, 9, 30),
+        feature_hash="f" * 64,
+        status=status,
+        created_at=created_at or taipei(2026, 10, 1),
+    )
+
+
+def add_predictions(
+    run: ModelRun, day: date, horizon: int, rows: dict[str, dict[str, Any]]
+) -> list[Prediction]:
+    """One prediction row per stock; in_universe defaults to True."""
+    return Prediction.objects.bulk_create(
+        Prediction(
+            run=run,
+            stock_id=stock_id,
+            date=day,
+            horizon=horizon,
+            **{"in_universe": True, **fields},
+        )
+        for stock_id, fields in rows.items()
+    )
