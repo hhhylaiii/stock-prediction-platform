@@ -4,7 +4,7 @@ from typing import Any
 
 import pandas as pd
 import pytest
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, connection, transaction
 from django.db.models import ProtectedError
 
 from apps.etl.upsert import upsert
@@ -98,6 +98,14 @@ def test_monitor_check_constraints(
 ) -> None:
     with pytest.raises(IntegrityError, match=constraint), transaction.atomic():
         monitor(**changes).save()
+
+
+def test_monitor_needs_a_recorded_run() -> None:
+    with connection.cursor() as cursor:
+        cursor.execute("SET CONSTRAINTS ALL IMMEDIATE")
+
+    with pytest.raises(IntegrityError, match="model_monitor_run_id"), transaction.atomic():
+        monitor(run_id="never-trained").save()
 
 
 def test_a_monitored_run_cannot_be_deleted(model_run: ModelRun) -> None:
