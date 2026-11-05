@@ -144,7 +144,7 @@ def test_fit_rank_trains_on_tradable_universe_rows_of_the_window_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     window = fold()
-    raw = raw_panel(window.train_start, window.test_end)
+    raw = raw_panel(CALENDAR.shift(window.train_start, -30), window.test_end)
     labels = labels_for(raw)
     inputs = rank_inputs(raw, FEATURES)
     sizes: list[int] = []
