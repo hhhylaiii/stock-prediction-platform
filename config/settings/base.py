@@ -230,6 +230,19 @@ ETL_MAX_CONSECUTIVE_REJECTIONS = env.int("ETL_MAX_CONSECUTIVE_REJECTIONS", defau
 ALERT_WEBHOOK_URL = env.str("ALERT_WEBHOOK_URL", default="")
 ALERT_TIMEOUT = env.float("ALERT_TIMEOUT", default=10.0)
 
+API_PAGE_SIZE = env.int("API_PAGE_SIZE", default=20)
+API_MAX_PAGE_SIZE = env.int("API_MAX_PAGE_SIZE", default=100)
+API_THROTTLE_RATE = env.str("API_THROTTLE_RATE", default="300/min")
+REST_FRAMEWORK = {
+    "DEFAULT_RENDERER_CLASSES": ["rest_framework.renderers.JSONRenderer"],
+    "DEFAULT_PARSER_CLASSES": ["rest_framework.parsers.JSONParser"],
+    "DEFAULT_AUTHENTICATION_CLASSES": [],
+    "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.AllowAny"],
+    "DEFAULT_THROTTLE_CLASSES": ["apps.api.throttling.ApiThrottle"],
+    "EXCEPTION_HANDLER": "apps.api.envelope.exception_handler",
+    "NUM_PROXIES": env.int("API_NUM_PROXIES", default=0),
+}
+
 RESEARCH_CACHE_DIR = Path(
     env.str("RESEARCH_CACHE_DIR", default="") or BASE_DIR / "artifacts" / "predictions"
 )
