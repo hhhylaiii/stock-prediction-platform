@@ -18,6 +18,7 @@ from apps.api.serving import (
     Slot,
     best_runs,
     eligible,
+    interval_alert,
     roles_for,
     serving_run,
 )
@@ -25,7 +26,7 @@ from apps.api.sessions import load_calendar
 from apps.api.stocks import require_stock
 from apps.api.views import ReadOnlyView
 from apps.market.calendar import CalendarError
-from apps.research.models import FeatureDaily, LabelDaily, ModelStatus
+from apps.research.models import FeatureDaily, LabelDaily
 
 HISTORY_ROLES = ("return", "interval", "volatility")
 ROW_FIELDS = ("date", "ret_pred", "q10", "q50", "q90", "vol_pred", "in_universe")
@@ -95,7 +96,7 @@ def outcome(
         q90=band_row.get("q90"),
         vol=part("volatility")[1].get("vol_pred"),
         tech_vol=tech_vol,
-        quantile_alert=band_run is not None and band_run.status == ModelStatus.DEGRADED,
+        quantile_alert=interval_alert(band_run, day),
     )
     band = None
     if interval is not None:

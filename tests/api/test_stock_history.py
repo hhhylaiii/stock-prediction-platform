@@ -6,6 +6,7 @@ import pytest
 from django.test import Client
 from pytest_django import DjangoAssertNumQueries
 
+from apps.api.serving import warn_undated
 from apps.research.models import FeatureDaily, LabelDaily, ModelRun
 from tests.api.conftest import (
     SESSIONS,
@@ -142,8 +143,9 @@ def test_each_date_uses_the_run_that_served_it(client: Client, history: ModelRun
 
 
 def test_a_degraded_quantile_run_is_judged_on_its_volatility_band(
-    client: Client, history: ModelRun
+    client: Client, history: ModelRun, caplog: pytest.LogCaptureFixture
 ) -> None:
+    warn_undated.cache_clear()
     ModelRun.objects.filter(pk="quantile-h20").update(status="degraded")
     vol = serving("vol-h20", "volatility")
     add_predictions(vol, LAST_LABELLED, 20, {"2330": {"vol_pred": 0.3}})
@@ -151,6 +153,9 @@ def test_a_degraded_quantile_run_is_judged_on_its_volatility_band(
 
     rows = rows_of(envelope_of(client.get("/api/stocks/2330/history")))
 
+    assert [r.getMessage() for r in caplog.records if r.levelname == "WARNING"] == [
+        "degraded run quantile-h20 has no params.degraded_on; its band is set aside on every day"
+    ]
     assert rows[0]["interval_source"] == "volatility"
     assert rows[0]["interval"] == {
         "ret_low": round(0.01 - spread, 6),
@@ -293,3 +298,35 @@ def test_history_query_count(
 ) -> None:
     with django_assert_max_num_queries(6):
         client.get("/api/stocks/2330/history")
+
+
+@pytest.mark.parametrize("status", ["degraded", "retired"])
+def test_the_band_is_set_aside_only_from_the_degraded_on_day(
+    client: Client, history: ModelRun, status: str
+) -> None:
+    expected = picks(LABELLED, 20)
+    ModelRun.objects.filter(pk="quantile-h20").update(
+        status=status, params={"degraded_on": expected[1].isoformat()}
+    )
+    vol = serving("vol-h20", "volatility")
+    for day in expected[:3]:
+        add_predictions(vol, day, 20, {"2330": {"vol_pred": 0.3}})
+
+    rows = rows_of(envelope_of(client.get("/api/stocks/2330/history")))
+
+    assert [row["interval_source"] for row in rows[:3]] == ["volatility", "volatility", "quantile"]
+    assert rows[2]["interval"] == {"ret_low": -0.05, "ret_high": 0.08}
+
+
+def test_an_unreadable_degraded_on_falls_back_to_every_day(
+    client: Client, history: ModelRun, caplog: pytest.LogCaptureFixture
+) -> None:
+    warn_undated.cache_clear()
+    ModelRun.objects.filter(pk="quantile-h20").update(
+        status="degraded", params={"degraded_on": "soon"}
+    )
+
+    rows = rows_of(envelope_of(client.get("/api/stocks/2330/history")))
+
+    assert all(row["interval"] is None for row in rows)
+    assert "quantile-h20" in caplog.text

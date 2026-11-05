@@ -449,3 +449,18 @@ def test_the_first_calendar_session_has_no_previous_rank(client: Client, db: Non
     row = envelope_of(client.get("/api/predictions"))["data"][0]
 
     assert (row["rank"], row["prev_rank"], row["close"]) == (1, None, 900.0)
+
+
+@pytest.mark.parametrize(
+    ("degraded_on", "source"), [("2026-10-30", "volatility"), ("2026-11-02", "quantile")]
+)
+def test_a_degraded_band_counts_from_its_degraded_on_day(
+    client: Client, runs: Runs, degraded_on: str, source: str
+) -> None:
+    ModelRun.objects.filter(pk="quantile-h20").update(
+        status="degraded", params={"degraded_on": degraded_on}
+    )
+
+    row = by_code(envelope_of(client.get("/api/predictions")))["8299"]
+
+    assert row["interval_source"] == source

@@ -15,6 +15,7 @@ from apps.api.pricing import Interval, choose_interval, price_at
 from apps.api.serving import (
     ServingRun,
     Slot,
+    interval_alert,
     latest_served_date,
     ranks_on,
     recent_mean,
@@ -235,7 +236,7 @@ def merged_rows(
         return []
     stock_ids = [row["stock_id"] for row in page]
     band = runs.get(roles["interval"]) if "interval" in roles else None
-    alert = band is not None and band.status == ModelStatus.DEGRADED
+    alert = interval_alert(band, day)
     parts = parts_of(day, roles, runs, stock_ids)
     lacking = [
         row["stock_id"]
