@@ -1,5 +1,5 @@
 from dataclasses import replace
-from datetime import date, timedelta
+from datetime import date
 from io import StringIO
 from pathlib import Path
 from typing import Any
@@ -11,7 +11,7 @@ from django.core.management import call_command
 from django.core.management.base import CommandError
 
 from apps.market.calendar import TradingDays
-from apps.market.models import DailyPrice, StockMaster, TradingCalendar
+from apps.market.models import DailyPrice, StockMaster
 from apps.research import baseline_runs
 from apps.research.baseline_runs import BASELINE, recipe, run_folds, shuffle_check
 from apps.research.baselines import PENALTY_GRID, historical_quantiles
@@ -37,107 +37,26 @@ from apps.research.runs import (
     load_model,
 )
 from apps.research.training import LINEAR_FEATURES, linear_features, linear_inputs
-from apps.research.walkforward import Fold, WalkForwardConfig, generate_folds
-
-pytestmark = pytest.mark.django_db
-START, END = date(2016, 1, 1), date(2016, 12, 31)
-STOCKS = [f"{1100 + k}" for k in range(40)]
-KEPT = ["tech_ret_1d", "tech_ret_60d", "tech_vol_20d"]
-SCREENED = linear_features(KEPT)
-CONFIG = WalkForwardConfig(
-    train_months=6,
-    test_months=1,
-    step_months=1,
-    valid_months=2,
-    data_start=START,
-    first_test=date(2016, 9, 1),
-    tuning_end=date(2016, 9, 30),
-    holdout_start=date(2016, 12, 1),
+from apps.research.walkforward import Fold, generate_folds
+from tests.research.run_panels import (
+    CONFIG,
+    END,
+    KEPT,
+    SCREENED,
+    START,
+    STOCKS,
+    fitted_runs,
+    folds,
+    research,
+    weekdays,
 )
 
-
-def record_screening(kept: list[str]) -> ModelRun:
-    return ModelRun.objects.create(
-        run_id="screen-1.screening",
-        run_key="screen-1",
-        model_type=SCREENING_MODEL,
-        objective="rank",
-        version="1",
-        train_start=START,
-        train_end=date(2016, 6, 30),
-        params={"unscreened": []},
-        feature_list=kept,
-        lib_versions={},
-        feature_hash="0" * 64,
-    )
-
-
-def fitted_runs() -> Any:
-    return ModelRun.objects.exclude(model_type=SCREENING_MODEL)
-
-
-def weekdays() -> list[date]:
-    days = (START + timedelta(days=n) for n in range((END - START).days + 1))
-    return [day for day in days if day.weekday() < 5]
+pytestmark = pytest.mark.django_db
 
 
 @pytest.fixture
-def panel(settings: Any, tmp_path: Path) -> Path:
-    """A year of 40 stocks whose tech_ret_1d drives the labels; 1139 is outside the universe."""
-    settings.RESEARCH_CACHE_DIR = tmp_path / "predictions"
-    settings.MODEL_DIR = tmp_path / "models"
-    settings.FEATURE_PARQUET_DIR = tmp_path / "features"
-    rng = np.random.default_rng(3)
-    days = weekdays()
-    TradingCalendar.objects.bulk_create(
-        TradingCalendar(date=day, is_trading_day=day.weekday() < 5)
-        for day in (START + timedelta(days=n) for n in range((END - START).days + 1))
-    )
-    features, labels = [], []
-    for day in days:
-        signal = rng.normal(size=len(STOCKS))
-        noise = rng.normal(size=len(STOCKS))
-        ranks = pd.Series(signal + noise).rank(pct=True).to_numpy()
-        for k, stock in enumerate(STOCKS):
-            features.append(
-                FeatureDaily(
-                    stock_id=stock,
-                    date=day,
-                    in_universe=stock != "1139",
-                    tech_ret_1d=float(signal[k]),
-                    tech_ret_60d=0.01 * k,
-                    tech_vol_20d=0.2 + 0.01 * k,
-                )
-            )
-            ret = 0.01 * float(signal[k] + noise[k])
-            for horizon in (5, 20):
-                labels.append(
-                    LabelDaily(
-                        stock_id=stock,
-                        date=day,
-                        horizon=horizon,
-                        fwd_ret=ret,
-                        fwd_ret_open=ret,
-                        fwd_rank_pct=float(ranks[k]),
-                        fwd_vol_20d=0.3 if horizon == 20 else None,
-                        fwd_up_5pct=bool(signal[k] + noise[k] > 0.5) if horizon == 20 else None,
-                        untradable_t1=False,
-                    )
-                )
-    FeatureDaily.objects.bulk_create(features)
-    LabelDaily.objects.bulk_create(labels)
-    export_year(2016, settings.FEATURE_PARQUET_DIR)
-    record_screening(KEPT)
-    return Path(settings.FEATURE_PARQUET_DIR)
-
-
-def folds() -> list[Fold]:
-    calendar = TradingDays(weekdays(), START, END)
-    return generate_folds(calendar, END, CONFIG)
-
-
-def research() -> list[Fold]:
-    return [fold for fold in folds() if not fold.holdout]
+def panel(run_panel: Path) -> Path:
+    return run_panel
 
 
 def test_rank_folds_cache_ridge_scores_for_every_test_row(panel: Path) -> None:

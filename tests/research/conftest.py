@@ -1,8 +1,11 @@
 from datetime import date, timedelta
+from pathlib import Path
+from typing import Any
 
 import pytest
 
 from apps.market.calendar import TradingDays
+from tests.research.run_panels import build_panel
 
 
 def weekday_calendar(start: date, end: date) -> TradingDays:
@@ -18,3 +21,9 @@ def weekday_calendar(start: date, end: date) -> TradingDays:
 @pytest.fixture(scope="session")
 def long_calendar() -> TradingDays:
     return weekday_calendar(date(2010, 1, 1), date(2026, 12, 31))
+
+
+@pytest.fixture
+def run_panel(settings: Any, tmp_path: Path, db: None) -> Path:
+    """Feature partitions, labels and a screening for the walk-forward runner tests."""
+    return build_panel(settings, tmp_path)
