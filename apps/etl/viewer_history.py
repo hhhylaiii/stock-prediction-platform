@@ -12,7 +12,6 @@ from apps.etl.mops_history import IFRS_FROM, quarters_between
 from apps.etl.statement_summary import REPORTS, previous_period, statement_rows
 from apps.etl.statement_viewer import parse_viewer
 
-STATEMENT_VIEWER = "statement_viewer"
 KINDS = ("C", "A")
 Figures = dict[str, dict[str, float | None]]
 Page = Callable[[str, str], str]
@@ -33,19 +32,20 @@ def viewer_periods(
 def viewer_frame(
     stock_id: str, periods: list[str], stored: set[str], page: Page, columns: list[str]
 ) -> pd.DataFrame:
-    """Rows for the quarters not stored, each against the quarter before it as the scans do."""
+    """Rows for the quarters not stored, and for stored ones whose quarter before was read too."""
     missing = [period for period in periods if period not in stored]
     reports = _reports(stock_id, _needed(missing), page)
     records: list[dict[str, Any]] = []
-    for period in missing:
+    for period in periods:
         current = reports.get(period)
-        if current is None:
+        first = period.endswith("Q1")
+        before = None if first else reports.get(previous_period(period))
+        if current is None or (period in stored and not first and before is None):
             continue
-        before = None if period.endswith("Q1") else reports.get(previous_period(period))
-        for row in statement_rows(
+        rows = statement_rows(
             _summary(stock_id, current), _summary(stock_id, before), int(period[-1])
-        ):
-            records.append({**row, "period": period})
+        )
+        records.extend({**row, "period": period} for row in rows)
     frame = pd.DataFrame(records, columns=columns, dtype=object)
     frame.attrs["absent"] = [period for period in missing if reports.get(period) is None]
     return frame

@@ -1,3 +1,4 @@
+import re
 from collections.abc import Callable
 from decimal import Decimal
 from pathlib import Path
@@ -115,3 +116,21 @@ def test_a_page_in_other_units_is_refused(page: Callable[[str], str]) -> None:
     text = page("t164sb01_6211_2013_1_C.html").replace("新臺幣仟元", "新臺幣元")
     with pytest.raises(SchemaChangedError, match="thousands"):
         parse_viewer(text, "6211", "2013-Q1")
+
+
+def test_the_first_filled_row_of_a_title_counts(page: Callable[[str], str]) -> None:
+    text = page("t164sb01_6211_2013_1_C.html")
+    row = re.search(r"<tr[^>]*><td[^>]*>[\s\u3000]*營業收入合計</td>(?:<td[^>]*>[^<]*</td>)+", text)
+    assert row is not None
+    text = text.replace(row[0], row[0] + row[0].replace("108,424", "1"), 1)
+    found = parse_viewer(text, "6211", "2013-Q1")
+    assert found is not None
+    assert found[INCOME][REVENUE] == 108_424
+
+
+def test_flows_of_another_year_are_not_taken_for_the_quarter(page: Callable[[str], str]) -> None:
+    text = page("t164sb01_6211_2013_2_C.html").replace(
+        "2013年01月01日至2013年06月30日", "2011年01月01日至2011年06月30日"
+    )
+    with pytest.raises(SchemaChangedError, match="no column for 2013-Q2"):
+        parse_viewer(text, "6211", "2013-Q2")

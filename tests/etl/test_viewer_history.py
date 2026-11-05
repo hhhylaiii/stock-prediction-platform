@@ -1,10 +1,25 @@
 from collections.abc import Callable
-from datetime import date
+from datetime import date, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
+import pandas as pd
 import pytest
+import responses
+import time_machine
+from django.conf import settings
+from responses import matchers
 
-from apps.etl.viewer_history import viewer_frame, viewer_periods
+from apps.etl.adapters.mops import MopsAdapter
+from apps.etl.models import DataQualityLog, RawMops
+from apps.etl.mops_history import MISMATCH_CHECKS, STATEMENT_VIEWER, insert_missing_history
+from apps.etl.ratelimit import RateLimit, RateLimiter
+from apps.etl.statement_scan import SCAN_COLUMNS
+from apps.etl.viewer_history import KINDS, viewer_frame, viewer_periods
+from apps.market.calendar import TradingDays
+from apps.market.models import FinancialStatement, StockMaster
+
+TAIPEI = ZoneInfo("Asia/Taipei")
 
 NOT_FILED = "檔案不存在!"
 COLUMNS = ["stock_id", "period", "fin_type", "revenue", "net_income", "operating_cf", "eps"]
@@ -18,9 +33,14 @@ def test_quarters_stop_at_the_last_one_ended_while_listed() -> None:
     assert (periods[0], periods[-1], len(periods)) == ("2013-Q1", "2015-Q4", 12)
 
 
-def test_a_listed_stock_stops_at_the_quarters_the_scan_still_watches() -> None:
-    periods = viewer_periods(date(2026, 1, 1), date(2026, 12, 31), date(2026, 10, 16), 45, None)
-    assert periods == ["2026-Q1", "2026-Q2"]
+@pytest.mark.parametrize(
+    ("today", "periods"),
+    [(date(2026, 10, 15), ["2026-Q1"]), (date(2026, 10, 16), ["2026-Q1", "2026-Q2"])],
+)
+def test_a_listed_stock_stops_at_the_quarters_the_scan_still_watches(
+    today: date, periods: list[str]
+) -> None:
+    assert viewer_periods(date(2026, 1, 1), date(2026, 12, 31), today, 45, None) == periods
 
 
 @pytest.fixture
@@ -95,3 +115,130 @@ def test_an_individual_filer_is_asked_for_that_kind_first_afterwards(
         ("2013-Q3", "A"),
         ("2013-Q4", "A"),
     ]
+
+
+TODAY = datetime(2026, 11, 6, 10, 0, tzinfo=TAIPEI)
+LIMIT = RateLimit(min_interval=6.0, max_retries=2, backoff_base=1.0, backoff_max=2.0, cooldown=5.0)
+SPAN = (date(2013, 1, 1), date(2013, 12, 31))
+
+
+@pytest.fixture
+def adapter(fake_sleep: Callable[[float], None]) -> MopsAdapter:
+    days = [date(2012, 1, 1) + timedelta(days=n) for n in range(15 * 366)]
+    calendar = TradingDays([d for d in days if d.weekday() < 5], days[0], days[-1])
+    return MopsAdapter(calendar, RateLimiter(LIMIT, sleep=fake_sleep))
+
+
+def serve(pages: dict[str, str], unfiled: tuple[str, ...] = ()) -> None:
+    for period in YEAR:
+        for kind in KINDS:
+            params = {"step": "1", "CO_ID": "6211", "SYEAR": period[:4], "SSEASON": period[-1]}
+            body = pages[period] if kind == "C" and period not in unfiled else NOT_FILED
+            responses.get(
+                f"{settings.MOPS_BASE_URL}/server-java/t164sb01",
+                body=body.encode("cp950"),
+                match=[matchers.query_param_matcher({**params, "REPORT_ID": kind})],
+            )
+
+
+def backfill(adapter: MopsAdapter) -> int:
+    with time_machine.travel(TODAY, tick=False):
+        return adapter.backfill(STATEMENT_VIEWER, ["6211"], *SPAN).rows
+
+
+@pytest.fixture
+def delisted() -> None:
+    StockMaster.objects.create(
+        stock_id="6211",
+        name="福登",
+        market="TPEx",
+        list_date=date(2000, 1, 1),
+        delist_date=date(2016, 1, 4),
+    )
+
+
+@pytest.mark.django_db
+@responses.activate
+@pytest.mark.usefixtures("delisted")
+def test_a_delisted_stock_gets_its_missing_quarters_at_the_conservative_date(
+    adapter: MopsAdapter, pages: dict[str, str]
+) -> None:
+    FinancialStatement.objects.create(
+        stock_id="6211",
+        period="2013-Q2",
+        fin_type="consolidated",
+        revenue=107_602_000,
+        operating_cf=1_000,
+        announce_date=date(2013, 8, 15),
+    )
+    serve(pages)
+    assert backfill(adapter) == 3
+    stored = {row.period: row for row in FinancialStatement.objects.filter(stock_id="6211")}
+    assert stored["2013-Q2"].operating_cf == 1_000
+    assert (stored["2013-Q3"].revenue, stored["2013-Q3"].announce_date) == (
+        96_580_000,
+        date(2013, 12, 3),
+    )
+    assert RawMops.objects.filter(dataset=STATEMENT_VIEWER).count() == 4
+    logged = DataQualityLog.objects.get(check_name=MISMATCH_CHECKS[STATEMENT_VIEWER])
+    assert (logged.detail["stock_id"], logged.detail["span"]) == (
+        "6211",
+        ["2013-01-01", "2013-12-31"],
+    )
+    assert [entry["period"] for entry in logged.detail["added"]] == [
+        "2013-Q1",
+        "2013-Q3",
+        "2013-Q4",
+    ]
+    (differing,) = logged.detail["rows"]
+    assert differing["fields"]["operating_cf"] == [1_000, 22_201_000]
+
+
+@pytest.mark.django_db
+@responses.activate
+@pytest.mark.usefixtures("delisted")
+def test_a_quarter_the_viewer_lacks_is_noted_and_not_written(
+    adapter: MopsAdapter, pages: dict[str, str]
+) -> None:
+    serve(pages, unfiled=("2013-Q4",))
+    assert backfill(adapter) == 3
+    logged = DataQualityLog.objects.get(check_name=MISMATCH_CHECKS[STATEMENT_VIEWER])
+    assert logged.detail["absent"] == ["2013-Q4"]
+    assert not FinancialStatement.objects.filter(period="2013-Q4").exists()
+
+
+@pytest.mark.django_db
+def test_the_viewer_goes_only_stock_by_stock(adapter: MopsAdapter) -> None:
+    with (
+        time_machine.travel(TODAY, tick=False),
+        pytest.raises(ValueError, match=r"use manage\.py backfill"),
+    ):
+        adapter.run(STATEMENT_VIEWER, *SPAN)
+
+
+@pytest.mark.django_db
+def test_each_stock_keeps_its_own_log_for_the_same_span() -> None:
+    for code in ("6211", "6212"):
+        record = dict.fromkeys(SCAN_COLUMNS)
+        frame = pd.DataFrame(
+            [
+                {
+                    **record,
+                    "stock_id": code,
+                    "period": "2013-Q1",
+                    "fin_type": "consolidated",
+                    "revenue": 1,
+                }
+            ],
+            columns=SCAN_COLUMNS,
+            dtype=object,
+        )
+        insert_missing_history(
+            STATEMENT_VIEWER,
+            frame,
+            lambda _: date(2013, 6, 3),
+            SPAN,
+            {"stock_id": code, "absent": []},
+        )
+    logs = DataQualityLog.objects.filter(check_name=MISMATCH_CHECKS[STATEMENT_VIEWER])
+    assert sorted(log.detail["stock_id"] for log in logs) == ["6211", "6212"]
