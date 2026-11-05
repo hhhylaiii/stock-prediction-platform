@@ -88,7 +88,7 @@ def test_meta_names_the_date_universe_and_serving_models(client: Client, runs: R
         "train_start": "2023-10-01",
         "train_end": "2026-09-30",
     }
-    assert meta["degraded"] == []
+    assert (meta["degraded"], meta["interval_alert"]) == ([], False)
 
 
 def test_a_stock_without_quantiles_gets_the_volatility_band(client: Client, runs: Runs) -> None:
@@ -461,6 +461,7 @@ def test_a_degraded_band_counts_from_its_degraded_on_day(
         status="degraded", params={"degraded_on": degraded_on}
     )
 
-    row = by_code(envelope_of(client.get("/api/predictions")))["8299"]
+    body = envelope_of(client.get("/api/predictions"))
 
-    assert row["interval_source"] == source
+    assert by_code(body)["8299"]["interval_source"] == source
+    assert body["meta"]["interval_alert"] is (source == "volatility")

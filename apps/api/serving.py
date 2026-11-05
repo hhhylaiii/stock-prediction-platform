@@ -3,6 +3,7 @@
 import calendar
 import functools
 import logging
+import re
 from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -32,6 +33,7 @@ RUN_FIELDS = (
     "created_at",
 )
 DEGRADED_ON = "run__params__degraded_on"
+ISO_DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
 SERVING_FIELDS = (
     "run_id",
     "run__objective",
@@ -70,13 +72,14 @@ class ServingRun:
 @functools.cache
 def warn_undated(run_id: str) -> None:
     logger.warning(
-        "degraded run %s has no params.degraded_on; its band is set aside on every day", run_id
+        "degraded run %s has no readable params.degraded_on; its band is set aside on every day",
+        run_id,
     )
 
 
 def day_of(value: object) -> date | None:
-    """The params.degraded_on date, or None when it is missing or not an ISO date."""
-    if not isinstance(value, str):
+    """The params.degraded_on date, or None unless it is a YYYY-MM-DD string."""
+    if not isinstance(value, str) or not ISO_DAY.fullmatch(value):
         return None
     try:
         return date.fromisoformat(value)
@@ -86,7 +89,7 @@ def day_of(value: object) -> date | None:
 
 def interval_alert(run: ServingRun | None, day: date) -> bool:
     """A quantile band gives way to the volatility one from the day its run was degraded."""
-    if run is None:
+    if run is None or run.status == ModelStatus.ACTIVE:
         return False
     if run.degraded_on is not None:
         return day >= run.degraded_on

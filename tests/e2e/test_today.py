@@ -297,3 +297,19 @@ def test_the_status_strip_says_when_no_prices_exist(
     page.goto(live_server.url)
 
     expect(page.locator("#status")).to_contain_text("尚無收盤資料")
+
+
+def test_a_band_degraded_after_the_shown_day_is_not_called_replaced(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    later = predicted.last_session + timedelta(days=1)
+    ModelRun.objects.filter(pk="quantile-h20").update(
+        status="degraded", params={"degraded_on": later.isoformat()}
+    )
+
+    page.goto(live_server.url)
+
+    expect(page.locator("#rows .trow").first).not_to_contain_text("（波動率區間）")
+    meta = page.locator("#today-meta")
+    expect(meta).to_contain_text("1 個模型降級中，結果僅供參考")
+    expect(meta).not_to_contain_text("區間改用波動率區間")

@@ -156,7 +156,7 @@
     if (monitor.coverage !== null && monitor.coverage !== undefined) parts.push('80% 區間的實際覆蓋率 ' + Math.round(monitor.coverage * 100) + '%');
     const degraded = meta.degraded || [];
     const degradedRuns = new Set((meta.models || []).filter(model => degraded.includes(model.role)).map(model => model.run_id)).size;
-    if (degraded.length) parts.push(degradedRuns + ' 個模型降級中，結果僅供參考' + (degraded.includes('interval') ? '，區間改用波動率區間' : ''));
+    if (degraded.length) parts.push(degradedRuns + ' 個模型降級中，結果僅供參考' + (meta.interval_alert ? '，區間改用波動率區間' : ''));
     return parts.join('，') + '。';
   }
 
