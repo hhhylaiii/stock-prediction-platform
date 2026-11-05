@@ -18,6 +18,7 @@ from apps.research.baseline_runs import (
     scope_features,
     shuffle_check,
 )
+from apps.research.gbdt import bag_seeds
 from apps.research.holdout import HoldoutError, is_holdout
 from apps.research.labels import latest_price_date
 from apps.research.runs import RunError
@@ -63,6 +64,12 @@ class Command(BaseCommand):
         parser.add_argument("--shuffle-check", action="store_true")
         parser.add_argument(
             "--seed", type=int, default=0, help="Seed of the shuffle check and of LightGBM."
+        )
+        parser.add_argument(
+            "--bags",
+            type=int,
+            default=1,
+            help="LightGBM seeds averaged per model: 1 for research folds, 5 for final runs.",
         )
 
     def _folds(self, options: dict[str, Any]) -> list[Fold]:
@@ -112,8 +119,11 @@ class Command(BaseCommand):
         scope, run_key = options["scope"], options["run_key"]
         if not scope or not run_key:
             raise CommandError("training needs --scope and --run-key")
+        if options["bags"] != 1 and options["model"] != lgbm_runs.MODEL:
+            raise CommandError(f"--bags bags LightGBM only, not --model {options['model']}")
         try:
             check_run_key(scope, run_key)
+            bag_seeds(options["seed"], options["bags"])
             if options["model"] == lgbm_runs.MODEL:
                 lgbm_runs.scope_features(scope)
             else:
@@ -133,5 +143,7 @@ class Command(BaseCommand):
     ) -> list[int]:
         directory, rerun = settings.FEATURE_PARQUET_DIR, options["rerun"]
         if options["model"] == lgbm_runs.MODEL:
-            return lgbm_runs.run_folds(scope, folds, run_key, directory, options["seed"], rerun)
+            return lgbm_runs.run_folds(
+                scope, folds, run_key, directory, options["seed"], rerun, options["bags"]
+            )
         return run_folds(scope, folds, run_key, directory, rerun)

@@ -13,7 +13,7 @@ from apps.market.models import DailyPrice, StockMaster
 from apps.research import baseline_runs, lgbm_runs
 from apps.research.baseline_runs import BASELINE
 from apps.research.features.store import export_year
-from apps.research.gbdt import BASE_PARAMS, seeded
+from apps.research.gbdt import BASE_PARAMS, Bagged, seeded
 from apps.research.holdout import HoldoutError
 from apps.research.lgbm_runs import MODEL, recipe, run_folds
 from apps.research.management.commands import train
@@ -273,3 +273,34 @@ def test_a_full_run_checks_the_screening_before_the_shuffle_check(
 
     with pytest.raises(CommandError, match="no feature screening"):
         call_command("train", model="lightgbm", scope="rank", run_key="rank-wf1")
+
+
+def test_bagged_rank_folds_average_their_seeds_and_record_them(panel: Path) -> None:
+    fold = research()[0]
+
+    run_folds("rank", [fold], "rank-wf1", panel, seed=1, bags=2)
+
+    run = ModelRun.objects.get(run_id=f"rank-wf1.lightgbm.h20.f{fold.index:03d}")
+    assert (run.params["bags"], run.params["bag_seeds"]) == (2, [1, 4])
+    booster = load_model("rank-wf1", run.run_id)
+    assert isinstance(booster, Bagged)
+    assert len(booster.boosters) == 2
+    raw = pd.read_parquet(panel / "year=2016" / "part-0.parquet")
+    inputs = rank_inputs(raw[raw["date"].between(fold.train_start, fold.test_end)], KEPT)
+    test = inputs[inputs["date"].between(fold.test_start, fold.test_end)]
+    cached = load_fold_predictions("rank-wf1", MODEL, fold)
+    np.testing.assert_allclose(cached["lightgbm_h20"].to_numpy(), booster.predict(test[KEPT]))
+    assert fold_notes("rank-wf1", MODEL, fold.index)["recipe"] == recipe("rank", KEPT, 1, bags=2)
+    assert recipe("rank", KEPT, 1, bags=2) != recipe("rank", KEPT, 1)
+    assert run_folds("rank", [fold], "rank-wf1", panel, seed=1, bags=2) == []
+    assert run_folds("rank", [fold], "rank-wf1", panel, seed=1) == [fold.index]
+    single = ModelRun.objects.get(run_id=run.run_id)
+    assert (single.params["bags"], single.params["bag_seeds"]) == (1, [1])
+
+
+def test_command_bags_lightgbm_and_refuses_bagged_baselines(command: Path) -> None:
+    call_command("train", model="lightgbm", scope="rank", run_key="rank-wf1", folds="0", bags=2)
+
+    assert ModelRun.objects.get(run_id="rank-wf1.lightgbm.h5.f000").params["bags"] == 2
+    with pytest.raises(CommandError, match="--bags"):
+        call_command("train", scope="rank", run_key="rank-wf1", folds="0", bags=2)

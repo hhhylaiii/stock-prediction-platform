@@ -40,12 +40,15 @@ def fit_rank(
     features: Sequence[str],
     seed: int,
     max_rounds: int = MAX_ROUNDS,
+    bags: int = 1,
 ) -> Boosted:
     """Fit on the fold's tradable universe rows, stopping on validation daily rank IC."""
     names = _stock_level(features)
     window = inputs[inputs["date"].between(fold.train_start, fold.train_end)]
     rows = training_rows(window, labels, RANK_LABEL)
-    return boost(rows, fold, names, RANK_LABEL, seed, feval=DailyRankIC, max_rounds=max_rounds)
+    return boost(
+        rows, fold, names, RANK_LABEL, seed, feval=DailyRankIC, max_rounds=max_rounds, bags=bags
+    )
 
 
 def prediction_frame(rows: pd.DataFrame, scores: np.ndarray) -> pd.DataFrame:

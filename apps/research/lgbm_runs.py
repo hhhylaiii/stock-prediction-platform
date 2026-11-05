@@ -26,7 +26,9 @@ from apps.research.gbdt import (
     BASE_PARAMS,
     EARLY_STOPPING_ROUNDS,
     FEVAL_EVERY,
+    Bagged,
     Boosted,
+    bag_seeds,
     seeded,
 )
 from apps.research.gbdt import MAX_ROUNDS as DEFAULT_MAX_ROUNDS
@@ -93,6 +95,7 @@ class Job:
     read: FoldInputs
     features: list[str]
     seed: int
+    bags: int
 
 
 @dataclass(frozen=True)
@@ -122,8 +125,8 @@ def _targets(scope: str) -> dict[str, object]:
     }
 
 
-def recipe(scope: str, features: list[str], seed: int) -> str:
-    """RECIPE_VERSION with a digest of a scope's features, targets, LightGBM settings and seed."""
+def recipe(scope: str, features: list[str], seed: int, bags: int = 1) -> str:
+    """RECIPE_VERSION with a digest of a scope's features, targets, LightGBM settings and seeds."""
     settings = {
         "scope": scope,
         "targets": _targets(scope),
@@ -132,6 +135,7 @@ def recipe(scope: str, features: list[str], seed: int) -> str:
         "early_stopping_rounds": EARLY_STOPPING_ROUNDS,
         "max_rounds": MAX_ROUNDS,
         "seed": seed,
+        "bags": bags,
     }
     listed = json.dumps(settings, sort_keys=True).encode()
     return f"{RECIPE_VERSION}-{hashlib.sha256(listed).hexdigest()[:12]}"
@@ -152,13 +156,13 @@ def scope_features(scope: str) -> list[str]:
 
 
 def _current_notes(
-    scope: str, fold: Fold, directory: Path, features: list[str], seed: int
+    scope: str, fold: Fold, directory: Path, features: list[str], seed: int, bags: int
 ) -> dict[str, str]:
     """Notes a fold cached now would carry: its features, labels and recipe."""
     return {
         "feature_hash": feature_hash(fold.train_start, fold.test_end, directory),
         "label_hash": label_digest(scope, fold),
-        "recipe": recipe(scope, features, seed),
+        "recipe": recipe(scope, features, seed, bags),
     }
 
 
@@ -170,7 +174,7 @@ def _mean(values: np.ndarray) -> float | None:
     return _plain(float(np.mean(values)))
 
 
-def _gains(booster: lgb.Booster, features: list[str]) -> dict[str, float]:
+def _gains(booster: lgb.Booster | Bagged, features: list[str]) -> dict[str, float]:
     gains = booster.feature_importance("gain")
     return {name: float(gain) for name, gain in zip(features, gains, strict=True)}
 
@@ -215,6 +219,8 @@ def _run(
         "horizon": horizon,
         "label": label,
         "lightgbm": {**BASE_PARAMS, **seeded(job.seed)},
+        "bags": job.bags,
+        "bag_seeds": bag_seeds(job.seed, job.bags),
         "max_rounds": MAX_ROUNDS,
         "early_stopping_rounds": EARLY_STOPPING_ROUNDS,
     }
@@ -242,7 +248,7 @@ def _rank(job: Job) -> FoldFit:
     columns, trained = {}, []
     for horizon in HORIZONS:
         labels = load_labels(fold.train_start, fold.eval_end, horizon)
-        boosted = fit_rank(inputs, labels, fold, features, job.seed, max_rounds=MAX_ROUNDS)
+        boosted = fit_rank(inputs, labels, fold, features, job.seed, MAX_ROUNDS, job.bags)
         test = inputs[read.test][features]
         columns[f"{MODEL}_h{horizon}"] = np.asarray(boosted.booster.predict(test))
         evaluated = _evaluated(job, inputs, labels, RANK_LABEL)
@@ -264,7 +270,7 @@ def _return(job: Job) -> FoldFit:
     fold, features = job.fold, job.features
     inputs, bins = raw_inputs(job.read.raw, fold, features)
     labels = load_labels(fold.train_start, fold.eval_end, RETURN_HORIZON)
-    fitted = fit_return(inputs, labels, fold, features, job.seed, max_rounds=MAX_ROUNDS)
+    fitted = fit_return(inputs, labels, fold, features, job.seed, MAX_ROUNDS, job.bags)
     booster = fitted.boosted.booster
     evaluated = _evaluated(job, inputs, labels, RETURN_LABEL)
     predicted = np.asarray(booster.predict(evaluated[features]))
@@ -293,7 +299,7 @@ def _quantiles(boosters: Mapping[str, Boosted], frame: pd.DataFrame, features: l
 
 def _quantile(job: Job, inputs: pd.DataFrame, labels: pd.DataFrame, bins: MarketBins) -> FoldFit:
     fold, features = job.fold, job.features
-    boosters = fit_quantiles(inputs, labels, fold, features, job.seed, max_rounds=MAX_ROUNDS)
+    boosters = fit_quantiles(inputs, labels, fold, features, job.seed, MAX_ROUNDS, job.bags)
     evaluated = _evaluated(job, inputs, labels, RETURN_LABEL)
     scored = _quantiles(boosters, evaluated, features)
     actual = evaluated[RETURN_LABEL].to_numpy(np.float64)
@@ -321,7 +327,7 @@ def _quantile(job: Job, inputs: pd.DataFrame, labels: pd.DataFrame, bins: Market
 
 def _volatility(job: Job, inputs: pd.DataFrame, labels: pd.DataFrame, bins: MarketBins) -> FoldFit:
     fold, features = job.fold, job.features
-    boosted = fit_volatility(inputs, labels, fold, features, job.seed, max_rounds=MAX_ROUNDS)
+    boosted = fit_volatility(inputs, labels, fold, features, job.seed, MAX_ROUNDS, job.bags)
     evaluated = _evaluated(job, inputs, labels, VOL_LABEL)
     error = volatility(boosted, evaluated, features) - evaluated[VOL_LABEL].to_numpy(np.float64)
     params = {
@@ -349,7 +355,7 @@ def _calibration(scored: pd.DataFrame, column: str, suffix: str) -> dict[str, fl
 
 def _probability(job: Job, inputs: pd.DataFrame, labels: pd.DataFrame, bins: MarketBins) -> FoldFit:
     fold, features = job.fold, job.features
-    fitted = fit_probability(inputs, labels, fold, features, job.seed, max_rounds=MAX_ROUNDS)
+    fitted = fit_probability(inputs, labels, fold, features, job.seed, MAX_ROUNDS, job.bags)
     booster = fitted.boosted.booster
     evaluated = _evaluated(job, inputs, labels, UP_LABEL)
     scored = evaluated[["date"]].assign(
@@ -394,7 +400,13 @@ FITS: dict[str, Callable[[Job], FoldFit]] = {
 
 
 def run_fold(
-    scope: str, fold: Fold, run_key: str, directory: Path, features: list[str], seed: int
+    scope: str,
+    fold: Fold,
+    run_key: str,
+    directory: Path,
+    features: list[str],
+    seed: int,
+    bags: int = 1,
 ) -> Path:
     """Fit one fold of a scope's boosters; the old cache goes first, the new one last."""
     if is_holdout(fold):
@@ -403,7 +415,7 @@ def run_fold(
     fold_path(run_key, MODEL, fold.index).unlink(missing_ok=True)
     labels_digest = label_digest(scope, fold)
     read = fold_inputs(fold, fold.train_start, fold.test_end, directory, features)
-    fitted = FITS[scope](Job(fold, run_key, read, features, seed))
+    fitted = FITS[scope](Job(fold, run_key, read, features, seed, bags))
     if label_digest(scope, fold) != labels_digest:
         raise RuntimeError(f"label_daily changed while fitting fold {fold.index}; run it again")
     for run, model in fitted.trained:
@@ -412,16 +424,21 @@ def run_fold(
     notes = {
         "feature_hash": read.feature_hash,
         "label_hash": labels_digest,
-        "recipe": recipe(scope, features, seed),
+        "recipe": recipe(scope, features, seed, bags),
     }
     return save_fold_predictions(run_key, MODEL, fold, rows.assign(**fitted.columns), notes=notes)
 
 
 def _stale(
-    scope: str, run_key: str, fold: Fold, directory: Path, features: list[str], seed: int
+    scope: str,
+    run_key: str,
+    fold: Fold,
+    directory: Path,
+    features: list[str],
+    seeds: tuple[int, int],
 ) -> bool:
     """Whether a cached fold's features, labels or recipe have changed since it was fitted."""
-    current = _current_notes(scope, fold, directory, features, seed)
+    current = _current_notes(scope, fold, directory, features, *seeds)
     return fold_notes(run_key, MODEL, fold.index) != current
 
 
@@ -432,6 +449,7 @@ def run_folds(
     directory: Path,
     seed: int = 0,
     rerun: bool = False,
+    bags: int = 1,
 ) -> list[int]:
     """Run a scope's folds without a current cache, or all with rerun; holdout is refused."""
     check_run_key(scope, run_key)
@@ -439,15 +457,13 @@ def run_folds(
     held = [fold.index for fold in chosen if is_holdout(fold)]
     if held:
         raise HoldoutError(f"folds {held} are holdout; they run once with the frozen design")
+    bag_seeds(seed, bags)
     features = scope_features(scope)
     missing = set(missing_folds(run_key, MODEL, chosen))
     ran = []
     for fold in chosen:
-        if (
-            rerun
-            or fold.index in missing
-            or _stale(scope, run_key, fold, directory, features, seed)
-        ):
-            run_fold(scope, fold, run_key, directory, features, seed)
+        stale = _stale(scope, run_key, fold, directory, features, (seed, bags))
+        if rerun or fold.index in missing or stale:
+            run_fold(scope, fold, run_key, directory, features, seed, bags)
             ran.append(fold.index)
     return ran

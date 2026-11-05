@@ -12,7 +12,7 @@ from apps.market.models import DailyPrice, StockMaster
 from apps.research import lgbm_runs, target_models
 from apps.research.baseline_runs import MAX_RUN_KEY
 from apps.research.features.store import export_year
-from apps.research.gbdt import BASE_PARAMS, seeded
+from apps.research.gbdt import BASE_PARAMS, Bagged, seeded
 from apps.research.holdout import HoldoutError
 from apps.research.lgbm_runs import MODEL, recipe, run_folds, run_id
 from apps.research.management.commands import train
@@ -432,3 +432,29 @@ def test_a_full_lightgbm_return_run_checks_the_screening_before_the_shuffle_chec
 
     with pytest.raises(CommandError, match="return scope fits on the screened features"):
         call_command("train", model="lightgbm", scope="return", run_key="return-wf1")
+
+
+def test_bagged_target_folds_bag_every_booster(panel: Path) -> None:
+    fold = research()[0]
+
+    run_folds("return", [fold], "return-wf1", panel, seed=2, bags=2)
+    run_folds("interval", [fold], "interval-wf1", panel, seed=2, bags=2)
+
+    saved = {
+        str(objective): load_model("interval-wf1", run_id("interval-wf1", objective, 20, fold))
+        for objective in lgbm_runs.INTERVAL_TAGS
+    }
+    saved["regression"] = load_model("return-wf1", run_id("return-wf1", "regression", 5, fold))
+    members = [
+        *saved["quantile"]["boosters"].values(),
+        saved["volatility"]["booster"],
+        saved["classification"]["booster"],
+        saved["regression"]["booster"],
+    ]
+    assert all(isinstance(member, Bagged) and len(member.boosters) == 2 for member in members)
+    runs = ModelRun.objects.filter(model_type="lightgbm")
+    assert runs.count() == 4
+    assert all(run.params["bag_seeds"] == [2, 5] for run in runs)
+    cached = load_fold_predictions("interval-wf1", MODEL, fold)
+    assert cached[INTERVAL_COLUMNS].notna().all().all()
+    assert (cached["lightgbm_q10_h20"] <= cached["lightgbm_q90_h20"]).all()
