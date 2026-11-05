@@ -48,7 +48,7 @@
     return out;
   }
 
-  const state = { h: 20, mkt: 'all', q: '', watchOnly: false, watch: new Set(), stock: '2330', chart: 'candle', stockToken: 0, todayToken: 0, page: 1 };
+  const state = { h: 20, mkt: 'all', q: '', watchOnly: false, watch: new Set(), stock: '2330', chart: 'candle', stockToken: 0, todayToken: 0, page: 1, watchCache: null };
   try { const c = localStorage.getItem('twp-chart'); if (c === 'line' || c === 'candle') state.chart = c; } catch (e) { state.chart = 'candle'; }
   try { const w = JSON.parse(localStorage.getItem('twp-watch') || '[]'); if (Array.isArray(w)) w.filter(c => STOCK_CODE.test(c)).forEach(c => state.watch.add(c)); } catch (e) { state.watch.clear(); }
   function saveWatch() { try { localStorage.setItem('twp-watch', JSON.stringify([...state.watch])); } catch (e) { return; } }
@@ -71,7 +71,8 @@
       const { data } = await api.get('status');
       const verdict = verdictOf(data.quality);
       const cls = verdict.cls === 'in' ? '' : ' ' + verdict.cls;
-      const parts = ['<span>' + esc(data.quality.date) + ' 收盤資料</span>', '<span><i class="dot' + cls + '"></i>品質檢查' + esc(verdict.label) + '</span>'];
+      const prices = data.price_date ? esc(data.price_date) + ' 收盤資料' : '尚無收盤資料';
+      const parts = ['<span>' + prices + '</span>', '<span><i class="dot' + cls + '"></i>品質檢查' + esc(verdict.label) + '</span>'];
       if (data.updated_at) parts.push('<span>' + esc(hhmm(data.updated_at)) + ' 更新</span>');
       if (!data.predictions_ready) parts.push('<span><i class="dot idle"></i>預測尚未產出</span>');
       if (data.degraded.length) parts.push('<span><i class="dot warn"></i>' + data.degraded.length + ' 個模型降級中</span>');
@@ -92,6 +93,7 @@
   const RANGE_SPAN = { 5: [-8, 12], 20: [-16, 24] };
   const SOURCE_NOTE = { volatility: '波動率區間', tech_vol_20d: '近 20 日波動估計' };
   const MODEL_NAMES = { lightgbm: 'LightGBM', ridge: 'Ridge', xgboost: 'XGBoost' };
+  const SEARCH_MAX = 32;
   const pctOf = (x, digits) => x === null || x === undefined ? '—' : sgn(x * 100, digits);
   const priceOf = x => x === null || x === undefined ? '—' : fmtPrice(x);
 
@@ -141,63 +143,82 @@
     const monitor = meta.monitor || {};
     if (monitor.rank_ic !== null && monitor.rank_ic !== undefined) parts.push('近 ' + monitor.rank_ic_days + ' 個評估日 rank IC ' + monitor.rank_ic.toFixed(3));
     if (monitor.coverage !== null && monitor.coverage !== undefined) parts.push('80% 區間的實際覆蓋率 ' + Math.round(monitor.coverage * 100) + '%');
-    if ((meta.degraded || []).length) parts.push('降級中的模型改用備援');
+    const degraded = meta.degraded || [];
+    if (degraded.length) parts.push(degraded.length + ' 個模型降級中，結果僅供參考' + (degraded.includes('interval') ? '，區間改用波動率區間' : ''));
     return parts.join('，') + '。';
   }
 
-  async function watchedRows() {
-    const codes = [...state.watch];
-    const results = await Promise.allSettled(codes.map(code => api.get('stocks/' + code + '/predictions')));
+  async function watchedStocks() {
+    const key = [...state.watch].join(',');
+    if (state.watchCache && state.watchCache.key === key) return state.watchCache.results;
+    const settled = await Promise.allSettled([...state.watch].map(code => api.get('stocks/' + code + '/predictions')));
+    const failed = settled.find(result => result.status === 'rejected' && result.reason.status !== 404);
+    if (failed) throw failed.reason;
+    const results = settled.filter(result => result.status === 'fulfilled').map(result => result.value.data);
+    state.watchCache = { key: key, results: results };
+    return results;
+  }
+
+  async function watchedToday() {
+    const entries = (await watchedStocks()).map(stock => stock.horizons.find(entry => entry.horizon === state.h)).filter(Boolean);
     const q = state.q.trim().toLowerCase();
-    return results
-      .filter(result => result.status === 'fulfilled')
-      .map(result => (result.value.data.horizons.find(entry => entry.horizon === state.h) || {}).prediction)
+    const rows = entries.map(entry => entry.prediction)
       .filter(row => row && (state.mkt === 'all' || row.market === state.mkt) && (!q || row.stock_id.toLowerCase().startsWith(q) || (row.name || '').toLowerCase().includes(q)))
       .sort((a, b) => (a.rank === null) - (b.rank === null) || a.rank - b.rank);
+    const latest = entries.filter(entry => entry.date).sort((a, b) => (a.date < b.date) - (a.date > b.date))[0];
+    return { rows: rows, meta: latest ? { date: latest.date, universe: latest.universe, models: latest.models, degraded: latest.degraded } : {} };
   }
 
   function emptyHtml(meta) {
-    if (!meta.date) return '<div class="empty" id="today-empty">預測資料尚未產出。模型上線後，這裡會列出全市場的排名。</div>';
     if (state.q.trim()) return '<div class="empty">沒有符合「' + esc(state.q.trim()) + '」的股票。試試代號或公司名稱的一部分。</div>';
+    if (watchingOnly()) return '<div class="empty">追蹤的股票沒有這一期的預測。</div>';
+    if (!meta.date) return '<div class="empty" id="today-empty">預測資料尚未產出。模型上線後，這裡會列出全市場的排名。</div>';
     return '<div class="empty">沒有符合條件的股票。</div>';
+  }
+
+  function countText(meta, shown) {
+    if (!meta.total) return '';
+    if (state.mkt !== 'all' || state.q.trim()) return '符合條件 ' + fmtInt(meta.total) + ' 檔';
+    const first = (meta.page - 1) * meta.page_size + 1;
+    const span = fmtInt(first) + '–' + fmtInt(first + shown - 1);
+    if (meta.total === meta.universe) return '第 ' + span + ' 名，共 ' + fmtInt(meta.total) + ' 檔';
+    return '第 ' + span + ' 列，共 ' + fmtInt(meta.total) + ' 檔，其中 ' + fmtInt(meta.universe) + ' 檔在訓練範圍內';
+  }
+
+  async function fetchToday() {
+    if (watchingOnly()) return watchedToday();
+    const params = { horizon: state.h, page: state.page };
+    if (state.mkt !== 'all') params.market = state.mkt;
+    if (state.q.trim()) params.q = state.q.trim().slice(0, SEARCH_MAX);
+    const { data, meta } = await api.get('predictions', params);
+    return { rows: data, meta: meta };
   }
 
   async function loadToday() {
     const token = ++state.todayToken;
     controls();
-    let rows, meta;
+    prevBtn.disabled = nextBtn.disabled = true;
+    let result;
     try {
-      if (watchingOnly()) {
-        rows = await watchedRows();
-        meta = {};
-      } else {
-        const params = { horizon: state.h, page: state.page };
-        if (state.mkt !== 'all') params.market = state.mkt;
-        if (state.q.trim()) params.q = state.q.trim();
-        ({ data: rows, meta } = await api.get('predictions', params));
-      }
+      result = await fetchToday();
     } catch (err) {
       if (token !== state.todayToken) return;
       rowsEl.innerHTML = errorBox(err);
-      countEl.textContent = '';
-      prevBtn.disabled = nextBtn.disabled = true;
+      countEl.textContent = todayMetaEl.textContent = '';
       return;
     }
     if (token !== state.todayToken) return;
-    const empty = watchingOnly() ? '<div class="empty">追蹤的股票沒有這一期的預測。</div>' : emptyHtml(meta);
-    rowsEl.innerHTML = rows.map(todayRowHtml).join('') || empty;
+    const { rows, meta } = result;
+    rowsEl.innerHTML = rows.map(todayRowHtml).join('') || emptyHtml(meta);
+    todayMetaEl.textContent = todayMetaText(meta);
     if (watchingOnly()) {
       countEl.textContent = '追蹤中的 ' + rows.length + ' 檔';
-      prevBtn.disabled = nextBtn.disabled = true;
       return;
     }
-    todayMetaEl.textContent = todayMetaText(meta);
-    const filtered = state.mkt !== 'all' || state.q.trim();
-    const first = (meta.page - 1) * meta.page_size + 1;
-    countEl.textContent = !meta.total ? '' : filtered ? '符合條件 ' + fmtInt(meta.total) + ' 檔' :
-      '第 ' + first + '–' + (first + rows.length - 1) + ' 名，共 ' + fmtInt(meta.universe) + ' 檔';
-    prevBtn.disabled = meta.page <= 1;
-    nextBtn.disabled = meta.page >= meta.pages;
+    state.page = meta.page || 1;
+    countEl.textContent = countText(meta, rows.length);
+    prevBtn.disabled = state.page <= 1;
+    nextBtn.disabled = state.page >= (meta.pages || 1);
   }
 
   function reloadToday() { state.page = 1; loadToday(); }
@@ -205,7 +226,7 @@
   document.querySelectorAll('[data-h]').forEach(b => b.addEventListener('click', () => { state.h = Number(b.dataset.h); reloadToday(); }));
   document.querySelectorAll('[data-mkt]').forEach(b => b.addEventListener('click', () => { state.mkt = b.dataset.mkt; reloadToday(); }));
   qEl.addEventListener('input', () => { state.q = qEl.value; clearTimeout(searchTimer); searchTimer = setTimeout(reloadToday, 250); });
-  watchOnlyBtn.addEventListener('click', () => { state.watchOnly = !state.watchOnly; reloadToday(); });
+  watchOnlyBtn.addEventListener('click', () => { state.watchOnly = !state.watchOnly; state.watchCache = null; reloadToday(); });
   prevBtn.addEventListener('click', () => { state.page -= 1; loadToday(); });
   nextBtn.addEventListener('click', () => { state.page += 1; loadToday(); });
 

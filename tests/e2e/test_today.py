@@ -4,7 +4,9 @@ import pytest
 from playwright.sync_api import Page, expect
 from pytest_django.live_server_helper import LiveServer
 
-from tests.e2e.conftest import EXTRA_STOCKS, TPEX_EXTRAS, XSS_NAME, Seed
+from apps.etl.models import EtlRun
+from apps.research.models import ModelMonitor, ModelRun, Prediction
+from tests.e2e.conftest import EXTRA_STOCKS, TPEX_EXTRAS, XSS_NAME, Seed, at
 
 pytestmark = pytest.mark.e2e
 
@@ -89,6 +91,67 @@ def test_pages_move_through_the_ranking(
     expect(page.locator("#prev-page")).to_be_enabled()
 
 
+def test_a_double_click_moves_one_page(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    page.goto(live_server.url)
+    expect(page.locator("#rows .trow")).to_have_count(20)
+
+    page.locator("#next-page").dblclick()
+
+    expect(page.locator("#count")).to_have_text("第 21–25 名，共 25 檔")
+    expect(page.locator("#rows .error")).to_have_count(0)
+
+
+def test_rows_outside_the_universe_are_flagged_and_counted_apart(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    Prediction.objects.filter(run_id="rank-h20", stock_id=EXTRA_STOCKS[-1]).update(
+        in_universe=False, rank=None, pct=None
+    )
+    page.goto(live_server.url)
+    expect(page.locator("#count")).to_have_text("第 1–20 列，共 25 檔，其中 24 檔在訓練範圍內")
+
+    page.locator("#next-page").click()
+
+    last = page.locator("#rows .trow").last
+    expect(last).to_contain_text("訓練範圍外")
+    expect(last.locator(".rank")).to_have_text("—")
+    expect(page.locator("#count")).to_have_text("第 21–25 列，共 25 檔，其中 24 檔在訓練範圍內")
+
+
+def test_degraded_models_monitoring_and_band_sources_are_shown(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    ModelRun.objects.filter(pk="quantile-h20").update(status="degraded")
+    EtlRun.objects.filter(status="success", start_date=predicted.last_session).update(
+        finished_at=at(predicted.last_session, 23, 4)
+    )
+    ModelMonitor.objects.bulk_create(
+        ModelMonitor(run_id="rank-h20", date=day, horizon=20, ic=0.05, n_stocks=25)
+        for day in predicted.sessions[-5:]
+    )
+    page.goto(live_server.url)
+
+    expect(page.locator("#rows .trow").nth(1)).to_contain_text("（波動率區間）")
+    meta = page.locator("#today-meta")
+    expect(meta).to_contain_text("rank IC 0.050")
+    expect(meta).to_contain_text("區間改用波動率區間")
+    status = page.locator("#status")
+    expect(status).to_contain_text("1 個模型降級中")
+    expect(status).to_contain_text("23:04 更新")
+
+
+def test_a_failed_ranking_request_is_shown(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    page.route("**/api/predictions?**", lambda route: route.abort())
+    page.goto(live_server.url)
+
+    expect(page.locator("#rows .error")).to_have_text("無法連線到伺服器。")
+    expect(page.locator("#today-meta")).to_have_text("")
+
+
 def test_watch_only_shows_the_watched_stocks(
     page: Page, live_server: LiveServer, predicted: Seed
 ) -> None:
@@ -103,6 +166,39 @@ def test_watch_only_shows_the_watched_stocks(
     expect(rows.nth(0)).to_contain_text("2330")
     expect(rows.nth(1)).to_contain_text(EXTRA_STOCKS[4])
     expect(page.locator("#count")).to_have_text("追蹤中的 2 檔")
+
+
+def test_watch_only_follows_the_horizon_and_the_search(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    ModelRun.objects.filter(pk="rank-h5").update(model_type="ridge", version="2026-09")
+    page.add_init_script("localStorage.setItem('twp-watch', JSON.stringify(['2330']))")
+    page.goto(live_server.url)
+    page.locator("#watch-only").click()
+    expect(page.locator("#today-meta")).to_contain_text("LightGBM 2026-10")
+    requests: list[str] = []
+    page.on("request", lambda request: requests.append(request.url))
+
+    page.get_by_role("button", name="5 日").click()
+
+    expect(page.locator("#today-meta")).to_contain_text("Ridge 2026-09")
+    page.locator("#q").fill("zzz")
+    expect(page.locator("#rows .empty")).to_have_text(
+        "沒有符合「zzz」的股票。試試代號或公司名稱的一部分。"
+    )
+    assert not [url for url in requests if "/api/stocks/" in url]
+
+
+def test_watch_only_shows_a_failed_request(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    page.add_init_script("localStorage.setItem('twp-watch', JSON.stringify(['2330']))")
+    page.route("**/api/stocks/2330/predictions", lambda route: route.abort())
+    page.goto(live_server.url)
+
+    page.locator("#watch-only").click()
+
+    expect(page.locator("#rows .error")).to_have_text("無法連線到伺服器。")
 
 
 def test_the_status_strip_reads_the_status_endpoint(
