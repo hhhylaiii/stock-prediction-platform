@@ -42,3 +42,7 @@ class DateQuery(serializers.Serializer[Any]):
 class FeatureQuery(serializers.Serializer[Any]):
     horizon = serializers.ChoiceField(choices=[5, 20], default=DEFAULT_HORIZON)
     date = serializers.DateField(required=False)
+
+
+class HistoryQuery(serializers.Serializer[Any]):
+    horizon = serializers.ChoiceField(choices=[5, 20], default=DEFAULT_HORIZON)
