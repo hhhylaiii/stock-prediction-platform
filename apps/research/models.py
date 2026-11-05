@@ -398,3 +398,67 @@ class ModelMonitor(models.Model):
 
     def __str__(self) -> str:
         return f"{self.run_id} {self.date} {self.horizon}d"
+
+
+class MetricGrain(models.TextChoices):
+    TOTAL = "total", "全期"
+    FOLD = "fold", "每摺"
+    YEAR = "year", "每年"
+    MONTH = "month", "每月"
+
+
+class BacktestMetric(models.Model):
+    """One walk-forward metric of a run's model over a period, optionally for a segment."""
+
+    run_key = models.CharField(max_length=64)
+    model_type = models.CharField(max_length=32)
+    objective = models.CharField(max_length=16, choices=ModelObjective.choices)
+    horizon = models.PositiveSmallIntegerField()
+    metric = models.CharField(max_length=32)
+    grain = models.CharField(max_length=8, choices=MetricGrain.choices)
+    period_start = models.DateField()
+    period_end = models.DateField()
+    segment = models.CharField(max_length=32, blank=True, default="")
+    value = models.FloatField(null=True, blank=True)
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        db_table = "backtest_metric"
+        constraints = [
+            models.UniqueConstraint(
+                fields=[
+                    "run_key",
+                    "model_type",
+                    "objective",
+                    "horizon",
+                    "metric",
+                    "grain",
+                    "period_start",
+                    "segment",
+                ],
+                name="backtest_metric_key",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(objective__in=ModelObjective.values),
+                name="backtest_metric_objective_known",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(grain__in=MetricGrain.values),
+                name="backtest_metric_grain_known",
+            ),
+            horizon_known("backtest_metric"),
+            models.CheckConstraint(
+                condition=models.Q(period_start__lte=models.F("period_end")),
+                name="backtest_metric_period_ordered",
+            ),
+            models.CheckConstraint(condition=finite("value"), name="backtest_metric_finite"),
+            models.CheckConstraint(
+                condition=models.Q(
+                    run_key__regex=r"\S", model_type__regex=r"\S", metric__regex=r"\S"
+                ),
+                name="backtest_metric_names_present",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.run_key} {self.model_type} {self.metric} {self.grain} {self.period_start}"
