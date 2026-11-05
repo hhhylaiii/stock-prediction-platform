@@ -2,6 +2,7 @@ from unittest.mock import ANY
 
 import pytest
 from django.core.exceptions import PermissionDenied as DjangoPermissionDenied
+from django.http import Http404
 from django.test import Client, override_settings
 from rest_framework.request import Request
 from rest_framework.test import APIRequestFactory
@@ -87,6 +88,14 @@ def test_django_permission_denied_becomes_a_403_envelope() -> None:
     assert response is not None
     assert response.status_code == 403
     assert response.data["error"] == {"code": "permission_denied", "message": "closed"}
+
+
+def test_django_http404_becomes_a_not_found_envelope() -> None:
+    response = exception_handler(Http404("gone"), {})
+
+    assert response is not None
+    assert response.status_code == 404
+    assert response.data["error"] == {"code": "not_found", "message": "gone"}
 
 
 def test_unexpected_errors_are_left_to_raise() -> None:
