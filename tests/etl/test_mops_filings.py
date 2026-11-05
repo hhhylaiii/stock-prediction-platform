@@ -192,6 +192,18 @@ def test_restated_reports_are_marked_with_their_own_upload(page: Callable[[str],
     assert not any(f.restated for f in found if f.period != "2018-Q4")
 
 
+def test_old_restatements_named_without_brackets_are_restated(page: Callable[[str], bytes]) -> None:
+    found = parse_listing(text(page("1310_98")), "1310", 98)
+    q1 = [(f.fin_type, f.uploaded_at, f.restated) for f in found if f.period == "2009-Q1"]
+    assert q1 == [
+        (INDIVIDUAL, at("2012-01-04 21:36:43"), False),
+        (CONSOLIDATED, at("2012-01-04 21:37:30"), False),
+        (INDIVIDUAL, at("2012-01-07 14:42:13"), True),
+        (CONSOLIDATED, at("2012-01-07 14:43:06"), True),
+    ]
+    assert {f.period for f in found if f.restated} == {"2009-Q1", "2009-Q2"}
+
+
 @pytest.mark.django_db
 def test_a_restated_period_is_announced_by_its_restatement_and_logged(
     adapter: MopsAdapter, page: Callable[[str], bytes]
@@ -235,10 +247,15 @@ def test_a_restatement_sets_the_date_even_when_corrected_or_early(
     }
 
 
-def test_the_affiliates_report_is_not_an_announcement(page: Callable[[str], bytes]) -> None:
+@pytest.mark.parametrize(
+    "supplement", ["關係企業合併報表", "關係企業合併報表重編", "關係企業合併報表(重編)"]
+)
+def test_the_affiliates_report_is_not_an_announcement(
+    page: Callable[[str], bytes], supplement: str
+) -> None:
     listing = text(page("2330_99"))
     assert listing.count("英文版-母公司財報") == 4
-    supplemented = listing.replace("英文版-母公司財報", "關係企業合併報表", 1)
+    supplemented = listing.replace("英文版-母公司財報", supplement, 1)
     assert parse_listing(supplemented, "2330", 99) == parse_listing(listing, "2330", 99)
 
 
