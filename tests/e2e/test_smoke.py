@@ -160,6 +160,7 @@ def test_a_dropped_connection_is_shown(page: Page, live_server: LiveServer, seed
     page.goto(f"{live_server.url}/#models")
 
     expect(page.locator("#quality .error")).to_have_text("無法連線到伺服器。")
+    expect(page.locator("#model-checks .error")).to_have_text("無法連線到伺服器。")
     expect(page.locator("#etl .trow")).to_have_count(3 + EXTRA_RUNS)
 
 
