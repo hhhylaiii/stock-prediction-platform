@@ -105,9 +105,9 @@ def test_top_contributions_come_in_order_with_the_rest(client: Client, contribs:
     }
     assert [(item["label"], item["unit"]) for item in items[1:]] == [
         ("外資 20 日買賣超（占流通股）", "ratio"),
-        ("20 日 Parkinson 波動", "ratio"),
+        ("20 日 Parkinson 波動（年化）", "percent"),
         ("市值（對數）", "number"),
-        ("ROE（近四季）", "number"),
+        ("ROE（近四季）", "percent"),
     ]
     assert [item["value"] for item in items] == [0.12, None, None, 30.5, None]
     assert items[2]["group"] == "technical"
