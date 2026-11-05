@@ -15,7 +15,7 @@ from django.db.models import Min
 from django.utils import timezone
 
 from apps.etl.adapters import build_adapter
-from apps.etl.adapters.mops import STATEMENT_SCAN
+from apps.etl.adapters.mops import REVENUE_SCAN, STATEMENT_SCAN
 from apps.etl.alerts import dispatch
 from apps.etl.catchup import catch_up
 from apps.etl.errors import SourceError, SourceNotReadyError
@@ -23,6 +23,7 @@ from apps.etl.master_refresh import refresh_stock_master
 from apps.etl.models import DataQualityLog
 from apps.etl.quality import CHECKS, alerting, run_checks, should_run_prediction
 from apps.etl.ratelimit import RetryableError, ThrottledError
+from apps.etl.revenue_scan import open_months
 from apps.etl.runs import covered_days
 from apps.etl.statement_summary import open_periods
 from apps.market.calendar import TradingDays
@@ -250,6 +251,18 @@ def statement_scan(self: Task[Any, Any], slot: str) -> str:
     if not open_periods(today, settings.STATEMENT_SCAN_DAYS_AFTER):
         return "no period open"
     return _run_once(self, "mops", STATEMENT_SCAN, today, calendar)
+
+
+@shared_task(bind=True, max_retries=None, name="etl.revenue_scan")
+def revenue_scan(self: Task[Any, Any], slot: str) -> str:
+    """MOPS monthly revenue pages on sessions while a month is being filed; outside the gate."""
+    session = _session_today(slot)
+    if session is None:
+        return "closed"
+    calendar, today = session
+    if not open_months(today, settings.REVENUE_SCAN_DAYS_AFTER):
+        return "no month open"
+    return _run_once(self, "mops", REVENUE_SCAN, today, calendar)
 
 
 @shared_task(name="etl.check_quality")

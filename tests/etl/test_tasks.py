@@ -109,6 +109,8 @@ def test_the_beat_schedule_covers_the_daily_etl_in_taipei_time() -> None:
         "etl-notices-again": crontab(hour=22, minute=40),
         "etl-statements": crontab(hour=19, minute=0),
         "etl-statements-late": crontab(hour=22, minute=40),
+        "etl-revenue": crontab(hour=19, minute=0),
+        "etl-revenue-late": crontab(hour=22, minute=40),
         "etl-check-quality": crontab(hour=22, minute=50),
         "etl-us-close": crontab(hour=5, minute=30),
         "etl-weekly-holding": crontab(hour=10, minute=0, day_of_week="sat"),
@@ -571,6 +573,50 @@ def test_an_unreachable_statement_scan_is_retried(
     fake = adapter(RetryableError("connection reset"))
     today(DAY, time(22, 40))
     assert tasks.statement_scan.apply(args=("STATEMENTS_LATE",)).get() == "success: 3 rows"
+    assert len(fake.runs) == 2
+
+
+def test_the_last_revenue_scan_runs_with_the_last_statement_scan() -> None:
+    assert settings.ETL_AT["REVENUE_LATE"] == settings.FILING_VISIBLE_BEFORE
+    entries = {
+        entry["args"]
+        for entry in settings.CELERY_BEAT_SCHEDULE.values()
+        if entry["task"] == "etl.revenue_scan"
+    }
+    assert entries == {("REVENUE",), ("REVENUE_LATE",)}
+
+
+def test_the_revenue_scan_runs_today_while_a_month_is_open(
+    today: Callable[..., None], adapter: Callable[..., FakeAdapter]
+) -> None:
+    fake = adapter()
+    today(DAY, time(19, 0))
+    assert tasks.revenue_scan.apply(args=("REVENUE",)).get() == "success: 3 rows"
+    assert fake.runs == [("revenue_scan", DAY, DAY)]
+
+
+def test_the_revenue_scan_skips_closed_days_early_slots_and_quiet_days(
+    today: Callable[..., None],
+    adapter: Callable[..., FakeAdapter],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = adapter()
+    today(date(2026, 10, 25), time(19, 0))
+    assert tasks.revenue_scan.apply(args=("REVENUE",)).get() == "closed"
+    today(DAY, time(18, 59))
+    assert tasks.revenue_scan.apply(args=("REVENUE",)).get() == "closed"
+    monkeypatch.setattr("apps.etl.tasks.open_months", lambda day, days_after: [])
+    today(DAY, time(19, 0))
+    assert tasks.revenue_scan.apply(args=("REVENUE",)).get() == "no month open"
+    assert fake.runs == []
+
+
+def test_an_unreachable_revenue_scan_is_retried(
+    today: Callable[..., None], adapter: Callable[..., FakeAdapter]
+) -> None:
+    fake = adapter(RetryableError("connection reset"))
+    today(DAY, time(22, 40))
+    assert tasks.revenue_scan.apply(args=("REVENUE_LATE",)).get() == "success: 3 rows"
     assert len(fake.runs) == 2
 
 
