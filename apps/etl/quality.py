@@ -255,5 +255,15 @@ def _result(day: date, check: str, severity: str, detail: dict[str, Any]) -> Dat
     return DataQualityLog(date=day, check_name=check, severity=severity, detail=detail)
 
 
+def replace_day_log(day: date, check: str, severity: str, detail: dict[str, Any] | None) -> None:
+    """One row per day and check: a rerun replaces it, and nothing to report removes it."""
+    with transaction.atomic():
+        DataQualityLog.objects.filter(date=day, check_name=check).delete()
+        if detail is not None:
+            DataQualityLog.objects.create(
+                date=day, check_name=check, severity=severity, detail=detail
+            )
+
+
 def alerting(results: Sequence[DataQualityLog]) -> list[DataQualityLog]:
     return [row for row in results if row.severity != Severity.INFO]
