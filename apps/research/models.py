@@ -435,6 +435,7 @@ class BacktestMetric(models.Model):
                     "metric",
                     "grain",
                     "period_start",
+                    "period_end",
                     "segment",
                 ],
                 name="backtest_metric_key",

@@ -64,6 +64,7 @@ class Migration(migrations.Migration):
                             "metric",
                             "grain",
                             "period_start",
+                            "period_end",
                             "segment",
                         ),
                         name="backtest_metric_key",

@@ -18,6 +18,7 @@ KEY = [
     "metric",
     "grain",
     "period_start",
+    "period_end",
     "segment",
 ]
 
@@ -90,12 +91,23 @@ def test_upsert_on_the_metric_key_is_idempotent() -> None:
         ]
     )
 
-    upsert(BacktestMetric, frame, KEY, ["period_end", "value"])
-    upsert(BacktestMetric, frame.assign(value=[0.033, 0.021]), KEY, ["period_end", "value"])
-    upsert(BacktestMetric, frame.assign(value=[0.033, 0.021]), KEY, ["period_end", "value"])
+    upsert(BacktestMetric, frame, KEY, ["value"])
+    upsert(BacktestMetric, frame.assign(value=[0.033, 0.021]), KEY, ["value"])
+    upsert(BacktestMetric, frame.assign(value=[0.033, 0.021]), KEY, ["value"])
 
     rows = BacktestMetric.objects.order_by("model_type").values_list("model_type", "value")
     assert list(rows) == [("lightgbm", 0.033), ("ridge", 0.021)]
+
+
+def test_totals_from_one_start_to_different_ends_keep_their_own_rows() -> None:
+    metric(grain=MetricGrain.TOTAL, period_end=date(2024, 12, 31), value=0.03).save()
+    metric(grain=MetricGrain.TOTAL, period_end=date(2026, 9, 30), value=0.02).save()
+
+    totals = BacktestMetric.objects.filter(grain="total").order_by("period_end")
+    assert list(totals.values_list("period_end", "value")) == [
+        (date(2024, 12, 31), 0.03),
+        (date(2026, 9, 30), 0.02),
+    ]
 
 
 def test_the_metric_key_is_unique() -> None:
