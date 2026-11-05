@@ -154,6 +154,7 @@ def test_boost_stops_on_validation_ic_then_refits_the_whole_window(
     assert calls[1] == (len(rows), boosted.rounds, False)
     assert boosted.booster.num_trees() == boosted.rounds
     assert 1 <= boosted.rounds < 400
+    assert (boosted.rounds - 1) % FEVAL_EVERY == 0
     assert boosted.valid_score > 0.3
     importance = dict(zip(FEATURES, boosted.booster.feature_importance("gain"), strict=True))
     assert importance["signal"] > importance["noise"]
@@ -182,8 +183,9 @@ def test_boost_is_reproducible_with_a_seed() -> None:
     assert not np.array_equal(scores(2), first)
 
 
-def test_boost_with_a_builtin_metric_stops_on_its_loss() -> None:
-    rows, window = training_window(), fold()
+def test_boost_with_a_builtin_metric_stops_on_that_loss() -> None:
+    window = fold()
+    rows = panel(window.train_start, window.train_end, signal=0.0)
 
     boosted = boost(
         rows,
@@ -191,9 +193,9 @@ def test_boost_with_a_builtin_metric_stops_on_its_loss() -> None:
         FEATURES,
         LABEL,
         seed=1,
-        params={"objective": "regression", "metric": "l2"},
-        max_rounds=300,
+        params={"objective": "regression", "metric": "l1"},
+        max_rounds=1000,
     )
 
-    assert 1 <= boosted.rounds <= 300
-    assert 0 < boosted.valid_score < 0.1
+    assert boosted.rounds < 1000 - EARLY_STOPPING_ROUNDS
+    assert 0.2 < boosted.valid_score < 0.3
