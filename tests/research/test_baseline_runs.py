@@ -397,14 +397,14 @@ def test_a_full_run_checks_the_screening_before_the_shuffle_check(
     monkeypatch.setattr(train, "shuffle_check", lambda *args: pytest.fail("shuffle ran"))
     ModelRun.objects.filter(model_type=SCREENING_MODEL).delete()
 
-    with pytest.raises(CommandError, match="interval baselines fit on the screened features"):
+    with pytest.raises(CommandError, match="interval scope fits on the screened features"):
         call_command("train", scope="interval", run_key="interval-wf1")
 
 
 def test_command_explains_a_missing_screening(command: Path) -> None:
     ModelRun.objects.filter(model_type=SCREENING_MODEL).delete()
 
-    with pytest.raises(CommandError, match="rank baselines fit on the screened features"):
+    with pytest.raises(CommandError, match="rank scope fits on the screened features"):
         call_command("train", scope="rank", run_key="rank-wf1", folds="0", stdout=StringIO())
 
 
@@ -441,6 +441,15 @@ def test_command_shuffle_check_passes_and_fails_by_the_limit(command: Path, sett
     settings.SHUFFLE_IC_LIMIT = 0.0
     with pytest.raises(CommandError, match="label column"):
         call_command("train", shuffle_check=True)
+
+
+def test_command_shuffle_check_runs_before_any_screening(command: Path) -> None:
+    ModelRun.objects.filter(model_type=SCREENING_MODEL).delete()
+    out = StringIO()
+
+    call_command("train", shuffle_check=True, stdout=out)
+
+    assert "shuffled OOS rank IC" in out.getvalue()
 
 
 @pytest.mark.parametrize("ic", [0.02, -0.02])
@@ -619,7 +628,7 @@ def test_fitted_baselines_refuse_to_run_without_a_screening(panel: Path, scope: 
     fold = research()[0]
     ModelRun.objects.filter(model_type=SCREENING_MODEL).delete()
 
-    with pytest.raises(RunError, match=f"{scope} baselines fit on the screened features"):
+    with pytest.raises(RunError, match=f"{scope} scope fits on the screened features"):
         run_folds(scope, [fold], f"{scope}-wf1", panel)
 
     assert missing_folds(f"{scope}-wf1", BASELINE, [fold]) == [fold.index]

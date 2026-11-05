@@ -250,7 +250,7 @@ def scope_features(scope: str) -> list[str]:
     try:
         kept = screened_features().kept
     except RunError as error:
-        raise RunError(f"the {scope} baselines fit on the screened features: {error}") from error
+        raise RunError(f"the {scope} scope fits on the screened features: {error}") from error
     return linear_features(kept)
 
 
