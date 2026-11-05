@@ -6,7 +6,7 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 
 from apps.api.envelope import envelope
-from apps.api.ops import CHECK_FIELDS, session_summary
+from apps.api.ops import CHECK_FIELDS, Severity, session_summary
 from apps.api.serving import DEFAULT_HORIZON, Slot, latest_served_date, runs_on
 from apps.api.sessions import latest_session, load_calendar
 from apps.api.views import ReadOnlyView
@@ -49,7 +49,10 @@ class StatusView(ReadOnlyView):
                 "prediction_date": prediction_date,
                 "predictions_ready": ready,
                 "quality": {
-                    key: summary[key] for key in ("date", "passed", "worst", "missing_checks")
+                    **{key: summary[key] for key in ("date", "passed", "worst", "missing_checks")},
+                    "warnings": sum(
+                        check["severity"] == Severity.WARNING for check in summary["checks"]
+                    ),
                 },
                 "updated_at": None if updated_at is None else timezone.localtime(updated_at),
                 "degraded": [
