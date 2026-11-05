@@ -1,5 +1,8 @@
-"""Batch-1 technical features of SPEC §6 from the universe panel, per listing."""
+"""Technical features of SPEC §6 from the universe panel, per listing."""
 
+import math
+
+import numpy as np
 import pandas as pd
 
 from apps.research.features.common import (
@@ -27,6 +30,10 @@ KD_DAYS, KD_SMOOTHING = 9, 3
 MACD_FAST, MACD_SLOW, MACD_SIGNAL = 12, 26, 9
 YEAR_DAYS = 250
 LIMIT_DAYS = 20
+PARKINSON_DAYS = 20
+LOCATION_DAYS = 5
+MAX_RETURN_DAYS = 20
+SKEW_DAYS = 60
 
 Columns = dict[str, pd.Series]
 
@@ -109,3 +116,32 @@ def technical_features(panel: pd.DataFrame) -> pd.DataFrame:
         **_limits(panel),
     }
     return feature_frame(panel, columns, feature_names(Group.TECHNICAL))
+
+
+def _parkinson(panel: pd.DataFrame) -> pd.Series:
+    """Annualized Parkinson volatility; a halted day has no range."""
+    squared = pd.Series(np.log(panel["adj_high"] / panel["adj_low"]) ** 2, index=panel.index)
+    ranges = squared.where(panel["has_bar"].astype(bool), 0.0)
+    mean = rolling(ranges, panel, PARKINSON_DAYS, "mean", PARKINSON_DAYS)
+    return (mean / (4 * math.log(2))).pow(0.5) * ANNUAL_ROOT
+
+
+def second_batch_technical_features(panel: pd.DataFrame) -> pd.DataFrame:
+    """Second-batch technical features of every panel row; needs the adjusted open, high, low."""
+    require_sorted(panel)
+    close = filled_close(panel)
+    steps = flat_returns(close, panel)
+    high = rolling(panel["adj_high"], panel, LOCATION_DAYS, "max", 1)
+    low = rolling(panel["adj_low"], panel, LOCATION_DAYS, "min", 1)
+    columns = {
+        "tech_parkinson_vol_20d": _parkinson(panel),
+        "tech_gap_1d": (panel["adj_open"] / shifted(close, panel, 1) - 1).where(
+            panel["has_bar"].astype(bool)
+        ),
+        "tech_close_loc_5d": ratio(close - low, high - low).where(
+            closes_seen(close, panel) >= LOCATION_DAYS
+        ),
+        "tech_max_ret_20d": rolling(steps, panel, MAX_RETURN_DAYS, "max", MAX_RETURN_DAYS),
+        "tech_skew_60d": rolling(steps, panel, SKEW_DAYS, "skew", SKEW_DAYS),
+    }
+    return feature_frame(panel, columns, feature_names(Group.TECHNICAL, batch=2))
