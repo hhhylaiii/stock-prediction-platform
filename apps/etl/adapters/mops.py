@@ -42,6 +42,7 @@ CODE, YEAR, KIND, DETAIL, UPLOADED, CORRECTION = (
 HEADER = (CODE, YEAR, KIND, DETAIL, UPLOADED, CORRECTION)
 FINANCIAL_REPORT = "財務報告書"
 ENGLISH = "英文版"
+RESTATED = "重編"
 REPORT_TYPES = {
     "IFRSs合併財報": FinType.CONSOLIDATED,
     "母子公司合併報表": FinType.CONSOLIDATED,
@@ -120,7 +121,7 @@ class _Rows(HTMLParser):
 
 
 def parse_listing(page: str, code: str, roc_year: int) -> list[Filing]:
-    """Chinese-language reports of the company's year; only 查無所需資料 may stand for none."""
+    """Original Chinese reports of the company's year; only 查無所需資料 may stand for none."""
     parser = _Rows()
     parser.feed(page)
     starts = [i for i, (_, row) in enumerate(parser.rows) if all(name in row for name in HEADER)]
@@ -141,7 +142,7 @@ def parse_listing(page: str, code: str, roc_year: int) -> list[Filing]:
         if len(row) != len(header):
             raise SchemaChangedError(f"doc.twse {code} {roc_year} row has {len(row)} cells")
         cells = {name: row[index] for name, index in position.items()}
-        if ENGLISH not in cells[DETAIL]:
+        if ENGLISH not in cells[DETAIL] and RESTATED not in cells[DETAIL]:
             filings.append(_filing(cells, code, roc_year))
     return filings
 

@@ -167,6 +167,15 @@ def test_an_unreadable_upload_time_fails(page: Callable[[str], bytes], shown: st
         parse_listing(broken, "2330", 113)
 
 
+def test_restated_reports_are_not_the_announcement(page: Callable[[str], bytes]) -> None:
+    found = parse_listing(text(page("1213_107")), "1213", 107)
+    assert [(f.period, f.fin_type, f.uploaded_at) for f in found if f.period == "2018-Q4"] == [
+        ("2018-Q4", CONSOLIDATED, at("2019-04-08 18:18:18")),
+        ("2018-Q4", INDIVIDUAL, at("2019-04-08 18:20:07")),
+    ]
+    assert len(found) == 5
+
+
 def test_companies_without_subsidiaries_file_individual_reports(
     page: Callable[[str], bytes],
 ) -> None:
