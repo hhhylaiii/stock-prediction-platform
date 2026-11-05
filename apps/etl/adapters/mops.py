@@ -1,5 +1,6 @@
-"""TWSE e-document listings: when each financial report was filed (SPEC §3 MOPS, §8.1)."""
+"""MOPS: when each financial report was filed, and the daily scan of new filings (SPEC §3, §5)."""
 
+import logging
 import re
 from collections.abc import Sequence
 from datetime import date, datetime, time
@@ -15,15 +16,32 @@ from django.utils import timezone
 
 from apps.etl.adapters.base import BaseAdapter
 from apps.etl.client import SourceClient
+from apps.etl.deadlines import statement_deadline
 from apps.etl.errors import SchemaChangedError, SourceError
 from apps.etl.filings import FILING_COLUMNS, Filing, apply_statement_filings
 from apps.etl.models import EtlRun, RawMops
 from apps.etl.ratelimit import RateLimiter, RetryableError
+from apps.etl.statement_scan import SCAN_COLUMNS, insert_new_statements, scan_session
+from apps.etl.statement_summary import (
+    MARKETS,
+    REPORTS,
+    VALUE_COLUMNS,
+    Summary,
+    incomplete,
+    open_periods,
+    parse_summary,
+    previous_period,
+    statement_rows,
+)
 from apps.market.calendar import TradingDays
 from apps.market.models import FinancialStatement, FinType
 
 MOPS_MIN_INTERVAL = 5.0
 STATEMENT_FILING = "statement_filing"
+STATEMENT_SCAN = "statement_scan"
+SUMMARY_PATH = "/mops/web/ajax_"
+SUMMARY_ENCODING = "utf-8"
+EXPORT_NAME = re.compile(r"name='filename' value='[^']*'")
 LISTING_PATH = "/server-java/t57sb01"
 REPORT_KIND = "A"
 PAGE_ENCODING = "cp950"
@@ -57,6 +75,7 @@ SEASONS = {"一": 1, "二": 2, "三": 3, "四": 4}
 SEASON = re.compile(r"^(\d{2,3})\s*年\s*第([一二三四])季$")
 UPLOAD = re.compile(r"^(\d{2,3})/(\d{2})/(\d{2}) (\d{2}):(\d{2}):(\d{2})$")
 TAIPEI = ZoneInfo("Asia/Taipei")
+logger = logging.getLogger(__name__)
 
 
 class MopsClient(SourceClient):
@@ -88,6 +107,36 @@ class MopsClient(SourceClient):
         if TOO_MANY_QUERIES in page:
             raise RetryableError(f"{self.label} asked to query less for {params['co_id']}")
         return page
+
+
+class MopsSummaryClient(SourceClient):
+    source = "mops"
+    label = "mopsov.twse.com.tw"
+    raw_model = RawMops
+    min_interval = MOPS_MIN_INTERVAL
+
+    @classmethod
+    def build(
+        cls, limiter: RateLimiter, session: requests.Session | None = None
+    ) -> "MopsSummaryClient":
+        return cls(limiter, str(settings.MOPS_BASE_URL), float(settings.MOPS_TIMEOUT), session)
+
+    def summary(
+        self, report: str, market: str, roc_year: int, season: int
+    ) -> tuple[dict[str, str], str]:
+        """One market's year-to-date figures of a quarter for every company that has filed."""
+        form = {
+            "encodeURIComponent": "1",
+            "step": "1",
+            "firstin": "1",
+            "off": "1",
+            "isQuery": "Y",
+            "TYPEK": market,
+            "year": str(roc_year),
+            "season": f"{season:02d}",
+        }
+        body = self.post_content(f"{self.base_url}{SUMMARY_PATH}{report}", form)
+        return {"report": report, **form}, body.decode(SUMMARY_ENCODING, errors="replace")
 
 
 class _Rows(HTMLParser):
@@ -184,7 +233,7 @@ def _uploaded_at(text: str, code: str, roc_year: int) -> datetime:
 class MopsAdapter(BaseAdapter):
     source = "mops"
     raw_model = RawMops
-    datasets = frozenset({STATEMENT_FILING})
+    datasets = frozenset({STATEMENT_FILING, STATEMENT_SCAN})
     per_stock = True
 
     def __init__(
@@ -195,14 +244,26 @@ class MopsAdapter(BaseAdapter):
     ) -> None:
         super().__init__(calendar, limiter)
         self.client = MopsClient.build(limiter, session)
+        self.summaries = MopsSummaryClient.build(limiter, session)
 
     def run(self, dataset: str, start: date, end: date, stock_id: str | None = None) -> EtlRun:
-        raise ValueError(f"{self.source}/{dataset} goes stock by stock; use manage.py backfill")
+        """The scan reads today's summaries; filing dates go stock by stock through backfill."""
+        self.require_dataset(dataset)
+        if dataset == STATEMENT_FILING:
+            raise ValueError(f"{self.source}/{dataset} goes stock by stock; use manage.py backfill")
+        today = timezone.localdate()
+        if (start, end) != (today, today):
+            raise ValueError(f"{self.source}/{dataset} sees only today {today}, not {start}..{end}")
+        return super().run(dataset, start, end, stock_id)
 
     def fetch(
         self, dataset: str, start: date, end: date, stock_id: str | None = None
     ) -> pd.DataFrame:
         self.require_dataset(dataset)
+        if dataset == STATEMENT_SCAN:
+            if stock_id is not None:
+                raise ValueError(f"{self.source}/{dataset} covers the whole market, not {stock_id}")
+            return self._scan(end)
         if stock_id is None:
             raise ValueError(f"{self.source}/{dataset} goes stock by stock; give a stock")
         filings: list[Filing] = []
@@ -218,6 +279,8 @@ class MopsAdapter(BaseAdapter):
         self.require_dataset(dataset)
         if raw_df.empty:
             return raw_df
+        if dataset == STATEMENT_SCAN:
+            return raw_df[raw_df[VALUE_COLUMNS].notna().any(axis=1)].reset_index(drop=True)
         records = []
         for key, group in raw_df.groupby(["stock_id", "period", "fin_type"], sort=True):
             restated = group.loc[group["restated"], "uploaded_at"]
@@ -227,10 +290,50 @@ class MopsAdapter(BaseAdapter):
 
     def upsert(self, dataset: str, frame: pd.DataFrame) -> int:
         self.require_dataset(dataset)
+        if dataset == STATEMENT_SCAN:
+            session = scan_session(timezone.now(), self.calendar)
+            return insert_new_statements(frame, timezone.localdate(), session)
         if frame.empty:
             return 0
         cutoff = time.fromisoformat(settings.FILING_VISIBLE_BEFORE)
         return apply_statement_filings(frame, self.calendar, cutoff)
+
+    def _scan(self, day: date) -> pd.DataFrame:
+        """Each open quarter against the one before; a quarter is fetched once per scan."""
+        fetched: dict[str, Summary] = {}
+
+        def summaries(period: str) -> Summary:
+            if period not in fetched:
+                fetched[period] = self._summaries(period, statement_deadline(period) < day)
+            return fetched[period]
+
+        records = []
+        for period in open_periods(day, int(settings.STATEMENT_SCAN_DAYS_AFTER)):
+            current, previous = summaries(period), summaries(previous_period(period))
+            waiting = incomplete(current)
+            if waiting:
+                logger.warning("mops %s scan waits for %s", period, ", ".join(waiting))
+            for row in statement_rows(current, previous, int(period[-1])):
+                records.append({**row, "period": period})
+        return pd.DataFrame(records, columns=SCAN_COLUMNS, dtype=object)
+
+    def _summaries(self, period: str, filed: bool) -> Summary:
+        """Both markets' three summaries, kept as raw first; a filed quarter cannot be empty."""
+        year, season = int(period[:4]), int(period[-1])
+        found: dict[str, dict[str, dict[str, float | None]]] = {}
+        for report in REPORTS:
+            found[report] = {}
+            for market in MARKETS:
+                params, page = self.summaries.summary(report, market, year - ROC_OFFSET, season)
+                identity = {"html": EXPORT_NAME.sub("", page)}
+                self.save_raw(STATEMENT_SCAN, params, {"html": page}, identity)
+                companies = parse_summary(page, market, season, report)
+                if filed and not companies:
+                    raise SchemaChangedError(f"MOPS {report} {market} {period} came back empty")
+                if companies.keys() & found[report].keys():
+                    raise SchemaChangedError(f"MOPS {report} {period} lists a company twice")
+                found[report] |= companies
+        return found
 
 
 def _statement_years(stock_id: str, start: date, end: date) -> list[int]:

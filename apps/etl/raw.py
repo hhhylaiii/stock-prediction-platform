@@ -16,12 +16,16 @@ def answer_hash(params: Mapping[str, Any], payload: Any) -> str:
 
 
 def store_raw(
-    raw_model: type[RawRecord], dataset: str, params: Mapping[str, Any], payload: Any
+    raw_model: type[RawRecord],
+    dataset: str,
+    params: Mapping[str, Any],
+    payload: Any,
+    identity: Any = None,
 ) -> RawRecord:
-    """Keep one row per distinct answer; asking the same and hearing the same adds nothing."""
+    """One row per distinct answer; identity, when given, stands in for parts that always change."""
     record, _ = raw_model._default_manager.get_or_create(
         dataset=dataset,
-        source_hash=answer_hash(params, payload),
+        source_hash=answer_hash(params, payload if identity is None else identity),
         defaults={"request_params": dict(params), "payload": payload},
     )
     return record

@@ -115,6 +115,26 @@ def test_finmind_interval_follows_the_quota_of_the_token(
 
 
 @pytest.mark.usefixtures("isolated_env")
+def test_filings_must_stop_counting_before_the_evening_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FILING_VISIBLE_BEFORE", "22:50")
+    monkeypatch.delenv("ETL_AT_CHECK_QUALITY", raising=False)
+    with pytest.raises(ImproperlyConfigured, match="FILING_VISIBLE_BEFORE"):
+        _fresh_import("config.settings.dev")
+
+
+@pytest.mark.usefixtures("isolated_env")
+def test_the_statement_scan_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in ("MOPS_BASE_URL", "STATEMENT_SCAN_DAYS_AFTER", "ETL_AT_STATEMENTS"):
+        monkeypatch.delenv(name, raising=False)
+    module = _fresh_import("config.settings.dev")
+    assert module.MOPS_BASE_URL == "https://mopsov.twse.com.tw"
+    assert module.STATEMENT_SCAN_DAYS_AFTER == 45
+    assert module.ETL_AT["STATEMENTS"] == "19:00"
+
+
+@pytest.mark.usefixtures("isolated_env")
 def test_doc_twse_is_asked_six_seconds_apart_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("MOPS_MIN_INTERVAL", raising=False)
     module = _fresh_import("config.settings.dev")

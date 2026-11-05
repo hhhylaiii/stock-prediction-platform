@@ -53,6 +53,10 @@ class SourceClient:
         """The body of a GET to an absolute URL, for sources that answer with files."""
         return self.limiter.call(lambda: self._receive("GET", url, params=dict(params)).content)
 
+    def post_content(self, url: str, data: Mapping[str, str]) -> bytes:
+        """The body of a form POST to an absolute URL, for sources that answer with pages."""
+        return self.limiter.call(lambda: self._receive("POST", url, data=dict(data)).content)
+
     def save_raw(self, dataset: str, params: Mapping[str, Any], payload: Any) -> RawRecord:
         return store_raw(self.raw_model, dataset, params, payload)
 

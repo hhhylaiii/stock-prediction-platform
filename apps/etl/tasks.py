@@ -15,6 +15,7 @@ from django.db.models import Min
 from django.utils import timezone
 
 from apps.etl.adapters import build_adapter
+from apps.etl.adapters.mops import STATEMENT_SCAN
 from apps.etl.alerts import dispatch
 from apps.etl.catchup import catch_up
 from apps.etl.errors import SourceError, SourceNotReadyError
@@ -23,6 +24,7 @@ from apps.etl.models import DataQualityLog
 from apps.etl.quality import CHECKS, alerting, run_checks, should_run_prediction
 from apps.etl.ratelimit import RetryableError, ThrottledError
 from apps.etl.runs import covered_days
+from apps.etl.statement_summary import open_periods
 from apps.market.calendar import TradingDays
 from apps.market.models import IndexDaily, IndexId
 
@@ -236,6 +238,18 @@ def refresh_master(self: Task[Any, Any]) -> str:
     except Exception as exc:
         return _failed(f"stock_master {today}", exc)
     return "success"
+
+
+@shared_task(bind=True, max_retries=None, name="etl.statement_scan")
+def statement_scan(self: Task[Any, Any], slot: str) -> str:
+    """MOPS summaries on sessions while a quarter is being filed; outside the research gate."""
+    session = _session_today(slot)
+    if session is None:
+        return "closed"
+    calendar, today = session
+    if not open_periods(today, settings.STATEMENT_SCAN_DAYS_AFTER):
+        return "no period open"
+    return _run_once(self, "mops", STATEMENT_SCAN, today, calendar)
 
 
 @shared_task(name="etl.check_quality")

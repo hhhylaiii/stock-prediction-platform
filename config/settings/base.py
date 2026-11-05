@@ -1,9 +1,11 @@
 """Settings shared by every environment; values come from environment variables."""
 
+from datetime import time
 from pathlib import Path
 
 import environ
 from celery.schedules import crontab
+from django.core.exceptions import ImproperlyConfigured
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
@@ -95,6 +97,7 @@ CELERY_BROKER_TRANSPORT_OPTIONS = {
 ETL_NOT_READY_COUNTDOWN = env.int("ETL_NOT_READY_COUNTDOWN", default=1800)
 ETL_NOT_READY_RETRIES = env.int("ETL_NOT_READY_RETRIES", default=6)
 ETL_CATCHUP_LOOKBACK_DAYS = env.int("ETL_CATCHUP_LOOKBACK_DAYS", default=14)
+FILING_VISIBLE_BEFORE = env.str("FILING_VISIBLE_BEFORE", default="22:40")
 
 
 ETL_AT = {
@@ -107,12 +110,15 @@ ETL_AT = {
         ("QFII", "18:30"),
         ("NIGHT", "21:30"),
         ("NOTICES_AGAIN", "22:40"),
+        ("STATEMENTS", "19:00"),
         ("CHECK_QUALITY", "22:50"),
         ("US_CLOSE", "05:30"),
         ("WEEKLY_HOLDING", "10:00"),
         ("BUSINESS_SIGNAL", "10:00"),
     )
-}
+} | {"STATEMENTS_LATE": FILING_VISIBLE_BEFORE}
+if time.fromisoformat(FILING_VISIBLE_BEFORE) >= time.fromisoformat(ETL_AT["CHECK_QUALITY"]):
+    raise ImproperlyConfigured("FILING_VISIBLE_BEFORE must come before ETL_AT_CHECK_QUALITY")
 
 
 def _at(name: str, **fields: str) -> crontab:
@@ -144,6 +150,16 @@ CELERY_BEAT_SCHEDULE: dict[str, dict[str, object]] = {
         "schedule": _at("NOTICES_AGAIN"),
         "args": ("notices",),
     },
+    "etl-statements": {
+        "task": "etl.statement_scan",
+        "schedule": _at("STATEMENTS"),
+        "args": ("STATEMENTS",),
+    },
+    "etl-statements-late": {
+        "task": "etl.statement_scan",
+        "schedule": _at("STATEMENTS_LATE"),
+        "args": ("STATEMENTS_LATE",),
+    },
     "etl-check-quality": {"task": "etl.check_quality", "schedule": _at("CHECK_QUALITY")},
     "etl-us-close": {"task": "etl.us_close", "schedule": _at("US_CLOSE")},
     "etl-weekly-holding": {
@@ -173,8 +189,9 @@ YAHOO_TIMEOUT = env.float("YAHOO_TIMEOUT", default=30.0)
 DATAGOV_BASE_URL = env.str("DATAGOV_BASE_URL", default="https://data.gov.tw")
 DATAGOV_TIMEOUT = env.float("DATAGOV_TIMEOUT", default=60.0)
 MOPS_DOC_BASE_URL = env.str("MOPS_DOC_BASE_URL", default="https://doc.twse.com.tw")
+MOPS_BASE_URL = env.str("MOPS_BASE_URL", default="https://mopsov.twse.com.tw")
 MOPS_TIMEOUT = env.float("MOPS_TIMEOUT", default=60.0)
-FILING_VISIBLE_BEFORE = env.str("FILING_VISIBLE_BEFORE", default="22:40")
+STATEMENT_SCAN_DAYS_AFTER = env.int("STATEMENT_SCAN_DAYS_AFTER", default=45)
 ETL_RATE_LIMITS: dict[str, dict[str, float]] = {
     "twse": {
         "min_interval": env.float("TWSE_MIN_INTERVAL", default=3.5),

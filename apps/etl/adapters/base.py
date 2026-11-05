@@ -60,8 +60,10 @@ class BaseAdapter(ABC):
     def upsert(self, dataset: str, frame: pd.DataFrame) -> int:
         """Write standard rows by primary key and return how many were written."""
 
-    def save_raw(self, dataset: str, params: Mapping[str, Any], payload: Any) -> RawRecord:
-        return store_raw(self.raw_model, dataset, params, payload)
+    def save_raw(
+        self, dataset: str, params: Mapping[str, Any], payload: Any, identity: Any = None
+    ) -> RawRecord:
+        return store_raw(self.raw_model, dataset, params, payload, identity)
 
     def require_dataset(self, dataset: str) -> None:
         if dataset not in self.datasets:
