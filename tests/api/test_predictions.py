@@ -8,7 +8,7 @@ import pytest
 from django.test import Client
 from pytest_django import DjangoAssertNumQueries
 
-from apps.market.models import Market
+from apps.market.models import Market, TradingCalendar
 from apps.research.models import ModelMonitor, ModelRun
 from tests.api.conftest import (
     add_bars,
@@ -23,6 +23,7 @@ from tests.api.conftest import (
 pytestmark = pytest.mark.usefixtures("calendar_in_db")
 
 OCT_28, OCT_29, OCT_30 = date(2026, 10, 28), date(2026, 10, 29), date(2026, 10, 30)
+NOV_2 = date(2026, 11, 2)
 
 
 @dataclass(frozen=True)
@@ -152,8 +153,8 @@ def test_twenty_day_rows_merge_every_model_in_rank_order(client: Client, runs: R
             "high": 1120.0,
             "ret_low": -0.05,
             "ret_high": 0.12,
-            "source": "quantile",
         },
+        "interval_source": "quantile",
         "prob_up_5pct": 0.6,
         "vol_pred": 0.3,
     }
@@ -188,6 +189,10 @@ def test_meta_names_the_date_universe_and_serving_models(client: Client, runs: R
 
 
 def test_a_stock_without_quantiles_gets_the_volatility_band(client: Client, runs: Runs) -> None:
+    add_predictions(
+        runs.quantile, OCT_30, 5, {"6488": {"q10": -0.5, "q50": 0.1, "q90": 0.5, "ret_pred": 0.1}}
+    )
+
     row = by_code(envelope_of(client.get("/api/predictions")))["6488"]
     spread = 1.28 * 0.3 * math.sqrt(20 / 252)
 
@@ -197,8 +202,8 @@ def test_a_stock_without_quantiles_gets_the_volatility_band(client: Client, runs
         "high": round(500 * math.exp(spread), 4),
         "ret_low": round(math.exp(-spread) - 1, 6),
         "ret_high": round(math.exp(spread) - 1, 6),
-        "source": "volatility",
     }
+    assert row["interval_source"] == "volatility"
 
 
 def test_untraded_stock_is_priced_on_its_last_close_and_ranked_last(
@@ -208,7 +213,7 @@ def test_untraded_stock_is_priced_on_its_last_close_and_ranked_last(
 
     assert (row["close"], row["close_date"]) == (800.0, "2026-10-29")
     assert (row["rank"], row["in_universe"], row["prev_rank"]) == (None, False, None)
-    assert row["interval"]["source"] == "quantile"
+    assert row["interval_source"] == "quantile"
     assert row["prob_up_5pct"] is None
 
 
@@ -219,7 +224,7 @@ def test_five_day_rows_use_the_regression_and_a_five_day_band(client: Client, ru
     assert [row["stock_id"] for row in body["data"]] == ["2317", "2330", "6488"]
     first = body["data"][0]
     assert (first["ret_pred"], first["price_pred"], first["prob_up_5pct"]) == (0.02, 204.0, None)
-    assert first["interval"]["source"] == "volatility"
+    assert first["interval_source"] == "volatility"
     assert first["interval"]["high"] == round(200 * math.exp(spread), 4)
     assert [model["role"] for model in body["meta"]["models"]] == ["rank", "return", "volatility"]
 
@@ -231,9 +236,14 @@ def test_a_degraded_quantile_model_switches_to_the_volatility_band(
 
     body = envelope_of(client.get("/api/predictions"))
     row = by_code(body)["2330"]
+    spread = 1.28 * 0.3 * math.sqrt(20 / 252)
 
-    assert row["ret_pred"] == 0.04
-    assert row["interval"]["source"] == "volatility"
+    assert (row["ret_pred"], row["price_pred"]) == (0.04, 1040.0)
+    assert row["interval_source"] == "volatility"
+    assert (row["interval"]["low"], row["interval"]["high"]) == (
+        round(1000 * math.exp(-spread), 4),
+        round(1000 * math.exp(spread), 4),
+    )
     assert body["meta"]["degraded"] == ["return", "interval"]
 
 
@@ -287,8 +297,10 @@ def test_retired_rows_still_answer_an_earlier_date(client: Client, runs: Runs) -
 
 
 def test_date_defaults_to_the_latest_served_date(client: Client, runs: Runs) -> None:
-    candidate = add_model_run("rank-candidate", "rank", status="candidate")
-    add_predictions(candidate, date(2026, 11, 2), 20, {"2330": {"score": 0.1, "rank": 1, "pct": 1}})
+    later = {"2330": {"score": 0.1, "rank": 1, "pct": 1}}
+    add_predictions(add_model_run("rank-candidate", "rank", status="candidate"), NOV_2, 20, later)
+    add_predictions(add_model_run("rank-old", "rank", status="retired"), NOV_2, 20, later)
+    add_predictions(add_model_run("quantile-new", "quantile"), NOV_2, 20, later)
 
     earlier = envelope_of(client.get("/api/predictions", {"date": "2026-10-29"}))
     latest = envelope_of(client.get("/api/predictions"))
@@ -297,6 +309,29 @@ def test_date_defaults_to_the_latest_served_date(client: Client, runs: Runs) -> 
     assert earlier["meta"]["date"] == "2026-10-29"
     assert [row["stock_id"] for row in earlier["data"]] == ["6488", "2330", "2317"]
     assert earlier["data"][0]["prev_rank"] is None
+    assert (by_code(earlier)["2330"]["close"], by_code(earlier)["2330"]["close_date"]) == (
+        990.0,
+        "2026-10-29",
+    )
+
+
+def test_previous_rank_comes_from_the_run_that_served_that_day(client: Client, runs: Runs) -> None:
+    old = add_model_run("rank-old", "rank", status="retired")
+    add_predictions(old, OCT_29, 20, {"8299": {"score": 0.0, "rank": 9, "pct": 0.0}})
+
+    rows = by_code(envelope_of(client.get("/api/predictions")))
+
+    assert (rows["2330"]["prev_rank"], rows["8299"]["prev_rank"]) == (2, None)
+
+
+def test_a_broken_calendar_only_drops_the_previous_rank(client: Client, runs: Runs) -> None:
+    TradingCalendar.objects.filter(date=date(2026, 8, 3)).delete()
+
+    response = client.get("/api/predictions")
+
+    assert response.status_code == 200
+    rows = by_code(envelope_of(response))
+    assert (rows["2330"]["rank"], rows["2330"]["prev_rank"]) == (1, None)
 
 
 @pytest.mark.parametrize(
@@ -329,10 +364,15 @@ def test_no_predictions_yet_is_an_empty_page(client: Client, db: None) -> None:
 
 
 def test_monitor_averages_the_last_60_evaluated_dates(client: Client, runs: Runs) -> None:
-    days = sessions_until(OCT_30)[-61:]
+    days = sessions_until(OCT_30)[-62:]
+    ics = {0: 0.5, len(days) - 1: None}
     ModelMonitor.objects.bulk_create(
-        ModelMonitor(run=runs.rank20, date=day, horizon=20, ic=0.5 if n == 0 else 0.04, n_stocks=3)
+        ModelMonitor(run=runs.rank20, date=day, horizon=20, ic=ics.get(n, 0.04), n_stocks=3)
         for n, day in enumerate(days)
+    )
+    ModelMonitor.objects.bulk_create(
+        ModelMonitor(run=runs.rank20, date=day, horizon=20, ic=0.9, n_stocks=3)
+        for day in (NOV_2, date(2026, 11, 3))
     )
     ModelMonitor.objects.bulk_create(
         ModelMonitor(run=runs.quantile, date=day, horizon=20, coverage=0.79, n_stocks=3)

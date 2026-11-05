@@ -4,7 +4,7 @@ from collections import defaultdict
 from datetime import date
 from typing import Any
 
-from django.db.models import F, Q, QuerySet
+from django.db.models import F, OuterRef, Q, QuerySet, Subquery
 from rest_framework.request import Request
 from rest_framework.response import Response
 
@@ -21,15 +21,14 @@ from apps.api.serving import (
     roles_for,
     runs_on,
 )
-from apps.api.sessions import load_calendar
 from apps.api.views import ReadOnlyView
-from apps.market.calendar import CalendarError
+from apps.market.calendar import CalendarError, TradingDays
 from apps.market.models import DailyPrice, StockMaster
 from apps.research.models import ModelStatus, Prediction
 
 PRICE_DIGITS = 4
 RATIO_DIGITS = 6
-BASE_FIELDS = ("stock_id", "rank", "pct", "score", "in_universe")
+BASE_FIELDS = ("stock_id", "rank", "pct", "score", "in_universe", "close", "close_date")
 PART_FIELDS = ("run_id", "stock_id", "ret_pred", "q10", "q50", "q90", "vol_pred", "prob_up_5pct")
 
 
@@ -59,7 +58,6 @@ def interval_json(interval: Interval | None) -> dict[str, Any] | None:
         "high": round(interval.high, PRICE_DIGITS),
         "ret_low": round(interval.ret_low, RATIO_DIGITS),
         "ret_high": round(interval.ret_high, RATIO_DIGITS),
-        "source": interval.source,
     }
 
 
@@ -74,15 +72,15 @@ def filtered(rows: QuerySet[Prediction], query: dict[str, Any]) -> QuerySet[Pred
     return rows
 
 
-def latest_closes(stock_ids: list[str], day: date) -> dict[str, dict[str, Any]]:
-    """Each stock's last traded close on or before the day."""
-    rows = (
-        DailyPrice.objects.filter(stock_id__in=stock_ids, date__lte=day, close__isnull=False)
-        .order_by("stock_id", "-date")
-        .distinct("stock_id")
-        .values("stock_id", "date", "close")
+def with_closes(rows: QuerySet[Prediction], day: date) -> QuerySet[Prediction]:
+    """Each stock's last traded close on or before the day, looked up per row by index."""
+    prices = DailyPrice.objects.filter(
+        stock_id=OuterRef("stock_id"), date__lte=day, close__isnull=False
+    ).order_by("-date")
+    return rows.annotate(
+        close=Subquery(prices.values("close")[:1]),
+        close_date=Subquery(prices.values("date")[:1]),
     )
-    return {row["stock_id"]: dict(row) for row in rows}
 
 
 def parts_of(
@@ -113,7 +111,7 @@ def parts_of(
 def previous_ranks(day: date, horizon: int, stock_ids: list[str]) -> dict[str, int | None]:
     """Ranks on the session before the day; none when the calendar cannot tell."""
     try:
-        previous = load_calendar().shift(day, -1)
+        previous = TradingDays.from_db().shift(day, -1)
     except CalendarError:
         return {}
     return ranks_on(previous, horizon, stock_ids)
@@ -123,13 +121,12 @@ def prediction_row(
     base: dict[str, Any],
     parts: dict[str, dict[str, Any]],
     master: dict[str, Any] | None,
-    close_row: dict[str, Any] | None,
     context: dict[str, Any],
 ) -> dict[str, Any]:
     ret_row, band_row = parts.get("return", {}), parts.get("interval", {})
     ret = ret_row.get("ret_pred") if ret_row.get("ret_pred") is not None else ret_row.get("q50")
     vol = parts.get("volatility", {}).get("vol_pred")
-    close = None if close_row is None else float(close_row["close"])
+    close = None if base["close"] is None else float(base["close"])
     interval = None
     if close is not None:
         interval = choose_interval(
@@ -151,10 +148,13 @@ def prediction_row(
         "prev_rank": context["prev_ranks"].get(base["stock_id"]),
         "in_universe": base["in_universe"],
         "close": close,
-        "close_date": None if close_row is None else close_row["date"],
+        "close_date": base["close_date"],
         "ret_pred": ret,
-        "price_pred": None if close is None or ret is None else rounded(price_at(close, ret), 4),
+        "price_pred": None
+        if close is None or ret is None
+        else rounded(price_at(close, ret), PRICE_DIGITS),
         "interval": interval_json(interval),
+        "interval_source": None if interval is None else interval.source,
         "prob_up_5pct": parts.get("probability", {}).get("prob_up_5pct"),
         "vol_pred": vol,
     }
@@ -183,7 +183,7 @@ class PredictionListView(ReadOnlyView):
         base = Prediction.objects.none()
         if day is not None and rank_run is not None:
             base = Prediction.objects.filter(run_id=rank_run.run_id, date=day, horizon=horizon)
-        rows = filtered(base, query).order_by(
+        rows = with_closes(filtered(base, query), day or date.min).order_by(
             F("rank").asc(nulls_last=True), F("score").desc(nulls_last=True), "stock_id"
         )
         paginator = EnvelopePagination()
@@ -204,7 +204,7 @@ class PredictionListView(ReadOnlyView):
                 for role, slot in roles.items()
                 if slot in runs and runs[slot].status == ModelStatus.DEGRADED
             ],
-            "monitor": self.monitor(roles, runs, horizon),
+            "monitor": self.monitor(day, roles, runs, horizon),
             **paginator.meta(),
         }
         return envelope(data, meta)
@@ -228,24 +228,19 @@ class PredictionListView(ReadOnlyView):
         }
         parts = parts_of(day, roles, runs, stock_ids)
         masters = masters_of(stock_ids)
-        closes = latest_closes(stock_ids, day)
         return [
             prediction_row(
-                row,
-                parts.get(row["stock_id"], {}),
-                masters.get(row["stock_id"]),
-                closes.get(row["stock_id"]),
-                context,
+                row, parts.get(row["stock_id"], {}), masters.get(row["stock_id"]), context
             )
             for row in page
         ]
 
     def monitor(
-        self, roles: dict[str, Slot], runs: dict[Slot, ServingRun], horizon: int
+        self, day: date | None, roles: dict[str, Slot], runs: dict[Slot, ServingRun], horizon: int
     ) -> dict[str, Any]:
-        ic, ic_days = recent_mean(runs.get(roles["rank"]), horizon, "ic")
+        ic, ic_days = recent_mean(runs.get(roles["rank"]), day, horizon, "ic")
         band = runs.get(roles["interval"]) if "interval" in roles else None
-        coverage, coverage_days = recent_mean(band, 20, "coverage")
+        coverage, coverage_days = recent_mean(band, day, 20, "coverage")
         return {
             "rank_ic": ic,
             "rank_ic_days": ic_days,

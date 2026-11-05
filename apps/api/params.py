@@ -5,6 +5,7 @@ from typing import Any
 from rest_framework import serializers
 from rest_framework.request import Request
 
+from apps.api.serving import DEFAULT_HORIZON
 from apps.market.models import Market
 
 
@@ -28,7 +29,7 @@ class QualityQuery(serializers.Serializer[Any]):
 
 
 class PredictionQuery(serializers.Serializer[Any]):
-    horizon = serializers.ChoiceField(choices=[5, 20], default=20)
+    horizon = serializers.ChoiceField(choices=[5, 20], default=DEFAULT_HORIZON)
     date = serializers.DateField(required=False)
     market = serializers.ChoiceField(choices=Market.values, required=False)
     q = serializers.CharField(max_length=32, required=False, allow_blank=True)

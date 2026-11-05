@@ -13,6 +13,7 @@ from apps.research.runs import SCREENING_MODEL
 
 STATUS_ORDER = (ModelStatus.ACTIVE, ModelStatus.DEGRADED, ModelStatus.RETIRED)
 SERVING = (ModelStatus.ACTIVE, ModelStatus.DEGRADED)
+DEFAULT_HORIZON = 20
 MONITOR_DAYS = 60
 MONITOR_DIGITS = 4
 RUN_FIELDS = ("model_type", "version", "status", "train_start", "train_end", "created_at")
@@ -101,26 +102,25 @@ def serving_run(row: dict[str, Any]) -> ServingRun:
 
 
 def ranks_on(day: date, horizon: int, stock_ids: list[str]) -> dict[str, int | None]:
-    """Each stock's rank that day from the rank run that served it."""
-    rows = list(
-        eligible()
-        .filter(date=day, horizon=horizon, run__objective=ModelObjective.RANK)
-        .filter(stock_id__in=stock_ids)
-        .values("stock_id", "rank", *SERVING_FIELDS)
-    )
-    best = best_runs((serving_run(row) for row in rows), [Slot(ModelObjective.RANK, horizon)])
-    run = best.get(Slot(ModelObjective.RANK, horizon))
+    """Each stock's rank that day from the rank run that served the day."""
+    slot = Slot(ModelObjective.RANK, horizon)
+    run = runs_on(day, [slot]).get(slot)
     if run is None:
         return {}
-    return {row["stock_id"]: row["rank"] for row in rows if row["run_id"] == run.run_id}
+    rows = Prediction.objects.filter(
+        run_id=run.run_id, date=day, horizon=horizon, stock_id__in=stock_ids
+    ).values_list("stock_id", "rank")
+    return dict(rows)
 
 
-def recent_mean(run: ServingRun | None, horizon: int, field: str) -> tuple[float | None, int]:
-    """Mean of a model_monitor column over the run's last 60 evaluated dates, and how many."""
-    if run is None:
+def recent_mean(
+    run: ServingRun | None, day: date | None, horizon: int, field: str
+) -> tuple[float | None, int]:
+    """Mean of a model_monitor column over the run's last 60 evaluated dates up to the day."""
+    if run is None or day is None:
         return None, 0
     values = list(
-        ModelMonitor.objects.filter(run_id=run.run_id, horizon=horizon)
+        ModelMonitor.objects.filter(run_id=run.run_id, horizon=horizon, date__lte=day)
         .exclude(**{f"{field}__isnull": True})
         .order_by("-date")
         .values_list(field, flat=True)[:MONITOR_DAYS]
