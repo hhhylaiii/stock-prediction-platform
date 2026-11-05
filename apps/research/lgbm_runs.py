@@ -73,7 +73,7 @@ from apps.research.training import load_labels, training_rows
 from apps.research.walkforward import Fold
 
 MODEL = MODEL_TYPE
-RECIPE_VERSION = "2"
+RECIPE_VERSION = "3"
 MAX_ROUNDS = DEFAULT_MAX_ROUNDS
 SCOPE_HORIZONS: dict[str, tuple[int, ...]] = {
     HoldoutScope.RANK: HORIZONS,

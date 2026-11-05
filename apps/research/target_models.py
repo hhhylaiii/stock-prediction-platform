@@ -10,7 +10,7 @@ from sklearn.isotonic import IsotonicRegression
 from apps.research.baselines import QUANTILES
 from apps.research.features.registry import FEATURES as REGISTRY
 from apps.research.features.transforms import STOCK_LEVEL, MarketBins, market_bins, winsorize
-from apps.research.gbdt import MAX_ROUNDS, Boosted, boost, split_validation
+from apps.research.gbdt import MAX_ROUNDS, Boosted, bag_seeds, boost, refit, split_validation
 from apps.research.metrics.forecast import expected_calibration_error, reliability_table
 from apps.research.runs import Screened
 from apps.research.training import training_rows
@@ -144,15 +144,36 @@ def volatility(boosted: Boosted, frame: pd.DataFrame, features: Sequence[str]) -
 
 @dataclass(frozen=True)
 class ProbabilityFit:
-    """The binary booster, its validation ECE, and an isotonic map fitted when ECE was high."""
+    """The binary booster, its bag's validation probabilities and ECE, and an isotonic map."""
 
     boosted: Boosted
+    valid_probs: np.ndarray
     ece: float
     calibrator: IsotonicRegression | None
 
     def predict(self, frame: pd.DataFrame, features: Sequence[str]) -> np.ndarray:
         probs = np.asarray(self.boosted.booster.predict(frame[list(features)]))
         return probs if self.calibrator is None else np.asarray(self.calibrator.predict(probs))
+
+
+def _bag_validation(
+    boosted: Boosted,
+    rows: pd.DataFrame,
+    fold: Fold,
+    features: Sequence[str],
+    seed: int,
+    bags: int,
+    params: Mapping[str, str],
+) -> np.ndarray:
+    """Validation probabilities averaged over the bag, each seed fit before validation."""
+    fit, valid = split_validation(rows, fold)
+    others = [
+        np.asarray(
+            refit(fit, features, UP, member, boosted.rounds, params).predict(valid[list(features)])
+        )
+        for member in bag_seeds(seed, bags)[1:]
+    ]
+    return np.asarray(np.mean([boosted.valid_scores, *others], axis=0))
 
 
 def fit_probability(
@@ -164,16 +185,18 @@ def fit_probability(
     max_rounds: int = MAX_ROUNDS,
     bags: int = 1,
 ) -> ProbabilityFit:
-    """Binary booster of a 20-day gain above 5%, calibrated on the validation tail if needed."""
+    """Binary booster of a 20-day gain above 5%, calibrated on its bag's validation tail."""
     rows = _rows(inputs, labels, fold, UP_LABEL)
     rows = rows.assign(**{UP: rows[UP_LABEL].astype(np.float64)})
     params = {"objective": "binary", "metric": "binary_logloss"}
     boosted = boost(rows, fold, features, UP, seed, params, max_rounds=max_rounds, bags=bags)
     _, valid = split_validation(rows, fold)
-    scored = valid.assign(prob=boosted.valid_scores)
-    ece = expected_calibration_error(reliability_table(scored, UP, "prob", ECE_BINS))
+    probs = _bag_validation(boosted, rows, fold, features, seed, bags, params)
+    ece = expected_calibration_error(
+        reliability_table(valid.assign(prob=probs), UP, "prob", ECE_BINS)
+    )
     calibrator = None
     if ece > ECE_LIMIT:
         calibrator = IsotonicRegression(y_min=0.0, y_max=1.0, out_of_bounds="clip")
-        calibrator.fit(boosted.valid_scores, valid[UP].to_numpy())
-    return ProbabilityFit(boosted, ece, calibrator)
+        calibrator.fit(probs, valid[UP].to_numpy())
+    return ProbabilityFit(boosted, probs, ece, calibrator)

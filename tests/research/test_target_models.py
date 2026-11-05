@@ -297,7 +297,8 @@ def test_fit_probability_calibrates_on_the_validation_tail_only_when_ece_is_high
     fitted = fit_probability(inputs, labels, window, FEATURES, seed=1, max_rounds=200)
 
     _, valid = split_validation(trainable(inputs, labels, UP_LABEL), window)
-    scored = valid.assign(prob=fitted.boosted.valid_scores)
+    np.testing.assert_array_equal(fitted.valid_probs, fitted.boosted.valid_scores)
+    scored = valid.assign(prob=fitted.valid_probs)
     scored[UP] = scored[UP_LABEL].astype(float)
     assert fitted.ece == pytest.approx(
         expected_calibration_error(reliability_table(scored, UP, "prob", 10))
@@ -317,3 +318,34 @@ def test_fit_probability_calibrates_on_the_validation_tail_only_when_ece_is_high
     assert ((probs >= 0) & (probs <= 1)).all()
     order = np.argsort(raw)
     assert (np.diff(probs[order]) >= -1e-12).all()
+
+
+def test_fit_probability_calibrates_the_bag_average_of_seeds_fit_before_validation(
+    data: tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    inputs, labels, _ = data
+    window = fold()
+    monkeypatch.setattr(target_models, "ECE_LIMIT", -1.0)
+
+    fitted = fit_probability(inputs, labels, window, FEATURES, seed=1, max_rounds=200, bags=3)
+
+    rows = trainable(inputs, labels, UP_LABEL)
+    rows = rows.assign(**{UP: rows[UP_LABEL].astype(float)})
+    before, valid = split_validation(rows, window)
+    params = {"objective": "binary", "metric": "binary_logloss"}
+    members = [
+        gbdt.refit(before, FEATURES, UP, member, fitted.boosted.rounds, params)
+        for member in gbdt.bag_seeds(1, 3)
+    ]
+    expected = np.mean([member.predict(valid[FEATURES]) for member in members], axis=0)
+    np.testing.assert_allclose(fitted.valid_probs, expected, rtol=1e-9)
+    assert not np.allclose(fitted.valid_probs, fitted.boosted.valid_scores)
+    scored = valid.assign(prob=expected)
+    assert fitted.ece == pytest.approx(
+        expected_calibration_error(reliability_table(scored, UP, "prob", 10))
+    )
+    assert fitted.calibrator is not None
+    alone = target_models.IsotonicRegression(y_min=0.0, y_max=1.0, out_of_bounds="clip")
+    alone.fit(expected, valid[UP].to_numpy())
+    grid = np.linspace(0, 1, 101)
+    np.testing.assert_allclose(fitted.calibrator.predict(grid), alone.predict(grid))
