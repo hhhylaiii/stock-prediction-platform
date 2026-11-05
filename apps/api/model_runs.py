@@ -6,7 +6,7 @@ from statistics import fmean, stdev
 from typing import Any
 
 from django.conf import settings
-from django.db.models import Max
+from django.db.models import Max, Q
 from django.utils import timezone
 from rest_framework.request import Request
 from rest_framework.response import Response
@@ -16,13 +16,16 @@ from apps.api.params import MonthlyIcQuery, parse
 from apps.api.serving import (
     MONITOR_FIELDS,
     SERVING,
+    SERVING_FIELDS,
     ServingRun,
     Slot,
+    best_runs,
     eligible,
     latest_served_date,
     months_before,
     runs_on,
     served_monitor,
+    serving_run,
 )
 from apps.api.views import ReadOnlyView
 from apps.research.eval_report import RANK_METRICS
@@ -60,17 +63,19 @@ def serving_models() -> list[tuple[ServingRun, date]]:
         .values("run__objective", "horizon")
         .annotate(day=Max("date"))
     )
-    days: dict[date, list[Slot]] = defaultdict(list)
-    for row in latest:
-        slot = Slot(row["run__objective"], row["horizon"])
-        if slot in PAGE_ORDER:
-            days[row["day"]].append(slot)
-    found: dict[Slot, tuple[ServingRun, date]] = {}
-    for day, slots in days.items():
-        for slot, run in runs_on(day, slots).items():
-            if run.status in SERVING:
-                found[slot] = (run, day)
-    return [found[slot] for slot in PAGE_ORDER if slot in found]
+    days = {
+        slot: row["day"]
+        for row in latest
+        if (slot := Slot(row["run__objective"], row["horizon"])) in PAGE_ORDER
+    }
+    if not days:
+        return []
+    condition = Q()
+    for slot, day in days.items():
+        condition |= Q(run__objective=slot.objective, horizon=slot.horizon, date=day)
+    rows = eligible().filter(condition).values(*SERVING_FIELDS).distinct()
+    best = best_runs((serving_run(row) for row in rows), days)
+    return [(best[slot], days[slot]) for slot in PAGE_ORDER if slot in best]
 
 
 def rounded(value: float | None) -> float | None:
@@ -104,20 +109,28 @@ def recent_scores(models: list[tuple[ServingRun, date]]) -> dict[Slot, dict[str,
 
 
 def rank_holdouts() -> list[str]:
-    rows = HoldoutRun.objects.filter(scope=HoldoutScope.RANK).order_by("-claimed_at", "-id")
-    return list(rows.values_list("run_key", flat=True))
+    """The latest rank holdout attempt's run_key; earlier attempts are superseded."""
+    rows = HoldoutRun.objects.filter(scope=HoldoutScope.RANK).order_by("-attempt")
+    return list(rows.values_list("run_key", flat=True)[:1])
+
+
+KEY_ROWS: dict[str, Q] = {
+    MetricGrain.TOTAL: Q(metric__in=RANK_METRICS),
+    MetricGrain.MONTH: Q(metric=MONTH_IC, segment=""),
+}
 
 
 def metric_key(
     run: ServingRun | None, params: dict[str, Any], holdouts: list[str], horizon: int, grain: str
 ) -> tuple[str | None, str | None, str | None]:
-    """(run_key, model_type, source) of the first key with rows: params, own key, holdouts."""
+    """(run_key, model_type, source) of the first key with rows: params, own key, holdout."""
     candidates = [(key, "holdout") for key in holdouts]
     if run is not None:
         candidates = [(run.run_key, "self"), *candidates]
         if isinstance(params.get(RESEARCH_KEY), str):
             candidates = [(params[RESEARCH_KEY], "params"), *candidates]
     rows = BacktestMetric.objects.filter(
+        KEY_ROWS[grain],
         run_key__in=[key for key, _ in candidates],
         objective=ModelObjective.RANK,
         horizon=horizon,
@@ -126,10 +139,14 @@ def metric_key(
     rows = (
         rows.filter(model_type=run.model_type) if run else rows.exclude(model_type=BASELINE_MODEL)
     )
-    found = dict(rows.order_by("run_key", "model_type").values_list("run_key", "model_type"))
+    found: dict[str, set[str]] = defaultdict(set)
+    for key, model_type in rows.values_list("run_key", "model_type").distinct():
+        found[key].add(model_type)
     for key, source in candidates:
         if key in found:
-            return key, found[key], source
+            if len(found[key]) > 1:
+                return None, None, None
+            return key, found[key].pop(), source
     return None, None, None
 
 
@@ -207,7 +224,7 @@ class ModelListView(ReadOnlyView):
 
 
 def chart_source(horizon: int) -> tuple[str | None, str | None, str | None]:
-    """The serving rank run's research key by params, its own key, then the latest rank holdout."""
+    """The serving rank run's research key by params, its own key, then the rank holdout."""
     day = latest_served_date(horizon)
     slot = Slot(ModelObjective.RANK, horizon)
     run = None if day is None else runs_on(day, [slot]).get(slot)

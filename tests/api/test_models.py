@@ -64,7 +64,7 @@ def ic_on(n: int) -> float:
 def monitored(runs: Runs) -> Runs:
     """The rank line: an old run serves until the switch, the current one after it."""
     days = sessions_until(OCT_30)
-    old = add_model_run("rank-old", "rank", status="retired", train_end=date(2026, 6, 30))
+    old = add_model_run("rank-old", "rank", status="retired", train_end=date(2026, 1, 30))
     ModelMonitor.objects.bulk_create(
         ModelMonitor(
             run=old if day <= SWITCH else runs.rank20,
@@ -255,6 +255,44 @@ def test_without_own_metrics_the_latest_rank_holdout_is_read(client: Client, run
     assert (rank["metric_run_key"], rank["metric_source"]) == ("rank-refrozen", "holdout")
 
 
+def test_a_superseded_holdout_is_not_read(client: Client, runs: Runs) -> None:
+    for attempt, run_key in ((1, "rank-frozen"), (2, "rank-refrozen")):
+        HoldoutRun.objects.create(
+            scope="rank", attempt=attempt, run_key=run_key, last_date=OCT_30, reason="again"
+        )
+    HoldoutRun.objects.filter(run_key="rank-frozen").update(claimed_at=taipei(2030, 1, 1))
+    add_metric("lightgbm", "rank_ic", 0.01, run_key="rank-frozen")
+
+    rank = by_slot(envelope_of(client.get("/api/models")))[("rank", 20)]
+
+    assert (rank["metric_run_key"], rank["metric_source"], rank["research"]) == (None, None, None)
+
+
+def test_a_key_without_rank_metrics_is_skipped(client: Client, runs: Runs) -> None:
+    ModelRun.objects.filter(pk="rank-h20").update(params={"research_run_key": "rank-research"})
+    add_metric("lightgbm", "decile_excess", 0.3, run_key="rank-research")
+    add_metric("lightgbm", "rank_ic", 0.041)
+    add_metric(
+        "lightgbm",
+        "rank_ic",
+        0.5,
+        "month",
+        (MONTHS[0], month_end(MONTHS[0])),
+        segment="liq_t1",
+        run_key="rank-research",
+    )
+    add_months("lightgbm")
+
+    rank = by_slot(envelope_of(client.get("/api/models")))[("rank", 20)]
+    chart = envelope_of(client.get("/api/models/ic-monthly"))
+
+    assert (rank["metric_run_key"], rank["research"]["metrics"]) == (
+        "rank-serving",
+        {"rank_ic": 0.041},
+    )
+    assert (chart["meta"]["run_key"], chart["meta"]["source"]) == ("rank-serving", "self")
+
+
 def test_a_non_rank_run_sharing_a_run_key_gets_no_rank_research(client: Client, runs: Runs) -> None:
     ModelRun.objects.filter(pk="quantile-h20").update(run_key="rank-serving")
     add_metric("lightgbm", "rank_ic", 0.041)
@@ -333,9 +371,18 @@ def test_models_query_count(
 ) -> None:
     add_metric("lightgbm", "rank_ic", 0.041)
     add_metric("ridge", "rank_ic", 0.027)
+    for run, horizon, row in (
+        (monitored.vol, 20, {"vol_pred": 0.3}),
+        (monitored.prob, 20, {"prob_up_5pct": 0.6}),
+        (monitored.reg5, 5, {"ret_pred": 0.01}),
+    ):
+        Prediction.objects.filter(run=run, date=OCT_30).delete()
+        add_predictions(run, OCT_29, horizon, {"2330": row})
 
     with django_assert_max_num_queries(9):
-        client.get("/api/models")
+        body = envelope_of(client.get("/api/models"))
+
+    assert len(body["data"]) == 6
 
 
 def test_monthly_metric_names_come_from_the_rank_metric_list() -> None:
@@ -378,6 +425,9 @@ def test_monthly_ic_returns_the_last_24_months_against_ridge(client: Client, run
     add_metric(
         "lightgbm", "rank_ic", -0.5, "month", (MONTHS[-1], month_end(MONTHS[-1])), segment="liq_t1"
     )
+    BacktestMetric.objects.filter(
+        model_type="lightgbm", metric="rank_ic", segment="", period_start=MONTHS[-1]
+    ).update(value=-0.01)
 
     body = envelope_of(client.get("/api/models/ic-monthly"))
 
@@ -393,7 +443,7 @@ def test_monthly_ic_returns_the_last_24_months_against_ridge(client: Client, run
         "complete": True,
     }
     assert (data[-2]["days"], data[-2]["complete"]) == (10, True)
-    assert (data[-1]["days"], data[-1]["complete"], data[-1]["model"]) == (2, False, 0.03)
+    assert (data[-1]["days"], data[-1]["complete"], data[-1]["model"]) == (2, False, -0.01)
     assert body["meta"] == {
         "horizon": 20,
         "run_key": "rank-serving",
@@ -432,6 +482,17 @@ def test_before_any_model_serves_the_rank_holdout_is_shown(client: Client, db: N
     assert [(row["model"], row["baseline"]) for row in body["data"]] == [(0.03, 0.02), (0.03, 0.02)]
     assert body["meta"]["run_key"] == "rank-frozen"
     assert (body["meta"]["model_type"], body["meta"]["source"]) == ("lightgbm", "holdout")
+
+
+def test_a_holdout_with_two_main_model_types_is_not_guessed(client: Client, db: None) -> None:
+    add_months("lightgbm", run_key="rank-frozen")
+    add_months("xgboost", run_key="rank-frozen")
+    HoldoutRun.objects.create(scope="rank", attempt=1, run_key="rank-frozen", last_date=OCT_30)
+
+    body = envelope_of(client.get("/api/models/ic-monthly"))
+
+    assert body["data"] == []
+    assert (body["meta"]["run_key"], body["meta"]["source"]) == (None, None)
 
 
 def test_unfound_research_is_an_empty_chart_not_a_guess(client: Client, runs: Runs) -> None:
