@@ -116,6 +116,7 @@ def add_model_run(
     model_type: str = "lightgbm",
     version: str = "2026-10",
     created_at: datetime | None = None,
+    train_end: date = date(2026, 9, 30),
 ) -> ModelRun:
     return ModelRun.objects.create(
         run_id=run_id,
@@ -124,7 +125,7 @@ def add_model_run(
         objective=objective,
         version=version,
         train_start=date(2023, 10, 1),
-        train_end=date(2026, 9, 30),
+        train_end=train_end,
         feature_hash="f" * 64,
         status=status,
         created_at=created_at or taipei(2026, 10, 1),

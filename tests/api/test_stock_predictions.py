@@ -72,6 +72,19 @@ def test_realised_volatility_comes_from_the_twenty_day_prediction_date(
     assert other["realized_vol"] is None
 
 
+def test_without_a_twenty_day_date_realised_volatility_follows_the_five_day_one(
+    client: Client, runs: Runs
+) -> None:
+    Prediction.objects.filter(run=runs.rank20).delete()
+    for day, vol in ((OCT_30, 0.25), (NOV_2, 0.9)):
+        FeatureDaily.objects.create(stock_id="2330", date=day, in_universe=True, tech_vol_60d=vol)
+
+    data = envelope_of(client.get("/api/stocks/2330/predictions"))["data"]
+
+    assert horizons_of({"data": data})[20]["date"] is None
+    assert data["realized_vol"]["date"] == "2026-10-30"
+
+
 def test_a_degraded_model_is_named_per_horizon(client: Client, runs: Runs) -> None:
     ModelRun.objects.filter(pk="quantile-h20").update(status="degraded")
 

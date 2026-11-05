@@ -4,7 +4,7 @@ from collections import defaultdict
 from datetime import date
 from typing import Any
 
-from django.db.models import Q
+from django.db.models import F, Q
 from rest_framework.request import Request
 from rest_framework.response import Response
 
@@ -43,12 +43,14 @@ def matured(stock_id: str, horizon: int) -> dict[date, float]:
 def predicted(
     stock_id: str, slots: list[Slot], first: date, last: date
 ) -> dict[date, list[dict[str, Any]]]:
+    """Out-of-sample rows only: a day inside a run's training window is not a past forecast."""
     condition = Q()
     for slot in slots:
         condition |= Q(run__objective=slot.objective, horizon=slot.horizon)
     rows = (
         eligible()
         .filter(condition, stock_id=stock_id, date__range=(first, last))
+        .filter(date__gt=F("run__train_end"))
         .values(*SERVING_FIELDS, *ROW_FIELDS)
     )
     grouped: dict[date, list[dict[str, Any]]] = defaultdict(list)

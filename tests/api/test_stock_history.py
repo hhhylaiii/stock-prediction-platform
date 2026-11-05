@@ -22,6 +22,12 @@ LAST_LABELLED = date(2026, 10, 1)
 LABELLED = [day for day in SESSIONS if date(2026, 7, 6) <= day <= LAST_LABELLED]
 PREDICTED = [day for day in SESSIONS if date(2026, 7, 6) <= day <= date(2026, 10, 30)]
 QUANTILES = {"q10": -0.05, "q50": 0.01, "q90": 0.08, "ret_pred": 0.01}
+TRAINED_TO = date(2026, 6, 30)
+
+
+def serving(run_id: str, objective: str, **fields: Any) -> ModelRun:
+    """A run trained before every predicted day, so all of them are out of sample."""
+    return add_model_run(run_id, objective, train_end=TRAINED_TO, **fields)
 
 
 def picks(days: list[date], step: int) -> list[date]:
@@ -62,7 +68,7 @@ def outside_on(day: date) -> bool:
 def history(db: None) -> ModelRun:
     add_stock()
     add_stock(stock_id="2317", name="鴻海")
-    quantile = add_model_run("quantile-h20", "quantile")
+    quantile = serving("quantile-h20", "quantile")
     other = {"q10": -0.6, "q50": -0.4, "q90": -0.3, "ret_pred": -0.4}
     for day in PREDICTED:
         add_predictions(quantile, day, 20, {"2330": QUANTILES, "2317": other})
@@ -116,8 +122,8 @@ def test_a_missing_prediction_moves_the_next_pick_back(client: Client, history: 
 
 
 def test_each_date_uses_the_run_that_served_it(client: Client, history: ModelRun) -> None:
-    old = add_model_run("quantile-old", "quantile", status="retired")
-    newer = add_model_run("quantile-cand", "quantile", status="candidate")
+    old = serving("quantile-old", "quantile", status="retired")
+    newer = serving("quantile-cand", "quantile", status="candidate")
     wide = {"q10": -0.5, "q50": 0.3, "q90": 0.9, "ret_pred": 0.3}
     add_predictions(old, LAST_LABELLED, 20, {"2330": wide})
     add_predictions(newer, LAST_LABELLED, 20, {"2330": wide})
@@ -139,7 +145,7 @@ def test_a_degraded_quantile_run_is_judged_on_its_volatility_band(
     client: Client, history: ModelRun
 ) -> None:
     ModelRun.objects.filter(pk="quantile-h20").update(status="degraded")
-    vol = add_model_run("vol-h20", "volatility")
+    vol = serving("vol-h20", "volatility")
     add_predictions(vol, LAST_LABELLED, 20, {"2330": {"vol_pred": 0.3}})
     spread = 1.28 * 0.3 * math.sqrt(20 / 252)
 
@@ -160,8 +166,8 @@ def test_a_degraded_quantile_run_is_judged_on_its_volatility_band(
 def test_five_day_history_steps_five_sessions_on_the_regression(
     client: Client, history: ModelRun
 ) -> None:
-    regression = add_model_run("reg-h5", "regression")
-    vol = add_model_run("vol-h20", "volatility", created_at=taipei(2026, 6, 1))
+    regression = serving("reg-h5", "regression")
+    vol = serving("vol-h20", "volatility", created_at=taipei(2026, 6, 1))
     for day in PREDICTED:
         add_predictions(regression, day, 5, {"2330": {"ret_pred": -0.01}})
         add_predictions(vol, day, 20, {"2330": {"vol_pred": 0.2}})
@@ -181,7 +187,7 @@ def test_five_day_history_steps_five_sessions_on_the_regression(
 def test_without_vol_pred_the_band_uses_that_day_s_tech_vol_20d(
     client: Client, history: ModelRun
 ) -> None:
-    regression = add_model_run("reg-h5", "regression")
+    regression = serving("reg-h5", "regression")
     for day in PREDICTED:
         add_predictions(regression, day, 5, {"2330": {"ret_pred": 0.0}})
     add_labels(5, dict.fromkeys(LABELLED, 0.0))
@@ -199,12 +205,55 @@ def test_without_vol_pred_the_band_uses_that_day_s_tech_vol_20d(
     assert rows[1]["interval"] is None
 
 
-def test_days_outside_the_training_universe_are_flagged(client: Client, history: ModelRun) -> None:
+def test_days_outside_the_training_universe_are_flagged_and_still_counted(
+    client: Client, history: ModelRun
+) -> None:
     history.predictions.filter(stock_id="2330", date=LAST_LABELLED).update(in_universe=False)
+
+    first = envelope_of(client.get("/api/stocks/2330/history", {"page_size": "1"}))
+    rows = rows_of(envelope_of(client.get("/api/stocks/2330/history")))
+
+    expected = picks(LABELLED, 20)
+    assert [row["in_universe"] for row in rows[:2]] == [False, True]
+    assert len(first["data"]) == 1
+    assert (first["meta"]["inside"], first["meta"]["with_interval"]) == (
+        sum(not outside_on(day) for day in expected),
+        len(expected),
+    )
+
+
+def test_a_return_on_either_end_of_the_band_is_inside(client: Client, history: ModelRun) -> None:
+    expected = picks(LABELLED, 20)
+    LabelDaily.objects.filter(stock_id="2330", horizon=20, date=expected[1]).update(
+        fwd_ret_open=0.08
+    )
+    LabelDaily.objects.filter(stock_id="2330", horizon=20, date=expected[2]).update(
+        fwd_ret_open=-0.05
+    )
 
     rows = rows_of(envelope_of(client.get("/api/stocks/2330/history")))
 
-    assert [row["in_universe"] for row in rows[:2]] == [False, True]
+    assert [row["inside"] for row in rows[1:3]] == [True, True]
+
+
+def test_a_gap_inside_a_window_does_not_shift_the_picks(client: Client, history: ModelRun) -> None:
+    expected = picks(LABELLED, 20)
+    hole = SESSIONS[SESSIONS.index(expected[0]) - 5]
+    history.predictions.filter(date=hole).delete()
+
+    rows = rows_of(envelope_of(client.get("/api/stocks/2330/history")))
+
+    assert [row["date"] for row in rows] == [day.isoformat() for day in expected]
+
+
+def test_days_inside_the_run_s_training_window_are_not_history(
+    client: Client, history: ModelRun
+) -> None:
+    ModelRun.objects.filter(pk="quantile-h20").update(train_end=date(2026, 9, 15))
+
+    rows = rows_of(envelope_of(client.get("/api/stocks/2330/history")))
+
+    assert [row["date"] for row in rows] == [LAST_LABELLED.isoformat()]
 
 
 def test_unlabelled_or_null_labels_are_not_matured(client: Client, history: ModelRun) -> None:
