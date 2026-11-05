@@ -176,6 +176,7 @@ def test_a_stock_without_predictions_says_so(
     expect(page.locator("#forecasts")).to_contain_text("預測資料尚未產出。")
     expect(page.locator("#features")).to_contain_text("預測資料尚未產出。")
     expect(page.locator("#history")).to_contain_text("還沒有到期的預測。")
+    expect(page.locator("#chart-title")).to_have_text("過去 60 個交易日")
     expect(page.locator("#price-chart path.fan-median")).to_have_count(0)
 
 
@@ -270,6 +271,7 @@ def test_the_fan_starts_on_the_adjusted_bar_of_its_prediction_day(
         body = response.json()
         for entry in body["data"]["horizons"]:
             if entry["prediction"]:
+                entry["date"] = day.isoformat()
                 entry["prediction"]["close_date"] = day.isoformat()
                 entry["prediction"]["close"] = explained.closes[-2]
         route.fulfill(response=response, json=body)
@@ -316,3 +318,151 @@ def test_switching_the_horizon_here_sends_today_back_to_page_one(
     page.locator("[data-nav=today]").click()
 
     expect(page.locator("#count")).to_have_text("第 1–20 名，共 25 檔")
+
+
+LAST_POINTS = """() => {
+  const coords = d => d.split(/[ML]/).filter(Boolean).map(p => p.trim().split(' ').map(Number));
+  const chart = document.querySelector('#price-chart');
+  const start = coords(chart.querySelector('path.fan-median').getAttribute('d'))[0];
+  const line = coords(chart.querySelector('path.close-line').getAttribute('d'));
+  return { start: start, last: line[line.length - 1] };
+}"""
+
+
+def test_a_halted_prediction_day_starts_the_fan_on_that_day(
+    page: Page, live_server: LiveServer, explained: Seed
+) -> None:
+    def halted(route: Route) -> None:
+        response = route.fetch()
+        body = response.json()
+        for key in ("open", "high", "low", "close", "volume", "turnover"):
+            body["data"][-1][key] = None
+        route.fulfill(response=response, json=body)
+
+    def earlier_close(route: Route) -> None:
+        response = route.fetch()
+        body = response.json()
+        for entry in body["data"]["horizons"]:
+            if entry["prediction"]:
+                entry["prediction"]["close_date"] = explained.sessions[-2].isoformat()
+        route.fulfill(response=response, json=body)
+
+    page.route("**/api/stocks/2330/prices*", halted)
+    page.route("**/api/stocks/2330/predictions", earlier_close)
+    page.goto(f"{live_server.url}/#stock-2330")
+    page.get_by_role("button", name="收盤線").click()
+    expect(page.locator("#price-chart path.fan-median")).to_have_count(1)
+
+    points = page.evaluate(LAST_POINTS)
+    assert points["start"][0] > points["last"][0]
+    assert abs(points["start"][1] - points["last"][1]) < 0.5
+
+
+BAND_HOLDS_MEDIAN = """() => {
+  const coords = d => d.replace(' Z', '').split(/[ML]/).filter(Boolean)
+    .map(p => p.trim().split(' ').map(Number));
+  const chart = document.querySelector('#price-chart');
+  const median = coords(chart.querySelector('path.fan-median').getAttribute('d'));
+  const band = coords(chart.querySelector('path.fan-band').getAttribute('d'));
+  const top = band.slice(0, median.length), bottom = band.slice(median.length).reverse();
+  return median.every((p, t) => top[t][1] <= p[1] + 1e-6 && p[1] <= bottom[t][1] + 1e-6);
+}"""
+
+
+def test_the_band_holds_the_median_when_both_quantiles_are_up(
+    page: Page, live_server: LiveServer, explained: Seed
+) -> None:
+    Prediction.objects.filter(run_id="quantile-h20", stock_id="2330").update(
+        q10=0.02, q50=0.06, q90=0.12, ret_pred=0.06
+    )
+
+    page.goto(f"{live_server.url}/#stock-2330")
+    expect(page.locator("#price-chart path.fan-band")).to_have_count(1)
+
+    assert page.evaluate(BAND_HOLDS_MEDIAN) is True
+
+
+def test_every_unit_reads_as_its_kind(page: Page, live_server: LiveServer, explained: Seed) -> None:
+    FeatureDaily.objects.filter(stock_id="2330", date=explained.last_session).update(
+        liq_amihud_20d=3.2e-12, tech_limit_up_cnt_20d=2, tech_attention_t=1, fund_gm_yoy_chg=0.012
+    )
+    add_contribs(
+        explained,
+        [
+            ("liq_amihud_20d", 0.004),
+            ("tech_limit_up_cnt_20d", 0.003),
+            ("tech_attention_t", -0.002),
+            ("fund_gm_yoy_chg", 0.001),
+        ],
+        (0.0, 73),
+        horizon=5,
+    )
+    page.goto(f"{live_server.url}/#stock-2330")
+
+    page.locator("#stock-seg [data-sh='5']").click()
+
+    values = page.locator("#features .feat .value")
+    expect(values).to_have_text(["3.20×10⁻¹²", "2", "是", "+1.20 個百分點"])
+
+
+def test_a_ranked_stock_without_contributions_says_so(
+    page: Page, live_server: LiveServer, explained: Seed
+) -> None:
+    page.goto(f"{live_server.url}/#stock-9999")
+
+    expect(page.locator("#features")).to_contain_text("這一期沒有這檔股票的特徵貢獻。")
+
+
+def test_the_header_and_forecasts_do_not_wait_for_the_history(
+    page: Page, live_server: LiveServer, explained: Seed
+) -> None:
+    held: list[Route] = []
+    page.route("**/api/stocks/2330/history?*", lambda route: held.append(route))
+    page.goto(f"{live_server.url}/#stock-2330")
+
+    expect(page.locator(".stockhead .kpi .v")).to_have_text("第 1 名 / 25")
+    expect(page.locator("#forecasts .trow")).to_have_count(2)
+    expect(page.locator("#history .placeholder")).to_have_text("載入中…")
+    assert len(held) == 1
+    held[0].continue_()
+    expect(page.locator("#history")).to_contain_text("還沒有到期的預測。")
+
+
+def test_forecasts_without_a_fan_keep_the_hover(
+    page: Page, live_server: LiveServer, explained: Seed
+) -> None:
+    held: list[Route] = []
+    page.route("**/api/stocks/9999/predictions", lambda route: held.append(route))
+    page.goto(f"{live_server.url}/#stock-9999")
+    overlay = page.locator("#price-chart .overlay")
+    expect(overlay).to_have_count(1)
+    box = overlay.bounding_box()
+    assert box is not None
+    overlay.hover(position={"x": box["width"] - 1, "y": box["height"] / 2})
+    expect(page.locator("#price-chart .tip")).to_be_visible()
+
+    held[0].continue_()
+    expect(page.locator(".stockhead .kpi .v")).to_have_text("第 2 名 / 25")
+
+    expect(page.locator("#price-chart .tip")).to_be_visible()
+
+
+def test_each_horizon_names_its_own_close_when_they_differ(
+    page: Page, live_server: LiveServer, explained: Seed
+) -> None:
+    def older_five(route: Route) -> None:
+        response = route.fetch()
+        body = response.json()
+        for entry in body["data"]["horizons"]:
+            if entry["horizon"] == 5:
+                entry["prediction"]["close_date"] = explained.sessions[-2].isoformat()
+                entry["prediction"]["close"] = explained.closes[-2]
+        route.fulfill(response=response, json=body)
+
+    page.route("**/api/stocks/2330/predictions", older_five)
+    page.goto(f"{live_server.url}/#stock-2330")
+
+    expect(page.locator("#forecasts .sub")).to_contain_text(
+        f"20 日以 {explained.last_session.isoformat()} 收盤 1,138、"
+        f"5 日以 {explained.sessions[-2].isoformat()} 收盤 1,136 換算"
+    )

@@ -273,6 +273,7 @@
   const UNIT_TEXT = {
     ratio: v => percentText(v, true),
     percent: v => percentText(v, false),
+    points: v => signed(v * 100, 2) + ' 個百分點',
     number: numberText,
     count: v => fmtInt(Math.round(v)),
     flag: v => v ? '是' : '否',
@@ -322,15 +323,17 @@
 
   function forecastsHtml(data) {
     const entries = [...data.horizons].sort((a, b) => a.horizon - b.horizon);
-    const based = [...entries].reverse().map(entry => entry.prediction).filter(p => p && p.close !== null);
+    const based = [...entries].reverse().filter(entry => entry.prediction && entry.prediction.close !== null);
     if (!based.length) return waiting;
     const twenty = entries.find(entry => entry.horizon === 20) || {};
-    const anchor = based[0];
+    const sameClose = based.every(entry => entry.prediction.close_date === based[0].prediction.close_date);
+    const closeText = p => esc(p.close_date) + ' 收盤 ' + fmtPrice(p.close);
+    const basis = sameClose ? closeText(based[0].prediction) : based.map(entry => entry.horizon + ' 日以 ' + closeText(entry.prediction)).join('、');
     const vol = twenty.prediction ? twenty.prediction.vol_pred : null;
     const realised = data.realized_vol && data.realized_vol.tech_vol_60d !== null ? data.realized_vol.tech_vol_60d : null;
     const rank = (twenty.models || []).find(model => model.role === 'rank') || (entries.flatMap(entry => entry.models || []).find(model => model.role === 'rank'));
     const degraded = entries.some(entry => (entry.degraded || []).length);
-    return '<p class="sub">同一組特徵，分別由排名、報酬與區間機率模型產出。價格以 ' + esc(anchor.close_date) + ' 收盤 ' + fmtPrice(anchor.close) + ' 換算。</p><div class="list">' +
+    return '<p class="sub">同一組特徵，分別由排名、報酬與區間機率模型產出。價格以 ' + basis + ' 換算。</p><div class="list">' +
       '<div class="thead h-cols" style="padding-top:10px"><div>期間</div><div class="right">預測報酬</div><div class="right">預測價</div><div class="right">80% 區間</div><div class="right">漲幅超過 5% 機率</div></div>' +
       entries.map(forecastRowHtml).join('') + '</div>' +
       '<div class="pair"><div><div class="faint tiny">預測 20 日波動（年化）</div><div class="v">' + (vol === null || vol === undefined ? '—' : (vol * 100).toFixed(1) + '%') + '</div>' +
@@ -404,7 +407,7 @@
     const p = entry && entry.prediction;
     if (!p || p.ret_pred === null || p.close === null) return null;
     const band = entry.horizon === 20 && p.interval ? { low: p.interval.ret_low, high: p.interval.ret_high } : null;
-    return { h: entry.horizon, close: p.close, date: p.close_date, ret: p.ret_pred, band: band };
+    return { h: entry.horizon, day: entry.date, date: p.close_date, ret: p.ret_pred, band: band };
   }
 
   async function renderStock(code) {
@@ -441,7 +444,8 @@
     const drawChart = () => {
       const bars = prices.status === 'fulfilled' ? prices.value.data : [];
       const candidate = fanOf(entryOf());
-      const fan = candidate && bars.some(b => b.date === candidate.date && b.close !== null) ? candidate : null;
+      const fan = candidate && bars.some(b => b.date === candidate.day) && bars.some(b => b.date === candidate.date && b.close !== null) ? candidate : null;
+      document.getElementById('chart-title').textContent = '過去 ' + PRICE_DAYS + ' 個交易日' + (fan ? '，與未來 ' + fan.h + ' 日的預測' : '');
       document.querySelectorAll('#chart-seg [data-ct]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.ct === state.chart)));
       const forecastLegend = fan ? '<span><i class="sw-dash"></i>預測中位數（內插）</span>' + (fan.band ? '<span><i class="sw-band"></i>80% 預測區間（內插）</span>' : '') : '';
       document.getElementById('chart-legend').innerHTML = (state.chart === 'candle'
@@ -455,7 +459,6 @@
     const drawHorizon = () => {
       controls();
       document.querySelectorAll('#stock-seg [data-sh]').forEach(b => b.setAttribute('aria-pressed', String(Number(b.dataset.sh) === state.h)));
-      document.getElementById('chart-title').textContent = '過去 ' + PRICE_DAYS + ' 個交易日，與未來 ' + state.h + ' 日的預測';
       document.querySelector('#stock-rank .l').textContent = state.h + ' 日預測排名';
       showRank();
       drawChart();
@@ -473,7 +476,7 @@
       forecasts = result;
       document.querySelector('#forecasts .body').innerHTML = result.status === 'rejected' ? errorBox(result.reason) : forecastsHtml(result.value.data);
       showRank();
-      drawChart();
+      if (fanOf(entryOf())) drawChart();
     });
     later.history.then(result => { if (token === state.stockToken) showHistory(document.getElementById('history'), result); });
   }
@@ -496,8 +499,9 @@
     if (!traded.length) { host.innerHTML = '<p class="placeholder">這段期間沒有成交資料。</p>'; return; }
     const candle = kind === 'candle';
     const n = bars.length;
-    const anchor = fan ? bars.findIndex(b => b.date === fan.date && b.close !== null) : -1;
-    const fanAt = anchor < 0 ? null : fanPoints(fan, anchor, bars[anchor].close);
+    const anchor = fan ? bars.findIndex(b => b.date === fan.day) : -1;
+    const base = fan ? bars.find(b => b.date === fan.date && b.close !== null) : null;
+    const fanAt = anchor < 0 || !base ? null : fanPoints(fan, anchor, base.close);
     const slots = fanAt ? Math.max(n, anchor + fan.h + 1) : n;
     const fanValues = fanAt ? [...fanAt.median, ...fanAt.top, ...fanAt.bottom].map(pt => pt.v) : [];
     const closes = bars.map(b => b.close);
