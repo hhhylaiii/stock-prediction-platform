@@ -69,6 +69,7 @@ REVENUE_SCAN = "revenue_scan"
 SCANS = frozenset({STATEMENT_SCAN, REVENUE_SCAN})
 REVENUE_PATH = "/nas/t21"
 SUMMARY_PATH = "/mops/web/ajax_"
+VIEWER_PATH = "/server-java/t164sb01"
 SUMMARY_ENCODING = "utf-8"
 EXPORT_NAME = re.compile(r"name='filename' value='[^']*'")
 LISTING_PATH = "/server-java/t57sb01"
@@ -175,6 +176,20 @@ class MopsSummaryClient(SourceClient):
         body = self.get_content(f"{self.base_url}{REVENUE_PATH}/{market}/{name}", {})
         params = {"market": market, "year": str(roc_year), "month": str(month)}
         return {**params, "origin": str(origin)}, body.decode(PAGE_ENCODING, errors="replace")
+
+    def viewer(
+        self, stock_id: str, year: int, season: int, report: str
+    ) -> tuple[dict[str, str], str]:
+        """One company's filed XBRL quarter: C consolidated, A individual; delisted ones too."""
+        params = {
+            "step": "1",
+            "CO_ID": stock_id,
+            "SYEAR": str(year),
+            "SSEASON": str(season),
+            "REPORT_ID": report,
+        }
+        body = self.get_content(f"{self.base_url}{VIEWER_PATH}", params)
+        return params, body.decode(PAGE_ENCODING, errors="replace")
 
 
 class _Rows(HTMLParser):
