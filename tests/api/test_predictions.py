@@ -88,7 +88,7 @@ def test_meta_names_the_date_universe_and_serving_models(client: Client, runs: R
         "train_start": "2023-10-01",
         "train_end": "2026-09-30",
     }
-    assert meta["degraded"] == []
+    assert (meta["degraded"], meta["interval_alert"]) == ([], False)
 
 
 def test_a_stock_without_quantiles_gets_the_volatility_band(client: Client, runs: Runs) -> None:
@@ -449,3 +449,19 @@ def test_the_first_calendar_session_has_no_previous_rank(client: Client, db: Non
     row = envelope_of(client.get("/api/predictions"))["data"][0]
 
     assert (row["rank"], row["prev_rank"], row["close"]) == (1, None, 900.0)
+
+
+@pytest.mark.parametrize(
+    ("degraded_on", "source"), [("2026-10-30", "volatility"), ("2026-11-02", "quantile")]
+)
+def test_a_degraded_band_counts_from_its_degraded_on_day(
+    client: Client, runs: Runs, degraded_on: str, source: str
+) -> None:
+    ModelRun.objects.filter(pk="quantile-h20").update(
+        status="degraded", params={"degraded_on": degraded_on}
+    )
+
+    body = envelope_of(client.get("/api/predictions"))
+
+    assert by_code(body)["8299"]["interval_source"] == source
+    assert body["meta"]["interval_alert"] is (source == "volatility")

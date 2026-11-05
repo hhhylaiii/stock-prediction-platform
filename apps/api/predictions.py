@@ -15,6 +15,7 @@ from apps.api.pricing import Interval, choose_interval, price_at
 from apps.api.serving import (
     ServingRun,
     Slot,
+    interval_alert,
     latest_served_date,
     ranks_on,
     recent_mean,
@@ -215,6 +216,11 @@ def served_models(roles: dict[str, Slot], runs: dict[Slot, ServingRun]) -> list[
     return [model_meta(role, runs[slot]) for role, slot in roles.items() if slot in runs]
 
 
+def band_alert(day: date, roles: dict[str, Slot], runs: dict[Slot, ServingRun]) -> bool:
+    """Whether the day's quantile band gives way to the volatility one."""
+    return interval_alert(runs.get(roles["interval"]) if "interval" in roles else None, day)
+
+
 def degraded_roles(roles: dict[str, Slot], runs: dict[Slot, ServingRun]) -> list[str]:
     return [
         role
@@ -234,8 +240,7 @@ def merged_rows(
     if day is None or not page:
         return []
     stock_ids = [row["stock_id"] for row in page]
-    band = runs.get(roles["interval"]) if "interval" in roles else None
-    alert = band is not None and band.status == ModelStatus.DEGRADED
+    alert = band_alert(day, roles, runs)
     parts = parts_of(day, roles, runs, stock_ids)
     lacking = [
         row["stock_id"]
@@ -276,6 +281,7 @@ class PredictionListView(ReadOnlyView):
             "universe": base.filter(in_universe=True).count(),
             "models": served_models(roles, runs),
             "degraded": degraded_roles(roles, runs),
+            "interval_alert": day is not None and band_alert(day, roles, runs),
             "monitor": self.monitor(day, roles, runs),
             **paginator.meta(),
         }

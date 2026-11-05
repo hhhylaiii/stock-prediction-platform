@@ -1,6 +1,9 @@
 """Which model runs serve a prediction date, and the run each displayed field is read from."""
 
 import calendar
+import functools
+import logging
+import re
 from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -29,7 +32,17 @@ RUN_FIELDS = (
     "train_end",
     "created_at",
 )
-SERVING_FIELDS = ("run_id", "run__objective", "horizon", *(f"run__{name}" for name in RUN_FIELDS))
+DEGRADED_ON = "run__params__degraded_on"
+ISO_DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
+SERVING_FIELDS = (
+    "run_id",
+    "run__objective",
+    "horizon",
+    *(f"run__{name}" for name in RUN_FIELDS),
+    DEGRADED_ON,
+)
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -50,9 +63,40 @@ class ServingRun:
     train_start: date
     train_end: date
     created_at: datetime
+    degraded_on: date | None = None
 
     def order(self) -> tuple[int, float, str]:
         return (STATUS_ORDER.index(self.status), -self.created_at.timestamp(), self.run_id)
+
+
+@functools.cache
+def warn_undated(run_id: str) -> None:
+    logger.warning(
+        "degraded run %s has no readable params.degraded_on; its band is set aside on every day",
+        run_id,
+    )
+
+
+def day_of(value: object) -> date | None:
+    """The params.degraded_on date, or None unless it is a YYYY-MM-DD string."""
+    if not isinstance(value, str) or not ISO_DAY.fullmatch(value):
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def interval_alert(run: ServingRun | None, day: date) -> bool:
+    """A quantile band gives way to the volatility one from the day its run was degraded."""
+    if run is None or run.status == ModelStatus.ACTIVE:
+        return False
+    if run.degraded_on is not None:
+        return day >= run.degraded_on
+    if run.status == ModelStatus.DEGRADED:
+        warn_undated(run.run_id)
+        return True
+    return False
 
 
 def roles_for(horizon: int) -> dict[str, Slot]:
@@ -111,6 +155,7 @@ def serving_run(row: dict[str, Any]) -> ServingRun:
         objective=row["run__objective"],
         horizon=row["horizon"],
         **{name: row[f"run__{name}"] for name in RUN_FIELDS},
+        degraded_on=day_of(row.get(DEGRADED_ON)),
     )
 
 

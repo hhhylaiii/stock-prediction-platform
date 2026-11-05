@@ -92,6 +92,7 @@ def test_a_degraded_model_is_named_per_horizon(client: Client, runs: Runs) -> No
 
     assert entries[20]["degraded"] == ["return", "interval"]
     assert entries[20]["prediction"]["interval_source"] == "volatility"
+    assert entries[20]["interval_alert"] is True
     assert entries[5]["degraded"] == []
 
 
@@ -154,3 +155,15 @@ def test_stock_predictions_query_count_on_the_worst_path(
     entries = horizons_of(envelope_of(response))
     assert [entries[h]["prediction"]["interval_source"] for h in (5, 20)] == ["tech_vol_20d"] * 2
     assert entries[5]["prediction"]["prev_rank"] == 1
+
+
+def test_a_band_degraded_after_the_prediction_day_still_shows(client: Client, runs: Runs) -> None:
+    ModelRun.objects.filter(pk="quantile-h20").update(
+        status="degraded", params={"degraded_on": "2026-11-02"}
+    )
+
+    entries = horizons_of(envelope_of(client.get("/api/stocks/2330/predictions")))
+
+    assert entries[20]["degraded"] == ["return", "interval"]
+    assert entries[20]["prediction"]["interval_source"] == "quantile"
+    assert (entries[20]["interval_alert"], entries[5]["interval_alert"]) == (False, False)

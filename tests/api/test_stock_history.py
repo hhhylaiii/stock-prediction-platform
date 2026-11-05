@@ -6,6 +6,7 @@ import pytest
 from django.test import Client
 from pytest_django import DjangoAssertNumQueries
 
+from apps.api.serving import warn_undated
 from apps.research.models import FeatureDaily, LabelDaily, ModelRun
 from tests.api.conftest import (
     SESSIONS,
@@ -23,6 +24,10 @@ LABELLED = [day for day in SESSIONS if date(2026, 7, 6) <= day <= LAST_LABELLED]
 PREDICTED = [day for day in SESSIONS if date(2026, 7, 6) <= day <= date(2026, 10, 30)]
 QUANTILES = {"q10": -0.05, "q50": 0.01, "q90": 0.08, "ret_pred": 0.01}
 TRAINED_TO = date(2026, 6, 30)
+UNDATED = (
+    "degraded run quantile-h20 has no readable params.degraded_on;"
+    " its band is set aside on every day"
+)
 
 
 def serving(run_id: str, objective: str, **fields: Any) -> ModelRun:
@@ -121,7 +126,9 @@ def test_a_missing_prediction_moves_the_next_pick_back(client: Client, history: 
     assert rows[1]["date"] == SESSIONS[SESSIONS.index(previous) - 20].isoformat()
 
 
-def test_each_date_uses_the_run_that_served_it(client: Client, history: ModelRun) -> None:
+def test_each_date_uses_the_run_that_served_it(
+    client: Client, history: ModelRun, caplog: pytest.LogCaptureFixture
+) -> None:
     old = serving("quantile-old", "quantile", status="retired")
     newer = serving("quantile-cand", "quantile", status="candidate")
     wide = {"q10": -0.5, "q50": 0.3, "q90": 0.9, "ret_pred": 0.3}
@@ -139,11 +146,14 @@ def test_each_date_uses_the_run_that_served_it(client: Client, history: ModelRun
         "quantile-old",
         0.3,
     )
+    assert rows[-1]["interval_source"] == "quantile"
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
 
 
 def test_a_degraded_quantile_run_is_judged_on_its_volatility_band(
-    client: Client, history: ModelRun
+    client: Client, history: ModelRun, caplog: pytest.LogCaptureFixture
 ) -> None:
+    warn_undated.cache_clear()
     ModelRun.objects.filter(pk="quantile-h20").update(status="degraded")
     vol = serving("vol-h20", "volatility")
     add_predictions(vol, LAST_LABELLED, 20, {"2330": {"vol_pred": 0.3}})
@@ -151,6 +161,7 @@ def test_a_degraded_quantile_run_is_judged_on_its_volatility_band(
 
     rows = rows_of(envelope_of(client.get("/api/stocks/2330/history")))
 
+    assert [r.getMessage() for r in caplog.records if r.levelname == "WARNING"] == [UNDATED]
     assert rows[0]["interval_source"] == "volatility"
     assert rows[0]["interval"] == {
         "ret_low": round(0.01 - spread, 6),
@@ -293,3 +304,50 @@ def test_history_query_count(
 ) -> None:
     with django_assert_max_num_queries(6):
         client.get("/api/stocks/2330/history")
+
+
+@pytest.mark.parametrize("status", ["degraded", "retired"])
+def test_the_band_is_set_aside_only_from_the_degraded_on_day(
+    client: Client, history: ModelRun, status: str
+) -> None:
+    expected = picks(LABELLED, 20)
+    ModelRun.objects.filter(pk="quantile-h20").update(
+        status=status, params={"degraded_on": expected[1].isoformat()}
+    )
+    vol = serving("vol-h20", "volatility")
+    for day in expected[:3]:
+        add_predictions(vol, day, 20, {"2330": {"vol_pred": 0.3}})
+
+    rows = rows_of(envelope_of(client.get("/api/stocks/2330/history")))
+
+    assert [row["interval_source"] for row in rows[:3]] == ["volatility", "volatility", "quantile"]
+    assert rows[2]["interval"] == {"ret_low": -0.05, "ret_high": 0.08}
+
+
+@pytest.mark.parametrize("written", ["soon", "20261001", 20261001, "2026-02-30"])
+def test_an_unreadable_degraded_on_falls_back_to_every_day(
+    client: Client, history: ModelRun, caplog: pytest.LogCaptureFixture, written: object
+) -> None:
+    warn_undated.cache_clear()
+    ModelRun.objects.filter(pk="quantile-h20").update(
+        status="degraded", params={"degraded_on": written}
+    )
+
+    rows = rows_of(envelope_of(client.get("/api/stocks/2330/history")))
+
+    assert rows
+    assert all(row["interval"] is None for row in rows)
+    assert [r.getMessage() for r in caplog.records if r.levelname == "WARNING"] == [UNDATED]
+
+
+def test_a_run_restored_to_active_keeps_its_quantile_band(
+    client: Client, history: ModelRun
+) -> None:
+    ModelRun.objects.filter(pk="quantile-h20").update(
+        params={"degraded_on": LABELLED[0].isoformat()}
+    )
+
+    rows = rows_of(envelope_of(client.get("/api/stocks/2330/history")))
+
+    assert rows
+    assert {row["interval_source"] for row in rows} == {"quantile"}

@@ -10,6 +10,7 @@ from apps.api.envelope import envelope
 from apps.api.params import DateQuery, parse
 from apps.api.predictions import (
     BASE_FIELDS,
+    band_alert,
     degraded_roles,
     merged_rows,
     rank_rows,
@@ -39,6 +40,7 @@ def horizon_entry(stock_id: str, horizon: int, asked: date | None) -> dict[str, 
         "prediction": rows[0] if rows else None,
         "models": served_models(roles, runs),
         "degraded": degraded_roles(roles, runs),
+        "interval_alert": day is not None and band_alert(day, roles, runs),
     }
 
 

@@ -297,3 +297,36 @@ def test_the_status_strip_says_when_no_prices_exist(
     page.goto(live_server.url)
 
     expect(page.locator("#status")).to_contain_text("尚無收盤資料")
+
+
+def test_a_band_degraded_after_the_shown_day_is_not_called_replaced(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    later = predicted.last_session + timedelta(days=1)
+    ModelRun.objects.filter(pk="quantile-h20").update(
+        status="degraded", params={"degraded_on": later.isoformat()}
+    )
+
+    page.goto(live_server.url)
+
+    expect(page.locator("#rows .trow").first).not_to_contain_text("（波動率區間）")
+    meta = page.locator("#today-meta")
+    expect(meta).to_contain_text("1 個模型降級中，結果僅供參考")
+    expect(meta).not_to_contain_text("區間改用波動率區間")
+
+
+def test_watch_only_names_the_replaced_band(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    ModelRun.objects.filter(pk="quantile-h20").update(
+        status="degraded", params={"degraded_on": predicted.sessions[0].isoformat()}
+    )
+    page.add_init_script("localStorage.setItem('twp-watch', JSON.stringify(['2330']))")
+    page.goto(live_server.url)
+
+    page.locator("#watch-only").click()
+
+    expect(page.locator("#count")).to_have_text("追蹤中的 1 檔")
+    expect(page.locator("#rows .trow")).to_have_count(1)
+    expect(page.locator("#rows .trow").first).to_contain_text("（波動率區間）")
+    expect(page.locator("#today-meta")).to_contain_text("區間改用波動率區間")
