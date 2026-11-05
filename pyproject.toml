@@ -77,6 +77,10 @@ ignore_missing_imports = true
 module = ["sklearn", "sklearn.*"]
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+module = ["scipy", "scipy.*"]
+ignore_missing_imports = true
+
 [tool.django-stubs]
 django_settings_module = "config.settings.test"
 
