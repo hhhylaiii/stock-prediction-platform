@@ -1,13 +1,21 @@
-"""Post-launch monitoring: matured-prediction metrics and output consistency (SPEC §7)."""
+"""Post-launch monitoring: matured-prediction metrics, output consistency, rolling alerts (§7)."""
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date
+from statistics import fmean
 from typing import Any
 
 import pandas as pd
 from django.db import transaction
 
+from apps.api.serving import (
+    MONITOR_DAYS,
+    MONITOR_LOOKBACK_MONTHS,
+    Slot,
+    months_before,
+    served_monitor,
+)
 from apps.etl.alerts import dispatch
 from apps.etl.models import DataQualityLog
 from apps.market.calendar import OutsideCalendarError, TradingDays
@@ -27,6 +35,7 @@ from apps.research.models import (
     LabelDaily,
     ModelMonitor,
     ModelObjective,
+    ModelRun,
     ModelStatus,
     Prediction,
 )
@@ -34,7 +43,13 @@ from apps.research.models import (
 WIDTH_CHECK = "output_width_ratio"
 ODDS_CHECK = "output_odds_vs_q50"
 UNSCORED_CHECK = "monitor_unscored"
-CHECKS = (WIDTH_CHECK, ODDS_CHECK, UNSCORED_CHECK)
+ALERT_CHECK = "model_alert"
+CHECKS = (WIDTH_CHECK, ODDS_CHECK, UNSCORED_CHECK, ALERT_CHECK)
+IC_THRESHOLD = "rolling_ic_threshold"
+BRIER_BASELINE = "brier_baseline"
+DEGRADED_ON = "degraded_on"
+WINDOW = MONITOR_DAYS
+COVERAGE_BOUNDS = (0.70, 0.90)
 OUTPUTS = ["score", "ret_pred", "q10", "q50", "q90", "vol_pred", "prob_up_5pct"]
 LABELS = ["fwd_rank_pct", "fwd_ret_open", "fwd_vol_20d", "fwd_up_5pct"]
 METRICS = ["ic", "coverage", "brier", "direction_acc", "mae", "width", "auc"]
@@ -46,6 +61,7 @@ TARGET: Mapping[str, str] = {
     ModelObjective.CLASSIFICATION: "fwd_up_5pct",
 }
 SERVED = (ModelStatus.ACTIVE, ModelStatus.DEGRADED, ModelStatus.RETIRED)
+WATCHED = SERVED[:2]
 BANDS: Mapping[str, list[str]] = {
     ModelObjective.QUANTILE: ["q10", "q50", "q90"],
     ModelObjective.VOLATILITY: ["vol_pred"],
@@ -209,18 +225,133 @@ def _unscored_row(day: date, missed: list[dict[str, Any]]) -> list[DataQualityLo
     return [DataQualityLog(date=day, check_name=UNSCORED_CHECK, severity=severity, detail=detail)]
 
 
+@dataclass(frozen=True)
+class Rule:
+    """A watched metric of one objective, the reference it is held to and when it breaches."""
+
+    metric: str
+    horizons: tuple[int, ...]
+    reason: str
+    limit: Callable[[Mapping[str, Any], int], Any]
+    breached: Callable[[float, Any], bool]
+
+
+def _reference(key: str, by_horizon: bool) -> Callable[[Mapping[str, Any], int], Any]:
+    def read(params: Mapping[str, Any], horizon: int) -> Any:
+        value = params.get(key)
+        return value.get(str(horizon)) if by_horizon and isinstance(value, dict) else value
+
+    return read
+
+
+RULES: Mapping[str, Rule] = {
+    ModelObjective.RANK: Rule(
+        "ic",
+        tuple(OUTPUT_HORIZONS),
+        "below_threshold",
+        _reference(IC_THRESHOLD, by_horizon=True),
+        lambda value, limit: value < limit,
+    ),
+    ModelObjective.QUANTILE: Rule(
+        "coverage",
+        (INTERVAL_HORIZON,),
+        "outside_range",
+        lambda params, horizon: list(COVERAGE_BOUNDS),
+        lambda value, limit: not limit[0] <= value <= limit[1],
+    ),
+    ModelObjective.CLASSIFICATION: Rule(
+        "brier",
+        (INTERVAL_HORIZON,),
+        "above_baseline",
+        _reference(BRIER_BASELINE, by_horizon=False),
+        lambda value, limit: value > limit,
+    ),
+}
+
+
+def recent_rows(objective: str, horizon: int, metric: str, day: date) -> list[dict[str, Any]]:
+    """The slot's last 60 out-of-sample rows with the metric up to the day, newest first."""
+    slot = Slot(objective, horizon)
+    window = {slot: (months_before(day, MONITOR_LOOKBACK_MONTHS), day)}
+    rows = served_monitor(window).get(slot, [])
+    return [row for row in reversed(rows) if row[metric] is not None][:WINDOW]
+
+
+def _breach(run: ModelRun, rule: Rule, horizon: int, values: list[float]) -> dict[str, Any] | None:
+    """The run's entry in the day's alert when its mean breaches or its reference is missing."""
+    value, threshold = fmean(values), rule.limit(run.params, horizon)
+    if threshold is not None and not rule.breached(value, threshold):
+        return None
+    return {
+        "run_id": run.run_id,
+        "objective": run.objective,
+        "horizon": horizon,
+        "metric": rule.metric,
+        "reason": rule.reason if threshold is not None else "missing_reference",
+        "value": value,
+        "threshold": threshold,
+        "days": len(values),
+    }
+
+
+def run_alerts(matured: Mapping[int, date]) -> list[dict[str, Any]]:
+    """Per slot, the entry of the watched run serving its latest matured day when the mean breaches.
+
+    The run judged is the one whose monitor row is newest in the window, so reruns of past days
+    judge the run that served them, not whichever run serves today.
+    """
+    found = []
+    for objective, rule in RULES.items():
+        for horizon in rule.horizons:
+            if horizon not in matured:
+                continue
+            rows = recent_rows(objective, horizon, rule.metric, matured[horizon])
+            if len(rows) < WINDOW:
+                continue
+            run = ModelRun.objects.get(pk=rows[0]["run_id"])
+            values = [row[rule.metric] for row in rows]
+            entry = _breach(run, rule, horizon, values) if run.status in WATCHED else None
+            if entry is not None:
+                found.append(entry)
+    return found
+
+
+def _alert_row(day: date, entries: list[dict[str, Any]]) -> list[DataQualityLog]:
+    """One warning row listing every alerted run of the day."""
+    if not entries:
+        return []
+    severity = DataQualityLog.Severity.WARNING
+    detail = {"runs": entries}
+    return [DataQualityLog(date=day, check_name=ALERT_CHECK, severity=severity, detail=detail)]
+
+
+def _degrade(day: date, entries: list[dict[str, Any]]) -> list[str]:
+    """Move breached active runs to degraded, noting the day in params."""
+    breached = {row["run_id"] for row in entries if row["reason"] != "missing_reference"}
+    active = ModelRun.objects.filter(run_id__in=breached, status=ModelStatus.ACTIVE)
+    runs = list(active.order_by("run_id"))
+    for run in runs:
+        run.status = ModelStatus.DEGRADED
+        run.params = {**run.params, DEGRADED_ON: day.isoformat()}
+        run.save(update_fields=["status", "params"])
+    return [run.run_id for run in runs]
+
+
 def _alerting(row: DataQualityLog) -> bool:
-    return row.check_name == UNSCORED_CHECK or bool(row.detail["share"] > ALERT_SHARE)
+    if row.check_name in (UNSCORED_CHECK, ALERT_CHECK):
+        return True
+    return bool(row.detail["share"] > ALERT_SHARE)
 
 
 @dataclass(frozen=True)
 class MonitorResult:
     scored: int
     logs: tuple[DataQualityLog, ...]
+    degraded: tuple[str, ...]
 
 
 def run_monitor(day: date, calendar: TradingDays) -> MonitorResult:
-    """Score predictions maturing on the day and check its outputs; reruns rewrite both."""
+    """Score predictions maturing on the day, check its outputs, raise alerts; reruns rewrite."""
     if not calendar.is_trading_day(day):
         raise MonitorError(f"{day} is not a trading day")
     matured = matured_dates(calendar, day)
@@ -233,8 +364,10 @@ def run_monitor(day: date, calendar: TradingDays) -> MonitorResult:
                 {"run_id": run_id, "date": when.isoformat(), "horizon": horizon}
                 for run_id in unscored
             ]
-        logs = [*consistency_checks(day), *_unscored_row(day, missed)]
+        entries = run_alerts(matured)
+        logs = [*consistency_checks(day), *_unscored_row(day, missed), *_alert_row(day, entries)]
         DataQualityLog.objects.filter(date=day, check_name__in=CHECKS).delete()
         DataQualityLog.objects.bulk_create(logs)
+        degraded = _degrade(day, entries)
     dispatch([row for row in logs if _alerting(row)])
-    return MonitorResult(scored, tuple(logs))
+    return MonitorResult(scored, tuple(logs), tuple(degraded))
