@@ -11,6 +11,7 @@ from apps.research.features.market import (
     attach_market_features,
     load_market_features,
     market_features,
+    quarter_end_distance,
 )
 from apps.research.features.registry import Group, feature_names
 from tests.research.conftest import weekday_calendar
@@ -137,14 +138,17 @@ def test_business_signal_waits_for_its_announcement() -> None:
 def test_market_values_are_shared_by_every_stock_of_the_day() -> None:
     days = weekdays("2016-03-01", 7)
     taiex = series("TAIEX", {day: 100.0 + k for k, day in enumerate(days)})
-    market = market_features(days, taiex, pd.Series(dtype="float64"), no_signal())
+    market = market_features(days, taiex, pd.Series(dtype="float64"), no_signal()).assign(
+        mkt_days_to_quarter_end=quarter_end_distance(CALENDAR, days)
+    )
     panel = pd.DataFrame(
         {"stock_id": ["2330", "1101", "2330"], "date": [days[5], days[5], days[6]], "close": 1.0}
     )
 
     attached = attach_market_features(panel, market)
 
-    assert list(attached.columns) == ["stock_id", "date", "close", *feature_names(Group.MARKET)]
+    names = [*feature_names(Group.MARKET), *feature_names(Group.MARKET, batch=2)]
+    assert list(attached.columns) == ["stock_id", "date", "close", *names]
     assert attached["mkt_taiex_ret_5d"].tolist() == pytest.approx(
         [105 / 100 - 1, 105 / 100 - 1, 106 / 101 - 1]
     )
@@ -259,3 +263,19 @@ def test_sox_return_uses_the_us_close_of_the_same_date_and_the_day_before_on_hol
     )
     assert market["mkt_business_signal"].tolist() == [20.0, 20.0]
     assert d("2016-05-31") + timedelta(days=1) in us_days
+
+
+def test_days_to_quarter_end_count_trading_days_and_need_the_whole_quarter() -> None:
+    days = [d("2016-03-29"), d("2016-03-31"), d("2016-04-01"), d("2016-12-30")]
+    short = weekday_calendar(date(2016, 1, 1), date(2016, 11, 30))
+
+    counted = quarter_end_distance(CALENDAR, days)
+
+    assert counted.tolist() == [
+        2.0,
+        0.0,
+        len(CALENDAR.between(d("2016-04-04"), d("2016-06-30"))),
+        0.0,
+    ]
+    assert math.isnan(quarter_end_distance(short, [d("2016-11-15")])[0])
+    assert quarter_end_distance(short, [d("2016-09-29")]).tolist() == [1.0]

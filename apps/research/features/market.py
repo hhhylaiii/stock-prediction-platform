@@ -1,5 +1,6 @@
 """Market-level features of SPEC §6; every stock of a day shares the same values."""
 
+from calendar import monthrange
 from collections.abc import Sequence
 from datetime import date, timedelta
 
@@ -22,6 +23,7 @@ MARKET_WARMUP = 30
 US_LOOKBACK = timedelta(days=60)
 SIGNAL_LOOKBACK = timedelta(days=120)
 SERIES = (IndexId.TAIEX, IndexId.SOX, IndexId.TSM_ADR, IndexId.USDTWD)
+MARKET_NAMES = [*feature_names(Group.MARKET), *feature_names(Group.MARKET, batch=2)]
 
 
 def _closes(index_closes: pd.DataFrame, index_id: str) -> pd.Series:
@@ -79,18 +81,33 @@ def market_features(
     return pd.DataFrame({"date": list(days), **{name: columns[name] for name in names}})
 
 
+def _quarter_end(day: date) -> date:
+    month = (day.month - 1) // 3 * 3 + 3
+    return date(day.year, month, monthrange(day.year, month)[1])
+
+
+def quarter_end_distance(calendar: TradingDays, days: Sequence[date]) -> np.ndarray:
+    """Trading days from each day to its quarter's last trading day; NaN past the calendar."""
+    found = [
+        float(len(calendar.between(day, _quarter_end(day))) - 1)
+        if _quarter_end(day) <= calendar.end
+        else np.nan
+        for day in days
+    ]
+    return np.array(found, dtype=np.float64)
+
+
 def attach_market_features(panel: pd.DataFrame, market: pd.DataFrame) -> pd.DataFrame:
-    """New panel with the market features of each row's day."""
-    names = feature_names(Group.MARKET)
-    values = market.set_index("date")[names].reindex(panel["date"]).to_numpy(dtype=np.float64)
-    return panel.assign(**{name: values[:, k] for k, name in enumerate(names)})
+    """New panel with the market features of both batches for each row's day."""
+    values = market.set_index("date")[MARKET_NAMES].reindex(panel["date"]).to_numpy(np.float64)
+    return panel.assign(**{name: values[:, k] for k, name in enumerate(MARKET_NAMES)})
 
 
 def load_market_features(calendar: TradingDays, start: date, end: date) -> pd.DataFrame:
     """Market features of the trading days in [start, end], read from the database."""
     days = calendar.between(max(start, calendar.start), min(end, calendar.end))
     if not days:
-        return pd.DataFrame(columns=["date", *feature_names(Group.MARKET)])
+        return pd.DataFrame(columns=["date", *MARKET_NAMES])
     try:
         warm = calendar.shift(days[0], -MARKET_WARMUP)
     except OutsideCalendarError:
@@ -111,4 +128,5 @@ def load_market_features(calendar: TradingDays, start: date, end: date) -> pd.Da
         pd.Series(dict(tsmc.values_list("date", "close")), dtype="float64"),
         pd.DataFrame(list(signal), columns=["period", "value", "announce_date"]),
     )
+    features["mkt_days_to_quarter_end"] = quarter_end_distance(calendar, grid)
     return features[features["date"] >= days[0]].reset_index(drop=True)
