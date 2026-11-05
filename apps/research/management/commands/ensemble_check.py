@@ -8,7 +8,7 @@ from django.core.management.base import BaseCommand, CommandError
 from apps.etl.management.options import as_date
 from apps.market.calendar import CalendarError
 from apps.research.baseline_runs import check_run_key
-from apps.research.comparisons import ensemble_ics, ensemble_report, research_folds, write_report
+from apps.research.ensemble import ensemble_ics, ensemble_report, research_folds, write_report
 from apps.research.labels import HORIZONS
 from apps.research.models import HoldoutScope
 from apps.research.prediction_cache import FoldMismatchError, MissingFoldsError

@@ -9,10 +9,11 @@ from django.core.management.base import BaseCommand, CommandError
 from apps.etl.management.options import as_date
 from apps.market.calendar import CalendarError
 from apps.research.baseline_runs import check_run_key
-from apps.research.comparisons import research_folds, write_report, xgboost_fold_ics, xgboost_report
+from apps.research.ensemble import research_folds, write_report
 from apps.research.management.commands.train import fold_indices
 from apps.research.models import HoldoutScope
 from apps.research.walkforward import WalkForwardConfig, WalkForwardError
+from apps.research.xgboost_check import xgboost_daily_ics, xgboost_report
 
 DEFAULT_CONFIG = WalkForwardConfig()
 
@@ -35,12 +36,20 @@ class Command(BaseCommand):
             folds = research_folds(DEFAULT_CONFIG, last)
             if options["folds"] is not None:
                 wanted = fold_indices(options["folds"])
+                outside = sorted(wanted - {fold.index for fold in folds})
+                if outside:
+                    raise ValueError(f"folds {outside} are not research folds")
                 folds = [fold for fold in folds if fold.index in wanted]
-            if not folds:
-                raise ValueError("no research folds chosen")
-            table = xgboost_fold_ics(run_key, folds, settings.FEATURE_PARQUET_DIR, options["seed"])
-        except (ValueError, LookupError, CalendarError, WalkForwardError, RuntimeError) as error:
+            daily = xgboost_daily_ics(run_key, folds, settings.FEATURE_PARQUET_DIR, options["seed"])
+        except (
+            ValueError,
+            LookupError,
+            CalendarError,
+            WalkForwardError,
+            RuntimeError,
+            FileNotFoundError,
+        ) as error:
             raise CommandError(str(error)) from error
-        text = xgboost_report(run_key, table)
+        text = xgboost_report(run_key, daily)
         written = write_report(text, options["output"])
         self.stdout.write(text if written is None else f"wrote {written}")
