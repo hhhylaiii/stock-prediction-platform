@@ -6,6 +6,7 @@ import pytest
 from pytest_django import DjangoAssertNumQueries
 
 from apps.market.models import StockMaster
+from apps.research.features.build import FIRST_BATCH_COLUMNS
 from apps.research.features.store import export_year, read_features, read_partitions
 from apps.research.features.transforms import STOCK_LEVEL
 from apps.research.models import FeatureDaily, LabelDaily
@@ -132,7 +133,7 @@ def test_partitions_are_read_across_years_and_keep_both_ends(tmp_path: Path) -> 
 
     assert frame["date"].tolist() == [edges[1], edges[1], edges[2], edges[2]]
     assert frame["stock_id"].tolist() == ["1101", "2330", "1101", "2330"]
-    assert frame.columns.tolist() == read_features(edges[1], edges[2]).columns.tolist()
+    assert frame.columns.tolist() == FIRST_BATCH_COLUMNS
     assert frame["in_universe"].dtype == bool
     assert frame["tech_ret_1d"].dtype == "float64"
 

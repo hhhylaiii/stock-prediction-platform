@@ -31,6 +31,7 @@ from apps.research.features.technical import (
 FEATURE_COLUMNS = [*feature_names(batch=1), *feature_names(batch=2)]
 PENDING = ["ind_sector_id", "ind_mom_neutral", "ind_ep_neutral", "fund_days_to_ex_date"]
 FRAME_COLUMNS = ["stock_id", "date", "in_universe", *FEATURE_COLUMNS]
+FIRST_BATCH_COLUMNS = ["stock_id", "date", "in_universe", *feature_names(batch=1)]
 FRAME_TYPES: dict[str, str] = {"in_universe": "bool", **dict.fromkeys(FEATURE_COLUMNS, "float64")}
 
 

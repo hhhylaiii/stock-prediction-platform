@@ -113,7 +113,7 @@ def stored() -> pd.DataFrame:
     return frame.astype(dict.fromkeys(FEATURE_COLUMNS, "float64"))
 
 
-def test_feature_daily_holds_the_first_batch_raw_values() -> None:
+def test_feature_daily_holds_the_raw_values_of_both_batches() -> None:
     names = [field.name for field in FeatureDaily._meta.concrete_fields if not field.primary_key]
 
     assert names == [
@@ -251,6 +251,25 @@ def test_a_partition_written_before_a_feature_existed_asks_for_a_rebuild(tmp_pat
         match=r"2016.*lacks tech_ret_1d, fund_rev_yoy_q.*--start 2016-01-01 --end 2016-12-31",
     ):
         read_partitions(d("2016-03-01"), d("2016-03-31"), tmp_path)
+
+
+def test_training_reads_the_first_batch_even_from_a_partition_without_the_second(
+    tmp_path: Path,
+) -> None:
+    listed("2330", "2015-06-01", "2016-03-31")
+    frame = build_feature_frame(CALENDAR, d("2016-03-01"), d("2016-03-31"))
+    write_features(frame, d("2016-03-01"), d("2016-03-31"))
+    path = export_year(2016, tmp_path)
+    assert path is not None
+    second = feature_names(batch=2)
+    pd.read_parquet(path).drop(columns=second).to_parquet(path, index=False)
+
+    first = read_partitions(d("2016-03-01"), d("2016-03-31"), tmp_path)
+
+    assert list(first.columns) == ["stock_id", "date", "in_universe", *feature_names(batch=1)]
+    pd.testing.assert_frame_equal(first, stored()[list(first.columns)])
+    with pytest.raises(ValueError, match=f"lacks {second[0]}, {second[1]}"):
+        read_partitions(d("2016-03-01"), d("2016-03-31"), tmp_path, FRAME_COLUMNS)
 
 
 def test_an_empty_year_leaves_no_partition_and_the_directory_reads(tmp_path: Path) -> None:
