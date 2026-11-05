@@ -1,0 +1,111 @@
+{% load static %}<!DOCTYPE html>
+<html lang="zh-Hant" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>台股預測</title>
+<link rel="stylesheet" href="{% static 'web/app.css' %}">
+<script src="{% static 'web/api.js' %}" defer></script>
+<script src="{% static 'web/app.js' %}" defer></script>
+</head>
+<body>
+
+<header class="top">
+<div class="wrap">
+<a class="brand" href="#today"><i></i>台股預測</a>
+<nav class="nav" aria-label="主選單">
+<a href="#today" data-nav="today">今日預測</a>
+<a href="#stock-2330" data-nav="stock">個股</a>
+<a href="#models" data-nav="models">模型與資料</a>
+</nav>
+<div class="status" id="status" aria-live="polite"><span>載入中…</span></div>
+</div>
+</header>
+
+<main>
+<div class="wrap">
+
+<section class="view" id="view-today">
+<h1>今日預測</h1>
+<p class="lead">每個交易日收盤後，對上市櫃普通股產出未來 5 日與 20 日的排名、預測報酬、80% 價格區間與上漲機率。<a href="#models">查看模型與資料</a></p>
+
+<div class="controls">
+<div class="control"><span>預測期間</span>
+<div class="seg" role="group" aria-label="預測期間">
+<button type="button" data-h="5">5 日</button>
+<button type="button" data-h="20">20 日</button>
+</div></div>
+<div class="control"><span>市場</span>
+<div class="seg" role="group" aria-label="市場">
+<button type="button" data-mkt="all">全部</button>
+<button type="button" data-mkt="TWSE">上市</button>
+<button type="button" data-mkt="TPEx">上櫃</button>
+</div></div>
+<button type="button" class="ghost" id="watch-only" aria-pressed="false" hidden>只看追蹤</button>
+<label class="search">
+<svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="7" cy="7" r="4.5"></circle><path d="M10.5 10.5L14 14"></path></svg>
+<input type="search" id="q" placeholder="搜尋代號或名稱" aria-label="搜尋代號或名稱" autocomplete="off">
+</label>
+</div>
+
+<div class="scroll" style="margin-top:8px">
+<div class="table">
+<div class="thead rank-cols">
+<div>排名</div><div>股票</div><div>市場</div><div class="right">收盤</div>
+<div class="right" id="ret-head">20 日預測報酬</div><div class="right">預測價</div>
+<div style="grid-column:span 2">80% 預測區間（價格）</div>
+<div class="right">漲幅超過 5% 機率</div><div class="right">昨日排名</div>
+</div>
+<div id="rows"><div class="empty" id="today-empty">預測資料尚未產出。模型上線後，這裡會列出全市場的排名。</div></div>
+</div>
+</div>
+<div class="tfoot">
+<span id="count"></span>
+<div><button type="button" class="ghost" id="prev-page" disabled>上一頁</button><button type="button" class="ghost" id="next-page" disabled>下一頁</button></div>
+</div>
+</section>
+
+<section class="view" id="view-stock" hidden></section>
+
+<section class="view" id="view-models" hidden>
+<h1>模型與資料</h1>
+<p class="lead">三類預測目標各有一個上線版本，每月第一個交易日重訓；新版本要通過四項健全性檢查才會上線，否則沿用舊版。</p>
+
+<div class="section">
+<h2>上線中的模型</h2>
+<div class="placeholder" id="model-table">模型尚未上線。</div>
+</div>
+
+<div class="section">
+<div class="sechead">
+<div><h2>每月 rank IC，排名模型與 baseline</h2><p class="sub">walk-forward 測試期的月平均，近 24 個月。</p></div>
+<div class="legend"><span><i class="sw-sq" style="background:var(--model)"></i>LightGBM</span><span><i class="sw-sq" style="background:var(--ink-4)"></i>Ridge</span></div>
+</div>
+<div class="placeholder" id="ic-chart">回測結果尚未產出。</div>
+</div>
+
+<div class="two wide">
+<section>
+<h2>今日資料更新</h2>
+<p class="sub" id="etl-sub">載入中…</p>
+<div class="list">
+<div class="thead etl-cols" style="padding-top:10px"><div>時間</div><div>工作</div><div>來源</div><div class="right">筆數</div><div>狀態</div></div>
+<div id="etl"></div>
+</div>
+</section>
+<section>
+<h2>資料品質檢查</h2>
+<p class="sub" id="quality-sub">載入中…</p>
+<div class="list" id="quality"></div>
+<details class="history" id="quality-history"><summary>30 個交易日的檢查紀錄</summary><div id="quality-days"></div></details>
+</section>
+</div>
+</section>
+
+</div>
+</main>
+
+<footer><div class="wrap">第一版僅供個人研究使用。模型只輸出報酬、分位數與機率，預測價與價格區間由後端依各股最新收盤價換算。</div></footer>
+
+</body>
+</html>
