@@ -69,15 +69,20 @@ PASSED = [*REVENUE_INPUTS, *list(STATEMENT_INPUTS)[1:], "fund_days_since_fs"]
 
 
 class _Lags:
-    """Values of earlier periods of the same stock, by period number."""
+    """Values of earlier periods of the same stock, missing where the statement basis changed."""
 
     def __init__(self, frame: pd.DataFrame) -> None:
         self.frame = frame
         self.lookup = frame.set_index(["stock_id", "number"])
+        self.basis = frame.get("fin_type")
 
     def __call__(self, column: str, lag: int) -> pd.Series:
         keys = pd.MultiIndex.from_arrays([self.frame["stock_id"], self.frame["number"] - lag])
-        return pd.Series(self.lookup[column].reindex(keys).to_numpy(), index=self.frame.index)
+        values = pd.Series(self.lookup[column].reindex(keys).to_numpy(), index=self.frame.index)
+        if self.basis is None:
+            return values
+        earlier = self.lookup["fin_type"].reindex(keys).to_numpy()
+        return values.where(earlier == self.basis.to_numpy())
 
     def signal(self, name: str, value: pd.Series, lags: Sequence[int]) -> pd.DataFrame:
         """Rows of one signal with the first and last announce date of the periods it reads."""
