@@ -314,7 +314,7 @@ def test_lib_versions_name_python_and_the_libraries() -> None:
     versions = lib_versions()
 
     assert versions["python"] == platform.python_version()
-    assert {"numpy", "pandas", "pyarrow", "scikit-learn"} <= set(LIBRARIES)
+    assert {"numpy", "pandas", "pyarrow", "scikit-learn", "lightgbm"} <= set(LIBRARIES)
     for name in LIBRARIES:
         assert versions[name] == importlib.metadata.version(name)
 
