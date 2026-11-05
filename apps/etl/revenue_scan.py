@@ -19,7 +19,7 @@ ORIGINS = {0: "國內", 1: "國外"}
 TITLE = re.compile(r"<b>\s*(\S+?)公司(\d{2,3})年(\d{1,2})月份\(累計與當月\)營業收入統計表\s*</b>")
 NO_FILINGS = "查無資料"
 THOUSANDS = "千元"
-UNIT = re.compile(r"單位：([^<]*)<")
+UNIT_NOTE = "單位："
 CODE_HEADER = "公司代號"
 THIS_MONTH, LAST_MONTH, LAST_YEAR = "當月營收", "上月營收", "去年當月營收"
 FIGURES = (THIS_MONTH, LAST_MONTH, LAST_YEAR)
@@ -61,9 +61,9 @@ def parse_revenue_page(page: str, market: str, origin: int, period: str) -> dict
         if NO_FILINGS in page:
             return {}
         raise SchemaChangedError(f"MOPS t21sc03 {market} {period} has no revenue table")
-    units = set(UNIT.findall(page))
-    if units != {THOUSANDS}:
-        raise SchemaChangedError(f"MOPS t21sc03 {market} {period} has the units {sorted(units)}")
+    units = _units(parser.rows)
+    if units[:-1] != [THOUSANDS] * (len(units) - 1):
+        raise SchemaChangedError(f"MOPS t21sc03 {market} {period} has the units {units[:-1]}")
     total = f"全部{ORIGINS[origin]}{label}公司合計"
     last = [cells for _, cells in parser.rows if cells][-1]
     if last[0] != total:
@@ -109,6 +109,20 @@ def insert_new_revenues(frame: pd.DataFrame, day: date, session: date) -> int:
 def without_generation_time(page: str) -> str:
     """The page as it would be hashed: the hourly regeneration stamp is not content."""
     return GENERATED_AT.sub("", page)
+
+
+def _units(rows: list[tuple[int, list[str]]]) -> list[str | None]:
+    """The unit noted above each table, the closing total table having none."""
+    units: list[str | None] = []
+    noted = None
+    for _, cells in rows:
+        found = [cell.removeprefix(UNIT_NOTE) for cell in cells if cell.startswith(UNIT_NOTE)]
+        if found:
+            noted = found[0]
+        elif cells and cells[0] == CODE_HEADER:
+            units.append(noted)
+            noted = None
+    return units
 
 
 def _companies(rows: list[tuple[int, list[str]]], where: str) -> dict[str, Figures]:

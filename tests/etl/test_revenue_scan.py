@@ -98,8 +98,8 @@ def test_a_page_of_another_market_or_month_fails(
 @pytest.mark.parametrize(
     ("old", "new", "count", "message"),
     [
-        ("單位：千元", "單位：元", -1, r"has the units \['元'\]"),
-        ("單位：千元", "單位：元", 1, r"has the units \['元', '千元'\]"),
+        ("單位：千元", "單位：元", 1, r"has the units \['元', '千元'"),
+        ("單位：千元", "", 1, r"has the units \[None, '千元'"),
         ("<th class=tt>去年當月營收</th>", "<th class=tt>去年營收</th>", 1, "lacks 去年當月營收"),
         ("公司<br>代號", "代號", 1, "lists 1101 outside a revenue table"),
         ("14,321,556", "14,321.556", 1, "1101 has the amount"),
