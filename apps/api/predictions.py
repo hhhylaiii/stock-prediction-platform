@@ -201,6 +201,60 @@ def masters_of(stock_ids: list[str]) -> dict[str, dict[str, Any]]:
     }
 
 
+def rank_rows(
+    day: date | None, horizon: int, roles: dict[str, Slot], runs: dict[Slot, ServingRun]
+) -> QuerySet[Prediction]:
+    """The serving rank run's rows of the day, which every merged row starts from."""
+    rank_run = runs.get(roles["rank"])
+    if day is None or rank_run is None:
+        return Prediction.objects.none()
+    return Prediction.objects.filter(run_id=rank_run.run_id, date=day, horizon=horizon)
+
+
+def served_models(roles: dict[str, Slot], runs: dict[Slot, ServingRun]) -> list[dict[str, Any]]:
+    return [model_meta(role, runs[slot]) for role, slot in roles.items() if slot in runs]
+
+
+def degraded_roles(roles: dict[str, Slot], runs: dict[Slot, ServingRun]) -> list[str]:
+    return [
+        role
+        for role, slot in roles.items()
+        if slot in runs and runs[slot].status == ModelStatus.DEGRADED
+    ]
+
+
+def merged_rows(
+    day: date | None,
+    horizon: int,
+    roles: dict[str, Slot],
+    runs: dict[Slot, ServingRun],
+    page: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Rank rows joined with every other role's row, priced on each stock's close."""
+    if day is None or not page:
+        return []
+    stock_ids = [row["stock_id"] for row in page]
+    band = runs.get(roles["interval"]) if "interval" in roles else None
+    alert = band is not None and band.status == ModelStatus.DEGRADED
+    parts = parts_of(day, roles, runs, stock_ids)
+    lacking = [
+        row["stock_id"]
+        for row in page
+        if needs_tech_vol(row, parts.get(row["stock_id"], {}), horizon, alert)
+    ]
+    context = {
+        "horizon": horizon,
+        "quantile_alert": alert,
+        "prev_ranks": previous_ranks(day, horizon, stock_ids),
+        "tech_vols": tech_vols(day, lacking),
+    }
+    masters = masters_of(stock_ids)
+    return [
+        prediction_row(row, parts.get(row["stock_id"], {}), masters.get(row["stock_id"]), context)
+        for row in page
+    ]
+
+
 class PredictionListView(ReadOnlyView):
     def get(self, request: Request) -> Response:
         query = parse(PredictionQuery, request)
@@ -208,10 +262,7 @@ class PredictionListView(ReadOnlyView):
         day = query.get("date") or latest_served_date(horizon)
         roles = roles_for(horizon)
         runs = {} if day is None else runs_on(day, roles.values())
-        rank_run = runs.get(roles["rank"])
-        base = Prediction.objects.none()
-        if day is not None and rank_run is not None:
-            base = Prediction.objects.filter(run_id=rank_run.run_id, date=day, horizon=horizon)
+        base = rank_rows(day, horizon, roles, runs)
         rows = with_closes(filtered(base, query), day or date.min).order_by(
             F("rank").asc(nulls_last=True), F("score").desc(nulls_last=True), "stock_id"
         )
@@ -219,57 +270,16 @@ class PredictionListView(ReadOnlyView):
         page: list[dict[str, Any]] = (
             paginator.paginate_queryset(rows.values(*BASE_FIELDS), request, view=self) or []
         )
-        stock_ids = [row["stock_id"] for row in page]
-        data = self.rows(day, horizon, roles, runs, page, stock_ids)
         meta = {
             "date": day,
             "horizon": horizon,
             "universe": base.filter(in_universe=True).count(),
-            "models": [
-                model_meta(role, runs[slot]) for role, slot in roles.items() if slot in runs
-            ],
-            "degraded": [
-                role
-                for role, slot in roles.items()
-                if slot in runs and runs[slot].status == ModelStatus.DEGRADED
-            ],
+            "models": served_models(roles, runs),
+            "degraded": degraded_roles(roles, runs),
             "monitor": self.monitor(day, roles, runs, horizon),
             **paginator.meta(),
         }
-        return envelope(data, meta)
-
-    def rows(
-        self,
-        day: date | None,
-        horizon: int,
-        roles: dict[str, Slot],
-        runs: dict[Slot, ServingRun],
-        page: list[dict[str, Any]],
-        stock_ids: list[str],
-    ) -> list[dict[str, Any]]:
-        if day is None or not page:
-            return []
-        band = runs.get(roles["interval"]) if "interval" in roles else None
-        alert = band is not None and band.status == ModelStatus.DEGRADED
-        parts = parts_of(day, roles, runs, stock_ids)
-        lacking = [
-            row["stock_id"]
-            for row in page
-            if needs_tech_vol(row, parts.get(row["stock_id"], {}), horizon, alert)
-        ]
-        context = {
-            "horizon": horizon,
-            "quantile_alert": alert,
-            "prev_ranks": previous_ranks(day, horizon, stock_ids),
-            "tech_vols": tech_vols(day, lacking),
-        }
-        masters = masters_of(stock_ids)
-        return [
-            prediction_row(
-                row, parts.get(row["stock_id"], {}), masters.get(row["stock_id"]), context
-            )
-            for row in page
-        ]
+        return envelope(merged_rows(day, horizon, roles, runs, page), meta)
 
     def monitor(
         self, day: date | None, roles: dict[str, Slot], runs: dict[Slot, ServingRun], horizon: int

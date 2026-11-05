@@ -71,11 +71,16 @@ def bar(day: date, row: dict[str, Any] | None, anchor_factor: float) -> dict[str
     return {"date": day, **prices, "volume": row["volume"], "turnover": row["turnover"]}
 
 
+def require_stock(stock_id: str) -> StockMaster:
+    stock = StockMaster.objects.filter(stock_id=stock_id).first()
+    if stock is None:
+        raise NotFound(f"找不到股票 {stock_id}。")
+    return stock
+
+
 class StockDetailView(ReadOnlyView):
     def get(self, request: Request, stock_id: str) -> Response:
-        stock = StockMaster.objects.filter(stock_id=stock_id).first()
-        if stock is None:
-            raise NotFound(f"找不到股票 {stock_id}。")
+        stock = require_stock(stock_id)
         bars = list(
             DailyPrice.objects.filter(stock_id=stock_id, close__isnull=False)
             .order_by("-date")
@@ -87,8 +92,7 @@ class StockDetailView(ReadOnlyView):
 class StockPricesView(ReadOnlyView):
     def get(self, request: Request, stock_id: str) -> Response:
         days = parse(PriceQuery, request)["days"]
-        if not StockMaster.objects.filter(stock_id=stock_id).exists():
-            raise NotFound(f"找不到股票 {stock_id}。")
+        require_stock(stock_id)
         prices = DailyPrice.objects.filter(stock_id=stock_id)
         span = prices.aggregate(first=Min("date"), last=Max("date"))
         if span["last"] is None:

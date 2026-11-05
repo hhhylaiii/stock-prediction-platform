@@ -33,3 +33,16 @@ class PredictionQuery(serializers.Serializer[Any]):
     date = serializers.DateField(required=False)
     market = serializers.ChoiceField(choices=Market.values, required=False)
     q = serializers.CharField(max_length=32, required=False, allow_blank=True)
+
+
+class DateQuery(serializers.Serializer[Any]):
+    date = serializers.DateField(required=False)
+
+
+class FeatureQuery(serializers.Serializer[Any]):
+    horizon = serializers.ChoiceField(choices=[5, 20], default=DEFAULT_HORIZON)
+    date = serializers.DateField(required=False)
+
+
+class HistoryQuery(serializers.Serializer[Any]):
+    horizon = serializers.ChoiceField(choices=[5, 20], default=DEFAULT_HORIZON)

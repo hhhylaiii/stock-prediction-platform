@@ -1,4 +1,5 @@
 from collections.abc import Iterator, Sequence
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Protocol
@@ -14,6 +15,8 @@ TAIPEI = ZoneInfo("Asia/Taipei")
 CALENDAR_START = date(2026, 7, 1)
 CALENDAR_END = date(2026, 11, 30)
 HOLIDAYS = frozenset({date(2026, 9, 25), date(2026, 10, 9)})
+OCT_28, OCT_29, OCT_30 = date(2026, 10, 28), date(2026, 10, 29), date(2026, 10, 30)
+NOV_2 = date(2026, 11, 2)
 
 
 def is_session(day: date) -> bool:
@@ -113,6 +116,7 @@ def add_model_run(
     model_type: str = "lightgbm",
     version: str = "2026-10",
     created_at: datetime | None = None,
+    train_end: date = date(2026, 9, 30),
 ) -> ModelRun:
     return ModelRun.objects.create(
         run_id=run_id,
@@ -121,7 +125,7 @@ def add_model_run(
         objective=objective,
         version=version,
         train_start=date(2023, 10, 1),
-        train_end=date(2026, 9, 30),
+        train_end=train_end,
         feature_hash="f" * 64,
         status=status,
         created_at=created_at or taipei(2026, 10, 1),
@@ -142,3 +146,101 @@ def add_predictions(
         )
         for stock_id, fields in rows.items()
     )
+
+
+@dataclass(frozen=True)
+class Runs:
+    rank20: ModelRun
+    quantile: ModelRun
+    vol: ModelRun
+    prob: ModelRun
+    rank5: ModelRun
+    reg5: ModelRun
+
+
+def seed_market() -> None:
+    add_stock()
+    add_stock(stock_id="2317", name="鴻海", industry="其他電子業")
+    add_stock(stock_id="6488", name="環球晶", market=Market.TPEX)
+    add_stock(stock_id="8299", name="群聯", market=Market.TPEX)
+    add_bars("2330", [OCT_29, OCT_30], [990.0, 1000.0])
+    add_bars("2317", [OCT_29, OCT_30], [198.0, 200.0])
+    add_bars("6488", [OCT_29, OCT_30], [490.0, 500.0])
+    add_bars("8299", [OCT_29, OCT_30], [800.0, None])
+
+
+@pytest.fixture
+def runs(db: None) -> Runs:
+    seed_market()
+    seeded = Runs(
+        rank20=add_model_run("rank-h20", "rank"),
+        quantile=add_model_run("quantile-h20", "quantile"),
+        vol=add_model_run("vol-h20", "volatility"),
+        prob=add_model_run("prob-h20", "classification"),
+        rank5=add_model_run("rank-h5", "rank"),
+        reg5=add_model_run("reg-h5", "regression"),
+    )
+    add_predictions(
+        seeded.rank20,
+        OCT_30,
+        20,
+        {
+            "2330": {"score": 0.9, "rank": 1, "pct": 0.99},
+            "6488": {"score": 0.5, "rank": 2, "pct": 0.5},
+            "2317": {"score": 0.1, "rank": 3, "pct": 0.01},
+            "8299": {"score": 0.3, "in_universe": False},
+        },
+    )
+    add_predictions(
+        seeded.rank20,
+        OCT_29,
+        20,
+        {
+            "6488": {"score": 0.8, "rank": 1, "pct": 0.99},
+            "2330": {"score": 0.4, "rank": 2, "pct": 0.5},
+            "2317": {"score": 0.1, "rank": 3, "pct": 0.01},
+        },
+    )
+    add_predictions(
+        seeded.quantile,
+        OCT_30,
+        20,
+        {
+            "2330": {"q10": -0.05, "q50": 0.04, "q90": 0.12, "ret_pred": 0.04},
+            "2317": {"q10": -0.1, "q50": -0.02, "q90": 0.05, "ret_pred": -0.02},
+            "8299": {"q10": -0.2, "q50": 0.0, "q90": 0.2, "ret_pred": 0.0, "in_universe": False},
+        },
+    )
+    add_predictions(
+        seeded.vol,
+        OCT_30,
+        20,
+        {code: {"vol_pred": 0.3} for code in ("2330", "2317", "6488", "8299")},
+    )
+    add_predictions(
+        seeded.prob,
+        OCT_30,
+        20,
+        {
+            "2330": {"prob_up_5pct": 0.6},
+            "2317": {"prob_up_5pct": 0.2},
+            "6488": {"prob_up_5pct": 0.4},
+        },
+    )
+    add_predictions(
+        seeded.rank5,
+        OCT_30,
+        5,
+        {
+            "2317": {"score": 0.7, "rank": 1, "pct": 0.99},
+            "2330": {"score": 0.2, "rank": 2, "pct": 0.5},
+            "6488": {"score": 0.1, "rank": 3, "pct": 0.01},
+        },
+    )
+    add_predictions(
+        seeded.reg5,
+        OCT_30,
+        5,
+        {"2317": {"ret_pred": 0.02}, "2330": {"ret_pred": 0.01}, "6488": {"ret_pred": -0.01}},
+    )
+    return seeded
