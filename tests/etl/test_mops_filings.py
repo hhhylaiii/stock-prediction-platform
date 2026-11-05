@@ -1,3 +1,4 @@
+import io
 from collections.abc import Callable
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
@@ -15,7 +16,7 @@ from responses import matchers
 from apps.etl.adapters import ADAPTERS
 from apps.etl.adapters.mops import STATEMENT_FILING, MopsAdapter, parse_listing
 from apps.etl.errors import SchemaChangedError
-from apps.etl.filings import FILED_LATER_CHECK, filing_session
+from apps.etl.filings import FILED_LATE_CHECK, FILED_LATER_CHECK, filing_session
 from apps.etl.models import DataQualityLog, EtlRun, RawMops
 from apps.etl.ratelimit import RateLimit, RateLimiter
 from apps.market.calendar import TradingDays
@@ -133,6 +134,24 @@ def test_a_page_without_the_report_table_fails(page: Callable[[str], bytes]) -> 
         parse_listing(text(page("blank_113")), "", 113)
 
 
+def test_a_report_table_wins_over_a_stray_no_data_note(page: Callable[[str], bytes]) -> None:
+    noted = text(page("2330_113")).replace("</body>", "查無所需資料</body>")
+    assert len(parse_listing(noted, "2330", 113)) == 5
+
+
+def test_a_row_with_another_cell_count_fails(page: Callable[[str], bytes]) -> None:
+    trimmed = text(page("2330_113")).replace("<td align='center'>無</td>", "", 1)
+    assert trimmed != text(page("2330_113"))
+    with pytest.raises(SchemaChangedError, match="cells"):
+        parse_listing(trimmed, "2330", 113)
+
+
+def test_a_company_off_the_calendar_year_fails(page: Callable[[str], bytes]) -> None:
+    shifted = text(page("2330_113")).replace("曆年制", "非曆年制（7月制）", 1)
+    with pytest.raises(SchemaChangedError, match="fiscal year"):
+        parse_listing(shifted, "2330", 113)
+
+
 @pytest.mark.parametrize(("code", "roc_year"), [("2303", 113), ("2330", 112)])
 def test_rows_of_another_company_or_year_fail(
     page: Callable[[str], bytes], code: str, roc_year: int
@@ -153,6 +172,8 @@ def test_an_unreadable_upload_time_fails(page: Callable[[str], bytes]) -> None:
         ("2024-11-14 18:03:20", date(2024, 11, 14)),
         ("2024-11-14 23:10:00", date(2024, 11, 15)),
         ("2024-11-16 10:00:00", date(2024, 11, 18)),
+        ("2024-11-14 23:00:00", date(2024, 11, 15)),
+        ("2024-11-14 22:59:59", date(2024, 11, 14)),
     ],
 )
 def test_a_filing_counts_from_the_session_whose_evening_run_can_see_it(
@@ -171,9 +192,29 @@ def listed(db: None) -> None:
     )
 
 
+def filings(*rows: tuple[str, str, str, str, bool]) -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            (code, period, kind, at(uploaded), corrected)
+            for code, period, kind, uploaded, corrected in rows
+        ],
+        columns=["stock_id", "period", "fin_type", "uploaded_at", "corrected"],
+    )
+
+
+def logged(check: str) -> dict[str, list[tuple[str, str, str, str]]]:
+    return {
+        row.detail["stock_id"]: [
+            (entry["period"], entry["fin_type"], entry["deadline"], entry["filed"])
+            for entry in row.detail["filings"]
+        ]
+        for row in DataQualityLog.objects.filter(check_name=check)
+    }
+
+
 @pytest.mark.usefixtures("listed")
 @responses.activate
-def test_actual_dates_only_move_announcements_earlier_and_log_the_later_ones(
+def test_filings_on_time_set_the_announcement_either_way(
     adapter: MopsAdapter, page: Callable[[str], bytes]
 ) -> None:
     serve("2330", 113, page("2330_113"))
@@ -187,45 +228,119 @@ def test_actual_dates_only_move_announcements_earlier_and_log_the_later_ones(
     assert announced("2330") == {
         ("2024-Q1", CONSOLIDATED): date(2024, 5, 15),
         ("2024-Q3", CONSOLIDATED): date(2024, 11, 14),
-        ("2024-Q4", CONSOLIDATED): date(2025, 2, 25),
+        ("2024-Q4", CONSOLIDATED): date(2025, 2, 27),
         ("2024-Q4", INDIVIDUAL): date(2025, 2, 27),
         ("2024-Q2", INDIVIDUAL): date(2024, 8, 14),
     }
-    assert written == 3
-    log = DataQualityLog.objects.get(check_name=FILED_LATER_CHECK)
-    assert log.severity == "warning"
-    assert log.detail == {
-        "stock_id": "2330",
-        "filed_later": [
-            {
-                "period": "2024-Q4",
-                "fin_type": CONSOLIDATED,
-                "announce_date": "2025-02-25",
-                "filed": "2025-02-27",
-                "corrected": False,
-            }
-        ],
-    }
+    assert written == 4
+    assert not DataQualityLog.objects.exists()
     assert RawMops.objects.get().request_params["co_id"] == "2330"
 
 
 @pytest.mark.usefixtures("listed")
 @responses.activate
-def test_a_rerun_changes_nothing_and_keeps_one_log_row(
+def test_a_late_uncorrected_report_moves_the_announcement_later(
     adapter: MopsAdapter, page: Callable[[str], bytes]
 ) -> None:
-    serve("2330", 113, page("2330_113"))
-    statement("2330", "2024-Q4", CONSOLIDATED, date(2025, 2, 25))
-    statement("2330", "2024-Q1", CONSOLIDATED, date(2024, 6, 3))
+    serve("1606", 100, page("1606_100"))
+    statement("1606", "2011-Q4", CONSOLIDATED, date(2012, 4, 3))
+    statement("1606", "2011-Q4", INDIVIDUAL, date(2012, 4, 3))
 
     def load() -> int:
-        raw = adapter.fetch(STATEMENT_FILING, date(2024, 1, 1), date(2024, 12, 31), "2330")
+        raw = adapter.fetch(STATEMENT_FILING, date(2011, 1, 1), date(2011, 12, 31), "1606")
         return adapter.upsert(STATEMENT_FILING, adapter.normalize(STATEMENT_FILING, raw))
 
-    assert load() == 1
+    assert load() == 2
+    assert announced("1606") == {
+        ("2011-Q4", CONSOLIDATED): date(2012, 4, 30),
+        ("2011-Q4", INDIVIDUAL): date(2012, 4, 30),
+    }
+    late = [
+        ("2011-Q4", CONSOLIDATED, "2012-04-03", "2012-04-30"),
+        ("2011-Q4", INDIVIDUAL, "2012-04-03", "2012-04-30"),
+    ]
+    assert logged(FILED_LATE_CHECK) == {"1606": late}
+    assert DataQualityLog.objects.get(check_name=FILED_LATE_CHECK).severity == "info"
     assert load() == 0
-    assert DataQualityLog.objects.filter(check_name=FILED_LATER_CHECK).count() == 1
+    assert logged(FILED_LATE_CHECK) == {"1606": late}
     assert RawMops.objects.count() == 1
+
+
+@pytest.mark.django_db
+def test_a_late_corrected_report_keeps_the_deadline_and_warns(adapter: MopsAdapter) -> None:
+    statement("5483", "2024-Q4", CONSOLIDATED, date(2025, 4, 1))
+    statement("5483", "2024-Q3", CONSOLIDATED, date(2024, 12, 2))
+    written = adapter.upsert(
+        STATEMENT_FILING,
+        filings(
+            ("5483", "2024-Q4", CONSOLIDATED, "2025-05-07 08:53:42", True),
+            ("5483", "2024-Q3", CONSOLIDATED, "2024-11-11 17:38:10", True),
+        ),
+    )
+    assert written == 1
+    assert announced("5483") == {
+        ("2024-Q4", CONSOLIDATED): date(2025, 4, 1),
+        ("2024-Q3", CONSOLIDATED): date(2024, 11, 11),
+    }
+    assert logged(FILED_LATER_CHECK) == {
+        "5483": [("2024-Q4", CONSOLIDATED, "2025-04-01", "2025-05-07")]
+    }
+    assert DataQualityLog.objects.get(check_name=FILED_LATER_CHECK).severity == "warning"
+    assert not DataQualityLog.objects.filter(check_name=FILED_LATE_CHECK).exists()
+
+
+@pytest.mark.django_db
+def test_each_statement_type_takes_its_own_report(adapter: MopsAdapter) -> None:
+    statement("2330", "2010-Q1", CONSOLIDATED, date(2010, 6, 1))
+    statement("2330", "2010-Q1", INDIVIDUAL, date(2010, 6, 1))
+    adapter.upsert(
+        STATEMENT_FILING,
+        filings(
+            ("2330", "2010-Q1", INDIVIDUAL, "2010-04-20 10:00:00", False),
+            ("2330", "2010-Q1", CONSOLIDATED, "2010-04-29 10:00:00", False),
+        ),
+    )
+    assert announced("2330") == {
+        ("2010-Q1", CONSOLIDATED): date(2010, 4, 29),
+        ("2010-Q1", INDIVIDUAL): date(2010, 4, 20),
+    }
+
+
+@pytest.mark.django_db
+def test_each_stock_keeps_its_own_log_row_and_a_narrower_rerun_keeps_the_rest(
+    adapter: MopsAdapter,
+) -> None:
+    for code in ("1606", "3369"):
+        statement(code, "2011-Q2", CONSOLIDATED, date(2011, 9, 1))
+        statement(code, "2011-Q4", CONSOLIDATED, date(2012, 4, 3))
+    both = [
+        (code, period, CONSOLIDATED, uploaded, False)
+        for code in ("1606", "3369")
+        for period, uploaded in (
+            ("2011-Q2", "2011-09-05 10:00:00"),
+            ("2011-Q4", "2012-04-27 10:00:00"),
+        )
+    ]
+    adapter.upsert(STATEMENT_FILING, filings(*both))
+    assert set(logged(FILED_LATE_CHECK)) == {"1606", "3369"}
+    adapter.upsert(
+        STATEMENT_FILING, filings(("1606", "2011-Q2", CONSOLIDATED, "2011-08-30 10:00:00", False))
+    )
+    assert logged(FILED_LATE_CHECK)["1606"] == [
+        ("2011-Q4", CONSOLIDATED, "2012-04-03", "2012-04-27")
+    ]
+    assert len(logged(FILED_LATE_CHECK)["3369"]) == 2
+
+
+@pytest.mark.django_db
+def test_a_filing_before_the_quarter_ended_rejects_the_stock(adapter: MopsAdapter) -> None:
+    statement("2330", "2024-Q2", CONSOLIDATED, date(2024, 9, 2))
+    with pytest.raises(SchemaChangedError, match="before the quarter ended"):
+        adapter.upsert(
+            STATEMENT_FILING,
+            filings(("2330", "2024-Q2", CONSOLIDATED, "2024-06-14 10:00:00", False)),
+        )
+    assert announced("2330") == {("2024-Q2", CONSOLIDATED): date(2024, 9, 2)}
 
 
 @pytest.mark.usefixtures("listed")
@@ -346,3 +461,32 @@ def test_the_source_is_registered_with_its_own_limits() -> None:
     assert ADAPTERS["mops"] is MopsAdapter
     assert settings.ETL_RATE_LIMITS["mops"]["min_interval"] >= 3.0
     assert settings.FILING_VISIBLE_BEFORE == "23:00"
+
+
+@pytest.mark.usefixtures("listed", "calendar_in_db")
+@responses.activate
+def test_reapply_reruns_the_rules_on_the_latest_stored_page(
+    adapter: MopsAdapter, page: Callable[[str], bytes]
+) -> None:
+    serve("2330", 113, page("2330_113"))
+    statement("2330", "2024-Q1", CONSOLIDATED, date(2024, 6, 3))
+    adapter.fetch(STATEMENT_FILING, date(2024, 1, 1), date(2024, 12, 31), "2330")
+    newer = text(page("2330_113")).replace("113/05/15 14:25:29", "113/05/14 09:00:00")
+    RawMops.objects.create(
+        dataset=STATEMENT_FILING,
+        request_params={"co_id": "2330", "year": "113", "mtype": "A"},
+        payload={"html": newer},
+        source_hash="newer",
+    )
+    RawMops.objects.create(
+        dataset=STATEMENT_FILING,
+        request_params={"co_id": "1606", "year": "100", "mtype": "A"},
+        payload={"html": "<html>維護中</html>"},
+        source_hash="broken",
+    )
+    out, err = io.StringIO(), io.StringIO()
+    call_command("reapply_filings", stdout=out, stderr=err)
+    assert announced("2330") == {("2024-Q1", CONSOLIDATED): date(2024, 5, 14)}
+    assert "1 statements changed across 2 stocks" in out.getvalue()
+    assert "rejected 1606" in err.getvalue()
+    assert len(responses.calls) == 1

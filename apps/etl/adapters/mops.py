@@ -1,18 +1,20 @@
 """TWSE e-document listings: when each financial report was filed (SPEC §3 MOPS, §8.1)."""
 
 import re
-from collections.abc import Iterator
+from collections.abc import Sequence
 from datetime import date, datetime, time
 from html.parser import HTMLParser
+from typing import NamedTuple
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 import requests
 from django.conf import settings
+from django.db import transaction
 
 from apps.etl.adapters.base import BaseAdapter
 from apps.etl.client import SourceClient
-from apps.etl.errors import SchemaChangedError
+from apps.etl.errors import SchemaChangedError, SourceError
 from apps.etl.filings import FILING_COLUMNS, Filing, apply_statement_filings
 from apps.etl.models import EtlRun, RawMops
 from apps.etl.ratelimit import RateLimiter
@@ -25,6 +27,8 @@ LISTING_PATH = "/server-java/t57sb01"
 REPORT_KIND = "A"
 PAGE_ENCODING = "cp950"
 NO_REPORTS = "查無所需資料"
+FISCAL_YEAR = re.compile(r"會計期間：\s*([^<\s]+)")
+CALENDAR_YEAR = "曆年制"
 CODE, YEAR, DETAIL, UPLOADED, CORRECTION = (
     "證券代號",
     "資料年度",
@@ -68,22 +72,29 @@ class MopsClient(SourceClient):
 
 
 class _Rows(HTMLParser):
-    """Text of every table cell, row by row."""
+    """Text of every table cell, row by row, each row tagged with the table it sits in."""
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
-        self.rows: list[list[str]] = []
+        self.rows: list[tuple[int, list[str]]] = []
+        self._tables: list[int] = []
+        self._opened = 0
         self._cell: list[str] | None = None
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag == "tr":
-            self.rows.append([])
+        if tag == "table":
+            self._opened += 1
+            self._tables.append(self._opened)
+        elif tag == "tr":
+            self.rows.append((self._tables[-1] if self._tables else 0, []))
         elif tag in ("td", "th") and self.rows:
             self._cell = []
 
     def handle_endtag(self, tag: str) -> None:
-        if tag in ("td", "th") and self._cell is not None:
-            self.rows[-1].append("".join(self._cell).strip())
+        if tag == "table" and self._tables:
+            self._tables.pop()
+        elif tag in ("td", "th") and self._cell is not None:
+            self.rows[-1][1].append("".join(self._cell).strip())
             self._cell = None
 
     def handle_data(self, data: str) -> None:
@@ -92,20 +103,26 @@ class _Rows(HTMLParser):
 
 
 def parse_listing(page: str, code: str, roc_year: int) -> list[Filing]:
-    """Chinese-language reports of the company's year; no reports is a valid empty answer."""
-    if NO_REPORTS in page:
-        return []
+    """Chinese-language reports of the company's year; only 查無所需資料 may stand for none."""
     parser = _Rows()
     parser.feed(page)
-    starts = [i for i, row in enumerate(parser.rows) if all(name in row for name in HEADER)]
+    starts = [i for i, (_, row) in enumerate(parser.rows) if all(name in row for name in HEADER)]
     if not starts:
+        if NO_REPORTS in page:
+            return []
         raise SchemaChangedError(f"doc.twse {code} {roc_year} has no report table")
-    header = parser.rows[starts[0]]
+    fiscal = FISCAL_YEAR.search(page)
+    if fiscal is None or fiscal[1] != CALENDAR_YEAR:
+        shown = fiscal[1] if fiscal else "missing"
+        raise SchemaChangedError(f"doc.twse {code} {roc_year} fiscal year is {shown}")
+    table, header = parser.rows[starts[0]]
     position = {name: header.index(name) for name in HEADER}
     filings = []
-    for row in parser.rows[starts[0] + 1 :]:
-        if len(row) != len(header):
+    for where, row in parser.rows[starts[0] + 1 :]:
+        if where != table:
             continue
+        if len(row) != len(header):
+            raise SchemaChangedError(f"doc.twse {code} {roc_year} row has {len(row)} cells")
         cells = {name: row[index] for name, index in position.items()}
         if ENGLISH not in cells[DETAIL]:
             filings.append(_filing(cells, code, roc_year))
@@ -150,9 +167,6 @@ class MopsAdapter(BaseAdapter):
     def run(self, dataset: str, start: date, end: date, stock_id: str | None = None) -> EtlRun:
         raise ValueError(f"{self.source}/{dataset} goes stock by stock; use manage.py backfill")
 
-    def units(self, dataset: str, start: date, end: date) -> Iterator[tuple[date, date]]:
-        yield start, end
-
     def fetch(
         self, dataset: str, start: date, end: date, stock_id: str | None = None
     ) -> pd.DataFrame:
@@ -188,3 +202,42 @@ def _statement_years(stock_id: str, start: date, end: date) -> list[int]:
         stock_id=stock_id, period__gte=f"{start.year}", period__lt=f"{end.year + 1}"
     ).values_list("period", flat=True)
     return sorted({int(period[:4]) for period in periods})
+
+
+class Reapplied(NamedTuple):
+    changed: int
+    stocks: int
+    rejected: dict[str, str]
+
+
+def reapply_filings(adapter: MopsAdapter, stock_ids: Sequence[str] | None = None) -> Reapplied:
+    """Rerun parsing and the date rules on the latest stored page of each company and year."""
+    rows = RawMops.objects.filter(dataset=STATEMENT_FILING)
+    if stock_ids:
+        rows = rows.filter(request_params__co_id__in=list(stock_ids))
+    latest: dict[tuple[str, str], int] = {}
+    ordered = rows.order_by("fetched_at", "id").values_list("id", "request_params")
+    for raw_id, params in ordered.iterator():
+        latest[(params["co_id"], params["year"])] = raw_id
+    by_stock: dict[str, list[int]] = {}
+    for (code, _), raw_id in sorted(latest.items()):
+        by_stock.setdefault(code, []).append(raw_id)
+    changed, rejected = 0, {}
+    for code, raw_ids in by_stock.items():
+        try:
+            changed += _reapply_stock(adapter, code, raw_ids)
+        except SourceError as exc:
+            rejected[code] = f"{type(exc).__name__}: {exc}"
+    return Reapplied(changed, len(by_stock), rejected)
+
+
+def _reapply_stock(adapter: MopsAdapter, code: str, raw_ids: list[int]) -> int:
+    pages = RawMops.objects.filter(id__in=raw_ids).values_list("request_params", "payload")
+    filings = [
+        filing
+        for params, payload in pages
+        for filing in parse_listing(payload["html"], code, int(params["year"]))
+    ]
+    frame = adapter.normalize(STATEMENT_FILING, pd.DataFrame(filings, columns=FILING_COLUMNS))
+    with transaction.atomic():
+        return adapter.upsert(STATEMENT_FILING, frame)

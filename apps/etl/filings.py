@@ -1,4 +1,4 @@
-"""Actual filing times replace the conservative announce dates of Phase 1, earlier only (K2)."""
+"""Actual filing times replace the conservative announce dates of Phase 1 (plan §8 K2, K14)."""
 
 from collections.abc import Iterable
 from datetime import date, datetime, time
@@ -8,12 +8,20 @@ import pandas as pd
 from django.db import transaction
 from django.utils import timezone
 
+from apps.etl.deadlines import statement_deadline, visible_from
+from apps.etl.errors import SchemaChangedError
 from apps.etl.models import DataQualityLog
 from apps.market.calendar import TradingDays
 from apps.market.models import FinancialStatement
 
+FILED_LATE_CHECK = "statement_filed_late"
 FILED_LATER_CHECK = "statement_filed_later"
+LOGS = {
+    FILED_LATE_CHECK: DataQualityLog.Severity.INFO,
+    FILED_LATER_CHECK: DataQualityLog.Severity.WARNING,
+}
 FILING_COLUMNS = ["stock_id", "period", "fin_type", "uploaded_at", "corrected"]
+QUARTER_LAST_DAY = {1: 31, 2: 30, 3: 30, 4: 31}
 
 
 class Filing(NamedTuple):
@@ -34,26 +42,41 @@ def filing_session(uploaded_at: datetime, calendar: TradingDays, cutoff: time) -
 
 
 def apply_statement_filings(frame: pd.DataFrame, calendar: TradingDays, cutoff: time) -> int:
-    """Move announce dates earlier to the filing session; later filings are only logged."""
+    """Uncorrected filings set the date; a corrected one may only bring the deadline forward."""
     filings = [Filing(*row) for row in frame[FILING_COLUMNS].itertuples(index=False)]
-    earlier: list[tuple[FinancialStatement, date]] = []
-    later: dict[str, list[dict[str, Any]]] = {}
-    for row, filing in _matched(filings):
+    changed: list[tuple[FinancialStatement, date]] = []
+    logs: dict[str, dict[str, list[dict[str, Any]]]] = {check: {} for check in LOGS}
+    for row, filing, own in _matched(filings):
         session = filing_session(filing.uploaded_at, calendar, cutoff)
-        if session < row.announce_date:
-            earlier.append((row, session))
-        elif session > row.announce_date:
-            later.setdefault(row.stock_id, []).append(_later(row, filing, session))
+        if session <= quarter_end(row.period):
+            raise SchemaChangedError(
+                f"{row.stock_id} {row.period} filed on {session}, before the quarter ended"
+            )
+        deadline = visible_from(statement_deadline(row.period), calendar)
+        target = min(deadline, session) if filing.corrected else session
+        if target != row.announce_date:
+            changed.append((row, target))
+        if session > deadline:
+            check = FILED_LATER_CHECK if filing.corrected else FILED_LATE_CHECK
+            entry = _entry(row, deadline, session, own)
+            logs[check].setdefault(row.stock_id, []).append(entry)
     with transaction.atomic():
-        for row, session in earlier:
+        for row, target in changed:
             FinancialStatement.objects.filter(
                 stock_id=row.stock_id, period=row.period, fin_type=row.fin_type
-            ).update(announce_date=session)
-        _log_later({filing.stock_id for filing in filings}, later)
-    return len(earlier)
+            ).update(announce_date=target)
+        seen = {(filing.stock_id, filing.period) for filing in filings}
+        for check, entries in logs.items():
+            _log(check, seen, entries)
+    return len(changed)
 
 
-def _matched(filings: list[Filing]) -> Iterable[tuple[FinancialStatement, Filing]]:
+def quarter_end(period: str) -> date:
+    year, quarter = int(period[:4]), int(period[-1])
+    return date(year, 3 * quarter, QUARTER_LAST_DAY[quarter])
+
+
+def _matched(filings: list[Filing]) -> Iterable[tuple[FinancialStatement, Filing, bool]]:
     """Each statement with its own report type's filing, else the period's latest filing."""
     by_type = {(f.stock_id, f.period, f.fin_type): f for f in filings}
     latest: dict[tuple[str, str], Filing] = {}
@@ -65,32 +88,40 @@ def _matched(filings: list[Filing]) -> Iterable[tuple[FinancialStatement, Filing
         stock_id__in={f.stock_id for f in filings}, period__in={f.period for f in filings}
     ).order_by("stock_id", "period", "fin_type")
     for row in rows:
-        found = by_type.get((row.stock_id, row.period, row.fin_type))
-        found = found or latest.get((row.stock_id, row.period))
+        own = by_type.get((row.stock_id, row.period, row.fin_type))
+        found = own or latest.get((row.stock_id, row.period))
         if found is not None:
-            yield row, found
+            yield row, found, own is not None
 
 
-def _later(row: FinancialStatement, filing: Filing, session: date) -> dict[str, Any]:
+def _entry(row: FinancialStatement, deadline: date, session: date, own: bool) -> dict[str, Any]:
     return {
         "period": row.period,
         "fin_type": row.fin_type,
-        "announce_date": row.announce_date.isoformat(),
+        "deadline": deadline.isoformat(),
         "filed": session.isoformat(),
-        "corrected": bool(filing.corrected),
+        "matched": "own" if own else "other",
     }
 
 
-def _log_later(stock_ids: set[str], later: dict[str, list[dict[str, Any]]]) -> None:
-    """One warning per stock, replaced on every rerun, listing filings after the kept date."""
-    for stock_id in stock_ids:
-        DataQualityLog.objects.filter(
-            check_name=FILED_LATER_CHECK, detail__stock_id=stock_id
-        ).delete()
-        if stock_id in later:
+def _log(check: str, seen: set[tuple[str, str]], found: dict[str, list[dict[str, Any]]]) -> None:
+    """One row per stock and check; a rerun replaces the periods it saw and keeps the others."""
+    for stock_id in sorted({stock_id for stock_id, _ in seen}):
+        logged = DataQualityLog.objects.filter(check_name=check, detail__stock_id=stock_id)
+        kept = [
+            entry
+            for row in logged
+            for entry in row.detail.get("filings", [])
+            if (stock_id, entry["period"]) not in seen
+        ]
+        logged.delete()
+        entries = sorted(
+            [*kept, *found.get(stock_id, [])], key=lambda e: (e["period"], e["fin_type"])
+        )
+        if entries:
             DataQualityLog.objects.create(
                 date=timezone.localdate(),
-                check_name=FILED_LATER_CHECK,
-                severity=DataQualityLog.Severity.WARNING,
-                detail={"stock_id": stock_id, "filed_later": later[stock_id]},
+                check_name=check,
+                severity=LOGS[check],
+                detail={"stock_id": stock_id, "filings": entries},
             )
