@@ -37,12 +37,16 @@ def screened_features() -> Screened:
     return Screened(list(kept), list(params.get("unscreened", [])))
 
 
-def rank_features(screened: Screened) -> list[str]:
-    """The screened stock-level features; the rank model never sees market features."""
-    unknown = [name for name in screened.kept if name not in STOCK_LEVEL]
+def _stock_level(features: Sequence[str]) -> list[str]:
+    unknown = [name for name in features if name not in STOCK_LEVEL]
     if unknown:
         raise ValueError(f"the rank model takes stock-level features only, not {unknown}")
-    return list(screened.kept)
+    return list(features)
+
+
+def rank_features(screened: Screened) -> list[str]:
+    """The screened stock-level features; the rank model never sees market features."""
+    return _stock_level(screened.kept)
 
 
 def rank_inputs(raw: pd.DataFrame, features: Sequence[str]) -> pd.DataFrame:
@@ -59,9 +63,10 @@ def fit_rank(
     max_rounds: int = MAX_ROUNDS,
 ) -> Boosted:
     """Fit on the fold's tradable universe rows, stopping on validation daily rank IC."""
+    names = _stock_level(features)
     window = inputs[inputs["date"].between(fold.train_start, fold.train_end)]
     rows = training_rows(window, labels, RANK_LABEL)
-    return boost(rows, fold, features, RANK_LABEL, seed, feval=DailyRankIC, max_rounds=max_rounds)
+    return boost(rows, fold, names, RANK_LABEL, seed, feval=DailyRankIC, max_rounds=max_rounds)
 
 
 def prediction_frame(rows: pd.DataFrame, scores: np.ndarray) -> pd.DataFrame:

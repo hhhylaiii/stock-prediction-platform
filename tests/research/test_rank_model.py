@@ -118,6 +118,14 @@ def test_rank_features_refuse_anything_but_stock_level_features(name: str) -> No
         rank_features(Screened(["tech_ret_20d", name], []))
 
 
+def test_fit_rank_refuses_features_that_are_not_stock_level() -> None:
+    window = fold()
+    raw = raw_panel(window.train_start, window.train_end)
+
+    with pytest.raises(ValueError, match="mkt_taiex_ret_5d"):
+        fit_rank(raw, labels_for(raw), window, [*FEATURES, "mkt_taiex_ret_5d"], seed=3)
+
+
 def test_rank_inputs_zscore_the_features_and_keep_gaps_and_other_columns() -> None:
     raw = raw_panel(date(2011, 3, 1), date(2011, 3, 10))
 
