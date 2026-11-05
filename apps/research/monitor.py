@@ -45,7 +45,7 @@ TARGET: Mapping[str, str] = {
     ModelObjective.VOLATILITY: "fwd_vol_20d",
     ModelObjective.CLASSIFICATION: "fwd_up_5pct",
 }
-WATCHED = (ModelStatus.ACTIVE, ModelStatus.DEGRADED)
+SERVED = (ModelStatus.ACTIVE, ModelStatus.DEGRADED, ModelStatus.RETIRED)
 BANDS: Mapping[str, list[str]] = {
     ModelObjective.QUANTILE: ["q10", "q50", "q90"],
     ModelObjective.VOLATILITY: ["vol_pred"],
@@ -99,9 +99,9 @@ def matured_dates(calendar: TradingDays, day: date) -> dict[int, date]:
 
 
 def _matured_rows(day: date, horizon: int) -> pd.DataFrame:
-    """Universe predictions of a date and horizon joined to their labels."""
-    predictions = Prediction.objects.filter(date=day, horizon=horizon, in_universe=True)
-    fields = ["run_id", "run__objective", "stock_id", *OUTPUTS]
+    """Predictions of a date and horizon joined to their labels."""
+    predictions = Prediction.objects.filter(date=day, horizon=horizon)
+    fields = ["run_id", "run__objective", "stock_id", "in_universe", *OUTPUTS]
     frame = pd.DataFrame(list(predictions.values_list(*fields)), columns=fields)
     fields = ["stock_id", "untradable_t1", *LABELS]
     labels = LabelDaily.objects.filter(date=day, horizon=horizon).values_list(*fields)
@@ -120,7 +120,8 @@ def score_matured(day: date, horizon: int) -> tuple[int, list[str]]:
     rows = _matured_rows(day, horizon)
     found, unscored = [], []
     for (run_id, objective), part in rows.groupby(["run_id", "run__objective"]):
-        kept = part[part[TARGET[str(objective)]].notna() & part["untradable_t1"].eq(False)]
+        counted = part["in_universe"].astype(bool) & part["untradable_t1"].eq(False)
+        kept = part[counted & part[TARGET[str(objective)]].notna()]
         if kept.empty:
             unscored.append(str(run_id))
             continue
@@ -137,12 +138,12 @@ def score_matured(day: date, horizon: int) -> tuple[int, list[str]]:
 
 
 def _served_runs(day: date) -> dict[str, str]:
-    """Per objective, the run serving the day's 20-day rows: active, then degraded, then newest."""
-    rows = Prediction.objects.filter(date=day, horizon=INTERVAL_HORIZON, run__status__in=WATCHED)
+    """Per objective, the run the API serves the day from: active, degraded, retired, newest."""
+    rows = Prediction.objects.filter(date=day, horizon=INTERVAL_HORIZON, run__status__in=SERVED)
     fields = ["run_id", "run__objective", "run__status", "run__created_at"]
     runs = sorted(
         set(rows.values_list(*fields)),
-        key=lambda run: (WATCHED.index(run[2]), -run[3].timestamp(), run[0]),
+        key=lambda run: (SERVED.index(run[2]), -run[3].timestamp(), run[0]),
     )
     chosen: dict[str, str] = {}
     for run_id, objective, _, _ in runs:

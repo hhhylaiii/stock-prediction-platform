@@ -352,6 +352,7 @@ def snapshot() -> tuple[list[Any], list[Any], list[Any]]:
             "date",
             "horizon",
             "ic",
+            "direction_acc",
             "coverage",
             "brier",
             "mae",
@@ -432,7 +433,7 @@ def test_runs_without_predictions_that_day_keep_their_monitor_rows() -> None:
     assert ModelMonitor.objects.filter(run=rank, horizon=5).exists()
 
 
-def test_consistency_reads_the_active_run_first_and_never_a_retired_one() -> None:
+def test_consistency_reads_active_then_degraded_then_retired_runs() -> None:
     runs = seed_today(narrow=0, against=0)
     flagged = consistent_outputs(STOCKS, True).assign(q10=-0.001, q90=0.001, q50=0.0)
     for state in ("degraded", "retired"):
@@ -449,7 +450,20 @@ def test_consistency_reads_the_active_run_first_and_never_a_retired_one() -> Non
     assert logged(WIDTH_CHECK).detail["flagged"] == 0
     Prediction.objects.filter(run=runs["quantile"]).delete()
     run_monitor(DAY, calendar())
+    assert logged(WIDTH_CHECK).detail["flagged"] == 40
+    ModelRun.objects.filter(pk="prod.quantile.retired").update(status="candidate")
+    run_monitor(DAY, calendar())
     assert not DataQualityLog.objects.filter(check_name=WIDTH_CHECK).exists()
+
+
+def test_rerunning_a_day_after_its_runs_retired_keeps_its_consistency_rows() -> None:
+    seed_today(narrow=10, against=0)
+    run_monitor(DAY, calendar())
+    ModelRun.objects.update(status="retired")
+
+    run_monitor(DAY, calendar())
+
+    assert logged(WIDTH_CHECK).detail["flagged"] == 10
 
 
 def test_consistency_reads_one_run_per_objective_as_the_api_serves() -> None:
@@ -477,3 +491,20 @@ def test_consistency_reads_one_run_per_objective_as_the_api_serves() -> None:
     )
     run_monitor(DAY, calendar())
     assert logged(WIDTH_CHECK).detail["flagged"] == 40
+
+
+def test_a_run_with_only_out_of_universe_rows_is_reported_unscored(
+    dispatched: list[DataQualityLog],
+) -> None:
+    rank = make_run("prod.rank", "rank")
+    labels = truth(12)
+    produced = outputs(labels, 12).assign(in_universe=False)
+    predict(rank, matured(5), 5, produced[["stock_id", "in_universe", "score", "rank", "pct"]])
+    label(matured(5), 5, labels)
+
+    run_monitor(DAY, calendar())
+
+    assert not ModelMonitor.objects.exists()
+    assert logged(UNSCORED_CHECK).detail["runs"] == [
+        {"run_id": rank.run_id, "date": matured(5).isoformat(), "horizon": 5}
+    ]
