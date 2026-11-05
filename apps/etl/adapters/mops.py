@@ -32,6 +32,7 @@ from apps.etl.mops_history import (
     STATEMENT_HISTORY,
     insert_missing_history,
     months_between,
+    periods_between,
     quarters_between,
     unsettled,
 )
@@ -303,15 +304,20 @@ class MopsAdapter(BaseAdapter):
                 if dataset == REVENUE_HISTORY
                 else settings.STATEMENT_SCAN_DAYS_AFTER
             )
+            if not periods_between(dataset, start, end):
+                raise ValueError(
+                    f"{self.source}/{dataset} has no period from 2013 in {start}..{end}"
+                )
             pending = unsettled(dataset, start, end, today, days_after)
             if pending:
                 raise ValueError(f"{self.source}/{dataset} leaves {pending} to the daily scan")
         return super().run(dataset, start, end, stock_id)
 
     def units(self, dataset: str, start: date, end: date) -> Iterator[tuple[date, date]]:
-        """History covers the periods inside the whole span at once, whatever day they end on."""
+        """History goes a calendar year at a time, each checkpointed, whatever day a period ends."""
         if dataset in HISTORIES:
-            yield start, end
+            for year in range(start.year, end.year + 1):
+                yield max(start, date(year, 1, 1)), min(end, date(year, 12, 31))
         else:
             yield from super().units(dataset, start, end)
 

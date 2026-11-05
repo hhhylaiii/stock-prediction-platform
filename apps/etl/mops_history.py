@@ -46,13 +46,17 @@ def quarters_between(start: date, end: date) -> list[str]:
     return found
 
 
+def periods_between(dataset: str, start: date, end: date) -> list[str]:
+    if dataset == REVENUE_HISTORY:
+        return months_between(start, end)
+    return quarters_between(start, end)
+
+
 def unsettled(dataset: str, start: date, end: date, today: date, days_after: int) -> list[str]:
     """Periods the daily scan still dates by the session that first lists them."""
-    if dataset == REVENUE_HISTORY:
-        months = months_between(start, end)
-        return [p for p in months if revenue_deadline(p) + timedelta(days=days_after) >= today]
-    quarters = quarters_between(start, end)
-    return [p for p in quarters if statement_deadline(p) + timedelta(days=days_after) >= today]
+    deadline = revenue_deadline if dataset == REVENUE_HISTORY else statement_deadline
+    periods = periods_between(dataset, start, end)
+    return [p for p in periods if deadline(p) + timedelta(days=days_after) >= today]
 
 
 def insert_missing_history(
@@ -89,11 +93,15 @@ def insert_missing_history(
     return len(new)
 
 
-def _record(model: type[models.Model], new: list[models.Model], check: str, detail: Any) -> None:
-    """Rows and the span's log together; a rerun of the span on any day replaces its log."""
+def _record(model: type[models.Model], new: list[models.Model], check: str, found: Any) -> None:
+    """Rows and the span's log together; a rerun replaces the log but keeps every row it added."""
     with transaction.atomic():
         model._default_manager.bulk_create(new)
-        DataQualityLog.objects.filter(check_name=check, detail__span=detail["span"]).delete()
+        earlier = DataQualityLog.objects.filter(check_name=check, detail__span=found["span"])
+        kept = [entry for log in earlier for entry in log.detail.get("added", [])]
+        added = sorted({(entry["stock_id"], entry["period"]) for entry in [*kept, *found["added"]]})
+        detail = {**found, "added": [{"stock_id": code, "period": p} for code, p in added]}
+        earlier.delete()
         if any(detail[part] for part in ("added", "rows", "types", "incomplete")):
             DataQualityLog.objects.create(
                 date=date.fromisoformat(detail["span"][1]),

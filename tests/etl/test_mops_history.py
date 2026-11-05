@@ -19,10 +19,18 @@ from apps.etl.mops_history import (
     STATEMENT_HISTORY,
     months_between,
     quarters_between,
+    unsettled,
 )
 from apps.etl.ratelimit import RateLimit, RateLimiter
 from apps.etl.revenue_scan import parse_revenue_page
-from apps.etl.statement_summary import BALANCE, CASH_FLOW, INCOME, parse_summary
+from apps.etl.statement_summary import (
+    BALANCE,
+    CASH_FLOW,
+    INCOME,
+    OPERATING_CF,
+    parse_summary,
+    statement_rows,
+)
 from apps.market.calendar import TradingDays
 from apps.market.models import FinancialStatement, FinType, MonthlyRevenue
 
@@ -80,6 +88,40 @@ def test_old_securities_balance_sheets_say_total_with_another_word(
 ) -> None:
     page = fixture("t163sb05_sii_102_04.html").decode("utf-8")
     assert "資產合計" in parse_summary(page, "sii", 4, BALANCE)["2855"]
+
+
+def test_totals_named_with_another_word_still_give_debt_ratio_and_roe() -> None:
+    def quarter(net: float, equity: float) -> dict:
+        return {
+            INCOME: {"2855": {"本期淨利（淨損）": net, "基本每股盈餘（元）": net / 10}},
+            BALANCE: {"2855": {"資產合計": 100.0, "負債合計": 60.0, "權益合計": equity}},
+            CASH_FLOW: {"2855": {OPERATING_CF[0]: 1.0}},
+        }
+
+    (row,) = statement_rows(quarter(4.0, 40.0), quarter(2.0, 40.0), 2)
+    assert (row["debt_ratio"], row["roe"]) == (0.6, 0.05)
+
+
+@pytest.mark.parametrize(
+    ("dataset", "start", "end", "today", "days_after", "pending"),
+    [
+        (REVENUE_HISTORY, date(2026, 9, 1), date(2026, 9, 30), date(2026, 11, 4), 20, ["2026-09"]),
+        (REVENUE_HISTORY, date(2026, 9, 1), date(2026, 9, 30), date(2026, 11, 5), 20, []),
+        (
+            STATEMENT_HISTORY,
+            date(2026, 4, 1),
+            date(2026, 6, 30),
+            date(2026, 10, 15),
+            45,
+            ["2026-Q2"],
+        ),
+        (STATEMENT_HISTORY, date(2026, 4, 1), date(2026, 6, 30), date(2026, 10, 16), 45, []),
+    ],
+)
+def test_a_period_settles_the_day_after_the_scan_last_looks(
+    dataset: str, start: date, end: date, today: date, days_after: int, pending: list[str]
+) -> None:
+    assert unsettled(dataset, start, end, today, days_after) == pending
 
 
 def weekdays(start: date, end: date, closed: date) -> TradingDays:
@@ -174,10 +216,27 @@ def test_a_second_run_over_the_same_span_adds_nothing(
     )
     serve_january(fixture)
     history(adapter, REVENUE_HISTORY, date(2013, 1, 1), date(2013, 1, 31))
+    first = DataQualityLog.objects.get(check_name=MISMATCH_CHECKS[REVENUE_HISTORY]).detail
     with time_machine.travel(TODAY + timedelta(days=1), tick=False):
         assert adapter.run(REVENUE_HISTORY, date(2013, 1, 1), date(2013, 1, 31)).rows == 0
     logged = DataQualityLog.objects.get(check_name=MISMATCH_CHECKS[REVENUE_HISTORY])
-    assert (logged.detail["added"], len(logged.detail["rows"])) == ([], 1)
+    assert logged.detail["added"] == first["added"]
+    assert len(logged.detail["added"]) == len(JANUARY_FILERS) - 1
+    assert len(logged.detail["rows"]) == 1
+
+
+@pytest.mark.django_db
+@responses.activate
+def test_a_long_span_goes_a_year_at_a_time(
+    adapter: MopsAdapter, fixture: Callable[[str], bytes]
+) -> None:
+    serve_january(fixture)
+    with time_machine.travel(TODAY, tick=False):
+        run = adapter.run(REVENUE_HISTORY, date(2012, 12, 1), date(2013, 1, 31))
+    assert run.checkpoint == {"last_date": "2013-01-31"}
+    logged = DataQualityLog.objects.get(check_name=MISMATCH_CHECKS[REVENUE_HISTORY])
+    assert logged.detail["span"] == ["2013-01-01", "2013-01-31"]
+    assert len(responses.calls) == len(PAGES)
 
 
 @pytest.mark.django_db
@@ -268,6 +327,7 @@ def test_a_past_month_that_comes_back_empty_fails(
 
 
 @pytest.mark.django_db
+@responses.activate
 @pytest.mark.parametrize(
     ("dataset", "end", "today", "pending"),
     [
@@ -289,6 +349,15 @@ def test_history_leaves_periods_still_being_filed_to_the_daily_scan(
 
 
 @pytest.mark.django_db
+@responses.activate
+@pytest.mark.parametrize("dataset", [REVENUE_HISTORY, STATEMENT_HISTORY])
+def test_a_span_before_2013_is_refused(adapter: MopsAdapter, dataset: str) -> None:
+    with time_machine.travel(TODAY, tick=False), pytest.raises(ValueError, match="from 2013"):
+        adapter.run(dataset, date(2012, 1, 1), date(2012, 12, 31))
+
+
+@pytest.mark.django_db
+@responses.activate
 def test_history_takes_any_span_but_only_the_whole_market(adapter: MopsAdapter) -> None:
     with time_machine.travel(TODAY, tick=False), pytest.raises(ValueError, match="whole market"):
         adapter.fetch(REVENUE_HISTORY, date(2013, 1, 1), date(2013, 1, 31), "1101")
