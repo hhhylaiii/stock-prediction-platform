@@ -200,6 +200,17 @@ def test_boost_stops_on_validation_ic_then_refits_the_whole_window(
     assert importance["signal"] > importance["noise"]
 
 
+def test_boost_keeps_the_probe_scores_on_the_validation_rows() -> None:
+    rows, window = training_window(), fold()
+
+    boosted = boost(rows, window, FEATURES, LABEL, seed=1, feval=DailyRankIC, max_rounds=200)
+
+    _, valid = split_validation(rows, window)
+    assert boosted.valid_scores.shape == (len(valid),)
+    rescored = DailyRankIC(valid["date"], valid[LABEL]).value(boosted.valid_scores)
+    assert rescored == pytest.approx(boosted.valid_score)
+
+
 def test_boost_without_signal_stops_a_patience_after_its_best_round(
     probe_rounds: list[int],
 ) -> None:

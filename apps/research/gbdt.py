@@ -69,9 +69,12 @@ def split_validation(rows: pd.DataFrame, fold: Fold) -> tuple[pd.DataFrame, pd.D
 
 @dataclass(frozen=True)
 class Boosted:
+    """The refit booster, its round count, and the probe's validation score and predictions."""
+
     booster: lgb.Booster
     rounds: int
     valid_score: float
+    valid_scores: np.ndarray
 
 
 def _dataset(
@@ -107,5 +110,6 @@ def boost(
     )
     rounds = probe.best_iteration or probe.current_iteration()
     score = next(iter(probe.best_score["valid"].values()))
+    scores = np.asarray(probe.predict(valid[list(features)], num_iteration=rounds))
     final = lgb.train(settings, _dataset(rows, features, label), num_boost_round=rounds)
-    return Boosted(final, rounds, float(score))
+    return Boosted(final, rounds, float(score), scores)
