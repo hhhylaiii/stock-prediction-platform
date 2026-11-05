@@ -7,6 +7,7 @@ from django.conf import settings
 from apps.etl.adapters.base import BaseAdapter
 from apps.etl.adapters.datagov import DatagovAdapter
 from apps.etl.adapters.finmind import FinmindAdapter
+from apps.etl.adapters.mops import MopsAdapter
 from apps.etl.adapters.tdcc import TdccAdapter
 from apps.etl.adapters.tpex import TpexAdapter
 from apps.etl.adapters.twse import TwseAdapter
@@ -21,6 +22,7 @@ ADAPTERS: dict[str, type[BaseAdapter]] = {
     TdccAdapter.source: TdccAdapter,
     YahooAdapter.source: YahooAdapter,
     DatagovAdapter.source: DatagovAdapter,
+    MopsAdapter.source: MopsAdapter,
 }
 
 

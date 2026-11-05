@@ -20,7 +20,7 @@ from apps.etl.adapters.yahoo import SERIES
 from apps.etl.alerts import dispatch
 from apps.etl.errors import SourceError, SourceNotReadyError
 from apps.etl.models import DataQualityLog, RawTpex, RawTwse
-from apps.etl.quality import run_checks
+from apps.etl.quality import CHECKS, run_checks
 from apps.etl.ratelimit import RetryableError
 from apps.etl.replay import rebuild_after
 from apps.etl.runs import covered_days
@@ -190,7 +190,9 @@ def _days_to_check(written: Sequence[date], calendar: TradingDays) -> list[date]
     """Written days, plus each next session already checked against the gap before it."""
     sessions = (_next_session(calendar, day) for day in written)
     following = {day for day in sessions if day is not None} - set(written)
-    checked = DataQualityLog.objects.filter(date__in=following).values_list("date", flat=True)
+    checked = DataQualityLog.objects.filter(date__in=following, check_name__in=CHECKS).values_list(
+        "date", flat=True
+    )
     return sorted({*written, *checked})
 
 

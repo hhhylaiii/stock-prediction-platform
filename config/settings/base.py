@@ -170,6 +170,9 @@ YAHOO_BASE_URL = env.str("YAHOO_BASE_URL", default="https://query1.finance.yahoo
 YAHOO_TIMEOUT = env.float("YAHOO_TIMEOUT", default=30.0)
 DATAGOV_BASE_URL = env.str("DATAGOV_BASE_URL", default="https://data.gov.tw")
 DATAGOV_TIMEOUT = env.float("DATAGOV_TIMEOUT", default=60.0)
+MOPS_DOC_BASE_URL = env.str("MOPS_DOC_BASE_URL", default="https://doc.twse.com.tw")
+MOPS_TIMEOUT = env.float("MOPS_TIMEOUT", default=60.0)
+FILING_VISIBLE_BEFORE = env.str("FILING_VISIBLE_BEFORE", default="22:40")
 ETL_RATE_LIMITS: dict[str, dict[str, float]] = {
     "twse": {
         "min_interval": env.float("TWSE_MIN_INTERVAL", default=3.5),
@@ -207,6 +210,13 @@ ETL_RATE_LIMITS: dict[str, dict[str, float]] = {
         "backoff_base": env.float("YAHOO_BACKOFF_BASE", default=5.0),
         "backoff_max": env.float("YAHOO_BACKOFF_MAX", default=120.0),
         "cooldown": env.float("YAHOO_COOLDOWN", default=900.0),
+    },
+    "mops": {
+        "min_interval": env.float("MOPS_MIN_INTERVAL", default=3.5),
+        "max_retries": env.int("MOPS_MAX_RETRIES", default=4),
+        "backoff_base": env.float("MOPS_BACKOFF_BASE", default=5.0),
+        "backoff_max": env.float("MOPS_BACKOFF_MAX", default=120.0),
+        "cooldown": env.float("MOPS_COOLDOWN", default=900.0),
     },
     "datagov": {
         "min_interval": env.float("DATAGOV_MIN_INTERVAL", default=2.0),
