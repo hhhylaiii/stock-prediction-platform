@@ -24,11 +24,13 @@ THOUSANDS_NOTE = "單位：新台幣仟元"
 CODE_HEADER = "公司代號"
 TITLE = re.compile(r"<h2>(.*?)</h2>", re.S)
 NUMBER = re.compile(r"^-?\d+(\.\d+)?$")
+COMPANY_CODE = re.compile(r"^[0-9A-Z]{4,6}$")
 MISSING = {"", "--"}
 THOUSAND = 1000
 EPS_PLACES = Decimal("0.0001")
 EPS_CENTS = 2
 STEADY_SHARES = 0.05
+RELIABLE_EPS = 0.10
 
 REVENUE = ("營業收入", "淨收益", "收入")
 GROSS_PROFIT = ("營業毛利（毛損）",)
@@ -113,7 +115,11 @@ def parse_summary(page: str, market: str, season: int) -> dict[str, dict[str, fl
         if cells and cells[0] == CODE_HEADER:
             header, table = cells, where
             continue
-        if header is None or where != table or not cells:
+        if not cells:
+            continue
+        if header is None or where != table:
+            if COMPANY_CODE.match(cells[0]):
+                raise SchemaChangedError(f"MOPS {market} lists {cells[0]} outside a report table")
             continue
         if len(cells) != len(header):
             raise SchemaChangedError(f"MOPS {market} row {cells[:2]} has {len(cells)} cells")
@@ -149,6 +155,12 @@ def open_periods(day: date, days_after: int) -> list[str]:
 def previous_period(period: str) -> str:
     year, quarter = int(period[:4]), int(period[-1])
     return f"{year - 1}-Q4" if quarter == 1 else f"{year}-Q{quarter - 1}"
+
+
+def incomplete(current: Summary) -> list[str]:
+    """Companies missing from some of the quarter's summaries, as while a filing uploads."""
+    listed = [set(current[report]) for report in REPORTS]
+    return sorted(set[str]().union(*listed) - listed[0].intersection(*listed[1:]))
 
 
 def statement_rows(current: Summary, previous: Summary, season: int) -> list[dict[str, Any]]:
@@ -225,9 +237,10 @@ def _quarter_eps(
         return None
     if season == 1:
         return eps_now
+    reliable = abs(eps_now) >= RELIABLE_EPS
     if eps_before is None:
-        return net_income * eps_now / net_now if net_now else None
-    if net_now and eps_now and net_before and eps_before:
+        return net_income * eps_now / net_now if net_now and reliable else None
+    if net_now and net_before and reliable and abs(eps_before) >= RELIABLE_EPS:
         shares_now, shares_before = net_now / eps_now, net_before / eps_before
         if abs(shares_now / shares_before - 1) > STEADY_SHARES:
             return net_income * eps_now / net_now

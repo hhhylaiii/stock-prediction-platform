@@ -1,5 +1,6 @@
 """MOPS: when each financial report was filed, and the daily scan of new filings (SPEC §3, §5)."""
 
+import logging
 import re
 from collections.abc import Sequence
 from datetime import date, datetime, time
@@ -24,6 +25,8 @@ from apps.etl.statement_summary import (
     MARKETS,
     REPORTS,
     VALUE_COLUMNS,
+    Summary,
+    incomplete,
     open_periods,
     parse_summary,
     previous_period,
@@ -37,6 +40,7 @@ STATEMENT_FILING = "statement_filing"
 STATEMENT_SCAN = "statement_scan"
 SUMMARY_PATH = "/mops/web/ajax_"
 SUMMARY_ENCODING = "utf-8"
+EXPORT_NAME = re.compile(r"name='filename' value='[^']*'")
 LISTING_PATH = "/server-java/t57sb01"
 REPORT_KIND = "A"
 PAGE_ENCODING = "cp950"
@@ -70,6 +74,7 @@ SEASONS = {"一": 1, "二": 2, "三": 3, "四": 4}
 SEASON = re.compile(r"^(\d{2,3})\s*年\s*第([一二三四])季$")
 UPLOAD = re.compile(r"^(\d{2,3})/(\d{2})/(\d{2}) (\d{2}):(\d{2}):(\d{2})$")
 TAIPEI = ZoneInfo("Asia/Taipei")
+logger = logging.getLogger(__name__)
 
 
 class MopsClient(SourceClient):
@@ -285,31 +290,46 @@ class MopsAdapter(BaseAdapter):
     def upsert(self, dataset: str, frame: pd.DataFrame) -> int:
         self.require_dataset(dataset)
         if dataset == STATEMENT_SCAN:
-            return insert_new_statements(frame, timezone.localdate())
+            session = scan_session(timezone.now(), self.calendar)
+            return insert_new_statements(frame, timezone.localdate(), session)
         if frame.empty:
             return 0
         cutoff = time.fromisoformat(settings.FILING_VISIBLE_BEFORE)
         return apply_statement_filings(frame, self.calendar, cutoff)
 
     def _scan(self, day: date) -> pd.DataFrame:
-        session = scan_session(timezone.now(), self.calendar)
+        """Each open quarter against the one before; a quarter is fetched once per scan."""
+        fetched: dict[str, Summary] = {}
+
+        def summaries(period: str, filed: bool) -> Summary:
+            if period not in fetched:
+                fetched[period] = self._summaries(period, filed)
+            return fetched[period]
+
         records = []
         for period in open_periods(day, int(settings.STATEMENT_SCAN_DAYS_AFTER)):
-            current, previous = self._summaries(period), self._summaries(previous_period(period))
+            current = summaries(period, filed=False)
+            previous = summaries(previous_period(period), filed=True)
+            waiting = incomplete(current)
+            if waiting:
+                logger.warning("mops %s scan waits for %s", period, ", ".join(waiting))
             for row in statement_rows(current, previous, int(period[-1])):
-                records.append({**row, "period": period, "announce_date": session})
+                records.append({**row, "period": period})
         return pd.DataFrame(records, columns=SCAN_COLUMNS, dtype=object)
 
-    def _summaries(self, period: str) -> dict[str, dict[str, dict[str, float | None]]]:
-        """Both markets' three summaries of a quarter, each page kept as raw before parsing."""
+    def _summaries(self, period: str, filed: bool) -> Summary:
+        """Both markets' three summaries, kept as raw first; a filed quarter cannot be empty."""
         year, season = int(period[:4]), int(period[-1])
         found: dict[str, dict[str, dict[str, float | None]]] = {}
         for report in REPORTS:
             found[report] = {}
             for market in MARKETS:
                 params, page = self.summaries.summary(report, market, year - ROC_OFFSET, season)
-                self.save_raw(STATEMENT_SCAN, params, {"html": page})
+                identity = {"html": EXPORT_NAME.sub("", page)}
+                self.save_raw(STATEMENT_SCAN, params, {"html": page}, identity)
                 companies = parse_summary(page, market, season)
+                if filed and not companies:
+                    raise SchemaChangedError(f"MOPS {report} {market} {period} came back empty")
                 if companies.keys() & found[report].keys():
                     raise SchemaChangedError(f"MOPS {report} {period} lists a company twice")
                 found[report] |= companies

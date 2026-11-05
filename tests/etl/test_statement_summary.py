@@ -1,3 +1,4 @@
+import re
 from collections.abc import Callable
 from decimal import Decimal
 from pathlib import Path
@@ -11,6 +12,7 @@ from apps.etl.statement_summary import (
     CASH_FLOW,
     INCOME,
     REPORTS,
+    incomplete,
     parse_summary,
     statement_rows,
 )
@@ -79,20 +81,22 @@ FIELDS = (
 
 
 @pytest.fixture
-def page(fixture_path: Callable[[str], Path]) -> Callable[[str, str, int], str]:
-    def _read(report: str, market: str, season: int) -> str:
-        name = f"mops/summary/{report}_{market}_115_{season:02d}.html"
+def page(fixture_path: Callable[[str], Path]) -> Callable[..., str]:
+    def _read(report: str, market: str, season: int, roc: int = 115) -> str:
+        name = f"mops/summary/{report}_{market}_{roc}_{season:02d}.html"
         return fixture_path(name).read_text(encoding="utf-8")
 
     return _read
 
 
-def summaries(page: Callable[[str, str, int], str], season: int) -> dict[str, dict[str, Any]]:
+def summaries(page: Callable[..., str], season: int, roc: int = 115) -> dict[str, dict[str, Any]]:
     return {
         report: {
             code: values
             for market in ("sii", "otc")
-            for code, values in parse_summary(page(report, market, season), market, season).items()
+            for code, values in parse_summary(
+                page(report, market, season, roc), market, season
+            ).items()
         }
         for report in REPORTS
     }
@@ -150,6 +154,21 @@ def test_a_company_listed_twice_fails(page: Callable[[str, str, int], str]) -> N
     row = row[: row.index("</tr>") + 5]
     with pytest.raises(SchemaChangedError, match="twice"):
         parse_summary(text.replace(row, row + row, 1), "sii", 2)
+
+
+def test_a_title_without_companies_fails(page: Callable[..., str]) -> None:
+    text = page(INCOME, "sii", 2)
+    rows = re.compile(r"<tr class='(?:even|odd)'>.*?</tr>", re.S)
+    with pytest.raises(SchemaChangedError, match="lists no company"):
+        parse_summary(rows.sub("", text), "sii", 2)
+
+
+def test_a_renamed_header_fails_instead_of_dropping_its_industry(page: Callable[..., str]) -> None:
+    text = page(INCOME, "sii", 2)
+    renamed = text.replace("公司<br>代號", "代號")
+    assert renamed != text
+    with pytest.raises(SchemaChangedError, match="outside a report table"):
+        parse_summary(renamed, "sii", 2)
 
 
 def test_a_page_without_any_report_fails() -> None:
@@ -212,6 +231,43 @@ def test_quarterly_eps_follows_net_income_when_shares_change(
     assert abs(row["eps"] - Decimal("14.22")) < Decimal("1.3")
 
 
+FINMIND_2025_Q4 = {
+    "1215": ("2.4500", 7579475000, 723562000, 0.0601387, 0.5955952, 700157000),
+    "2330": ("19.5100", 1046090421000, 505743990000, 0.0970913, 0.3116376, 725508787000),
+    "8069": ("0.9700", 7015759000, 1118518000, 0.0167112, 0.3481247, 2666246000),
+}
+
+
+def test_the_annual_report_less_three_quarters_matches_the_finmind_fourth_quarter(
+    page: Callable[..., str],
+) -> None:
+    rows = by_code(statement_rows(summaries(page, 4, 114), summaries(page, 3, 114), 4))
+    for code, (eps, revenue, net, roe, debt, cash) in FINMIND_2025_Q4.items():
+        row = rows[code]
+        assert (row["eps"], row["revenue"], row["net_income"]) == (Decimal(eps), revenue, net)
+        assert (row["roe"], row["debt_ratio"]) == (
+            pytest.approx(roe, abs=1e-6),
+            pytest.approx(debt, abs=1e-6),
+        )
+        assert row["operating_cf"] == cash
+
+
+def test_the_first_quarter_takes_its_roe_from_the_year_end_balance(
+    page: Callable[..., str],
+) -> None:
+    rows = by_code(statement_rows(summaries(page, 1), summaries(page, 4, 114), 1))
+    assert rows["1215"]["roe"] == pytest.approx(0.0323697, abs=1e-6)
+    assert rows["2330"]["roe"] == pytest.approx(0.1012293, abs=1e-6)
+    assert rows["2330"]["revenue"] == 1_134_103_440_000
+
+
+def test_incomplete_lists_companies_missing_from_some_summaries(page: Callable[..., str]) -> None:
+    current = summaries(page, 2)
+    assert incomplete(current) == []
+    partial = {**current, CASH_FLOW: {k: v for k, v in current[CASH_FLOW].items() if k != "2882"}}
+    assert incomplete(partial) == ["2882"]
+
+
 def test_a_company_not_yet_in_every_summary_waits_for_the_next_scan(
     page: Callable[[str, str, int], str],
 ) -> None:
@@ -222,7 +278,7 @@ def test_a_company_not_yet_in_every_summary_waits_for_the_next_scan(
     assert "2882" not in by_code(statement_rows(partial, previous, 2))
 
 
-def synthetic(net: float, eps: float) -> dict[str, dict[str, dict[str, float | None]]]:
+def synthetic(net: float, eps: float | None) -> dict[str, dict[str, dict[str, float | None]]]:
     figures: dict[str, float | None] = {
         "本期淨利（淨損）": net,
         "基本每股盈餘（元）": eps,
@@ -238,6 +294,8 @@ def synthetic(net: float, eps: float) -> dict[str, dict[str, dict[str, float | N
         ((3.0, 0.03), (1.0, 0.0), Decimal("0.0300")),
         ((0.0, 0.0), (1.0, 0.01), Decimal("-0.0100")),
         ((3.0, 0.03), (0.0, 0.0), Decimal("0.0300")),
+        ((2600.0, 0.01), (-1000000.0, -2.0), Decimal("2.0100")),
+        ((4000.0, 0.01), (-1000000.0, -2.0), Decimal("2.0100")),
     ],
 )
 def test_a_year_to_date_eps_or_profit_of_zero_takes_the_eps_difference(
@@ -245,6 +303,20 @@ def test_a_year_to_date_eps_or_profit_of_zero_takes_the_eps_difference(
 ) -> None:
     rows = statement_rows(synthetic(*now), synthetic(*before), 2)
     assert rows[0]["eps"] == eps
+
+
+@pytest.mark.parametrize(
+    ("now", "before"), [((3.0, None), (1.0, 0.01)), ((300.0, 0.03), (1.0, None))]
+)
+def test_a_missing_or_unreliable_eps_leaves_the_quarter_without_one(
+    now: tuple[float, float | None], before: tuple[float, float | None]
+) -> None:
+    assert statement_rows(synthetic(*now), synthetic(*before), 2)[0]["eps"] is None
+
+
+def test_a_reliable_eps_without_an_earlier_one_scales_by_net_income() -> None:
+    rows = statement_rows(synthetic(300.0, 3.0), synthetic(100.0, None), 2)
+    assert rows[0]["eps"] == Decimal("2.0000")
 
 
 def test_the_first_quarter_keeps_its_year_to_date_figures(

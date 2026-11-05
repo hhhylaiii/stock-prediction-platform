@@ -13,7 +13,7 @@ from apps.etl.statement_summary import TYPE_MISMATCH_CHECK, VALUE_COLUMNS
 from apps.market.calendar import TradingDays
 from apps.market.models import FinancialStatement
 
-SCAN_COLUMNS = ["stock_id", "period", "fin_type", *VALUE_COLUMNS, "announce_date"]
+SCAN_COLUMNS = ["stock_id", "period", "fin_type", *VALUE_COLUMNS]
 
 
 def scan_session(moment: datetime, calendar: TradingDays) -> date:
@@ -21,7 +21,7 @@ def scan_session(moment: datetime, calendar: TradingDays) -> date:
     return filing_session(moment, calendar, time.fromisoformat(settings.ETL_AT["CHECK_QUALITY"]))
 
 
-def insert_new_statements(frame: pd.DataFrame, day: date) -> int:
+def insert_new_statements(frame: pd.DataFrame, day: date, session: date) -> int:
     """First sight wins: a stored period keeps its values and date; another type is logged."""
     stored = _stored_types(frame)
     new: list[FinancialStatement] = []
@@ -29,7 +29,8 @@ def insert_new_statements(frame: pd.DataFrame, day: date) -> int:
     for record in frame.to_dict("records"):
         types = stored.get((record["stock_id"], record["period"]))
         if types is None:
-            new.append(FinancialStatement(**{str(key): value for key, value in record.items()}))
+            values = {str(key): value for key, value in record.items()}
+            new.append(FinancialStatement(**values, announce_date=session))
         elif record["fin_type"] not in types:
             mismatched.append(
                 {

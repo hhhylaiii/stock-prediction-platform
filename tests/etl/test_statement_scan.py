@@ -1,3 +1,4 @@
+import re
 from collections.abc import Callable, Iterator
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -27,7 +28,6 @@ from apps.etl.statement_summary import (
 from apps.market.calendar import TradingDays
 from apps.market.models import FinancialStatement, FinType
 
-BASE = "https://mopsov.twse.com.tw/mops/web/ajax_"
 TAIPEI = ZoneInfo("Asia/Taipei")
 LIMIT = RateLimit(min_interval=6.0, max_retries=2, backoff_base=1.0, backoff_max=2.0, cooldown=5.0)
 SCAN_DAY = date(2026, 11, 5)
@@ -76,13 +76,13 @@ def adapter(fake_sleep: Callable[[float], None]) -> MopsAdapter:
 
 
 @pytest.fixture
-def summary(fixture_path: Callable[[str], Path]) -> Callable[[str, str, int], bytes]:
-    return lambda report, market, season: fixture_path(
-        f"mops/summary/{report}_{market}_115_{season:02d}.html"
+def summary(fixture_path: Callable[[str], Path]) -> Callable[..., bytes]:
+    return lambda report, market, season, roc=115: fixture_path(
+        f"mops/summary/{report}_{market}_{roc}_{season:02d}.html"
     ).read_bytes()
 
 
-def serve(report: str, market: str, season: int, body: bytes) -> None:
+def serve(report: str, market: str, season: int, body: bytes, roc: int = 115) -> None:
     form = {
         "encodeURIComponent": "1",
         "step": "1",
@@ -90,10 +90,14 @@ def serve(report: str, market: str, season: int, body: bytes) -> None:
         "off": "1",
         "isQuery": "Y",
         "TYPEK": market,
-        "year": "115",
+        "year": str(roc),
         "season": f"{season:02d}",
     }
-    responses.post(f"{BASE}{report}", body=body, match=[matchers.urlencoded_params_matcher(form)])
+    responses.post(
+        f"{settings.MOPS_BASE_URL}/mops/web/ajax_{report}",
+        body=body,
+        match=[matchers.urlencoded_params_matcher(form)],
+    )
 
 
 @pytest.fixture
@@ -256,6 +260,89 @@ def test_a_scan_only_sees_today(adapter: MopsAdapter) -> None:
             adapter.fetch(STATEMENT_SCAN, SCAN_DAY, SCAN_DAY, "1215")
 
 
-def test_the_scan_settings() -> None:
-    assert settings.MOPS_BASE_URL == "https://mopsov.twse.com.tw"
-    assert settings.STATEMENT_SCAN_DAYS_AFTER == 5
+@pytest.mark.django_db
+@responses.activate
+def test_an_empty_previous_quarter_fails_instead_of_blanking_the_flows(
+    adapter: MopsAdapter, summary: Callable[..., bytes]
+) -> None:
+    empty = summary(INCOME, "sii", 4)
+    for report in (INCOME, BALANCE, CASH_FLOW):
+        for market in ("sii", "otc"):
+            serve(report, market, 3, summary(report, market, 3))
+            serve(report, market, 2, empty if report == CASH_FLOW else summary(report, market, 2))
+    with pytest.raises(SchemaChangedError, match="came back empty"):
+        scan_at(adapter, "2026-11-05 19:00:00")
+    assert not FinancialStatement.objects.exists()
+
+
+@pytest.mark.django_db
+@responses.activate
+def test_early_april_scans_the_annual_report_and_the_first_quarter_once_each(
+    adapter: MopsAdapter, summary: Callable[..., bytes]
+) -> None:
+    for report in (INCOME, BALANCE, CASH_FLOW):
+        for market in ("sii", "otc"):
+            serve(report, market, 1, summary(report, market, 1))
+            for season in (4, 3):
+                serve(report, market, season, summary(report, market, season, 114), 114)
+    day = date(2026, 4, 2)
+    with time_machine.travel(datetime(2026, 4, 2, 19, 0, tzinfo=TAIPEI), tick=False):
+        adapter.run(STATEMENT_SCAN, day, day)
+    assert len(responses.calls) == 18
+    periods = set(FinancialStatement.objects.values_list("period", flat=True))
+    assert periods == {"2025-Q4", "2026-Q1"}
+    q4 = FinancialStatement.objects.get(stock_id="2330", period="2025-Q4")
+    assert (q4.eps, q4.announce_date) == (Decimal("19.5100"), day)
+
+
+@pytest.mark.django_db
+@responses.activate
+def test_a_page_differing_only_in_its_export_name_is_stored_once(
+    adapter: MopsAdapter, summary: Callable[..., bytes]
+) -> None:
+    for name in (b"t163_20261105_190000001.csv", b"t163_20261105_224000002.csv"):
+        for report in (INCOME, BALANCE, CASH_FLOW):
+            for market in ("sii", "otc"):
+                for season in (3, 2):
+                    page = summary(report, market, season)
+                    renamed = re.sub(
+                        rb"name='filename' value='[^']*'",
+                        b"name='filename' value='" + name + b"'",
+                        page,
+                    )
+                    serve(report, market, season, renamed)
+    scan_at(adapter, "2026-11-05 19:00:00")
+    scan_at(adapter, "2026-11-05 22:40:00")
+    assert len(responses.calls) == 24
+    assert RawMops.objects.filter(dataset=STATEMENT_SCAN).count() == 12
+
+
+@pytest.mark.django_db
+@pytest.mark.usefixtures("published")
+def test_rows_written_after_the_evening_check_count_for_the_next_session(
+    adapter: MopsAdapter,
+) -> None:
+    with time_machine.travel(datetime(2026, 11, 5, 22, 40, tzinfo=TAIPEI), tick=False):
+        frame = adapter.normalize(STATEMENT_SCAN, adapter.fetch(STATEMENT_SCAN, SCAN_DAY, SCAN_DAY))
+    with time_machine.travel(datetime(2026, 11, 5, 22, 55, tzinfo=TAIPEI), tick=False):
+        adapter.upsert(STATEMENT_SCAN, frame)
+    assert {row.announce_date for row in stored().values()} == {date(2026, 11, 6)}
+
+
+@pytest.mark.django_db
+@responses.activate
+def test_a_company_missing_from_one_summary_waits_and_is_named(
+    adapter: MopsAdapter, summary: Callable[..., bytes], caplog: pytest.LogCaptureFixture
+) -> None:
+    rows = re.compile(rb"<tr class='(?:even|odd)'>(?:(?!</tr>).)*?>1215<.*?</tr>", re.S)
+    for report in (INCOME, BALANCE, CASH_FLOW):
+        for market in ("sii", "otc"):
+            page = summary(report, market, 3)
+            if (report, market) == (BALANCE, "sii"):
+                page = rows.sub(b"", page)
+                assert b">1215<" not in page
+            serve(report, market, 3, page)
+            serve(report, market, 2, summary(report, market, 2))
+    scan_at(adapter, "2026-11-05 19:00:00")
+    assert set(stored()) == FILERS - {"1215"}
+    assert any("2026-Q3 scan waits for 1215" in row.getMessage() for row in caplog.records)
