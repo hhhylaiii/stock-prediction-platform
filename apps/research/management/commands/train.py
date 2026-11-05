@@ -44,8 +44,8 @@ class Command(BaseCommand):
         parser.add_argument(
             "--rerun",
             action="store_true",
-            help="Refit cached folds too. A cache is reused while its fold boundaries and feature "
-            "partitions are unchanged; after rebuilding labels or changing the recipe, rerun.",
+            help="Refit cached folds too. A baseline cache is reused while its fold boundaries, "
+            "feature partitions, labels and recipe are unchanged; other models' caches stay.",
         )
         parser.add_argument("--shuffle-check", action="store_true")
         parser.add_argument("--seed", type=int, default=0)

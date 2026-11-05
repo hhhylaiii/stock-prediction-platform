@@ -14,7 +14,7 @@ from django.db import IntegrityError, transaction
 
 from apps.research.features.store import export_year
 from apps.research.holdout import HoldoutError, claim_holdout
-from apps.research.models import BacktestMetric, FeatureDaily, ModelRun
+from apps.research.models import BacktestMetric, FeatureDaily, LabelDaily, ModelRun
 from apps.research.prediction_cache import fold_path, fold_record
 from apps.research.runs import (
     LIBRARIES,
@@ -22,6 +22,7 @@ from apps.research.runs import (
     RunError,
     drop_run,
     feature_hash,
+    label_hash,
     lib_versions,
     load_model,
     model_path,
@@ -203,12 +204,13 @@ def test_a_holdout_fold_needs_the_claim_of_its_run(artifacts: Path) -> None:
     assert not model_path("wf1", "wf1.ridge.h20.f044").exists()
 
 
-def test_a_holdout_fold_is_rewritten_until_its_predictions_are_cached(artifacts: Path) -> None:
+@pytest.mark.parametrize("model", ["baseline", "lightgbm"])
+def test_a_holdout_fold_is_rewritten_until_any_model_caches_it(artifacts: Path, model: str) -> None:
     ticket = claim_holdout("rank", "wf1", d("2025-03-31"))
     record_run(held_run(ic_mean=0.01), {"weights": [1.0]}, fold=HELD, ticket=ticket)
     record_run(held_run(ic_mean=0.02), {"weights": [2.0]}, fold=HELD, ticket=ticket)
-    fold_path("wf1", HELD.index).parent.mkdir(parents=True)
-    fold_path("wf1", HELD.index).write_bytes(b"cached")
+    fold_path("wf1", model, HELD.index).parent.mkdir(parents=True)
+    fold_path("wf1", model, HELD.index).write_bytes(b"cached")
 
     with pytest.raises(RunError, match="cached"):
         record_run(held_run(ic_mean=0.9), {"weights": [9.0]}, fold=HELD, ticket=ticket)
@@ -220,8 +222,8 @@ def test_a_holdout_fold_is_rewritten_until_its_predictions_are_cached(artifacts:
 def test_research_folds_of_a_claimed_run_stay_rewritable(artifacts: Path) -> None:
     claim_holdout("rank", "wf1", d("2025-03-31"))
     record_run(run("wf1.ridge.h20.f043", ic_mean=0.01), fold=STUDIED)
-    fold_path("wf1", STUDIED.index).parent.mkdir(parents=True)
-    fold_path("wf1", STUDIED.index).write_bytes(b"cached")
+    fold_path("wf1", "baseline", STUDIED.index).parent.mkdir(parents=True)
+    fold_path("wf1", "baseline", STUDIED.index).write_bytes(b"cached")
 
     record_run(run("wf1.ridge.h20.f043", ic_mean=0.03), fold=STUDIED)
 
@@ -318,10 +320,11 @@ def test_lib_versions_name_python_and_the_libraries() -> None:
 
 
 def cached(artifacts: Path, run_key: str) -> Path:
-    path = artifacts / "predictions" / run_key / "fold-000.parquet"
-    path.parent.mkdir(parents=True)
-    path.write_bytes(b"cached")
-    return path
+    for model in ("baseline", "lightgbm"):
+        path = fold_path(run_key, model, 0)
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b"cached")
+    return artifacts / "predictions" / run_key
 
 
 def test_drop_run_removes_its_rows_models_and_cached_predictions(artifacts: Path) -> None:
@@ -340,8 +343,8 @@ def test_drop_run_removes_its_rows_models_and_cached_predictions(artifacts: Path
     assert list(ModelRun.objects.values_list("run_id", flat=True)) == ["wf2.ridge.h20.f000"]
     assert not (artifacts / "models" / "wf1").exists()
     assert model_path("wf2", "wf2.ridge.h20.f000").exists()
-    assert not dropped.parent.exists()
-    assert kept.exists()
+    assert not dropped.exists()
+    assert sorted(path.name for path in kept.iterdir()) == ["baseline", "lightgbm"]
 
 
 def backtest(run_key: str) -> BacktestMetric:
@@ -440,3 +443,82 @@ def test_drop_run_command_reports_and_refuses(artifacts: Path) -> None:
         call_command("drop_run", "wf3")
     with pytest.raises(CommandError, match="lowercase"):
         call_command("drop_run", "../wf1")
+
+
+LABEL_DAYS = [d("2016-03-01"), d("2016-03-02"), d("2016-03-03")]
+WINDOW = (LABEL_DAYS[0], LABEL_DAYS[1], (5, 20))
+
+
+def label_rows() -> list[LabelDaily]:
+    return [
+        LabelDaily(
+            stock_id=stock,
+            date=day,
+            horizon=horizon,
+            fwd_ret=0.01,
+            fwd_ret_open=0.02,
+            fwd_rank_pct=0.5,
+            fwd_vol_20d=0.3 if horizon == 20 else None,
+            fwd_up_5pct=False if horizon == 20 else None,
+            untradable_t1=False,
+        )
+        for stock in ("2330", "2317")
+        for day in LABEL_DAYS
+        for horizon in (5, 20)
+    ]
+
+
+def test_label_hash_is_stable_and_ignores_the_row_order() -> None:
+    LabelDaily.objects.bulk_create(label_rows())
+    first = label_hash(*WINDOW)
+
+    assert label_hash(*WINDOW) == first
+    LabelDaily.objects.all().delete()
+    LabelDaily.objects.bulk_create(reversed(label_rows()))
+    assert label_hash(*WINDOW) == first
+    assert len(first) == 64
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("fwd_ret", math.nextafter(0.01, 1.0)),
+        ("fwd_ret_open", None),
+        ("fwd_rank_pct", 0.75),
+        ("fwd_vol_20d", 0.31),
+        ("fwd_up_5pct", True),
+        ("untradable_t1", None),
+    ],
+)
+def test_label_hash_changes_with_any_value_in_its_window(field: str, value: object) -> None:
+    LabelDaily.objects.bulk_create(label_rows())
+    first = label_hash(*WINDOW)
+
+    LabelDaily.objects.filter(stock_id="2317", date=LABEL_DAYS[1], horizon=20).update(
+        **{field: value}
+    )
+
+    assert label_hash(*WINDOW) != first
+
+
+def test_label_hash_changes_when_a_row_goes_or_comes() -> None:
+    LabelDaily.objects.bulk_create(label_rows())
+    first = label_hash(*WINDOW)
+
+    LabelDaily.objects.filter(stock_id="2317", date=LABEL_DAYS[0], horizon=5).delete()
+
+    assert label_hash(*WINDOW) != first
+    LabelDaily.objects.all().delete()
+    assert label_hash(*WINDOW) != first
+
+
+def test_label_hash_reads_only_its_dates_and_horizons() -> None:
+    LabelDaily.objects.bulk_create(label_rows())
+    both, five = label_hash(*WINDOW), label_hash(LABEL_DAYS[0], LABEL_DAYS[1], (5,))
+
+    LabelDaily.objects.filter(date=LABEL_DAYS[2]).update(fwd_ret=0.9)
+    LabelDaily.objects.filter(horizon=20).update(fwd_rank_pct=0.9)
+
+    assert label_hash(LABEL_DAYS[0], LABEL_DAYS[1], (5,)) == five
+    assert label_hash(*WINDOW) != both
+    assert five != both

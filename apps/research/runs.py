@@ -12,12 +12,12 @@ from pathlib import Path
 from typing import Any
 
 from django.conf import settings
-from django.db import transaction
+from django.db import connection, transaction
 
 from apps.research.features.store import existing_partition
 from apps.research.holdout import HoldoutTicket, authorize_folds, is_holdout, require_key
 from apps.research.models import BacktestMetric, HoldoutRun, ModelRun, ModelStatus
-from apps.research.prediction_cache import fold_path, fold_record
+from apps.research.prediction_cache import fold_cached, fold_record
 from apps.research.ranges import years
 from apps.research.walkforward import Fold
 
@@ -49,6 +49,22 @@ def feature_hash(start: date, end: date, directory: Path) -> str:
             for chunk in iter(lambda: handle.read(CHUNK), b""):
                 digest.update(chunk)
     return digest.hexdigest()
+
+
+LABEL_DIGEST = """
+SELECT count(*), coalesce(sum(('x' || left(md5(label::text), 15))::bit(60)::bigint), 0)
+FROM label_daily AS label
+WHERE label.date BETWEEN %s AND %s AND label.horizon = ANY(%s)
+"""
+
+
+def label_hash(start: date, end: date, horizons: tuple[int, ...]) -> str:
+    """SHA-256 of the label_daily rows of the horizons dated in [start, end], in any row order."""
+    with connection.cursor() as cursor:
+        cursor.execute(LABEL_DIGEST, [start, end, list(horizons)])
+        count, total = cursor.fetchone()
+    text = f"{start}..{end} h{sorted(horizons)} rows={count} sum={total}"
+    return hashlib.sha256(text.encode()).hexdigest()
 
 
 def run_dir(run_key: str) -> Path:
@@ -93,9 +109,9 @@ def _replaceable(run: ModelRun) -> None:
 
 
 def _writable(run_key: str, fold: Fold, ticket: HoldoutTicket | None) -> None:
-    """A holdout fold needs its run's ticket and is written until its predictions are cached."""
+    """A holdout fold needs its run's ticket and is written until any model caches it."""
     authorize_folds([fold], run_key, ticket)
-    if is_holdout(fold) and fold_path(run_key, fold.index).exists():
+    if is_holdout(fold) and fold_cached(run_key, fold.index):
         raise RunError(f"holdout fold {fold.index} of {run_key} is cached; it is recorded once")
 
 
