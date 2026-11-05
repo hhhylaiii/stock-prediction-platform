@@ -50,10 +50,15 @@ def fold_path(run_key: str, model: str, index: int) -> Path:
     return root / require_key(model) / _name(index)
 
 
+def _marker(run_key: str, index: int) -> Path:
+    """File a holdout write takes before publishing; it stays once the fold is written."""
+    return Path(settings.RESEARCH_CACHE_DIR) / require_key(run_key) / f"fold-{index:03d}.holdout"
+
+
 def fold_cached(run_key: str, index: int) -> bool:
-    """Whether any model of the run has cached this fold."""
-    root = Path(settings.RESEARCH_CACHE_DIR) / require_key(run_key)
-    return any(root.glob(f"*/{_name(index)}"))
+    """Whether any model of the run has cached this fold, or a holdout write has taken it."""
+    marker = _marker(run_key, index)
+    return marker.exists() or any(marker.parent.glob(f"*/{_name(index)}"))
 
 
 def fold_record(fold: Fold) -> dict[str, object]:
@@ -113,10 +118,8 @@ def save_fold_predictions(
     path = fold_path(run_key, model, fold.index)
     if is_holdout(fold):
         raise HoldoutError(f"fold {fold.index} is holdout; save_holdout_fold writes its models")
-    if _holds_holdout(path):
-        raise HoldoutError(
-            f"holdout fold {fold.index} of {run_key}/{model} is written once and exists"
-        )
+    if _holds_holdout(path) or _marker(run_key, fold.index).exists():
+        raise HoldoutError(f"holdout fold {fold.index} of {run_key} is written once and exists")
     _check(fold, predictions)
     temporary = _staged(path, fold, predictions, notes or {})
     try:
@@ -151,12 +154,29 @@ def save_holdout_fold(
     try:
         for model, frame in predictions.items():
             staged[model] = _staged(paths[model], fold, frame, (notes or {}).get(model, {}))
-        for model, temporary in staged.items():
-            _link(temporary, paths[model])
+        _publish(staged, paths, _marker(run_key, fold.index))
     finally:
         for temporary in staged.values():
             Path(temporary).unlink(missing_ok=True)
     return list(paths.values())
+
+
+def _publish(staged: Mapping[str, str], paths: Mapping[str, Path], marker: Path) -> None:
+    """Take the fold's marker, then link every model; a failure removes what this call linked."""
+    try:
+        os.close(os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+    except FileExistsError as error:
+        raise HoldoutError(f"holdout fold {marker.stem} is being written elsewhere") from error
+    linked: list[Path] = []
+    try:
+        for model, temporary in staged.items():
+            _link(temporary, paths[model])
+            linked.append(paths[model])
+    except BaseException:
+        for path in linked:
+            path.unlink(missing_ok=True)
+        marker.unlink(missing_ok=True)
+        raise
 
 
 def _link(temporary: str, path: Path) -> None:
