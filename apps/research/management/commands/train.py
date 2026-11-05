@@ -112,11 +112,12 @@ class Command(BaseCommand):
         scope, run_key = options["scope"], options["run_key"]
         if not scope or not run_key:
             raise CommandError("training needs --scope and --run-key")
-        if options["model"] == lgbm_runs.MODEL and scope != lgbm_runs.SCOPE:
-            raise CommandError(f"--model {lgbm_runs.MODEL} fits the rank scope only so far")
         try:
             check_run_key(scope, run_key)
-            scope_features(scope)
+            if options["model"] == lgbm_runs.MODEL:
+                lgbm_runs.scope_features(scope)
+            else:
+                scope_features(scope)
         except (ValueError, RunError) as error:
             raise CommandError(str(error)) from error
         if options["folds"] is None:
@@ -132,5 +133,5 @@ class Command(BaseCommand):
     ) -> list[int]:
         directory, rerun = settings.FEATURE_PARQUET_DIR, options["rerun"]
         if options["model"] == lgbm_runs.MODEL:
-            return lgbm_runs.run_folds(folds, run_key, directory, options["seed"], rerun)
+            return lgbm_runs.run_folds(scope, folds, run_key, directory, options["seed"], rerun)
         return run_folds(scope, folds, run_key, directory, rerun)
