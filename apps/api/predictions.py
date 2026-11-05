@@ -24,7 +24,7 @@ from apps.api.serving import (
 from apps.api.views import ReadOnlyView
 from apps.market.calendar import CalendarError, TradingDays
 from apps.market.models import DailyPrice, StockMaster
-from apps.research.models import ModelStatus, Prediction
+from apps.research.models import FeatureDaily, ModelStatus, Prediction
 
 PRICE_DIGITS = 4
 RATIO_DIGITS = 6
@@ -117,6 +117,23 @@ def previous_ranks(day: date, horizon: int, stock_ids: list[str]) -> dict[str, i
     return ranks_on(previous, horizon, stock_ids)
 
 
+def needs_tech_vol(
+    base: dict[str, Any], parts: dict[str, dict[str, Any]], quantile_alert: bool
+) -> bool:
+    """A priced row whose band can come neither from quantiles nor from vol_pred."""
+    band = parts.get("interval", {})
+    usable = not quantile_alert and None not in (band.get("q10"), band.get("q90"))
+    vol = parts.get("volatility", {}).get("vol_pred")
+    return base["close"] is not None and not usable and vol is None
+
+
+def tech_vols(day: date, stock_ids: list[str]) -> dict[str, float | None]:
+    if not stock_ids:
+        return {}
+    rows = FeatureDaily.objects.filter(date=day, stock_id__in=stock_ids)
+    return dict(rows.values_list("stock_id", "tech_vol_20d"))
+
+
 def prediction_row(
     base: dict[str, Any],
     parts: dict[str, dict[str, Any]],
@@ -132,9 +149,11 @@ def prediction_row(
         interval = choose_interval(
             close,
             context["horizon"],
+            ret=ret,
             q10=band_row.get("q10"),
             q90=band_row.get("q90"),
             vol=vol,
+            tech_vol=context["tech_vols"].get(base["stock_id"]),
             quantile_alert=context["quantile_alert"],
         )
     return {
@@ -221,12 +240,19 @@ class PredictionListView(ReadOnlyView):
         if day is None or not page:
             return []
         band = runs.get(roles["interval"]) if "interval" in roles else None
+        alert = band is not None and band.status == ModelStatus.DEGRADED
+        parts = parts_of(day, roles, runs, stock_ids)
+        lacking = [
+            row["stock_id"]
+            for row in page
+            if needs_tech_vol(row, parts.get(row["stock_id"], {}), alert)
+        ]
         context = {
             "horizon": horizon,
-            "quantile_alert": band is not None and band.status == ModelStatus.DEGRADED,
+            "quantile_alert": alert,
             "prev_ranks": previous_ranks(day, horizon, stock_ids),
+            "tech_vols": tech_vols(day, lacking),
         }
-        parts = parts_of(day, roles, runs, stock_ids)
         masters = masters_of(stock_ids)
         return [
             prediction_row(

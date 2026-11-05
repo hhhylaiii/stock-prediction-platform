@@ -9,7 +9,7 @@ from django.test import Client
 from pytest_django import DjangoAssertNumQueries
 
 from apps.market.models import Market, TradingCalendar
-from apps.research.models import ModelMonitor, ModelRun
+from apps.research.models import FeatureDaily, ModelMonitor, ModelRun, Prediction
 from tests.api.conftest import (
     add_bars,
     add_model_run,
@@ -198,10 +198,10 @@ def test_a_stock_without_quantiles_gets_the_volatility_band(client: Client, runs
 
     assert (row["ret_pred"], row["price_pred"]) == (None, None)
     assert row["interval"] == {
-        "low": round(500 * math.exp(-spread), 4),
-        "high": round(500 * math.exp(spread), 4),
-        "ret_low": round(math.exp(-spread) - 1, 6),
-        "ret_high": round(math.exp(spread) - 1, 6),
+        "low": round(500 * (1 - spread), 4),
+        "high": round(500 * (1 + spread), 4),
+        "ret_low": round(-spread, 6),
+        "ret_high": round(spread, 6),
     }
     assert row["interval_source"] == "volatility"
 
@@ -225,7 +225,8 @@ def test_five_day_rows_use_the_regression_and_a_five_day_band(client: Client, ru
     first = body["data"][0]
     assert (first["ret_pred"], first["price_pred"], first["prob_up_5pct"]) == (0.02, 204.0, None)
     assert first["interval_source"] == "volatility"
-    assert first["interval"]["high"] == round(200 * math.exp(spread), 4)
+    assert first["interval"]["high"] == round(200 * (1.02 + spread), 4)
+    assert first["interval"]["low"] < first["price_pred"] < first["interval"]["high"]
     assert [model["role"] for model in body["meta"]["models"]] == ["rank", "return", "volatility"]
 
 
@@ -241,10 +242,37 @@ def test_a_degraded_quantile_model_switches_to_the_volatility_band(
     assert (row["ret_pred"], row["price_pred"]) == (0.04, 1040.0)
     assert row["interval_source"] == "volatility"
     assert (row["interval"]["low"], row["interval"]["high"]) == (
-        round(1000 * math.exp(-spread), 4),
-        round(1000 * math.exp(spread), 4),
+        round(1000 * (1.04 - spread), 4),
+        round(1000 * (1.04 + spread), 4),
     )
+    for each in body["data"]:
+        if each["price_pred"] is not None and each["interval"] is not None:
+            assert each["interval"]["low"] <= each["price_pred"] <= each["interval"]["high"]
     assert body["meta"]["degraded"] == ["return", "interval"]
+
+
+def test_without_a_volatility_prediction_the_band_uses_tech_vol_20d(
+    client: Client, runs: Runs
+) -> None:
+    Prediction.objects.filter(run=runs.vol, stock_id__in=["6488", "2317"]).delete()
+    FeatureDaily.objects.create(stock_id="6488", date=OCT_30, in_universe=True, tech_vol_20d=0.5)
+    FeatureDaily.objects.create(stock_id="6488", date=OCT_29, in_universe=True, tech_vol_20d=0.9)
+    spread = 1.28 * 0.5 * math.sqrt(20 / 252)
+
+    rows = by_code(envelope_of(client.get("/api/predictions")))
+
+    assert rows["6488"]["interval_source"] == "tech_vol_20d"
+    assert rows["6488"]["vol_pred"] is None
+    assert rows["6488"]["interval"]["high"] == round(500 * (1 + spread), 4)
+    assert rows["2317"]["interval_source"] == "quantile"
+
+
+def test_no_volatility_at_all_leaves_the_band_empty(client: Client, runs: Runs) -> None:
+    Prediction.objects.filter(run=runs.vol, stock_id="6488").delete()
+
+    row = by_code(envelope_of(client.get("/api/predictions")))["6488"]
+
+    assert (row["interval"], row["interval_source"]) == (None, None)
 
 
 def test_candidate_retired_and_screening_rows_do_not_serve(client: Client, runs: Runs) -> None:
