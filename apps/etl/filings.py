@@ -11,7 +11,7 @@ from django.utils import timezone
 from apps.etl.deadlines import statement_deadline, visible_from
 from apps.etl.errors import SchemaChangedError
 from apps.etl.models import DataQualityLog
-from apps.market.calendar import TradingDays
+from apps.market.calendar import CalendarError, TradingDays
 from apps.market.models import FinancialStatement
 
 FILED_LATE_CHECK = "statement_filed_late"
@@ -47,11 +47,7 @@ def apply_statement_filings(frame: pd.DataFrame, calendar: TradingDays, cutoff: 
     changed: list[tuple[FinancialStatement, date]] = []
     logs: dict[str, dict[str, list[dict[str, Any]]]] = {check: {} for check in LOGS}
     for row, filing, own in _matched(filings):
-        session = filing_session(filing.uploaded_at, calendar, cutoff)
-        if session <= quarter_end(row.period):
-            raise SchemaChangedError(
-                f"{row.stock_id} {row.period} filed on {session}, before the quarter ended"
-            )
+        session = _session(row, filing, calendar, cutoff)
         deadline = visible_from(statement_deadline(row.period), calendar)
         target = min(deadline, session) if filing.corrected else session
         if target != row.announce_date:
@@ -69,6 +65,19 @@ def apply_statement_filings(frame: pd.DataFrame, calendar: TradingDays, cutoff: 
         for check, entries in logs.items():
             _log(check, seen, entries)
     return len(changed)
+
+
+def _session(row: FinancialStatement, filing: Filing, calendar: TradingDays, cutoff: time) -> date:
+    """A report uploaded by the quarter's last day, or off the calendar, rejects the stock."""
+    uploaded = timezone.localtime(filing.uploaded_at).date()
+    if uploaded <= quarter_end(row.period):
+        raise SchemaChangedError(
+            f"{row.stock_id} {row.period} filed on {uploaded}, before the quarter ended"
+        )
+    try:
+        return filing_session(filing.uploaded_at, calendar, cutoff)
+    except CalendarError as exc:
+        raise SchemaChangedError(f"{row.stock_id} {row.period} filed off the calendar") from exc
 
 
 def quarter_end(period: str) -> date:

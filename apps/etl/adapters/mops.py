@@ -11,6 +11,7 @@ import pandas as pd
 import requests
 from django.conf import settings
 from django.db import transaction
+from django.utils import timezone
 
 from apps.etl.adapters.base import BaseAdapter
 from apps.etl.client import SourceClient
@@ -29,16 +30,24 @@ PAGE_ENCODING = "cp950"
 NO_REPORTS = "查無所需資料"
 FISCAL_YEAR = re.compile(r"會計期間：\s*([^<\s]+)")
 CALENDAR_YEAR = "曆年制"
-CODE, YEAR, DETAIL, UPLOADED, CORRECTION = (
+CODE, YEAR, KIND, DETAIL, UPLOADED, CORRECTION = (
     "證券代號",
     "資料年度",
+    "資料類型",
     "資料細節說明",
     "上傳日期",
     "財務報告更(補)正",
 )
-HEADER = (CODE, YEAR, DETAIL, UPLOADED, CORRECTION)
+HEADER = (CODE, YEAR, KIND, DETAIL, UPLOADED, CORRECTION)
+FINANCIAL_REPORT = "財務報告書"
 ENGLISH = "英文版"
-GROUP_REPORT = "合併"
+REPORT_TYPES = {
+    "IFRSs合併財報": FinType.CONSOLIDATED,
+    "母子公司合併報表": FinType.CONSOLIDATED,
+    "IFRSs個體財報": FinType.INDIVIDUAL,
+    "IFRSs個別財報": FinType.INDIVIDUAL,
+    "母公司財報": FinType.INDIVIDUAL,
+}
 NOT_CORRECTED = "無"
 ROC_OFFSET = 1911
 SEASONS = {"一": 1, "二": 2, "三": 3, "四": 4}
@@ -135,18 +144,29 @@ def _filing(cells: dict[str, str], code: str, roc_year: int) -> Filing:
         raise SchemaChangedError(
             f"doc.twse {code} {roc_year} listed {cells[CODE]!r} {cells[YEAR]!r}"
         )
-    uploaded = UPLOAD.match(cells[UPLOADED])
-    if uploaded is None:
-        raise SchemaChangedError(f"doc.twse {code} {roc_year} upload time {cells[UPLOADED]!r}")
-    year, month, day, hour, minute, second = (int(part) for part in uploaded.groups())
-    fin_type = FinType.CONSOLIDATED if GROUP_REPORT in cells[DETAIL] else FinType.INDIVIDUAL
+    fin_type = REPORT_TYPES.get(cells[DETAIL])
+    if cells[KIND] != FINANCIAL_REPORT or fin_type is None:
+        raise SchemaChangedError(
+            f"doc.twse {code} {roc_year} has an unknown report {cells[KIND]!r} {cells[DETAIL]!r}"
+        )
     return Filing(
         stock_id=code,
         period=f"{roc_year + ROC_OFFSET}-Q{SEASONS[season[2]]}",
         fin_type=fin_type.value,
-        uploaded_at=datetime(year + ROC_OFFSET, month, day, hour, minute, second, tzinfo=TAIPEI),
+        uploaded_at=_uploaded_at(cells[UPLOADED], code, roc_year),
         corrected=cells[CORRECTION] != NOT_CORRECTED,
     )
+
+
+def _uploaded_at(text: str, code: str, roc_year: int) -> datetime:
+    uploaded = UPLOAD.match(text)
+    try:
+        if uploaded is None:
+            raise ValueError(text)
+        year, month, day, hour, minute, second = (int(part) for part in uploaded.groups())
+        return datetime(year + ROC_OFFSET, month, day, hour, minute, second, tzinfo=TAIPEI)
+    except ValueError as exc:
+        raise SchemaChangedError(f"doc.twse {code} {roc_year} upload time {text!r}") from exc
 
 
 class MopsAdapter(BaseAdapter):
@@ -176,7 +196,8 @@ class MopsAdapter(BaseAdapter):
         filings: list[Filing] = []
         for year in _statement_years(stock_id, start, end):
             params, page = self.client.listing(stock_id, year - ROC_OFFSET)
-            self.save_raw(dataset, params, {"html": page})
+            kept = self.save_raw(dataset, params, {"html": page})
+            RawMops.objects.filter(pk=kept.pk).update(fetched_at=timezone.now())
             filings.extend(parse_listing(page, stock_id, year - ROC_OFFSET))
         return pd.DataFrame(filings, columns=FILING_COLUMNS)
 
@@ -211,7 +232,7 @@ class Reapplied(NamedTuple):
 
 
 def reapply_filings(adapter: MopsAdapter, stock_ids: Sequence[str] | None = None) -> Reapplied:
-    """Rerun parsing and the date rules on the latest stored page of each company and year."""
+    """Rerun parsing and the date rules on the page last seen for each company and year."""
     rows = RawMops.objects.filter(dataset=STATEMENT_FILING)
     if stock_ids:
         rows = rows.filter(request_params__co_id__in=list(stock_ids))

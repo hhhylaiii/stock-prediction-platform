@@ -160,10 +160,31 @@ def test_rows_of_another_company_or_year_fail(
         parse_listing(text(page("2330_113")), code, roc_year)
 
 
-def test_an_unreadable_upload_time_fails(page: Callable[[str], bytes]) -> None:
-    broken = text(page("2330_113")).replace("113/05/15 14:25:29", "113/05/15")
+@pytest.mark.parametrize("shown", ["113/05/15", "113/02/30 14:25:29"])
+def test_an_unreadable_upload_time_fails(page: Callable[[str], bytes], shown: str) -> None:
+    broken = text(page("2330_113")).replace("113/05/15 14:25:29", shown)
     with pytest.raises(SchemaChangedError, match="upload"):
         parse_listing(broken, "2330", 113)
+
+
+def test_companies_without_subsidiaries_file_individual_reports(
+    page: Callable[[str], bytes],
+) -> None:
+    found = parse_listing(text(page("2820_113")), "2820", 113)
+    assert [(f.period, f.fin_type) for f in found] == [
+        (f"2024-Q{quarter}", INDIVIDUAL) for quarter in (1, 2, 3, 4)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [("財務報告書</td>", "股東會年報</td>"), ("IFRSs個體財報", "IFRSs簡明財報")],
+)
+def test_an_unknown_kind_of_report_fails(page: Callable[[str], bytes], old: str, new: str) -> None:
+    listing = text(page("2330_113"))
+    assert old in listing
+    with pytest.raises(SchemaChangedError, match="unknown report"):
+        parse_listing(listing.replace(old, new, 1), "2330", 113)
 
 
 @pytest.mark.parametrize(
@@ -333,14 +354,29 @@ def test_each_stock_keeps_its_own_log_row_and_a_narrower_rerun_keeps_the_rest(
 
 
 @pytest.mark.django_db
-def test_a_filing_before_the_quarter_ended_rejects_the_stock(adapter: MopsAdapter) -> None:
+@pytest.mark.parametrize(
+    "uploaded",
+    ["2024-06-14 10:00:00", "2024-06-28 23:30:00", "2024-06-29 10:00:00", "2024-06-30 10:00:00"],
+)
+def test_a_filing_before_the_quarter_ended_rejects_the_stock(
+    adapter: MopsAdapter, uploaded: str
+) -> None:
     statement("2330", "2024-Q2", CONSOLIDATED, date(2024, 9, 2))
     with pytest.raises(SchemaChangedError, match="before the quarter ended"):
         adapter.upsert(
-            STATEMENT_FILING,
-            filings(("2330", "2024-Q2", CONSOLIDATED, "2024-06-14 10:00:00", False)),
+            STATEMENT_FILING, filings(("2330", "2024-Q2", CONSOLIDATED, uploaded, False))
         )
     assert announced("2330") == {("2024-Q2", CONSOLIDATED): date(2024, 9, 2)}
+
+
+@pytest.mark.django_db
+def test_a_filing_off_the_calendar_rejects_the_stock(adapter: MopsAdapter) -> None:
+    statement("2330", "2026-Q3", CONSOLIDATED, date(2026, 11, 16))
+    with pytest.raises(SchemaChangedError, match="off the calendar"):
+        adapter.upsert(
+            STATEMENT_FILING,
+            filings(("2330", "2026-Q3", CONSOLIDATED, "2027-01-05 10:00:00", False)),
+        )
 
 
 @pytest.mark.usefixtures("listed")
@@ -471,7 +507,7 @@ def test_reapply_reruns_the_rules_on_the_latest_stored_page(
     serve("2330", 113, page("2330_113"))
     statement("2330", "2024-Q1", CONSOLIDATED, date(2024, 6, 3))
     adapter.fetch(STATEMENT_FILING, date(2024, 1, 1), date(2024, 12, 31), "2330")
-    newer = text(page("2330_113")).replace("113/05/15 14:25:29", "113/05/14 09:00:00")
+    newer = text(page("2330_113")).replace("113/05/15 14:25:29", "113/05/16 09:00:00")
     RawMops.objects.create(
         dataset=STATEMENT_FILING,
         request_params={"co_id": "2330", "year": "113", "mtype": "A"},
@@ -486,7 +522,27 @@ def test_reapply_reruns_the_rules_on_the_latest_stored_page(
     )
     out, err = io.StringIO(), io.StringIO()
     call_command("reapply_filings", stdout=out, stderr=err)
-    assert announced("2330") == {("2024-Q1", CONSOLIDATED): date(2024, 5, 14)}
+    assert announced("2330") == {("2024-Q1", CONSOLIDATED): date(2024, 5, 16)}
     assert "1 statements changed across 2 stocks" in out.getvalue()
     assert "rejected 1606" in err.getvalue()
     assert len(responses.calls) == 1
+
+
+@pytest.mark.usefixtures("listed", "calendar_in_db")
+@responses.activate
+def test_reapply_takes_the_page_seen_last_even_when_it_was_seen_before(
+    adapter: MopsAdapter, page: Callable[[str], bytes]
+) -> None:
+    statement("2330", "2024-Q1", CONSOLIDATED, date(2024, 6, 3))
+    serve("2330", 113, page("2330_113"))
+    serve("2330", 113, "<html><body>系統維護中</body></html>".encode("cp950"))
+    serve("2330", 113, page("2330_113"))
+    adapter.fetch(STATEMENT_FILING, date(2024, 1, 1), date(2024, 12, 31), "2330")
+    with pytest.raises(SchemaChangedError):
+        adapter.fetch(STATEMENT_FILING, date(2024, 1, 1), date(2024, 12, 31), "2330")
+    adapter.fetch(STATEMENT_FILING, date(2024, 1, 1), date(2024, 12, 31), "2330")
+    out, err = io.StringIO(), io.StringIO()
+    call_command("reapply_filings", stdout=out, stderr=err)
+    assert RawMops.objects.count() == 2
+    assert err.getvalue() == ""
+    assert announced("2330") == {("2024-Q1", CONSOLIDATED): date(2024, 5, 15)}
