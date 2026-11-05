@@ -30,6 +30,7 @@ STATEMENT_INPUTS: Mapping[str, tuple[int, ...]] = {
     "fund_gm_yoy_chg": (TTM_QUARTERS,),
     "fund_opm_yoy_chg": (TTM_QUARTERS,),
     "fund_cfo_to_ni": TTM_LAGS,
+    "fund_rev_yoy_q": (TTM_QUARTERS,),
 }
 SIGNAL_COLUMNS = [
     "stock_id",
@@ -60,6 +61,7 @@ STATEMENT_COLUMNS = [
     "roe",
     "debt_ratio",
     "operating_cf",
+    "revenue",
     "announce_date",
 ]
 NUMERIC = STATEMENT_COLUMNS[3:-1]
@@ -157,6 +159,7 @@ def statement_signals(statements: pd.DataFrame) -> pd.DataFrame:
         "fund_gm_yoy_chg": frame["gross_margin"] - lag("gross_margin", TTM_QUARTERS),
         "fund_opm_yoy_chg": frame["op_margin"] - lag("op_margin", TTM_QUARTERS),
         "fund_cfo_to_ni": ratio(_ttm(lag, frame, "operating_cf"), income.where(income > 0)),
+        "fund_rev_yoy_q": _growth(frame["revenue"], lag("revenue", TTM_QUARTERS)),
     }
     return _signals(lag, values, STATEMENT_INPUTS)
 

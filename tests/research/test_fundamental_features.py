@@ -47,6 +47,7 @@ def quarters(first: str, n: int, **columns: list[float]) -> pd.DataFrame:
             "roe": 0.05,
             "debt_ratio": 0.3,
             "operating_cf": 120.0,
+            "revenue": 1000.0,
             "announce_date": date(y, q * 3 + 3, 28) + timedelta(days=45),
         }
         rows.append({**row, **{name: values[k] for name, values in columns.items()}})
@@ -102,6 +103,7 @@ STATEMENT_READS = {
     "fund_gm_yoy_chg": {0, 4},
     "fund_opm_yoy_chg": {0, 4},
     "fund_cfo_to_ni": {0, 1, 2, 3},
+    "fund_rev_yoy_q": {0, 4},
 }
 LATE = pd.Timestamp("2030-01-02")
 
@@ -180,6 +182,18 @@ def test_consolidated_statements_win_over_individual_ones() -> None:
     assert one(signals, "2016-Q1")["eps_ttm"] == pytest.approx(6.0)
 
 
+def test_quarterly_revenue_growth_compares_the_same_quarter_a_year_earlier() -> None:
+    revenue = [100.0, 110.0, 120.0, 130.0, 150.0, 0.0, 132.0, 130.0, 160.0, 55.0]
+    signals = statement_signals(quarters("2014-Q1", 10, revenue=revenue))
+
+    growth = {period: one(signals, period)["fund_rev_yoy_q"] for period in ("2015-Q1", "2016-Q1")}
+    assert growth == pytest.approx({"2015-Q1": 0.5, "2016-Q1": 160 / 150 - 1})
+    assert one(signals, "2015-Q2")["fund_rev_yoy_q"] == pytest.approx(-1.0)
+    assert one(signals, "2015-Q4")["fund_rev_yoy_q"] == pytest.approx(0.0)
+    assert math.isnan(one(signals, "2014-Q4")["fund_rev_yoy_q"])
+    assert math.isnan(one(signals, "2016-Q2")["fund_rev_yoy_q"])
+
+
 def test_features_divide_ttm_eps_by_the_carried_raw_close() -> None:
     closes = rising(4)
     closes[2] = NAN
@@ -198,6 +212,7 @@ def test_features_divide_ttm_eps_by_the_carried_raw_close() -> None:
         fund_gm_yoy_chg=0.01,
         fund_opm_yoy_chg=0.02,
         fund_cfo_to_ni=1.2,
+        fund_rev_yoy_q=0.05,
         fund_days_since_fs=[1.0, 2.0, 3.0, 4.0],
     )
 

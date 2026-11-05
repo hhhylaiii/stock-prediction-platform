@@ -21,6 +21,7 @@ STATEMENT_NAMES = [
     "fund_gm_yoy_chg",
     "fund_opm_yoy_chg",
     "fund_cfo_to_ni",
+    "fund_rev_yoy_q",
 ]
 pytestmark = pytest.mark.django_db
 
@@ -52,6 +53,7 @@ def statement(period: str, announce: str, eps: float = 1.0, **fields: object) ->
         "roe": 0.05,
         "debt_ratio": 0.3,
         "operating_cf": 120,
+        "revenue": 1000,
     }
     FinancialStatement.objects.create(
         period=period, announce_date=d(announce), **{**defaults, **fields}
@@ -254,3 +256,19 @@ def test_the_lookback_covers_every_input_of_a_fresh_value() -> None:
     pd.testing.assert_frame_equal(late, early)
     assert late["fund_eps_yoy"].tolist() == [1.0]
     assert late["fund_rev_3m_yoy"].tolist() == pytest.approx([0.1])
+
+
+def test_quarterly_revenue_growth_appears_on_the_announce_date() -> None:
+    for period, announce, sales in (
+        ("2015-Q1", "2015-05-15", 100),
+        ("2015-Q2", "2015-08-14", 100),
+        ("2015-Q3", "2015-11-13", 100),
+        ("2015-Q4", "2016-03-31", 100),
+        ("2016-Q1", "2016-05-13", 130),
+    ):
+        statement(period, announce, revenue=sales)
+
+    attached = attach(panel_of("2330", "2016-05-12", "2016-05-13")).set_index("date")
+
+    assert math.isnan(attached["fund_rev_yoy_q"].iloc[0])
+    assert attached["fund_rev_yoy_q"].iloc[1] == pytest.approx(0.3)

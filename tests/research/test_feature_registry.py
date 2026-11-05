@@ -14,7 +14,7 @@ FIRST_BATCH_GROUPS = {
     Group.TECHNICAL: 22,
     Group.SIZE_LIQUIDITY: 3,
     Group.CHIP: 13,
-    Group.FUNDAMENTAL: 15,
+    Group.FUNDAMENTAL: 16,
     Group.INDUSTRY_RISK: 4,
     Group.MARKET: 6,
 }
@@ -51,6 +51,7 @@ ANNOUNCE_DATE = {
     "fund_gm_yoy_chg",
     "fund_opm_yoy_chg",
     "fund_cfo_to_ni",
+    "fund_rev_yoy_q",
     "fund_days_since_fs",
     "mkt_business_signal",
 }
@@ -58,10 +59,10 @@ PUBLISH_DATE = {"chip_big_holder_pct_chg_1w", "chip_holder_count_chg_1w"}
 US_CLOSE = {"mkt_sox_ret_5d", "mkt_tsm_adr_gap", "mkt_usdtwd_chg_20d"}
 
 
-def test_first_batch_has_the_63_spec_features_by_group() -> None:
+def test_first_batch_has_the_63_spec_features_and_quarterly_revenue_growth() -> None:
     first = [spec for spec in FEATURES if spec.batch == 1]
 
-    assert len(first) == 63
+    assert len(first) == 64
     assert Counter(spec.group for spec in first) == FIRST_BATCH_GROUPS
 
 
@@ -120,7 +121,7 @@ def test_lookups_by_group_and_batch() -> None:
         "ind_mom_neutral",
         "ind_ep_neutral",
     ]
-    assert len(feature_names()) == 63
+    assert len(feature_names()) == 64
     assert feature("tech_limit_up_t").group is Group.TECHNICAL
     with pytest.raises(KeyError, match="tech_nope"):
         feature("tech_nope")

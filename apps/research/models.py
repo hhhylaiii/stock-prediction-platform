@@ -231,6 +231,7 @@ class FeatureDaily(models.Model):
     fund_opm_yoy_chg = models.FloatField(null=True, blank=True)
     fund_cfo_to_ni = models.FloatField(null=True, blank=True)
     fund_days_since_fs = models.FloatField(null=True, blank=True)
+    fund_rev_yoy_q = models.FloatField(null=True, blank=True)
     risk_beta_250d = models.FloatField(null=True, blank=True)
     risk_idio_vol_60d = models.FloatField(null=True, blank=True)
     ind_sector_ret_20d = models.FloatField(null=True, blank=True)
