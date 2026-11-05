@@ -57,6 +57,15 @@ def test_change_on_an_ex_dividend_day_is_against_the_reference_price(client: Cli
     assert quote["change_ratio"] == round(96 / 95 - 1, 6)
 
 
+def test_reference_price_follows_both_factors_before_a_pending_ex_date(client: Client) -> None:
+    add_stock()
+    add_bars("2330", [OCT_29, OCT_30], [100.0, 100.0], factors=[0.4, 0.5])
+
+    quote = envelope_of(client.get("/api/stocks/2330"))["data"]["quote"]
+
+    assert (quote["reference_price"], quote["change"]) == (80.0, 20.0)
+
+
 def test_a_day_without_trades_keeps_the_last_traded_quote(client: Client) -> None:
     add_stock()
     add_bars("2330", [OCT_28, OCT_29, OCT_30], [50.0, 51.0, None])

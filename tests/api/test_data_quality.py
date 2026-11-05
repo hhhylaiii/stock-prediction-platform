@@ -49,7 +49,7 @@ def test_each_session_reports_its_checks_newest_first(client: Client) -> None:
         "2026-10-28",
         "2026-10-27",
     ]
-    assert [entry["ready"] for entry in days] == [True, False, False, False]
+    assert [entry["passed"] for entry in days] == [True, False, False, False]
     assert [entry["worst"] for entry in days] == ["info", "error", None, "warning"]
     assert [entry["missing_checks"] for entry in days] == [
         [],
@@ -78,7 +78,7 @@ def test_each_session_reports_its_checks_newest_first(client: Client) -> None:
 
 
 @time_machine.travel(FRIDAY_NIGHT, tick=False)
-def test_ready_matches_the_prediction_gate(client: Client) -> None:
+def test_passed_matches_the_prediction_gate(client: Client) -> None:
     log_all(OCT_30)
     log_all(OCT_29)
     log(OCT_29, "consistency", Severity.ERROR)
@@ -87,7 +87,7 @@ def test_ready_matches_the_prediction_gate(client: Client) -> None:
 
     days = envelope_of(client.get("/api/data-quality", {"days": 4}))["data"]
 
-    assert {entry["date"]: entry["ready"] for entry in days} == {
+    assert {entry["date"]: entry["passed"] for entry in days} == {
         day.isoformat(): should_run_prediction(day) for day in (OCT_27, OCT_28, OCT_29, OCT_30)
     }
 

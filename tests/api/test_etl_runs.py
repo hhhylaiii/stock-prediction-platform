@@ -38,6 +38,7 @@ def test_default_scope_lists_that_day_s_increment_in_start_order(client: Client)
     twse = add_run("daily_price", OCT_30, OCT_30, taipei(2026, 10, 30, 15, 31))
     add_run("TaiwanStockPrice", date(2010, 1, 4), OCT_30, taipei(2026, 10, 1), source="finmind")
     add_run("trading_calendar_refresh", date(2026, 10, 1), OCT_29, taipei(2026, 10, 30, 15, 10))
+    add_run("trading_calendar_refresh", OCT_30, date(2026, 11, 30), taipei(2026, 11, 2, 15, 10))
     add_run("daily_price", OCT_29, OCT_29, taipei(2026, 10, 29, 15, 31))
 
     response = client.get("/api/etl/runs", {"date": "2026-10-30"})
@@ -116,6 +117,13 @@ def test_date_defaults_to_the_latest_session_on_or_before_today(client: Client) 
     assert [entry["run_id"] for entry in body["data"]] == [run.pk]
 
 
+@time_machine.travel(taipei(2026, 11, 2, 7), tick=False)
+def test_default_date_is_today_in_taipei_not_utc(client: Client) -> None:
+    body = envelope_of(client.get("/api/etl/runs"))
+
+    assert body["meta"]["date"] == "2026-11-02"
+
+
 @time_machine.travel(taipei(2026, 12, 1, 10), tick=False)
 def test_today_past_the_calendar_reports_it_outdated(client: Client) -> None:
     response = client.get("/api/etl/runs")
@@ -186,6 +194,7 @@ def test_malformed_date_is_invalid(client: Client, value: str) -> None:
     assert set(envelope_of(response)["error"]["fields"]) == {"date"}
 
 
+@time_machine.travel(taipei(2026, 10, 31, 10), tick=False)
 def test_etl_runs_query_count(
     client: Client, django_assert_max_num_queries: DjangoAssertNumQueries
 ) -> None:
@@ -193,6 +202,9 @@ def test_etl_runs_query_count(
         add_run(f"set{minute}", OCT_30, OCT_30, taipei(2026, 10, 30, 16, minute))
 
     with django_assert_max_num_queries(2):
-        client.get("/api/etl/runs", {"date": "2026-10-30"})
+        given = client.get("/api/etl/runs", {"date": "2026-10-30"})
     with django_assert_max_num_queries(3):
-        client.get("/api/etl/runs")
+        default = client.get("/api/etl/runs")
+
+    assert [given.status_code, default.status_code] == [200, 200]
+    assert len(envelope_of(default)["data"]) == 5

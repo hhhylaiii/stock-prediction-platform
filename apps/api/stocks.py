@@ -87,7 +87,7 @@ class StockPricesView(ReadOnlyView):
     def get(self, request: Request, stock_id: str) -> Response:
         days = parse(PriceQuery, request)["days"]
         if not StockMaster.objects.filter(stock_id=stock_id).exists():
-            raise NotFound(f"stock {stock_id} is not in stock_master")
+            raise NotFound(f"找不到股票 {stock_id}。")
         prices = DailyPrice.objects.filter(stock_id=stock_id)
         span = prices.aggregate(first=Min("date"), last=Max("date"))
         if span["last"] is None:

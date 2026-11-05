@@ -43,13 +43,13 @@ class EtlRunSerializer(serializers.ModelSerializer[EtlRun]):
 
 
 def session_summary(day: date, logs: list[dict[str, Any]]) -> dict[str, Any]:
-    """A session's checks; ready means every check ran and none is an error, like the gate."""
+    """A session's checks; passed means every check ran and none is an error, as the gate rules."""
     ran = {entry["check_name"] for entry in logs}
     missing = [check for check in CHECKS if check not in ran]
     worst = max((entry["severity"] for entry in logs), key=SEVERITY_ORDER.index, default=None)
     return {
         "date": day,
-        "ready": not missing and worst != Severity.ERROR,
+        "passed": not missing and worst != Severity.ERROR,
         "worst": worst,
         "missing_checks": missing,
         "checks": [{field: entry[field] for field in CHECK_FIELDS} for entry in logs],

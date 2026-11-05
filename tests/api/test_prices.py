@@ -1,7 +1,9 @@
 from datetime import date
 
 import pytest
+from django.db import connection
 from django.test import Client
+from django.test.utils import CaptureQueriesContext
 from pytest_django import DjangoAssertNumQueries
 
 from apps.market.models import TradingCalendar
@@ -161,6 +163,20 @@ def test_empty_calendar_reports_it_unavailable(client: Client) -> None:
 
     assert response.status_code == 503
     assert envelope_of(response)["error"]["code"] == "calendar_unavailable"
+
+
+def test_only_bars_inside_the_window_are_loaded(client: Client) -> None:
+    add_stock()
+    add_bars("2330", LAST_70, [1.0] * 70)
+
+    with CaptureQueriesContext(connection) as queries:
+        client.get("/api/stocks/2330/prices", {"days": 3})
+
+    bounded = f"BETWEEN '{LAST_70[-3].isoformat()}'::date AND '2026-10-30'::date"
+    loaded = [query["sql"] for query in queries if "BETWEEN" in query["sql"]]
+    assert len(loaded) == 1
+    assert '"daily_price"' in loaded[0]
+    assert bounded in loaded[0]
 
 
 def test_prices_query_count(
