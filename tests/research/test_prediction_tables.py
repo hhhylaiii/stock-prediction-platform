@@ -1,11 +1,12 @@
 import math
+from collections.abc import Callable
 from datetime import date
 from typing import Any
 
 import pandas as pd
 import pytest
 from django.db import IntegrityError, connection, transaction
-from django.db.models import ProtectedError
+from django.db.models import Model, ProtectedError
 
 from apps.etl.upsert import upsert
 from apps.research.models import REST_FEATURE, ModelRun, Prediction, PredictionContrib
@@ -93,7 +94,7 @@ def test_prediction_keys_and_indexes() -> None:
 
 def test_contrib_keys_and_indexes() -> None:
     assert primary_key_columns("prediction_contrib") == [
-        ["run_id", "stock_id", "date", "horizon", "feature"]
+        ["run_id", "stock_id", "date", "horizon", "position"]
     ]
     assert ["stock_id", "date"] in index_columns("prediction_contrib")
 
@@ -165,22 +166,33 @@ def test_prediction_check_constraints(
         prediction(**changes).save()
 
 
-def test_prediction_needs_a_recorded_run() -> None:
+OUTPUTS = [
+    (prediction, Prediction, "prediction"),
+    (contrib, PredictionContrib, "prediction_contrib"),
+]
+
+
+@pytest.mark.parametrize(("build", "model", "table"), OUTPUTS)
+def test_outputs_need_a_recorded_run(
+    build: Callable[..., Model], model: type[Model], table: str
+) -> None:
     with connection.cursor() as cursor:
         cursor.execute("SET CONSTRAINTS ALL IMMEDIATE")
 
-    with pytest.raises(IntegrityError, match="prediction_run_id"), transaction.atomic():
-        prediction(run_id="never-trained").save()
+    with pytest.raises(IntegrityError, match=f"{table}_run_id"), transaction.atomic():
+        build(run_id="never-trained").save()
 
 
-def test_a_run_with_predictions_cannot_be_deleted(model_run: ModelRun) -> None:
-    prediction().save()
-    contrib().save()
+@pytest.mark.parametrize(("build", "model", "table"), OUTPUTS)
+def test_a_run_with_outputs_cannot_be_deleted(
+    model_run: ModelRun, build: Callable[..., Model], model: type[Model], table: str
+) -> None:
+    build().save()
 
     with pytest.raises(ProtectedError), transaction.atomic():
         model_run.delete()
 
-    assert Prediction.objects.count() == PredictionContrib.objects.count() == 1
+    assert model._default_manager.count() == 1
 
 
 def test_contrib_keeps_top_features_and_one_rest_row(model_run: ModelRun) -> None:
@@ -215,12 +227,43 @@ def test_contrib_check_constraints(
         contrib(**changes).save()
 
 
-def test_contrib_positions_are_unique_per_prediction(model_run: ModelRun) -> None:
+def contrib_frame(features: list[tuple[str, float, int]]) -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {"run_id": RUN_ID, "stock_id": "2330", "date": DAY, "horizon": 20}
+            | {"position": position, "feature": name, "contrib": value, "n_features": count}
+            for position, (name, value, count) in enumerate(features, start=1)
+        ]
+    )
+
+
+def test_contrib_upsert_rewrites_a_reranked_prediction(model_run: ModelRun) -> None:
+    keys = ["run_id", "stock_id", "date", "horizon", "position"]
+    values = ["feature", "contrib", "n_features"]
+    first = [("tech_ret_20d", 0.03, 1), ("fund_rev_yoy", -0.02, 1), ("chip_fi_net_5d", 0.01, 1)]
+    reranked = [("fund_rev_yoy", 0.04, 1), ("tech_ret_20d", 0.02, 1), ("size_log_mcap", 0.01, 1)]
+    rest = [(REST_FEATURE, 0.002, 38)]
+
+    upsert(PredictionContrib, contrib_frame(first + rest), keys, values)
+    upsert(PredictionContrib, contrib_frame(reranked + rest), keys, values)
+    upsert(PredictionContrib, contrib_frame(reranked + rest), keys, values)
+    connection.check_constraints()
+
+    rows = PredictionContrib.objects.order_by("position").values_list("feature", "contrib")
+    assert list(rows) == [(name, value) for name, value, _ in reranked + rest]
+
+
+def save_and_check(row: Model) -> None:
+    row.save()
+    connection.check_constraints()
+
+
+def test_contrib_features_are_unique_per_prediction(model_run: ModelRun) -> None:
     contrib().save()
-    contrib(stock_id="2317").save()
+    save_and_check(contrib(stock_id="2317"))
 
     with (
-        pytest.raises(IntegrityError, match="prediction_contrib_position_unique"),
+        pytest.raises(IntegrityError, match="prediction_contrib_feature_unique"),
         transaction.atomic(),
     ):
-        contrib(feature="fund_rev_yoy").save()
+        save_and_check(contrib(position=2))

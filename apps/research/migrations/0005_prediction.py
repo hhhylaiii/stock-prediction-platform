@@ -1,3 +1,4 @@
+import django.db.models.constraints
 import django.db.models.deletion
 from django.db import migrations, models
 
@@ -156,7 +157,7 @@ class Migration(migrations.Migration):
                         "stock_id",
                         "date",
                         "horizon",
-                        "feature",
+                        "position",
                         blank=True,
                         editable=False,
                         primary_key=True,
@@ -191,8 +192,9 @@ class Migration(migrations.Migration):
                         name="prediction_contrib_horizon_known",
                     ),
                     models.UniqueConstraint(
-                        fields=("run_id", "stock_id", "date", "horizon", "position"),
-                        name="prediction_contrib_position_unique",
+                        deferrable=django.db.models.constraints.Deferrable["DEFERRED"],
+                        fields=("run_id", "stock_id", "date", "horizon", "feature"),
+                        name="prediction_contrib_feature_unique",
                     ),
                     models.CheckConstraint(
                         condition=models.Q(

@@ -317,9 +317,9 @@ class Prediction(models.Model):
 
 
 class PredictionContrib(models.Model):
-    """Top feature contributions to a rank prediction, then one row summing the rest (K3)."""
+    """Top feature contributions to a rank prediction by position, then one row summing the rest."""
 
-    pk = models.CompositePrimaryKey("run_id", "stock_id", "date", "horizon", "feature")
+    pk = models.CompositePrimaryKey("run_id", "stock_id", "date", "horizon", "position")
     run = models.ForeignKey(
         ModelRun, on_delete=models.PROTECT, db_index=False, related_name="contributions"
     )
@@ -337,8 +337,9 @@ class PredictionContrib(models.Model):
         constraints = [
             horizon_known("prediction_contrib"),
             models.UniqueConstraint(
-                fields=["run_id", "stock_id", "date", "horizon", "position"],
-                name="prediction_contrib_position_unique",
+                fields=["run_id", "stock_id", "date", "horizon", "feature"],
+                name="prediction_contrib_feature_unique",
+                deferrable=models.Deferrable.DEFERRED,
             ),
             models.CheckConstraint(condition=finite("contrib"), name="prediction_contrib_finite"),
             models.CheckConstraint(
@@ -352,7 +353,7 @@ class PredictionContrib(models.Model):
         ]
 
     def __str__(self) -> str:
-        return f"{self.run_id} {self.stock_id} {self.date} {self.horizon}d {self.feature}"
+        return f"{self.run_id} {self.stock_id} {self.date} {self.horizon}d p{self.position}"
 
 
 class ModelMonitor(models.Model):
