@@ -12,7 +12,7 @@ from django.core.management.base import CommandError
 from apps.market.calendar import TradingDays
 from apps.market.models import DailyPrice, StockMaster, TradingCalendar
 from apps.research import baseline_runs
-from apps.research.baseline_runs import BASELINE, run_folds, shuffle_check
+from apps.research.baseline_runs import BASELINE, recipe, run_folds, shuffle_check
 from apps.research.baselines import PENALTY_GRID, historical_quantiles
 from apps.research.features.store import export_year
 from apps.research.holdout import HoldoutError
@@ -27,7 +27,7 @@ from apps.research.prediction_cache import (
     missing_folds,
     save_fold_predictions,
 )
-from apps.research.runs import RunError, feature_hash, lib_versions, load_model
+from apps.research.runs import RunError, feature_hash, label_hash, lib_versions, load_model
 from apps.research.training import LINEAR_FEATURES, linear_inputs
 from apps.research.walkforward import Fold, WalkForwardConfig, generate_folds
 
@@ -549,3 +549,96 @@ def test_folds_another_model_cached_still_run_their_baselines(panel: Path) -> No
 
     assert run_folds("return", [first, second], "return-wf1", panel) == [first.index, second.index]
     assert run_folds("return", [first, second], "return-wf1", panel) == []
+
+
+@pytest.mark.parametrize(
+    ("scope", "run_key", "first", "last", "horizons"),
+    [
+        ("rank", "rank-wf1", "train_start", "eval_end", (5, 20)),
+        ("interval", "interval-wf1", "train_start", "train_end", (20,)),
+    ],
+)
+def test_cached_folds_note_their_features_labels_and_recipe(
+    panel: Path, scope: str, run_key: str, first: str, last: str, horizons: tuple[int, ...]
+) -> None:
+    fold = research()[0]
+
+    run_folds(scope, [fold], run_key, panel)
+
+    assert fold_notes(run_key, BASELINE, fold.index) == {
+        "feature_hash": feature_hash(getattr(fold, first), fold.test_end, panel),
+        "label_hash": label_hash(getattr(fold, first), getattr(fold, last), horizons),
+        "recipe": recipe(),
+    }
+
+
+def test_rule_only_folds_note_no_labels(panel: Path) -> None:
+    fold = research()[0]
+
+    run_folds("return", [fold], "return-wf1", panel)
+
+    assert fold_notes("return-wf1", BASELINE, fold.index)["label_hash"] == ""
+
+
+@pytest.mark.parametrize(
+    ("scope", "run_key", "day", "horizon"),
+    [
+        ("rank", "rank-wf1", "train_start", 5),
+        ("rank", "rank-wf1", "eval_end", 20),
+        ("interval", "interval-wf1", "train_end", 20),
+    ],
+)
+def test_relabelled_folds_rerun(
+    panel: Path, scope: str, run_key: str, day: str, horizon: int
+) -> None:
+    fold = research()[0]
+    run_folds(scope, [fold], run_key, panel)
+    edge = getattr(fold, day)
+    LabelDaily.objects.filter(date=edge, horizon=horizon, stock_id="1101").update(fwd_ret_open=0.9)
+
+    assert run_folds(scope, [fold], run_key, panel) == [fold.index]
+    assert run_folds(scope, [fold], run_key, panel) == []
+
+
+def test_labels_a_scope_does_not_read_leave_its_cache(panel: Path) -> None:
+    fold = research()[0]
+    run_folds("interval", [fold], "interval-wf1", panel)
+    run_folds("return", [fold], "return-wf1", panel)
+    LabelDaily.objects.filter(date__gt=fold.train_end).update(fwd_up_5pct=True)
+    LabelDaily.objects.filter(horizon=5).update(fwd_ret_open=0.9)
+
+    assert run_folds("interval", [fold], "interval-wf1", panel) == []
+    LabelDaily.objects.all().delete()
+    assert run_folds("return", [fold], "return-wf1", panel) == []
+
+
+def test_a_changed_recipe_reruns_cached_folds(panel: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fold = research()[0]
+    run_folds("return", [fold], "return-wf1", panel)
+
+    monkeypatch.setattr(baseline_runs, "RECIPE_VERSION", "2")
+    assert run_folds("return", [fold], "return-wf1", panel) == [fold.index]
+    assert run_folds("return", [fold], "return-wf1", panel) == []
+
+    monkeypatch.setattr(baseline_runs, "LINEAR_FEATURES", LINEAR_FEATURES[:-1])
+    assert run_folds("return", [fold], "return-wf1", panel) == [fold.index]
+
+
+def test_labels_rewritten_during_the_fit_stop_the_fold(
+    panel: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fold = research()[0]
+    fitted = baseline_runs.SCOPES["rank"]
+
+    def relabelled(inputs: Any, run_key: str) -> Any:
+        result = fitted(inputs, run_key)
+        LabelDaily.objects.filter(date=fold.train_start).update(fwd_rank_pct=0.5)
+        return result
+
+    monkeypatch.setitem(baseline_runs.SCOPES, "rank", relabelled)
+
+    with pytest.raises(RuntimeError, match="label_daily changed"):
+        run_folds("rank", [fold], "rank-wf1", panel)
+
+    assert not ModelRun.objects.exists()
+    assert missing_folds("rank-wf1", BASELINE, [fold]) == [fold.index]

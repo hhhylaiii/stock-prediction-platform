@@ -1,5 +1,7 @@
 """Walk-forward baseline folds: model files, model_run rows and cached predictions (SPEC §7)."""
 
+import hashlib
+import json
 import math
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -34,7 +36,7 @@ from apps.research.prediction_cache import (
     missing_folds,
     save_fold_predictions,
 )
-from apps.research.runs import RunError, feature_hash, lib_versions, record_run
+from apps.research.runs import RunError, feature_hash, label_hash, lib_versions, record_run
 from apps.research.training import LINEAR_FEATURES, linear_inputs, load_labels, training_rows
 from apps.research.walkforward import Fold
 
@@ -218,6 +220,30 @@ def first_day(scope: str, fold: Fold) -> date:
     return fold.test_start if scope == HoldoutScope.RETURN else fold.train_start
 
 
+def label_digest(scope: str, fold: Fold) -> str:
+    """label_hash of the rows a scope fits and evaluates on; empty for the rule-only scope."""
+    if scope == HoldoutScope.RETURN:
+        return ""
+    if scope == HoldoutScope.RANK:
+        return label_hash(fold.train_start, fold.eval_end, HORIZONS)
+    return label_hash(fold.train_start, fold.train_end, (VOL_DAYS,))
+
+
+def recipe() -> str:
+    """RECIPE_VERSION with a digest of the features the linear baselines read."""
+    listed = json.dumps(LINEAR_FEATURES).encode()
+    return f"{RECIPE_VERSION}-{hashlib.sha256(listed).hexdigest()[:12]}"
+
+
+def _current_notes(scope: str, fold: Fold, directory: Path) -> dict[str, str]:
+    """Notes a fold cached now would carry: its features, labels and recipe."""
+    return {
+        "feature_hash": feature_hash(first_day(scope, fold), fold.test_end, directory),
+        "label_hash": label_digest(scope, fold),
+        "recipe": recipe(),
+    }
+
+
 def fold_inputs(fold: Fold, start: date, end: date, directory: Path) -> FoldInputs:
     """Raw features dated in [start, end], hashed before and after the read."""
     digest = feature_hash(start, end, directory)
@@ -240,12 +266,15 @@ def run_fold(scope: str, fold: Fold, run_key: str, directory: Path) -> Path:
         raise HoldoutError(f"fold {fold.index} is holdout; it runs once with the Phase 4 models")
     _require_candidates(run_key, fold)
     fold_path(run_key, BASELINE, fold.index).unlink(missing_ok=True)
+    labels = label_digest(scope, fold)
     inputs = fold_inputs(fold, first_day(scope, fold), fold.test_end, directory)
     result = SCOPES[scope](inputs, run_key)
+    if label_digest(scope, fold) != labels:
+        raise RuntimeError(f"label_daily changed while fitting fold {fold.index}; run it again")
     for item in result.trained:
         record_run(item.run, item.model, fold=fold)
     rows = inputs.raw.loc[inputs.test, ROW_KEYS].reset_index(drop=True)
-    notes = {"feature_hash": inputs.feature_hash}
+    notes = {"feature_hash": inputs.feature_hash, "label_hash": labels, "recipe": recipe()}
     predictions = rows.assign(**result.columns)
     return save_fold_predictions(run_key, BASELINE, fold, predictions, notes=notes)
 
@@ -262,9 +291,8 @@ def check_run_key(scope: str, run_key: str) -> None:
 
 
 def _stale(scope: str, run_key: str, fold: Fold, directory: Path) -> bool:
-    """Whether a cached fold was fitted on feature partitions that have since changed."""
-    stored = fold_notes(run_key, BASELINE, fold.index).get("feature_hash")
-    return stored != feature_hash(first_day(scope, fold), fold.test_end, directory)
+    """Whether a cached fold's features, labels or recipe have changed since it was fitted."""
+    return fold_notes(run_key, BASELINE, fold.index) != _current_notes(scope, fold, directory)
 
 
 def run_folds(

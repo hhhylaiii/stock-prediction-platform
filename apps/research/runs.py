@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from django.conf import settings
-from django.db import transaction
+from django.db import connection, transaction
 
 from apps.research.features.store import existing_partition
 from apps.research.holdout import HoldoutTicket, authorize_folds, is_holdout, require_key
@@ -49,6 +49,22 @@ def feature_hash(start: date, end: date, directory: Path) -> str:
             for chunk in iter(lambda: handle.read(CHUNK), b""):
                 digest.update(chunk)
     return digest.hexdigest()
+
+
+LABEL_DIGEST = """
+SELECT count(*), coalesce(sum(('x' || left(md5(label::text), 15))::bit(60)::bigint), 0)
+FROM label_daily AS label
+WHERE label.date BETWEEN %s AND %s AND label.horizon = ANY(%s)
+"""
+
+
+def label_hash(start: date, end: date, horizons: tuple[int, ...]) -> str:
+    """SHA-256 of the label_daily rows of the horizons dated in [start, end], in any row order."""
+    with connection.cursor() as cursor:
+        cursor.execute(LABEL_DIGEST, [start, end, list(horizons)])
+        count, total = cursor.fetchone()
+    text = f"{start}..{end} h{sorted(horizons)} rows={count} sum={total}"
+    return hashlib.sha256(text.encode()).hexdigest()
 
 
 def run_dir(run_key: str) -> Path:

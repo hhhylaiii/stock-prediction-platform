@@ -14,7 +14,7 @@ from django.db import IntegrityError, transaction
 
 from apps.research.features.store import export_year
 from apps.research.holdout import HoldoutError, claim_holdout
-from apps.research.models import BacktestMetric, FeatureDaily, ModelRun
+from apps.research.models import BacktestMetric, FeatureDaily, LabelDaily, ModelRun
 from apps.research.prediction_cache import fold_path, fold_record
 from apps.research.runs import (
     LIBRARIES,
@@ -22,6 +22,7 @@ from apps.research.runs import (
     RunError,
     drop_run,
     feature_hash,
+    label_hash,
     lib_versions,
     load_model,
     model_path,
@@ -442,3 +443,82 @@ def test_drop_run_command_reports_and_refuses(artifacts: Path) -> None:
         call_command("drop_run", "wf3")
     with pytest.raises(CommandError, match="lowercase"):
         call_command("drop_run", "../wf1")
+
+
+LABEL_DAYS = [d("2016-03-01"), d("2016-03-02"), d("2016-03-03")]
+WINDOW = (LABEL_DAYS[0], LABEL_DAYS[1], (5, 20))
+
+
+def label_rows() -> list[LabelDaily]:
+    return [
+        LabelDaily(
+            stock_id=stock,
+            date=day,
+            horizon=horizon,
+            fwd_ret=0.01,
+            fwd_ret_open=0.02,
+            fwd_rank_pct=0.5,
+            fwd_vol_20d=0.3 if horizon == 20 else None,
+            fwd_up_5pct=False if horizon == 20 else None,
+            untradable_t1=False,
+        )
+        for stock in ("2330", "2317")
+        for day in LABEL_DAYS
+        for horizon in (5, 20)
+    ]
+
+
+def test_label_hash_is_stable_and_ignores_the_row_order() -> None:
+    LabelDaily.objects.bulk_create(label_rows())
+    first = label_hash(*WINDOW)
+
+    assert label_hash(*WINDOW) == first
+    LabelDaily.objects.all().delete()
+    LabelDaily.objects.bulk_create(reversed(label_rows()))
+    assert label_hash(*WINDOW) == first
+    assert len(first) == 64
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("fwd_ret", math.nextafter(0.01, 1.0)),
+        ("fwd_ret_open", None),
+        ("fwd_rank_pct", 0.75),
+        ("fwd_vol_20d", 0.31),
+        ("fwd_up_5pct", True),
+        ("untradable_t1", None),
+    ],
+)
+def test_label_hash_changes_with_any_value_in_its_window(field: str, value: object) -> None:
+    LabelDaily.objects.bulk_create(label_rows())
+    first = label_hash(*WINDOW)
+
+    LabelDaily.objects.filter(stock_id="2317", date=LABEL_DAYS[1], horizon=20).update(
+        **{field: value}
+    )
+
+    assert label_hash(*WINDOW) != first
+
+
+def test_label_hash_changes_when_a_row_goes_or_comes() -> None:
+    LabelDaily.objects.bulk_create(label_rows())
+    first = label_hash(*WINDOW)
+
+    LabelDaily.objects.filter(stock_id="2317", date=LABEL_DAYS[0], horizon=5).delete()
+
+    assert label_hash(*WINDOW) != first
+    LabelDaily.objects.all().delete()
+    assert label_hash(*WINDOW) != first
+
+
+def test_label_hash_reads_only_its_dates_and_horizons() -> None:
+    LabelDaily.objects.bulk_create(label_rows())
+    both, five = label_hash(*WINDOW), label_hash(LABEL_DAYS[0], LABEL_DAYS[1], (5,))
+
+    LabelDaily.objects.filter(date=LABEL_DAYS[2]).update(fwd_ret=0.9)
+    LabelDaily.objects.filter(horizon=20).update(fwd_rank_pct=0.9)
+
+    assert label_hash(LABEL_DAYS[0], LABEL_DAYS[1], (5,)) == five
+    assert label_hash(*WINDOW) != both
+    assert five != both
