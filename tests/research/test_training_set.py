@@ -10,7 +10,12 @@ from apps.research.features.store import export_year, read_features, read_partit
 from apps.research.features.transforms import STOCK_LEVEL
 from apps.research.models import FeatureDaily, LabelDaily
 from apps.research.ranges import months
-from apps.research.training import LINEAR_FEATURES, load_labels, load_training_set
+from apps.research.training import (
+    LINEAR_FEATURES,
+    linear_features,
+    load_labels,
+    load_training_set,
+)
 
 pytestmark = pytest.mark.django_db
 DAYS = [date(2016, 3, 30), date(2016, 3, 31), date(2016, 4, 1)]
@@ -241,3 +246,19 @@ def test_training_set_keeps_delisted_stocks(tmp_path: Path) -> None:
     )
     assert delisted & set(rows["stock_id"])
     assert len(rows) == 6
+
+
+def test_linear_features_pair_each_screened_feature_with_its_gap_flag() -> None:
+    assert linear_features(["fund_ep", "tech_ret_20d"]) == [
+        "fund_ep",
+        "tech_ret_20d",
+        "fund_ep_missing",
+        "tech_ret_20d_missing",
+    ]
+    assert linear_features(STOCK_LEVEL) == LINEAR_FEATURES
+
+
+@pytest.mark.parametrize("name", ["mkt_taiex_ret_5d", "made_up_feature"])
+def test_linear_features_refuse_anything_but_stock_level_features(name: str) -> None:
+    with pytest.raises(ValueError, match=name):
+        linear_features(["tech_ret_20d", name])

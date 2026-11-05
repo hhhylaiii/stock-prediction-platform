@@ -1,5 +1,6 @@
 """Tradable universe rows with a label, and the linear baselines' inputs (SPEC §6, §7)."""
 
+from collections.abc import Sequence
 from datetime import date
 from pathlib import Path
 
@@ -20,6 +21,14 @@ TARGET_HORIZONS = {
     "fwd_vol_20d": (VOL_DAYS,),
     "fwd_up_5pct": (VOL_DAYS,),
 }
+
+
+def linear_features(kept: Sequence[str]) -> list[str]:
+    """Stock-level features followed by their gap flags, as the linear baselines read them."""
+    unknown = [name for name in kept if name not in STOCK_LEVEL]
+    if unknown:
+        raise ValueError(f"the linear baselines take stock-level features only, not {unknown}")
+    return [*kept, *(f"{name}_missing" for name in kept)]
 
 
 def load_labels(start: date, end: date, horizon: int) -> pd.DataFrame:

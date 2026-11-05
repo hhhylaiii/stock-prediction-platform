@@ -36,11 +36,24 @@ from apps.research.prediction_cache import (
     missing_folds,
     save_fold_predictions,
 )
-from apps.research.runs import RunError, feature_hash, label_hash, lib_versions, record_run
-from apps.research.training import LINEAR_FEATURES, linear_inputs, load_labels, training_rows
+from apps.research.runs import (
+    RunError,
+    feature_hash,
+    label_hash,
+    lib_versions,
+    record_run,
+    screened_features,
+)
+from apps.research.training import (
+    LINEAR_FEATURES,
+    linear_features,
+    linear_inputs,
+    load_labels,
+    training_rows,
+)
 from apps.research.walkforward import Fold
 
-RECIPE_VERSION = "1"
+RECIPE_VERSION = "2"
 BASELINE = "baseline"
 RETURN_HORIZON = 5
 MAX_RUN_KEY = 40
@@ -56,6 +69,7 @@ class FoldInputs:
     fold: Fold
     raw: pd.DataFrame
     feature_hash: str
+    features: list[str]
 
     @cached_property
     def inputs(self) -> pd.DataFrame:
@@ -141,7 +155,7 @@ def _rank(inputs: FoldInputs, run_key: str) -> FoldResult:
     columns, trained = {}, []
     for horizon in HORIZONS:
         labels = load_labels(fold.train_start, fold.eval_end, horizon)
-        fit = fit_ridge(inputs.train(labels, RANK_LABEL), LINEAR_FEATURES, RANK_LABEL, horizon)
+        fit = fit_ridge(inputs.train(labels, RANK_LABEL), inputs.features, RANK_LABEL, horizon)
         columns[f"ridge_h{horizon}"] = fit.predict(test)
         oos = _oos(fit, inputs.evaluated(labels, RANK_LABEL), horizon)
         run = _run(
@@ -152,7 +166,7 @@ def _rank(inputs: FoldInputs, run_key: str) -> FoldResult:
             RANK_LABEL,
             objective=ModelObjective.RANK,
             params={**_linear_params(fit), "ic_nw_t": oos["ic_nw_t"]},
-            feature_list=LINEAR_FEATURES,
+            feature_list=inputs.features,
             ic_mean=oos["ic_mean"],
             icir=oos["icir"],
         )
@@ -173,7 +187,7 @@ def _interval(inputs: FoldInputs, run_key: str) -> FoldResult:
     fold, raw, test = inputs.fold, inputs.raw[inputs.test], inputs.inputs[inputs.test]
     labels = load_labels(fold.train_start, fold.train_end, VOL_DAYS)
     up = inputs.train(labels, "fwd_up_5pct")
-    fit = fit_logistic(up, LINEAR_FEATURES, "fwd_up_5pct", VOL_DAYS)
+    fit = fit_logistic(up, inputs.features, "fwd_up_5pct", VOL_DAYS)
     quantiles = historical_quantiles(inputs.train(labels, "fwd_ret_open"), "fwd_ret_open")
     band = vol_interval(raw, VOL_DAYS)
     columns = {
@@ -193,7 +207,7 @@ def _interval(inputs: FoldInputs, run_key: str) -> FoldResult:
         "fwd_up_5pct",
         objective=ModelObjective.CLASSIFICATION,
         params=_linear_params(fit),
-        feature_list=LINEAR_FEATURES,
+        feature_list=inputs.features,
     )
     histq = _run(
         inputs,
@@ -229,28 +243,41 @@ def label_digest(scope: str, fold: Fold) -> str:
     return label_hash(fold.train_start, fold.train_end, (VOL_DAYS,))
 
 
-def recipe() -> str:
+def scope_features(scope: str) -> list[str]:
+    """Linear inputs a scope fits on: the screened features and their gap flags; none for return."""
+    if scope == HoldoutScope.RETURN:
+        return []
+    try:
+        kept = screened_features().kept
+    except RunError as error:
+        raise RunError(f"the {scope} baselines fit on the screened features: {error}") from error
+    return linear_features(kept)
+
+
+def recipe(features: list[str]) -> str:
     """RECIPE_VERSION with a digest of the features the linear baselines read."""
-    listed = json.dumps(LINEAR_FEATURES).encode()
+    listed = json.dumps(features).encode()
     return f"{RECIPE_VERSION}-{hashlib.sha256(listed).hexdigest()[:12]}"
 
 
-def _current_notes(scope: str, fold: Fold, directory: Path) -> dict[str, str]:
+def _current_notes(scope: str, fold: Fold, directory: Path, features: list[str]) -> dict[str, str]:
     """Notes a fold cached now would carry: its features, labels and recipe."""
     return {
         "feature_hash": feature_hash(first_day(scope, fold), fold.test_end, directory),
         "label_hash": label_digest(scope, fold),
-        "recipe": recipe(),
+        "recipe": recipe(features),
     }
 
 
-def fold_inputs(fold: Fold, start: date, end: date, directory: Path) -> FoldInputs:
+def fold_inputs(
+    fold: Fold, start: date, end: date, directory: Path, features: list[str]
+) -> FoldInputs:
     """Raw features dated in [start, end], hashed before and after the read."""
     digest = feature_hash(start, end, directory)
     raw = read_partitions(start, end, directory)
     if feature_hash(start, end, directory) != digest:
         raise RuntimeError("feature partitions changed while reading; rerun after build_features")
-    return FoldInputs(fold, raw, digest)
+    return FoldInputs(fold, raw, digest, features)
 
 
 def _require_candidates(run_key: str, fold: Fold) -> None:
@@ -260,21 +287,21 @@ def _require_candidates(run_key: str, fold: Fold) -> None:
         raise RunError(f"{kept} are past candidate; fold {fold.index} keeps its cache")
 
 
-def run_fold(scope: str, fold: Fold, run_key: str, directory: Path) -> Path:
+def run_fold(scope: str, fold: Fold, run_key: str, directory: Path, features: list[str]) -> Path:
     """Fit one fold's baselines; its old cache goes first and the new one is written last."""
     if is_holdout(fold):
         raise HoldoutError(f"fold {fold.index} is holdout; it runs once with the Phase 4 models")
     _require_candidates(run_key, fold)
     fold_path(run_key, BASELINE, fold.index).unlink(missing_ok=True)
     labels = label_digest(scope, fold)
-    inputs = fold_inputs(fold, first_day(scope, fold), fold.test_end, directory)
+    inputs = fold_inputs(fold, first_day(scope, fold), fold.test_end, directory, features)
     result = SCOPES[scope](inputs, run_key)
     if label_digest(scope, fold) != labels:
         raise RuntimeError(f"label_daily changed while fitting fold {fold.index}; run it again")
     for item in result.trained:
         record_run(item.run, item.model, fold=fold)
     rows = inputs.raw.loc[inputs.test, ROW_KEYS].reset_index(drop=True)
-    notes = {"feature_hash": inputs.feature_hash, "label_hash": labels, "recipe": recipe()}
+    notes = {"feature_hash": inputs.feature_hash, "label_hash": labels, "recipe": recipe(features)}
     predictions = rows.assign(**result.columns)
     return save_fold_predictions(run_key, BASELINE, fold, predictions, notes=notes)
 
@@ -290,9 +317,10 @@ def check_run_key(scope: str, run_key: str) -> None:
         raise ValueError(f"run_key must be at most {MAX_RUN_KEY} characters to fit its run_ids")
 
 
-def _stale(scope: str, run_key: str, fold: Fold, directory: Path) -> bool:
+def _stale(scope: str, run_key: str, fold: Fold, directory: Path, features: list[str]) -> bool:
     """Whether a cached fold's features, labels or recipe have changed since it was fitted."""
-    return fold_notes(run_key, BASELINE, fold.index) != _current_notes(scope, fold, directory)
+    current = _current_notes(scope, fold, directory, features)
+    return fold_notes(run_key, BASELINE, fold.index) != current
 
 
 def run_folds(
@@ -304,18 +332,19 @@ def run_folds(
     held = [fold.index for fold in chosen if is_holdout(fold)]
     if held:
         raise HoldoutError(f"folds {held} are holdout; they run once with the Phase 4 models")
+    features = scope_features(scope)
     missing = set(missing_folds(run_key, BASELINE, chosen))
     ran = []
     for fold in chosen:
-        if rerun or fold.index in missing or _stale(scope, run_key, fold, directory):
-            run_fold(scope, fold, run_key, directory)
+        if rerun or fold.index in missing or _stale(scope, run_key, fold, directory, features):
+            run_fold(scope, fold, run_key, directory, features)
             ran.append(fold.index)
     return ran
 
 
 def shuffle_check(fold: Fold, directory: Path, seed: int) -> float:
     """OOS rank IC of the 20-day Ridge refit on labels shuffled within dates (SPEC §8)."""
-    inputs = fold_inputs(fold, fold.train_start, fold.eval_end, directory)
+    inputs = fold_inputs(fold, fold.train_start, fold.eval_end, directory, LINEAR_FEATURES)
     labels = load_labels(fold.train_start, fold.eval_end, SHUFFLE_HORIZON)
     frame = training_rows(inputs.inputs, labels, RANK_LABEL)
     return shuffled_oos_ic(frame, fold, LINEAR_FEATURES, RANK_LABEL, SHUFFLE_HORIZON, seed)
