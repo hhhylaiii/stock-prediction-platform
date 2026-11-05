@@ -107,6 +107,8 @@ def test_the_beat_schedule_covers_the_daily_etl_in_taipei_time() -> None:
         "etl-qfii": crontab(hour=18, minute=30),
         "etl-night": crontab(hour=21, minute=30),
         "etl-notices-again": crontab(hour=22, minute=40),
+        "etl-statements": crontab(hour=19, minute=0),
+        "etl-statements-late": crontab(hour=22, minute=40),
         "etl-check-quality": crontab(hour=22, minute=50),
         "etl-us-close": crontab(hour=5, minute=30),
         "etl-weekly-holding": crontab(hour=10, minute=0, day_of_week="sat"),
@@ -525,6 +527,51 @@ def test_the_business_signal_runs_on_its_day(
     today(date(2026, 10, 15))
     tasks.business_signal.apply().get()
     assert fake.runs == [("business_signal", date(2026, 10, 15), date(2026, 10, 15))]
+
+
+def test_the_last_statement_scan_is_where_filings_stop_counting_for_the_session() -> None:
+    assert settings.ETL_AT["STATEMENTS_LATE"] == settings.FILING_VISIBLE_BEFORE
+    assert settings.ETL_AT["STATEMENTS_LATE"] < settings.ETL_AT["CHECK_QUALITY"]
+    entries = {
+        entry["args"]
+        for entry in settings.CELERY_BEAT_SCHEDULE.values()
+        if entry["task"] == "etl.statement_scan"
+    }
+    assert entries == {("STATEMENTS",), ("STATEMENTS_LATE",)}
+
+
+def test_the_statement_scan_runs_today_while_a_quarter_is_open(
+    today: Callable[..., None], adapter: Callable[..., FakeAdapter]
+) -> None:
+    fake = adapter()
+    today(DAY, time(19, 0))
+    assert tasks.statement_scan.apply(args=("STATEMENTS",)).get() == "success: 3 rows"
+    assert fake.runs == [("statement_scan", DAY, DAY)]
+
+
+def test_the_statement_scan_skips_closed_days_early_slots_and_quiet_seasons(
+    today: Callable[..., None],
+    adapter: Callable[..., FakeAdapter],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = adapter()
+    today(date(2026, 10, 25), time(19, 0))
+    assert tasks.statement_scan.apply(args=("STATEMENTS",)).get() == "closed"
+    today(DAY, time(18, 59))
+    assert tasks.statement_scan.apply(args=("STATEMENTS",)).get() == "closed"
+    monkeypatch.setattr("apps.etl.tasks.open_periods", lambda day, days_after: [])
+    today(DAY, time(19, 0))
+    assert tasks.statement_scan.apply(args=("STATEMENTS",)).get() == "no period open"
+    assert fake.runs == []
+
+
+def test_an_unreachable_statement_scan_is_retried(
+    today: Callable[..., None], adapter: Callable[..., FakeAdapter]
+) -> None:
+    fake = adapter(RetryableError("connection reset"))
+    today(DAY, time(22, 40))
+    assert tasks.statement_scan.apply(args=("STATEMENTS_LATE",)).get() == "success: 3 rows"
+    assert len(fake.runs) == 2
 
 
 def test_research_waits_for_the_gate_datasets_and_the_quality_gate() -> None:
