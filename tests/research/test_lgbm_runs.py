@@ -1,5 +1,7 @@
+from dataclasses import replace
 from io import StringIO
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -10,12 +12,19 @@ from django.core.management.base import CommandError
 from apps.market.models import DailyPrice, StockMaster
 from apps.research import baseline_runs, lgbm_runs
 from apps.research.baseline_runs import BASELINE
+from apps.research.features.store import export_year
 from apps.research.gbdt import BASE_PARAMS, seeded
 from apps.research.holdout import HoldoutError
 from apps.research.lgbm_runs import MODEL, recipe, run_folds
 from apps.research.management.commands import train
-from apps.research.models import LabelDaily, ModelRun
-from apps.research.prediction_cache import fold_notes, load_fold_predictions, missing_folds
+from apps.research.metrics.ic import daily_rank_ic
+from apps.research.models import FeatureDaily, LabelDaily, ModelRun, ModelStatus
+from apps.research.prediction_cache import (
+    fold_notes,
+    fold_path,
+    load_fold_predictions,
+    missing_folds,
+)
 from apps.research.rank_model import rank_inputs
 from apps.research.runs import (
     SCREENING_MODEL,
@@ -70,9 +79,19 @@ def test_rank_folds_cache_lightgbm_scores_and_record_both_horizons(panel: Path) 
         assert run.params["importance_gain"]["tech_ret_1d"] == max(
             run.params["importance_gain"].values()
         )
-        assert run.ic_mean is not None
-        assert run.ic_mean > 0.3
-        assert run.icir is not None
+        labels = pd.DataFrame(
+            list(
+                LabelDaily.objects.filter(
+                    date__range=(fold.test_start, fold.eval_end), horizon=horizon
+                ).values("stock_id", "date", "fwd_rank_pct")
+            )
+        )
+        scored = cached[cached["in_universe"]].merge(labels, on=["stock_id", "date"])
+        daily = daily_rank_ic(scored, f"lightgbm_h{horizon}", "fwd_rank_pct")
+        assert len(daily) == len([day for day in test_days if day <= fold.eval_end])
+        assert run.ic_mean == pytest.approx(daily.mean())
+        assert run.icir == pytest.approx(daily.mean() / daily.std())
+        assert daily.mean() > 0.3
 
 
 def test_cached_scores_come_from_the_saved_booster(panel: Path) -> None:
@@ -120,6 +139,67 @@ def test_cached_folds_note_their_inputs_and_rerun_only_when_one_changes(panel: P
     LabelDaily.objects.filter(date=fold.train_start, horizon=5).update(fwd_rank_pct=0.5)
     assert run_folds([fold], "rank-wf1", panel, seed=2) == [fold.index]
     assert run_folds([fold], "rank-wf1", panel, seed=2) == []
+
+
+def test_rebuilt_partitions_and_moved_boundaries_rerun_their_folds(panel: Path) -> None:
+    fold = research()[0]
+    run_folds([fold], "rank-wf1", panel)
+
+    FeatureDaily.objects.filter(date=fold.test_start).update(tech_ret_60d=0.5)
+    export_year(2016, panel)
+    assert run_folds([fold], "rank-wf1", panel) == [fold.index]
+
+    moved = replace(fold, tuning=not fold.tuning)
+    assert run_folds([moved], "rank-wf1", panel) == [fold.index]
+    assert run_folds([moved], "rank-wf1", panel) == []
+
+
+def test_a_fold_with_a_promoted_model_keeps_its_cache(panel: Path) -> None:
+    fold = research()[0]
+    run_folds([fold], "rank-wf1", panel)
+    promoted = f"rank-wf1.lightgbm.h5.f{fold.index:03d}"
+    ModelRun.objects.filter(run_id=promoted).update(status=ModelStatus.ACTIVE)
+
+    with pytest.raises(RunError, match=promoted):
+        run_folds([fold], "rank-wf1", panel, rerun=True)
+
+    assert fold_path("rank-wf1", MODEL, fold.index).exists()
+
+
+def test_a_rerun_that_fails_leaves_its_fold_to_be_run_again(
+    panel: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fold = research()[0]
+    run_folds([fold], "rank-wf1", panel)
+
+    def broken(*args: Any, **kwargs: Any) -> Path:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(lgbm_runs, "save_fold_predictions", broken)
+    with pytest.raises(OSError, match="disk full"):
+        run_folds([fold], "rank-wf1", panel, rerun=True)
+
+    assert missing_folds("rank-wf1", MODEL, [fold]) == [fold.index]
+
+
+def test_labels_rewritten_during_the_fit_stop_the_fold(
+    panel: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fold = research()[0]
+    fitted = lgbm_runs.fit_rank
+
+    def relabelling(*args: Any, **kwargs: Any) -> Any:
+        boosted = fitted(*args, **kwargs)
+        LabelDaily.objects.filter(date=fold.train_start).update(fwd_rank_pct=0.5)
+        return boosted
+
+    monkeypatch.setattr(lgbm_runs, "fit_rank", relabelling)
+
+    with pytest.raises(RuntimeError, match="label_daily changed"):
+        run_folds([fold], "rank-wf1", panel)
+
+    assert not ModelRun.objects.filter(model_type="lightgbm").exists()
+    assert missing_folds("rank-wf1", MODEL, [fold]) == [fold.index]
 
 
 def test_recipe_changes_with_the_features_the_seed_and_the_round_cap(

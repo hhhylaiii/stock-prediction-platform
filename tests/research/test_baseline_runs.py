@@ -167,6 +167,9 @@ def test_interval_folds_cache_probability_quantile_and_volatility_baselines(pane
         pytest.approx(half),
     )
     assert first["techvol_h20"] == pytest.approx(0.21)
+    logistic = ModelRun.objects.get(model_type="logistic")
+    assert logistic.feature_list == SCREENED
+    assert set(logistic.params["coefficients"]) == set(SCREENED)
     kinds = set(fitted_runs().values_list("model_type", "objective"))
     assert kinds == {("logistic", "classification"), ("histq", "quantile")}
     histq = ModelRun.objects.get(model_type="histq")
@@ -585,16 +588,19 @@ def test_a_changed_recipe_reruns_cached_folds(panel: Path, monkeypatch: pytest.M
     assert run_folds("return", [fold], "return-wf1", panel) == []
 
 
-def test_a_new_screening_reruns_the_fitted_baselines_only(panel: Path) -> None:
+@pytest.mark.parametrize(("scope", "model"), [("rank", "ridge.h20"), ("interval", "logistic.h20")])
+def test_a_new_screening_reruns_the_fitted_baselines_only(
+    panel: Path, scope: str, model: str
+) -> None:
     fold = research()[0]
-    run_folds("rank", [fold], "rank-wf1", panel)
+    run_folds(scope, [fold], f"{scope}-wf1", panel)
     run_folds("return", [fold], "return-wf1", panel)
 
     ModelRun.objects.filter(model_type=SCREENING_MODEL).update(feature_list=KEPT[:2])
 
-    assert run_folds("rank", [fold], "rank-wf1", panel) == [fold.index]
+    assert run_folds(scope, [fold], f"{scope}-wf1", panel) == [fold.index]
     assert run_folds("return", [fold], "return-wf1", panel) == []
-    run = ModelRun.objects.get(run_id=f"rank-wf1.ridge.h20.f{fold.index:03d}")
+    run = ModelRun.objects.get(run_id=f"{scope}-wf1.{model}.f{fold.index:03d}")
     assert run.feature_list == linear_features(KEPT[:2])
 
 
