@@ -41,6 +41,7 @@ CONSOLIDATED = FinType.CONSOLIDATED.value
         (date(2013, 1, 1), date(2013, 3, 31), ["2013-01", "2013-02", "2013-03"]),
         (date(2013, 1, 2), date(2013, 3, 1), ["2013-02", "2013-03"]),
         (date(2019, 12, 1), date(2020, 1, 31), ["2019-12", "2020-01"]),
+        (date(2012, 11, 1), date(2013, 1, 31), ["2013-01"]),
     ],
 )
 def test_months_between_start_on_their_first_day(start: date, end: date, months: list[str]) -> None:
@@ -81,27 +82,31 @@ def test_old_securities_balance_sheets_say_total_with_another_word(
     assert "資產合計" in parse_summary(page, "sii", 4, BALANCE)["2855"]
 
 
-def weekdays(start: date, end: date) -> TradingDays:
+def weekdays(start: date, end: date, closed: date) -> TradingDays:
     span = (start + timedelta(days=offset) for offset in range((end - start).days + 1))
-    return TradingDays([day for day in span if day.weekday() < 5], start, end)
+    return TradingDays([day for day in span if day.weekday() < 5 and day != closed], start, end)
 
 
 @pytest.fixture
 def adapter(fake_sleep: Callable[[float], None]) -> MopsAdapter:
-    calendar = weekdays(date(2012, 1, 1), date(2026, 12, 31))
+    calendar = weekdays(date(2012, 1, 1), date(2026, 12, 31), closed=date(2013, 2, 4))
     return MopsAdapter(calendar, RateLimiter(LIMIT, sleep=fake_sleep))
 
 
-def serve_january(fixture: Callable[[str], bytes]) -> None:
+def serve_january(fixture: Callable[[str], bytes], unfiled: str | None = None) -> None:
     for market, origin in PAGES:
         name = f"t21sc03_{market}_102_1_{origin}.html"
+        if market == unfiled:
+            name = f"t21sc03_{market}_102_1_{origin}_unfiled.html"
         responses.get(
             f"{settings.MOPS_BASE_URL}/nas/t21/{market}/t21sc03_102_1_{origin}.html",
             body=fixture(name),
         )
 
 
-def serve_q1(fixture: Callable[[str], bytes], empty: str | None = None) -> None:
+def serve_q1(
+    fixture: Callable[[str], bytes], swapped: dict[tuple[str, str], bytes] | None = None
+) -> None:
     for report in (INCOME, BALANCE, CASH_FLOW):
         for market in ("sii", "otc"):
             form = {
@@ -114,13 +119,9 @@ def serve_q1(fixture: Callable[[str], bytes], empty: str | None = None) -> None:
                 "year": "102",
                 "season": "01",
             }
-            body = fixture(f"{report}_{market}_102_01.html")
-            if (report, market) == (empty, "otc"):
-                body = (
-                    fixture(f"{INCOME}_otc_102_01.html")
-                    .replace(b">3105<", b">x<")
-                    .replace(b">8069<", b">y<")
-                )
+            body = (swapped or {}).get((report, market)) or fixture(
+                f"{report}_{market}_102_01.html"
+            )
             responses.post(
                 f"{settings.MOPS_BASE_URL}/mops/web/ajax_{report}",
                 body=body,
@@ -147,10 +148,12 @@ def test_revenue_history_fills_missing_months_with_the_conservative_date(
     stored = {row.stock_id: row for row in MonthlyRevenue.objects.filter(period="2013-01")}
     assert set(stored) == JANUARY_FILERS
     assert (stored["1101"].revenue, stored["1101"].mom) == (9_134_465_000, None)
-    assert stored["1101"].announce_date == date(2013, 2, 12)
+    assert stored["1101"].announce_date == date(2013, 2, 13)
     assert stored["2330"].revenue == 47_000_000_000
     logged = DataQualityLog.objects.get(check_name=MISMATCH_CHECKS[REVENUE_HISTORY])
-    assert logged.detail["span"] == ["2013-01-01", "2013-01-31"]
+    assert (logged.date, logged.detail["span"]) == (date(2013, 1, 31), ["2013-01-01", "2013-01-31"])
+    assert {"stock_id": "1101", "period": "2013-01"} in logged.detail["added"]
+    assert len(logged.detail["added"]) == rows
     assert logged.detail["rows"] == [
         {
             "stock_id": "2330",
@@ -171,8 +174,10 @@ def test_a_second_run_over_the_same_span_adds_nothing(
     )
     serve_january(fixture)
     history(adapter, REVENUE_HISTORY, date(2013, 1, 1), date(2013, 1, 31))
-    assert history(adapter, REVENUE_HISTORY, date(2013, 1, 1), date(2013, 1, 31)) == 0
-    assert DataQualityLog.objects.filter(check_name=MISMATCH_CHECKS[REVENUE_HISTORY]).count() == 1
+    with time_machine.travel(TODAY + timedelta(days=1), tick=False):
+        assert adapter.run(REVENUE_HISTORY, date(2013, 1, 1), date(2013, 1, 31)).rows == 0
+    logged = DataQualityLog.objects.get(check_name=MISMATCH_CHECKS[REVENUE_HISTORY])
+    assert (logged.detail["added"], len(logged.detail["rows"])) == ([], 1)
 
 
 @pytest.mark.django_db
@@ -221,6 +226,23 @@ def test_statement_history_fills_missing_quarters_and_compares_stored_ones(
             "fields": {"operating_cf": [-42_412_000, -92_392_000]},
         }
     ]
+    assert logged.detail["types"] == [
+        {"stock_id": "2330", "period": "2013-Q1", "stored": ["individual"], "found": CONSOLIDATED}
+    ]
+    assert logged.detail["incomplete"] == {}
+
+
+@pytest.mark.django_db
+@responses.activate
+def test_companies_missing_from_some_summaries_are_logged_not_written(
+    adapter: MopsAdapter, fixture: Callable[[str], bytes]
+) -> None:
+    page = fixture(f"{CASH_FLOW}_otc_102_01.html").replace(b">8069<", b">8070<")
+    serve_q1(fixture, {(CASH_FLOW, "otc"): page})
+    history(adapter, STATEMENT_HISTORY, date(2013, 1, 1), date(2013, 3, 31))
+    assert not FinancialStatement.objects.filter(stock_id__in=["8069", "8070"]).exists()
+    logged = DataQualityLog.objects.get(check_name=MISMATCH_CHECKS[STATEMENT_HISTORY])
+    assert logged.detail["incomplete"] == {"2013-Q1": ["8069", "8070"]}
 
 
 @pytest.mark.django_db
@@ -228,10 +250,42 @@ def test_statement_history_fills_missing_quarters_and_compares_stored_ones(
 def test_a_filed_quarter_that_comes_back_empty_fails(
     adapter: MopsAdapter, fixture: Callable[[str], bytes]
 ) -> None:
-    serve_q1(fixture, empty=CASH_FLOW)
-    with pytest.raises(SchemaChangedError):
+    serve_q1(fixture, {(CASH_FLOW, "otc"): fixture(f"{CASH_FLOW}_otc_102_01_unfiled.html")})
+    with pytest.raises(SchemaChangedError, match="came back empty"):
         history(adapter, STATEMENT_HISTORY, date(2013, 1, 1), date(2013, 3, 31))
     assert not FinancialStatement.objects.exists()
+
+
+@pytest.mark.django_db
+@responses.activate
+def test_a_past_month_that_comes_back_empty_fails(
+    adapter: MopsAdapter, fixture: Callable[[str], bytes]
+) -> None:
+    serve_january(fixture, unfiled="otc")
+    with pytest.raises(SchemaChangedError, match="otc 2013-01 came back empty"):
+        history(adapter, REVENUE_HISTORY, date(2013, 1, 1), date(2013, 1, 31))
+    assert not MonthlyRevenue.objects.exists()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("dataset", "end", "today", "pending"),
+    [
+        (REVENUE_HISTORY, date(2026, 10, 31), TODAY, "2026-10"),
+        (REVENUE_HISTORY, date(2026, 11, 6), TODAY, "2026-11"),
+        (REVENUE_HISTORY, date(2026, 9, 30), datetime(2026, 10, 30, tzinfo=TAIPEI), "2026-09"),
+        (STATEMENT_HISTORY, date(2026, 9, 30), TODAY, "2026-Q3"),
+        (STATEMENT_HISTORY, date(2026, 6, 30), datetime(2026, 9, 28, tzinfo=TAIPEI), "2026-Q2"),
+    ],
+)
+def test_history_leaves_periods_still_being_filed_to_the_daily_scan(
+    adapter: MopsAdapter, dataset: str, end: date, today: datetime, pending: str
+) -> None:
+    with (
+        time_machine.travel(today, tick=False),
+        pytest.raises(ValueError, match=f"leaves .*{pending}.* to the daily scan"),
+    ):
+        adapter.run(dataset, date(2026, 1, 1), end)
 
 
 @pytest.mark.django_db

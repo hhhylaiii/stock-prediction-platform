@@ -1,12 +1,13 @@
 """Months and quarters FinMind lacks, filled once from MOPS's own summary pages (plan K17)."""
 
 from collections.abc import Callable
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 
 import pandas as pd
 from django.db import models, transaction
 
+from apps.etl.deadlines import revenue_deadline, statement_deadline
 from apps.etl.filings import quarter_end
 from apps.etl.models import DataQualityLog
 from apps.etl.statement_scan import figure_differences
@@ -20,16 +21,18 @@ MISMATCH_CHECKS = {
     STATEMENT_HISTORY: "statement_history_mismatch",
 }
 IFRS_FROM = "2013-Q1"
+REVENUE_FROM = "2013-01"
 MONEY_TOLERANCE = 1000
 MONTHS = 12
 QUARTERS = 4
 
 
 def months_between(start: date, end: date) -> list[str]:
-    """Months whose first day falls in [start, end]."""
+    """Months from 2013 whose first day falls in [start, end]; older pages have another layout."""
     first = start.year * MONTHS + start.month - 1 + (start.day > 1)
     last = end.year * MONTHS + end.month - 1
-    return [f"{index // MONTHS:04d}-{index % MONTHS + 1:02d}" for index in range(first, last + 1)]
+    months = (f"{index // MONTHS:04d}-{index % MONTHS + 1:02d}" for index in range(first, last + 1))
+    return [month for month in months if month >= REVENUE_FROM]
 
 
 def quarters_between(start: date, end: date) -> list[str]:
@@ -43,42 +46,61 @@ def quarters_between(start: date, end: date) -> list[str]:
     return found
 
 
+def unsettled(dataset: str, start: date, end: date, today: date, days_after: int) -> list[str]:
+    """Periods the daily scan still dates by the session that first lists them."""
+    if dataset == REVENUE_HISTORY:
+        months = months_between(start, end)
+        return [p for p in months if revenue_deadline(p) + timedelta(days=days_after) >= today]
+    quarters = quarters_between(start, end)
+    return [p for p in quarters if statement_deadline(p) + timedelta(days=days_after) >= today]
+
+
 def insert_missing_history(
     dataset: str,
     frame: pd.DataFrame,
     dated: Callable[[str], date],
     span: tuple[date, date],
-    day: date,
+    waiting: dict[str, list[str]],
 ) -> int:
-    """New periods only, visible from their conservative date; stored figures are compared."""
+    """New periods only, from their conservative date; one log per span says what differs."""
     model: type[models.Model] = MonthlyRevenue if dataset == REVENUE_HISTORY else FinancialStatement
     stored = _stored(model, frame)
     new: list[models.Model] = []
-    differing: list[dict[str, Any]] = []
+    detail: dict[str, Any] = {
+        "span": [span[0].isoformat(), span[1].isoformat()],
+        "added": [],
+        "rows": [],
+        "types": [],
+        "incomplete": {period: codes for period, codes in waiting.items() if codes},
+    }
     for raw in frame.to_dict("records"):
         record = {str(name): value for name, value in raw.items()}
+        key = {"stock_id": record["stock_id"], "period": record["period"]}
         rows = stored.get((record["stock_id"], record["period"]))
+        row = None if rows is None else rows.get(record.get("fin_type", ""))
         if rows is None:
             new.append(model(**record, announce_date=dated(record["period"])))
-            continue
-        row = rows.get(record.get("fin_type", ""))
-        fields = {} if row is None else _differences(dataset, row, record)
-        if fields:
-            differing.append(
-                {"stock_id": record["stock_id"], "period": record["period"], "fields": fields}
-            )
-    check = MISMATCH_CHECKS[dataset]
-    detail = {"span": [span[0].isoformat(), span[1].isoformat()], "rows": differing}
+            detail["added"].append(key)
+        elif row is None:
+            detail["types"].append({**key, "stored": sorted(rows), "found": record["fin_type"]})
+        elif fields := _differences(dataset, row, record):
+            detail["rows"].append({**key, "fields": fields})
+    _record(model, new, MISMATCH_CHECKS[dataset], detail)
+    return len(new)
+
+
+def _record(model: type[models.Model], new: list[models.Model], check: str, detail: Any) -> None:
+    """Rows and the span's log together; a rerun of the span on any day replaces its log."""
     with transaction.atomic():
         model._default_manager.bulk_create(new)
-        DataQualityLog.objects.filter(
-            date=day, check_name=check, detail__span=detail["span"]
-        ).delete()
-        if differing:
+        DataQualityLog.objects.filter(check_name=check, detail__span=detail["span"]).delete()
+        if any(detail[part] for part in ("added", "rows", "types", "incomplete")):
             DataQualityLog.objects.create(
-                date=day, check_name=check, severity=DataQualityLog.Severity.INFO, detail=detail
+                date=date.fromisoformat(detail["span"][1]),
+                check_name=check,
+                severity=DataQualityLog.Severity.INFO,
+                detail=detail,
             )
-    return len(new)
 
 
 def _stored(

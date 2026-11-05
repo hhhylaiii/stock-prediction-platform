@@ -33,6 +33,7 @@ from apps.etl.mops_history import (
     insert_missing_history,
     months_between,
     quarters_between,
+    unsettled,
 )
 from apps.etl.ratelimit import RateLimiter, RetryableError
 from apps.etl.revenue_scan import (
@@ -296,6 +297,15 @@ class MopsAdapter(BaseAdapter):
         today = timezone.localdate()
         if dataset in SCANS and (start, end) != (today, today):
             raise ValueError(f"{self.source}/{dataset} sees only today {today}, not {start}..{end}")
+        if dataset in HISTORIES:
+            days_after = int(
+                settings.REVENUE_SCAN_DAYS_AFTER
+                if dataset == REVENUE_HISTORY
+                else settings.STATEMENT_SCAN_DAYS_AFTER
+            )
+            pending = unsettled(dataset, start, end, today, days_after)
+            if pending:
+                raise ValueError(f"{self.source}/{dataset} leaves {pending} to the daily scan")
         return super().run(dataset, start, end, stock_id)
 
     def units(self, dataset: str, start: date, end: date) -> Iterator[tuple[date, date]]:
@@ -353,8 +363,9 @@ class MopsAdapter(BaseAdapter):
             return insert(frame, timezone.localdate(), session)
         if dataset in HISTORIES:
             span = (frame.attrs["start"], frame.attrs["end"])
+            waiting = frame.attrs.get("incomplete", {})
             return insert_missing_history(
-                dataset, frame, self._conservative(dataset), span, timezone.localdate()
+                dataset, frame, self._conservative(dataset), span, waiting
             )
         if frame.empty:
             return 0
@@ -385,14 +396,17 @@ class MopsAdapter(BaseAdapter):
             return fetched[period]
 
         records = []
+        waits: dict[str, list[str]] = {}
         for period in periods:
             current, previous = summaries(period), summaries(previous_period(period))
-            waiting = incomplete(current)
-            if waiting:
-                logger.warning("mops %s scan waits for %s", period, ", ".join(waiting))
+            waits[period] = incomplete(current)
+            if waits[period]:
+                logger.warning("mops %s scan waits for %s", period, ", ".join(waits[period]))
             for row in statement_rows(current, previous, int(period[-1])):
                 records.append({**row, "period": period})
-        return pd.DataFrame(records, columns=SCAN_COLUMNS, dtype=object)
+        frame = pd.DataFrame(records, columns=SCAN_COLUMNS, dtype=object)
+        frame.attrs["incomplete"] = waits
+        return frame
 
     def _summaries(self, period: str, filed: bool, dataset: str) -> Summary:
         """Both markets' three summaries, kept as raw first; a filed quarter cannot be empty."""
