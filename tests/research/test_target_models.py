@@ -45,10 +45,7 @@ def fold() -> Fold:
 
 
 def panel(start: date, end: date, seed: int = 0) -> pd.DataFrame:
-    """Raw features and labels: tech_ret_20d moves returns, tech_vol_20d sets their spread.
-
-    A few rows sit outside the universe, cannot trade at t+1 or have no labels yet.
-    """
+    """Raw features and labels, with a few rows out of universe, untradable or unlabelled."""
     days = CALENDAR.between(start, end)
     rng = np.random.default_rng(seed)
     size = len(days) * STOCKS
@@ -288,11 +285,11 @@ def test_fit_probability_calibrates_on_the_validation_tail_only_when_ece_is_high
     inputs, labels, test = data
     window = fold()
     monkeypatch.setattr(target_models, "ECE_LIMIT", limit)
-    seen: list[np.ndarray] = []
+    seen: list[tuple[np.ndarray, np.ndarray]] = []
     fit = target_models.IsotonicRegression.fit
 
     def spy(self: Any, x: Any, y: Any, *args: Any, **kwargs: Any) -> Any:
-        seen.append(np.asarray(x))
+        seen.append((np.asarray(x), np.asarray(y)))
         return fit(self, x, y, *args, **kwargs)
 
     monkeypatch.setattr(target_models.IsotonicRegression, "fit", spy)
@@ -308,7 +305,8 @@ def test_fit_probability_calibrates_on_the_validation_tail_only_when_ece_is_high
     assert (fitted.calibrator is not None) is calibrated
     assert len(seen) == (1 if calibrated else 0)
     if seen:
-        np.testing.assert_array_equal(seen[0], fitted.boosted.valid_scores)
+        np.testing.assert_array_equal(seen[0][0], fitted.boosted.valid_scores)
+        np.testing.assert_array_equal(seen[0][1], scored[UP].to_numpy())
     probs = fitted.predict(test, FEATURES)
     raw = np.asarray(fitted.boosted.booster.predict(test[FEATURES]))
     if fitted.calibrator is None:
