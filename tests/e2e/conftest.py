@@ -9,7 +9,7 @@ from django.utils import timezone
 
 from apps.etl.models import DataQualityLog, EtlRun
 from apps.market.models import Market, TradingCalendar
-from tests.api.conftest import add_bars, add_stock
+from tests.api.conftest import add_bars, add_model_run, add_predictions, add_stock
 
 XSS_NAME = '<img src=x onerror="window.__xss=1">'
 BAR_COUNT = 70
@@ -43,6 +43,11 @@ QUALITY: tuple[tuple[str, str, dict[str, Any]], ...] = (
 class Seed:
     last_session: date
     closes: tuple[float | None, ...]
+    sessions: tuple[date, ...] = ()
+
+
+EXTRA_STOCKS = tuple(f"{1101 + n}" for n in range(23))
+TPEX_EXTRAS = frozenset(EXTRA_STOCKS[::3])
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -121,4 +126,44 @@ def seeded(transactional_db: None) -> Seed:
         DataQualityLog(date=last, check_name=check, severity=severity, detail=detail)
         for check, severity, detail in QUALITY
     )
-    return Seed(last_session=last, closes=closes)
+    return Seed(last_session=last, closes=closes, sessions=tuple(sessions))
+
+
+def rank_rows(order: list[str]) -> dict[str, dict[str, Any]]:
+    total = len(order)
+    return {
+        code: {"score": float(total - n), "rank": n + 1, "pct": (total - n) / total}
+        for n, code in enumerate(order)
+    }
+
+
+@pytest.fixture
+def predicted(seeded: Seed) -> Seed:
+    """Serving runs of every role on the last session, 25 ranked stocks, one previous day."""
+    last, previous = seeded.last_session, seeded.sessions[-2]
+    for n, code in enumerate(EXTRA_STOCKS):
+        market = Market.TPEX if code in TPEX_EXTRAS else Market.TWSE
+        add_stock(stock_id=code, name=f"測試{n:02d}", market=market)
+        add_bars(code, [last], [50.0 + n])
+    order = ["2330", "9999", *EXTRA_STOCKS]
+    rank20, rank5 = add_model_run("rank-h20", "rank"), add_model_run("rank-h5", "rank")
+    add_predictions(rank20, last, 20, rank_rows(order))
+    add_predictions(rank20, previous, 20, rank_rows(["1101", "1102", "1103", "2330"]))
+    add_predictions(rank5, last, 5, rank_rows(["9999", "2330", *EXTRA_STOCKS]))
+    add_predictions(
+        add_model_run("quantile-h20", "quantile"),
+        last,
+        20,
+        {"2330": {"q10": -0.05, "q50": 0.04, "q90": 0.12, "ret_pred": 0.04}},
+    )
+    add_predictions(
+        add_model_run("prob-h20", "classification"), last, 20, {"2330": {"prob_up_5pct": 0.6}}
+    )
+    add_predictions(
+        add_model_run("vol-h20", "volatility"),
+        last,
+        20,
+        {code: {"vol_pred": 0.3} for code in order},
+    )
+    add_predictions(add_model_run("reg-h5", "regression"), last, 5, {"2330": {"ret_pred": 0.01}})
+    return seeded
