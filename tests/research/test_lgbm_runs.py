@@ -10,7 +10,7 @@ from django.core.management import call_command
 from django.core.management.base import CommandError
 
 from apps.market.models import DailyPrice, StockMaster
-from apps.research import baseline_runs, lgbm_runs
+from apps.research import baseline_runs, gbdt, lgbm_runs
 from apps.research.baseline_runs import BASELINE
 from apps.research.features.store import export_year
 from apps.research.gbdt import BASE_PARAMS, Bagged, seeded
@@ -219,6 +219,10 @@ def test_recipe_changes_with_the_features_seed_and_lightgbm_settings(
         with monkeypatch.context() as patched:
             patched.setattr(lgbm_runs, name, value)
             assert recipe("rank", KEPT, 0) != first, name
+    bagged = recipe("rank", KEPT, 0, bags=2)
+    with monkeypatch.context() as patched:
+        patched.setattr(gbdt, "BAG_STRIDE", 4)
+        assert recipe("rank", KEPT, 0, bags=2) != bagged
     assert recipe("rank", KEPT, 0) == first
 
 
@@ -325,3 +329,12 @@ def test_missing_and_rerun_folds_skip_the_fingerprint(
 
     assert run_folds("rank", [fold], "rank-wf1", panel) == [fold.index]
     assert run_folds("rank", [fold], "rank-wf1", panel, rerun=True) == [fold.index]
+
+
+def test_a_full_run_refuses_an_empty_bag_before_the_shuffle_check(
+    command: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(train, "shuffle_check", lambda *args: pytest.fail("shuffle ran"))
+
+    with pytest.raises(CommandError, match="at least one"):
+        call_command("train", model="lightgbm", scope="rank", run_key="rank-wf1", bags=0)

@@ -69,7 +69,8 @@ class Command(BaseCommand):
             "--bags",
             type=int,
             default=1,
-            help="LightGBM seeds averaged per model: 1 for research folds, 5 for final runs.",
+            help="LightGBM seeds averaged per model: 1 for research folds, 5 for final runs "
+            "under their own run_key, since a run_key keeps one bag size.",
         )
 
     def _folds(self, options: dict[str, Any]) -> list[Fold]:

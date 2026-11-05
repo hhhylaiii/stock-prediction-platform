@@ -135,7 +135,7 @@ def recipe(scope: str, features: list[str], seed: int, bags: int = 1) -> str:
         "early_stopping_rounds": EARLY_STOPPING_ROUNDS,
         "max_rounds": MAX_ROUNDS,
         "seed": seed,
-        "bags": bags,
+        "bag_seeds": bag_seeds(seed, bags),
     }
     listed = json.dumps(settings, sort_keys=True).encode()
     return f"{RECIPE_VERSION}-{hashlib.sha256(listed).hexdigest()[:12]}"

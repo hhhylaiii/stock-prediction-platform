@@ -326,13 +326,17 @@ def test_boost_with_bags_probes_once_and_refits_each_seed_for_the_same_rounds(
     assert len({tuple(member.predict(test[FEATURES][:5])) for member in members}) == 3
 
 
-def test_boost_with_one_bag_returns_the_plain_booster() -> None:
+def test_boost_with_one_bag_returns_the_booster_lightgbm_trains_directly() -> None:
     rows, window = training_window(), fold()
 
-    single = boost(rows, window, FEATURES, LABEL, seed=4, feval=DailyRankIC, max_rounds=200)
-    one = boost(rows, window, FEATURES, LABEL, seed=4, feval=DailyRankIC, max_rounds=200, bags=1)
+    one = boost(rows, window, FEATURES, LABEL, seed=4, feval=DailyRankIC, max_rounds=200)
 
-    assert isinstance(single.booster, lgb.Booster)
+    assert isinstance(one.booster, lgb.Booster)
+    direct = lgb.train(
+        {**BASE_PARAMS, **seeded(4)},
+        lgb.Dataset(rows[FEATURES], label=rows[LABEL]),
+        num_boost_round=one.rounds,
+    )
     np.testing.assert_array_equal(
-        single.booster.predict(rows[FEATURES]), one.booster.predict(rows[FEATURES])
+        one.booster.predict(rows[FEATURES]), direct.predict(rows[FEATURES])
     )
