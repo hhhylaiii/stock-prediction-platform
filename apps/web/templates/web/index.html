@@ -74,15 +74,16 @@
 
 <div class="section">
 <h2>上線中的模型</h2>
-<div class="placeholder" id="model-table">模型尚未上線。</div>
+<div id="model-table"><p class="placeholder">載入中…</p></div>
+<p class="note" id="model-rules">上線後以最近 60 個評估日的平均監控，滿 60 天才開始判斷；任一條成立就改成降級：排名模型的 IC 低於門檻、分位數模型 20 日覆蓋率不在 70%–90%、機率模型 20 日 Brier 高於 baseline。降級不會自動恢復；缺參考值只發告警，不降級。</p>
 </div>
 
 <div class="section">
 <div class="sechead">
-<div><h2>每月 rank IC，排名模型與 baseline</h2><p class="sub">walk-forward 測試期的月平均，近 24 個月。</p></div>
-<div class="legend"><span><i class="sw-sq" style="background:var(--model)"></i>LightGBM</span><span><i class="sw-sq" style="background:var(--ink-4)"></i>Ridge</span></div>
+<div><h2>每月 rank IC，排名模型與 baseline</h2><p class="sub" id="ic-sub">walk-forward 研究期的月平均。</p></div>
+<div class="legend" id="ic-legend"></div>
 </div>
-<div class="placeholder" id="ic-chart">回測結果尚未產出。</div>
+<div class="chart" id="ic-chart"><p class="placeholder">載入中…</p></div>
 </div>
 
 <div class="two wide">
