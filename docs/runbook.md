@@ -93,7 +93,7 @@ uv run python manage.py backfill --source mops --dataset statement_filing --from
 ```
 
 - 每檔只查 `financial_statement` 有資料的年度，每年一次請求，約 3.2 萬次，6 秒間隔約 53 小時。doc.twse 每分鐘大約只接受 12 次，超過就回「查詢過量，請稍後再查詢!」，client 會退避後重試（`MOPS_MIN_INTERVAL` 不能低於 5 秒）。拒收的代號用 `--retry-rejected <run_id>` 重跑。
-- 上傳時間在交易日 22:40（`FILING_VISIBLE_BEFORE`，每日財報掃描的最後一次）之前算當天，之後或非交易日算下一個交易日；英文版與「(重編)」的重編報表都不算公告。
+- 上傳時間在交易日 22:40（`FILING_VISIBLE_BEFORE`，每日財報掃描的最後一次）之前算當天，之後或非交易日算下一個交易日；英文版不算。有「(重編)」重編報表的期別，公告日改成最後一次重編的上傳日，記一列 `statement_restated`（info）：FinMind 存的數字可能是重編後的，原始上傳日就看到會偷看。
 - 規則（plan §8 K14）：沒有更正紀錄的財報，公告日就是實際上傳日，早於或晚於法定截止日都照實際；有更正紀錄的，上傳時間可能是更正後重傳，只拿來提早、不延後。晚於保守值（截止日的下一個交易日）的每檔記一列 `data_quality_log`：沒更正、已延後的是 `statement_filed_late`（info），有更正、沒延後的是 `statement_filed_later`（warning）。
 - 每天 16:00 的 `refresh_master` 只要多一個代號，`--resume` 就會因為股票清單變了而拒絕。這時改用 `--stock` 只跑還沒跑到的代號（`etl_run.checkpoint.last_stock_id` 之後的），並把那次 run 已拒收的代號一起帶上；中斷的 run 沒有結束，不能用 `--retry-rejected`：
 
@@ -109,7 +109,7 @@ uv run python manage.py backfill --source mops --dataset statement_filing --from
 ```bash
 uv run python manage.py reapply_filings
 docker compose exec db psql -U twp -d twp -c \
-  "select check_name, count(*), sum(jsonb_array_length(detail->'filings')) from data_quality_log where check_name like 'statement_filed%' group by 1"
+  "select check_name, count(*), sum(jsonb_array_length(detail->'filings')) from data_quality_log where check_name in ('statement_filed_late', 'statement_filed_later', 'statement_restated') group by 1"
 ```
 
 - 月營收沒有歷史申報日可查，維持 Phase 1 的保守值。
