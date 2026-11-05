@@ -9,7 +9,9 @@ from apps.research.runs import RunError, drop_run
 
 
 class Command(BaseCommand):
-    help = "Delete a run's model_run rows, model files and cached fold predictions."
+    help = (
+        "Delete a run's model_run rows, backtest metrics, model files and cached fold predictions."
+    )
 
     def add_arguments(self, parser: ArgumentParser) -> None:
         parser.add_argument("run_key")

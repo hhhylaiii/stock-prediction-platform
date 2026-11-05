@@ -6,6 +6,35 @@ from django.utils import timezone
 from apps.market.models import finite
 from apps.research.features.registry import feature_names
 
+OUTPUT_HORIZONS = [5, 20]
+REST_FEATURE = "_rest"
+
+
+def horizon_known(table: str) -> models.CheckConstraint:
+    """The horizon is one the labels carry."""
+    return models.CheckConstraint(
+        condition=models.Q(horizon__in=OUTPUT_HORIZONS), name=f"{table}_horizon_known"
+    )
+
+
+def unit_interval(*fields: str) -> models.Q:
+    """Each column is NULL or within [0, 1]."""
+    condition = models.Q()
+    for field in fields:
+        condition &= models.Q(**{f"{field}__gte": 0, f"{field}__lte": 1}) | models.Q(
+            **{f"{field}__isnull": True}
+        )
+    return condition
+
+
+def ordered(low: str, high: str) -> models.Q:
+    """low <= high whenever both are present."""
+    return (
+        models.Q(**{f"{low}__lte": models.F(high)})
+        | models.Q(**{f"{low}__isnull": True})
+        | models.Q(**{f"{high}__isnull": True})
+    )
+
 
 class HoldoutScope(models.TextChoices):
     RANK = "rank", "排名"
@@ -224,3 +253,220 @@ class FeatureDaily(models.Model):
 
     def __str__(self) -> str:
         return f"{self.stock_id} {self.date}"
+
+
+class Prediction(models.Model):
+    """One run's outputs per stock, day and horizon; columns the run does not produce stay NULL."""
+
+    pk = models.CompositePrimaryKey("run_id", "stock_id", "date", "horizon")
+    run = models.ForeignKey(
+        ModelRun, on_delete=models.PROTECT, db_index=False, related_name="predictions"
+    )
+    stock_id = models.CharField(max_length=10)
+    date = models.DateField()
+    horizon = models.PositiveSmallIntegerField()
+    score = models.FloatField(null=True, blank=True)
+    rank = models.PositiveIntegerField(null=True, blank=True)
+    pct = models.FloatField(null=True, blank=True)
+    ret_pred = models.FloatField(null=True, blank=True)
+    q10 = models.FloatField(null=True, blank=True)
+    q50 = models.FloatField(null=True, blank=True)
+    q90 = models.FloatField(null=True, blank=True)
+    vol_pred = models.FloatField(null=True, blank=True)
+    prob_up_5pct = models.FloatField(null=True, blank=True)
+    in_universe = models.BooleanField()
+
+    class Meta:
+        db_table = "prediction"
+        indexes = [
+            models.Index(fields=["date", "horizon", "rank"], name="prediction_date_horizon_rank"),
+            models.Index(fields=["stock_id", "date"], name="prediction_stock_date_idx"),
+        ]
+        constraints = [
+            horizon_known("prediction"),
+            models.CheckConstraint(
+                condition=finite(
+                    "score", "pct", "ret_pred", "q10", "q50", "q90", "vol_pred", "prob_up_5pct"
+                ),
+                name="prediction_finite",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(rank__gte=1) | models.Q(rank__isnull=True),
+                name="prediction_rank_gte_1",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(rank__isnull=True, pct__isnull=True)
+                | models.Q(rank__isnull=False, pct__isnull=False, score__isnull=False),
+                name="prediction_rank_pct_with_score",
+            ),
+            models.CheckConstraint(
+                condition=unit_interval("pct", "prob_up_5pct"), name="prediction_unit_interval"
+            ),
+            models.CheckConstraint(
+                condition=models.Q(vol_pred__gte=0) | models.Q(vol_pred__isnull=True),
+                name="prediction_vol_gte_0",
+            ),
+            models.CheckConstraint(
+                condition=ordered("q10", "q50") & ordered("q50", "q90") & ordered("q10", "q90"),
+                name="prediction_quantiles_ordered",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(ret_pred=models.F("q50"))
+                | models.Q(ret_pred__isnull=True)
+                | models.Q(q50__isnull=True),
+                name="prediction_ret_pred_is_q50",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.run_id} {self.stock_id} {self.date} {self.horizon}d"
+
+
+class PredictionContrib(models.Model):
+    """Top feature contributions to a rank prediction by position, then one row summing the rest."""
+
+    pk = models.CompositePrimaryKey("run_id", "stock_id", "date", "horizon", "position")
+    run = models.ForeignKey(
+        ModelRun, on_delete=models.PROTECT, db_index=False, related_name="contributions"
+    )
+    stock_id = models.CharField(max_length=10)
+    date = models.DateField()
+    horizon = models.PositiveSmallIntegerField()
+    feature = models.CharField(max_length=64)
+    position = models.PositiveSmallIntegerField()
+    contrib = models.FloatField()
+    n_features = models.PositiveSmallIntegerField(default=1)
+
+    class Meta:
+        db_table = "prediction_contrib"
+        indexes = [models.Index(fields=["stock_id", "date"], name="prediction_contrib_stock_date")]
+        constraints = [
+            horizon_known("prediction_contrib"),
+            models.UniqueConstraint(
+                fields=["run_id", "stock_id", "date", "horizon", "feature"],
+                name="prediction_contrib_feature_unique",
+                deferrable=models.Deferrable.DEFERRED,
+            ),
+            models.CheckConstraint(condition=finite("contrib"), name="prediction_contrib_finite"),
+            models.CheckConstraint(
+                condition=models.Q(position__gte=1), name="prediction_contrib_position_gte_1"
+            ),
+            models.CheckConstraint(
+                condition=models.Q(n_features=1)
+                | models.Q(feature=REST_FEATURE, n_features__gte=1),
+                name="prediction_contrib_rest_sums_features",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.run_id} {self.stock_id} {self.date} {self.horizon}d p{self.position}"
+
+
+class ModelMonitor(models.Model):
+    """Matured-prediction metrics of one run per prediction date and horizon (SPEC §7)."""
+
+    pk = models.CompositePrimaryKey("run_id", "date", "horizon")
+    run = models.ForeignKey(
+        ModelRun, on_delete=models.PROTECT, db_index=False, related_name="monitors"
+    )
+    date = models.DateField()
+    horizon = models.PositiveSmallIntegerField()
+    ic = models.FloatField(null=True, blank=True)
+    coverage = models.FloatField(null=True, blank=True)
+    brier = models.FloatField(null=True, blank=True)
+    direction_acc = models.FloatField(null=True, blank=True)
+    mae = models.FloatField(null=True, blank=True)
+    width = models.FloatField(null=True, blank=True)
+    auc = models.FloatField(null=True, blank=True)
+    n_stocks = models.PositiveIntegerField()
+
+    class Meta:
+        db_table = "model_monitor"
+        constraints = [
+            horizon_known("model_monitor"),
+            models.CheckConstraint(
+                condition=finite("ic", "coverage", "brier", "direction_acc", "mae", "width", "auc"),
+                name="model_monitor_finite",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(ic__gte=-1, ic__lte=1) | models.Q(ic__isnull=True),
+                name="model_monitor_ic_range",
+            ),
+            models.CheckConstraint(
+                condition=unit_interval("coverage", "brier", "direction_acc", "auc"),
+                name="model_monitor_unit_interval",
+            ),
+            models.CheckConstraint(
+                condition=(models.Q(mae__gte=0) | models.Q(mae__isnull=True))
+                & (models.Q(width__gte=0) | models.Q(width__isnull=True)),
+                name="model_monitor_spread_gte_0",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.run_id} {self.date} {self.horizon}d"
+
+
+class MetricGrain(models.TextChoices):
+    TOTAL = "total", "全期"
+    FOLD = "fold", "每摺"
+    YEAR = "year", "每年"
+    MONTH = "month", "每月"
+
+
+class BacktestMetric(models.Model):
+    """One walk-forward metric of a run's model over a period, optionally for a segment."""
+
+    run_key = models.CharField(max_length=64)
+    model_type = models.CharField(max_length=32)
+    objective = models.CharField(max_length=16, choices=ModelObjective.choices)
+    horizon = models.PositiveSmallIntegerField()
+    metric = models.CharField(max_length=32)
+    grain = models.CharField(max_length=8, choices=MetricGrain.choices)
+    period_start = models.DateField()
+    period_end = models.DateField()
+    segment = models.CharField(max_length=32, blank=True, default="")
+    value = models.FloatField(null=True, blank=True)
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        db_table = "backtest_metric"
+        constraints = [
+            models.UniqueConstraint(
+                fields=[
+                    "run_key",
+                    "model_type",
+                    "objective",
+                    "horizon",
+                    "metric",
+                    "grain",
+                    "period_start",
+                    "period_end",
+                    "segment",
+                ],
+                name="backtest_metric_key",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(objective__in=ModelObjective.values),
+                name="backtest_metric_objective_known",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(grain__in=MetricGrain.values),
+                name="backtest_metric_grain_known",
+            ),
+            horizon_known("backtest_metric"),
+            models.CheckConstraint(
+                condition=models.Q(period_start__lte=models.F("period_end")),
+                name="backtest_metric_period_ordered",
+            ),
+            models.CheckConstraint(condition=finite("value"), name="backtest_metric_finite"),
+            models.CheckConstraint(
+                condition=models.Q(
+                    run_key__regex=r"\S", model_type__regex=r"\S", metric__regex=r"\S"
+                ),
+                name="backtest_metric_names_present",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.run_key} {self.model_type} {self.metric} {self.grain} {self.period_start}"
