@@ -18,7 +18,8 @@ from apps.market.models import MonthlyRevenue
 ORIGINS = {0: "國內", 1: "國外"}
 TITLE = re.compile(r"<b>\s*(\S+?)公司(\d{2,3})年(\d{1,2})月份\(累計與當月\)營業收入統計表\s*</b>")
 NO_FILINGS = "查無資料"
-THOUSANDS_NOTE = "單位：千元"
+THOUSANDS = "千元"
+UNIT = re.compile(r"單位：([^<]*)<")
 CODE_HEADER = "公司代號"
 THIS_MONTH, LAST_MONTH, LAST_YEAR = "當月營收", "上月營收", "去年當月營收"
 FIGURES = (THIS_MONTH, LAST_MONTH, LAST_YEAR)
@@ -60,9 +61,13 @@ def parse_revenue_page(page: str, market: str, origin: int, period: str) -> dict
         if NO_FILINGS in page:
             return {}
         raise SchemaChangedError(f"MOPS t21sc03 {market} {period} has no revenue table")
-    for note in (THOUSANDS_NOTE, f"全部{ORIGINS[origin]}{label}公司合計"):
-        if note not in page:
-            raise SchemaChangedError(f"MOPS t21sc03 {market} {period} lacks {note}")
+    units = set(UNIT.findall(page))
+    if units != {THOUSANDS}:
+        raise SchemaChangedError(f"MOPS t21sc03 {market} {period} has the units {sorted(units)}")
+    total = f"全部{ORIGINS[origin]}{label}公司合計"
+    last = [cells for _, cells in parser.rows if cells][-1]
+    if last[0] != total:
+        raise SchemaChangedError(f"MOPS t21sc03 {market} {period} does not end with {total}")
     return _companies(parser.rows, f"{market} {period}")
 
 

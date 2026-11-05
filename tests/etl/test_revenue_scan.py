@@ -76,7 +76,7 @@ def test_a_domestic_page_gives_each_filer_in_thousands(
 def test_a_foreign_page_has_its_own_total(page: Callable[[str, int, int], str]) -> None:
     found = parse_revenue_page(page("sii", 9, 1), "sii", 1, "2026-09")
     assert found == {"1256": (561575, 648858, 419697), "1340": (6390, 7115, 2859)}
-    with pytest.raises(SchemaChangedError, match="lacks 全部國內上市公司合計"):
+    with pytest.raises(SchemaChangedError, match="does not end with 全部國內上市公司合計"):
         parse_revenue_page(page("sii", 9, 1), "sii", 0, "2026-09")
 
 
@@ -98,7 +98,8 @@ def test_a_page_of_another_market_or_month_fails(
 @pytest.mark.parametrize(
     ("old", "new", "count", "message"),
     [
-        ("單位：千元", "單位：元", -1, "lacks 單位：千元"),
+        ("單位：千元", "單位：元", -1, r"has the units \['元'\]"),
+        ("單位：千元", "單位：元", 1, r"has the units \['元', '千元'\]"),
         ("<th class=tt>去年當月營收</th>", "<th class=tt>去年營收</th>", 1, "lacks 去年當月營收"),
         ("公司<br>代號", "代號", 1, "lists 1101 outside a revenue table"),
         ("14,321,556", "14,321.556", 1, "1101 has the amount"),
@@ -122,6 +123,13 @@ def test_a_company_row_in_a_table_without_a_header_fails(
     text = page("sii", 9, 0).replace(closing, closing + stray, 1)
     with pytest.raises(SchemaChangedError, match="lists 9999 outside a revenue table"):
         parse_revenue_page(text, "sii", 0, "2026-09")
+
+
+def test_a_page_cut_before_its_total_fails(page: Callable[[str, int, int], str]) -> None:
+    text = page("sii", 9, 0)
+    cut = text[: text.rindex("<table  width=100%")] + "<!--全部國內上市公司合計--></body></html>"
+    with pytest.raises(SchemaChangedError, match="does not end with 全部國內上市公司合計"):
+        parse_revenue_page(cut, "sii", 0, "2026-09")
 
 
 def test_a_company_listed_twice_fails(page: Callable[[str, int, int], str]) -> None:
@@ -293,6 +301,7 @@ def test_a_market_without_filers_past_the_deadline_fails(
     with pytest.raises(SchemaChangedError, match="otc 2026-10 came back empty"):
         scan_at(adapter, "2026-11-16 19:00:00")
     assert not MonthlyRevenue.objects.exists()
+    assert RawMops.objects.filter(dataset=REVENUE_SCAN).count() == len(PAGES)
 
 
 @pytest.mark.django_db
@@ -335,6 +344,39 @@ def test_a_company_in_both_markets_fails(
     with pytest.raises(SchemaChangedError, match="lists a company twice"):
         scan_at(adapter, "2026-11-05 19:00:00")
     assert not MonthlyRevenue.objects.exists()
+    assert RawMops.objects.filter(dataset=REVENUE_SCAN).count() == len(PAGES) - 1
+
+
+@pytest.mark.django_db
+@responses.activate
+def test_a_broken_page_is_kept_as_raw_before_failing(
+    adapter: MopsAdapter, body: Callable[[str, int, int], bytes]
+) -> None:
+    for market, origin in PAGES:
+        content = body(market, 10, origin)
+        if (market, origin) == ("otc", 0):
+            content = content.replace("千元".encode("cp950"), "元".encode("cp950"))
+        serve(market, 10, origin, content)
+    with pytest.raises(SchemaChangedError, match="has the units"):
+        scan_at(adapter, "2026-11-05 19:00:00")
+    kept = RawMops.objects.filter(dataset=REVENUE_SCAN)
+    assert sorted(row.request_params["market"] for row in kept) == ["otc", "sii", "sii"]
+
+
+@pytest.mark.django_db
+@responses.activate
+def test_a_company_on_both_pages_of_a_market_fails(
+    adapter: MopsAdapter, body: Callable[[str, int, int], bytes]
+) -> None:
+    for market, origin in PAGES:
+        content = body(market, 10, origin)
+        if (market, origin) == ("sii", 1):
+            content = content.replace(b">1256<", b">1414<")
+        serve(market, 10, origin, content)
+    with pytest.raises(SchemaChangedError, match="lists a company twice"):
+        scan_at(adapter, "2026-11-05 19:00:00")
+    assert not MonthlyRevenue.objects.exists()
+    assert RawMops.objects.filter(dataset=REVENUE_SCAN).count() == 2
 
 
 @pytest.mark.django_db
