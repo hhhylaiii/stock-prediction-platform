@@ -180,7 +180,7 @@
       .filter(row => row && (state.mkt === 'all' || row.market === state.mkt) && (!q || row.stock_id.toLowerCase().startsWith(q) || (row.name || '').toLowerCase().includes(q)))
       .sort((a, b) => (a.rank === null) - (b.rank === null) || a.rank - b.rank);
     const latest = entries.filter(entry => entry.date).sort((a, b) => (a.date < b.date) - (a.date > b.date))[0];
-    return { rows: rows, meta: latest ? { date: latest.date, universe: latest.universe, models: latest.models, degraded: latest.degraded } : {} };
+    return { rows: rows, meta: latest ? { date: latest.date, universe: latest.universe, models: latest.models, degraded: latest.degraded, interval_alert: latest.interval_alert } : {} };
   }
 
   function emptyHtml(meta) {

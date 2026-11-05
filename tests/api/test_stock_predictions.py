@@ -92,6 +92,7 @@ def test_a_degraded_model_is_named_per_horizon(client: Client, runs: Runs) -> No
 
     assert entries[20]["degraded"] == ["return", "interval"]
     assert entries[20]["prediction"]["interval_source"] == "volatility"
+    assert entries[20]["interval_alert"] is True
     assert entries[5]["degraded"] == []
 
 
@@ -165,3 +166,4 @@ def test_a_band_degraded_after_the_prediction_day_still_shows(client: Client, ru
 
     assert entries[20]["degraded"] == ["return", "interval"]
     assert entries[20]["prediction"]["interval_source"] == "quantile"
+    assert (entries[20]["interval_alert"], entries[5]["interval_alert"]) == (False, False)

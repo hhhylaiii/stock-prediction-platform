@@ -126,7 +126,9 @@ def test_a_missing_prediction_moves_the_next_pick_back(client: Client, history: 
     assert rows[1]["date"] == SESSIONS[SESSIONS.index(previous) - 20].isoformat()
 
 
-def test_each_date_uses_the_run_that_served_it(client: Client, history: ModelRun) -> None:
+def test_each_date_uses_the_run_that_served_it(
+    client: Client, history: ModelRun, caplog: pytest.LogCaptureFixture
+) -> None:
     old = serving("quantile-old", "quantile", status="retired")
     newer = serving("quantile-cand", "quantile", status="candidate")
     wide = {"q10": -0.5, "q50": 0.3, "q90": 0.9, "ret_pred": 0.3}
@@ -144,6 +146,8 @@ def test_each_date_uses_the_run_that_served_it(client: Client, history: ModelRun
         "quantile-old",
         0.3,
     )
+    assert rows[-1]["interval_source"] == "quantile"
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
 
 
 def test_a_degraded_quantile_run_is_judged_on_its_volatility_band(
@@ -320,7 +324,7 @@ def test_the_band_is_set_aside_only_from_the_degraded_on_day(
     assert rows[2]["interval"] == {"ret_low": -0.05, "ret_high": 0.08}
 
 
-@pytest.mark.parametrize("written", ["soon", "20261001", 20261001])
+@pytest.mark.parametrize("written", ["soon", "20261001", 20261001, "2026-02-30"])
 def test_an_unreadable_degraded_on_falls_back_to_every_day(
     client: Client, history: ModelRun, caplog: pytest.LogCaptureFixture, written: object
 ) -> None:
