@@ -85,7 +85,14 @@ def read_partitions(start: date, end: date, directory: Path) -> pd.DataFrame:
     for low, high in years(start, end):
         path = existing_partition(directory, low.year)
         dated = [("date", ">=", low), ("date", "<=", high)]
-        parts.append(pq.read_table(path, filters=dated).to_pandas())
+        part = pq.read_table(path, filters=dated).to_pandas()
+        missing = [name for name in FRAME_COLUMNS if name not in part]
+        if missing:
+            raise ValueError(
+                f"feature partition for {low.year} in {directory} lacks {', '.join(missing)}; "
+                f"run build_features --start {low.year}-01-01 --end {low.year}-12-31"
+            )
+        parts.append(part)
     return _typed(parts)
 
 
