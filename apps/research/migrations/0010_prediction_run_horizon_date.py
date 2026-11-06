@@ -3,7 +3,7 @@ from django.db import migrations, models
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("research", "0008_featuredaily_fund_rev_yoy_q"),
+        ("research", "0009_featuredaily_second_batch"),
     ]
 
     operations = [
