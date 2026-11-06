@@ -6,6 +6,7 @@ import pytest
 
 from apps.market.calendar import TradingDays
 from apps.research.phase3_report import (
+    accepted,
     fill_counts,
     fill_table,
     missing_counts,
@@ -168,18 +169,20 @@ def test_statement_coverage_lists_fundamental_features_left_unjudged() -> None:
 
 def test_render_lists_only_flagged_gaps_and_marks_incomplete_months() -> None:
     before = pd.DataFrame(
-        {"current": [0.004, 0.0], "delisted": [0.209, 0.0], "ratio": [55.3, NAN]},
-        index=["size_log_mcap", "tech_ret_1d"],
-    ).assign(rows_current=100, rows_delisted=10, gap_pp=[20.5, 0.0], flag=[True, False])
+        {"current": [0.004, 0.0, 0.1], "delisted": [0.209, 0.0, 0.2], "ratio": [55.3, NAN, 2.0]},
+        index=["size_log_mcap", "tech_ret_1d", "chip_foreign_hold_pct"],
+    ).assign(
+        rows_current=100, rows_delisted=10, gap_pp=[20.5, 0.0, 10.0], flag=[True, False, False]
+    )
     after = missing_table(
         pd.DataFrame(
             {
-                "missing_current": [0, 0],
-                "missing_delisted": [1, 0],
-                "rows_current": [100, 100],
-                "rows_delisted": [10, 10],
+                "missing_current": [0, 0, 10],
+                "missing_delisted": [1, 0, 2],
+                "rows_current": [100, 100, 100],
+                "rows_delisted": [10, 10, 10],
             },
-            index=["size_log_mcap", "tech_ret_1d"],
+            index=["size_log_mcap", "tech_ret_1d", "chip_foreign_hold_pct"],
         )
     )
     fills = fill_table(
@@ -214,8 +217,10 @@ def test_render_lists_only_flagged_gaps_and_marks_incomplete_months() -> None:
         top=["fund_ep"],
     )
 
-    assert "| size_log_mcap | 20.9%／0.4% | 10.0%／0.0% |" in text
+    assert "| size_log_mcap | 20.9%／0.4% | 10.0%／0.0% | — | 10.0 | 否 |" in text
+    assert "| chip_foreign_hold_pct | 20.0%／10.0% | 20.0%／10.0% | 2.00 | 10.0 | 否 |" in text
     assert "| tech_ret_1d |" not in text
+    assert "補後未達驗收 2 個：size_log_mcap、chip_foreign_hold_pct。" in text
     assert "| fund_rev_yoy | fund_rev_yoy_q | 50.0%／10.0% | 5.00 | 是 |" in text
     assert "| fund_rev_mom | 2016-01–2016-02 |" in text
     assert "| fund_roe_ttm | 30／30 | 30.0% | 不判定 |" in text
@@ -233,3 +238,22 @@ def test_strongest_ranks_features_by_their_largest_absolute_ic() -> None:
 
     assert strongest(ic, 2) == ["tech_ret_1d", "size_log_mcap"]
     assert strongest(ic, 10)[-1] == "chip_big_holder_pct_chg_1w"
+
+
+def test_accepted_takes_a_small_ratio_or_a_small_gap() -> None:
+    table = pd.DataFrame(
+        {
+            "ratio": [1.5, 1.6, 20.0, NAN, NAN, 1.6],
+            "gap_pp": [30.0, 5.0, 1.0, 0.0, 6.0, 5.1],
+        },
+        index=["ratio_edge", "gap_edge", "small_gap", "none_missing", "only_delisted", "both_over"],
+    )
+
+    assert accepted(table).to_dict() == {
+        "ratio_edge": True,
+        "gap_edge": True,
+        "small_gap": True,
+        "none_missing": True,
+        "only_delisted": False,
+        "both_over": False,
+    }

@@ -10,6 +10,8 @@ from apps.research.metrics.ic import daily_rank_ic
 
 FLAG_RATIO = 3.0
 FLAG_GAP = 0.20
+ACCEPT_RATIO = 1.5
+ACCEPT_GAP = 0.05
 MONTHLY_TOP = 10
 FUNDAMENTAL_PREFIX = "fund_"
 TABLE_COLUMNS = ["current", "delisted", "rows_current", "rows_delisted", "ratio", "gap_pp", "flag"]
@@ -65,6 +67,11 @@ def missing_table(counts: pd.DataFrame) -> pd.DataFrame:
         }
     )
     return table[TABLE_COLUMNS]
+
+
+def accepted(table: pd.DataFrame) -> pd.Series:
+    """Features meeting the 11/07 bar: ratio at most ACCEPT_RATIO or gap at most ACCEPT_GAP."""
+    return (table["ratio"] <= ACCEPT_RATIO) | (table["gap_pp"] <= ACCEPT_GAP * 100)
 
 
 def fill_counts(
@@ -167,10 +174,13 @@ def _yes(flag: bool) -> str:
 
 def _gap_rows(before: pd.DataFrame, after: pd.DataFrame) -> list[str]:
     names = [*after.index, *(name for name in before.index if name not in after.index)]
+    passed = accepted(after)
     flagged = [
         name
         for name in names
-        if bool(before["flag"].get(name, False)) or bool(after["flag"].get(name, False))
+        if bool(before["flag"].get(name, False))
+        or bool(after["flag"].get(name, False))
+        or not bool(passed.get(name, True))
     ]
     rows = []
     for name in flagged:
@@ -181,10 +191,15 @@ def _gap_rows(before: pd.DataFrame, after: pd.DataFrame) -> list[str]:
         tail = (
             "— | — | —"
             if new is None
-            else f"{_num(new['ratio'], 2)} | {_num(new['gap_pp'], 1)} | {_yes(bool(new['flag']))}"
+            else f"{_num(new['ratio'], 2)} | {_num(new['gap_pp'], 1)} | {_yes(bool(passed[name]))}"
         )
         rows.append(f"| {name} | {was} | {now} | {tail} |")
     return rows
+
+
+def _failed(after: pd.DataFrame) -> str:
+    names = [str(name) for name, ok in accepted(after).items() if not ok]
+    return f"補後未達驗收 {len(names)} 個：{'、'.join(names)}。" if names else "補後全部達到驗收。"
 
 
 def _monthly_rows(monthly: pd.DataFrame, top: Sequence[str]) -> list[str]:
@@ -246,10 +261,14 @@ def render(
         "",
         "## 缺值：之後下市 vs 現存（K17 補前、補後）",
         "",
-        f"只列補前或補後任一超過門檻的特徵：比值 > {FLAG_RATIO:g}，"
-        f"或差距 > {FLAG_GAP * 100:g} 個百分點。完整表見附錄 CSV。",
+        f"驗收：補後比值 ≤ {ACCEPT_RATIO:g}，或差距 ≤ {ACCEPT_GAP * 100:g} 個百分點。"
+        f"{_failed(after)}",
         "",
-        "| 特徵 | 補前 下市／現存 | 補後 下市／現存 | 補後比值 | 補後差距（百分點） | 補後超標 |",
+        f"只列補前或補後超過列表門檻（比值 > {FLAG_RATIO:g}，"
+        f"或差距 > {FLAG_GAP * 100:g} 個百分點），或補後未達驗收的特徵。完整表見附錄 CSV。",
+        "",
+        "| 特徵 | 補前 下市／現存 | 補後 下市／現存 | 補後比值 | 補後差距（百分點） "
+        "| 補後達到驗收 |",
         "| --- | --- | --- | --- | --- | --- |",
         *_gap_rows(before, after),
         "",
