@@ -1,6 +1,6 @@
 # 台股預測平台 開發規格書
 
-> 匯出自 claude.ai 規格書《台股預測平台 開發規格書》rev 112（2026-11-01 匯出），原文：https://claude.ai/artifact/Nw8QAWMeFz5mB4SNVq8Twp 。規格以原文為準；原文改版時重新匯出覆蓋本檔。圖未保留，以表格與文字為準。
+> 本檔是規格的唯一來源。最初匯出自 claude.ai 規格書《台股預測平台 開發規格書》rev 112（2026-11-01 匯出），原文：https://claude.ai/artifact/Nw8QAWMeFz5mB4SNVq8Twp ，保留為歷史版本，之後不再回寫。圖未保留，以表格與文字為準。
 
 Oct 29, 2026 · @Owen Lai
 
