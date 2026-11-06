@@ -21,6 +21,7 @@ from apps.research.baseline_runs import (
     fold_inputs,
     require_candidates,
 )
+from apps.research.features.store import read_partitions
 from apps.research.features.transforms import MarketBins
 from apps.research.gbdt import (
     BASE_PARAMS,
@@ -47,6 +48,7 @@ from apps.research.prediction_cache import (
     missing_folds,
     save_fold_predictions,
 )
+from apps.research.ranges import years
 from apps.research.rank_model import (
     MODEL_TYPE,
     RANK_LABEL,
@@ -81,7 +83,8 @@ from apps.research.training import load_labels, training_rows
 from apps.research.walkforward import Fold
 
 MODEL = MODEL_TYPE
-RECIPE_VERSION = "3"
+RANK_FIELDS = (RANK_LABEL, "untradable_t1")
+RECIPE_VERSION = "4"
 MAX_ROUNDS = DEFAULT_MAX_ROUNDS
 SCOPE_HORIZONS: dict[str, tuple[int, ...]] = {
     HoldoutScope.RANK: HORIZONS,
@@ -267,12 +270,31 @@ def _run(
     )
 
 
+def rank_fold_inputs(fold: Fold, directory: Path, features: list[str]) -> FoldInputs:
+    """Rank inputs of train_start..test_end as float32, z-scored a yearly partition at a time.
+
+    raw holds the inputs themselves; a day's z-score reads that day only, so years split cleanly.
+    """
+    start, end = fold.train_start, fold.test_end
+    digest = feature_hash(start, end, directory)
+    types = dict.fromkeys(features, "float32")
+    parts = [
+        rank_inputs(read_partitions(low, high, directory), features)[[*ROW_KEYS, *features]].astype(
+            types
+        )
+        for low, high in years(start, end)
+    ]
+    if feature_hash(start, end, directory) != digest:
+        raise RuntimeError("feature partitions changed while reading; rerun after build_features")
+    return FoldInputs(fold, pd.concat(parts, ignore_index=True), digest, features)
+
+
 def _rank(job: Job) -> FoldFit:
     fold, read, features = job.fold, job.read, job.features
-    inputs = rank_inputs(read.raw, features)
+    inputs = read.raw
     columns, trained = {}, []
     for horizon in HORIZONS:
-        labels = load_labels(fold.train_start, fold.eval_end, horizon)
+        labels = load_labels(fold.train_start, fold.eval_end, horizon, RANK_FIELDS)
         boosted = fit_rank(
             inputs, labels, fold, features, job.seed, MAX_ROUNDS, job.bags, job.variant
         )
@@ -443,7 +465,10 @@ def run_fold(
     require_candidates(run_key, fold)
     fold_path(run_key, MODEL, fold.index).unlink(missing_ok=True)
     labels_digest = label_digest(scope, fold)
-    read = fold_inputs(fold, fold.train_start, fold.test_end, directory, features)
+    if scope == HoldoutScope.RANK:
+        read = rank_fold_inputs(fold, directory, features)
+    else:
+        read = fold_inputs(fold, fold.train_start, fold.test_end, directory, features)
     fitted = FITS[scope](Job(fold, run_key, read, features, seed, bags, variant))
     if label_digest(scope, fold) != labels_digest:
         raise RuntimeError(f"label_daily changed while fitting fold {fold.index}; run it again")

@@ -73,8 +73,9 @@ def fit_rank(
     lambdarank learns LEVELS integer grades of the rank; every variant stops on the rank itself.
     """
     names = _stock_level(features)
-    window = inputs[inputs["date"].between(fold.train_start, fold.train_end)]
-    rows = training_rows(window, labels, RANK_LABEL)
+    rows = training_rows(
+        inputs[inputs["date"].between(fold.train_start, fold.train_end)], labels, RANK_LABEL
+    )
     label, params, weight = RANK_LABEL, None, None
     if variant.half_life is not None:
         decay = time_decay_weights(rows["date"], fold.train_end, variant.half_life)
