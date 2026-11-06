@@ -9,6 +9,8 @@ from django.core.management.base import CommandError
 
 from apps.market.models import StockMaster
 from apps.research.features.build import FEATURE_COLUMNS
+from apps.research.features.store import existing_partition
+from apps.research.models import ModelRun
 from apps.research.phase3_report import TABLE_COLUMNS
 from tests.research.test_screening import STOCKS, stored
 
@@ -65,8 +67,14 @@ def test_the_report_covers_gaps_fallbacks_and_monthly_ic(stored: Path) -> None:
     assert list(after.index) == FEATURE_COLUMNS
     assert after["rows_delisted"].iloc[0] > 0
     assert after["rows_current"].iloc[0] > after["rows_delisted"].iloc[0]
+    before = pd.read_csv(stored / "appendix" / "missing-before.csv", index_col=0)
+    assert list(before.columns) == TABLE_COLUMNS
+    assert list(before.index) == ["fund_ep"]
     monthly = pd.read_csv(stored / "appendix" / "monthly-ic.csv")
     assert set(monthly["horizon"]) == {5, 20}
+    kept = ModelRun.objects.get(run_id="screen1.screening").feature_list
+    header = next(line for line in text.splitlines() if line.startswith("| 月份 |"))
+    assert set(header.strip("| ").split(" | ")[1:]) <= set(kept)
     fills = pd.read_csv(stored / "appendix" / "fills.csv", index_col=0)
     assert list(fills.index) == ["fund_rev_yoy", "fund_rev_3m_yoy"]
     assert "screen1.screening" in out.getvalue()
@@ -83,3 +91,17 @@ def test_the_report_needs_a_recorded_screening_and_a_complete_before_table(store
 
     with pytest.raises(CommandError, match="lacks delisted"):
         call_command("phase3_report", run_key="screen1", before=str(broken), stdout=StringIO())
+
+
+def test_the_report_refuses_features_rebuilt_after_the_screening(stored: Path) -> None:
+    call_command("ic_report", run_key="screen1", output=str(stored / "ic.md"), stdout=StringIO())
+    partition = existing_partition(stored / "features", 2016)
+    partition.write_bytes(partition.read_bytes() + b"\0")
+
+    with pytest.raises(CommandError, match="features changed since the screening"):
+        call_command(
+            "phase3_report",
+            run_key="screen1",
+            before=str(before_table(stored / "before.csv")),
+            stdout=StringIO(),
+        )

@@ -29,7 +29,7 @@ from apps.research.phase3_report import (
     statement_coverage,
     strongest,
 )
-from apps.research.runs import SCREENING_MODEL
+from apps.research.runs import SCREENING_MODEL, feature_hash
 from apps.research.screening import RANK_LABEL
 from apps.research.training import load_labels, training_rows
 
@@ -43,6 +43,12 @@ def _screening(run_key: str) -> ModelRun:
     if run is None:
         raise CommandError(f"no screening run {run_key}.screening; run ic_report first")
     return run
+
+
+def _unchanged(run: ModelRun) -> None:
+    digest = feature_hash(run.train_start, run.train_end, settings.FEATURE_PARQUET_DIR)
+    if digest != run.feature_hash:
+        raise CommandError("features changed since the screening; run ic_report again")
 
 
 def _before(path: Path) -> pd.DataFrame:
@@ -76,6 +82,11 @@ def _gaps(start: date, end: date, delisted: pd.Series) -> tuple[pd.DataFrame, pd
     return missing_table(missing), fill_table(filled)
 
 
+def _kept(run: ModelRun) -> dict[str, dict[str, float | None]]:
+    kept = set(run.feature_list)
+    return {name: ic for name, ic in run.params["ic"].items() if name in kept}
+
+
 def _monthly(run: ModelRun, calendar: TradingDays) -> pd.DataFrame:
     names = list(run.params["ic"])
     features = read_partitions(run.train_start, run.train_end, settings.FEATURE_PARQUET_DIR)
@@ -106,6 +117,7 @@ class Command(BaseCommand):
         if start > end:
             raise CommandError(f"--start {start} is after --end {end}")
         try:
+            _unchanged(run)
             after, fills = _gaps(start, end, _delisted())
             monthly = _monthly(run, TradingDays.from_db())
         except (ValueError, FileNotFoundError) as error:
@@ -114,6 +126,7 @@ class Command(BaseCommand):
         output = Path(options["output"]) if options["output"] else base / REPORT
         appendix = Path(options["appendix"]) if options["appendix"] else base / APPENDIX
         appendix.mkdir(parents=True, exist_ok=True)
+        before.rename_axis("feature").to_csv(appendix / "missing-before.csv")
         after.rename_axis("feature").to_csv(appendix / "missing-after.csv")
         fills.rename_axis("feature").to_csv(appendix / "fills.csv")
         monthly.to_csv(appendix / "monthly-ic.csv", index=False)
@@ -132,7 +145,7 @@ class Command(BaseCommand):
             fills=(fills, FALLBACKS),
             masked=MASKED_MONTHS,
             monthly=monthly,
-            top=strongest(run.params["ic"], MONTHLY_TOP),
+            top=strongest(_kept(run), MONTHLY_TOP),
         )
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(text, encoding="utf-8")
