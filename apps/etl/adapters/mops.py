@@ -72,7 +72,7 @@ SCANS = frozenset({STATEMENT_SCAN, REVENUE_SCAN})
 REVENUE_PATH = "/nas/t21"
 SUMMARY_PATH = "/mops/web/ajax_"
 VIEWER_PATH = "/server-java/t164sb01"
-NOTES = ("incomplete", "stock_id", "absent", "stored_absent", "no_revenue")
+NOTES = ("incomplete", "stock_id", "absent", "stored_absent", "no_revenue", "stored_no_revenue")
 SUMMARY_ENCODING = "utf-8"
 EXPORT_NAME = re.compile(r"name='filename' value='[^']*'")
 LISTING_PATH = "/server-java/t57sb01"
@@ -523,7 +523,8 @@ class MopsAdapter(BaseAdapter):
 
         def page(period: str, kind: str) -> str:
             params, body = self.summaries.viewer(stock_id, int(period[:4]), int(period[-1]), kind)
-            self.save_raw(STATEMENT_VIEWER, params, {"html": body})
+            kept = self.save_raw(STATEMENT_VIEWER, params, {"html": body})
+            RawMops.objects.filter(pk=kept.pk).update(fetched_at=timezone.now())
             return body
 
         frame = viewer_frame(stock_id, periods, stored, page, SCAN_COLUMNS)

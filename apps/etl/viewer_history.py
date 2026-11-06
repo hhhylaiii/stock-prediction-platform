@@ -53,6 +53,11 @@ def viewer_frame(
     frame.attrs["no_revenue"] = [
         period for period in missing if _lacks(reports.get(period), INCOME, REVENUE)
     ]
+    frame.attrs["stored_no_revenue"] = [
+        period
+        for period in periods
+        if period in stored and _lacks(reports.get(period), INCOME, REVENUE)
+    ]
     return frame
 
 
