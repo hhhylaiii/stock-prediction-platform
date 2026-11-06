@@ -6,7 +6,7 @@ x-app: &app
   env_file:
     - path: .env
       required: false
-  environment:
+  environment: &app-env
     DJANGO_SETTINGS_MODULE: ${DJANGO_SETTINGS_MODULE:-config.settings.dev}
     DATABASE_URL: postgres://${POSTGRES_USER:-twp}:${POSTGRES_PASSWORD:-twp}@db:5432/${POSTGRES_DB:-twp}
     CELERY_BROKER_URL: redis://redis:6379/0
@@ -33,6 +33,15 @@ services:
   worker:
     <<: *app
     command: ["celery", "-A", "config", "worker", "--beat", "--loglevel=${LOG_LEVEL:-INFO}", "--schedule=/tmp/celerybeat-schedule"]
+    environment:
+      <<: *app-env
+      FEATURE_PARQUET_DIR: /app/artifacts/features
+      MODEL_DIR: /app/artifacts/models
+      RESEARCH_CACHE_DIR: /app/artifacts/predictions
+    volumes:
+      - ./artifacts/features:/app/artifacts/features
+      - ./artifacts/models:/app/artifacts/models
+      - ./artifacts/predictions:/app/artifacts/predictions
     healthcheck:
       test: ["CMD-SHELL", "celery -A config inspect ping -d celery@$$HOSTNAME --timeout 5"]
       interval: 30s
