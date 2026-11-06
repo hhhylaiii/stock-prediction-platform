@@ -138,6 +138,26 @@ def test_an_individual_report_on_the_full_page_is_an_individual_row(
     assert found[INCOME]["營業毛利（毛損）"] == 145_617
 
 
+def test_a_first_quarter_flow_may_be_headed_as_the_quarter(page: Callable[[str], str]) -> None:
+    found = parse_viewer(page("t164sb01_2847_2015_1_C.html"), "2847", "2015-Q1")
+    assert found is not None
+    assert found[INCOME]["淨收益"] is not None
+    assert found[CASH_FLOW][CFO] is not None
+
+
+def test_a_later_quarter_headed_as_the_quarter_alone_is_refused(
+    page: Callable[[str], str],
+) -> None:
+    text = (
+        page("t164sb01_2847_2015_1_C.html")
+        .replace("104年第1季", "104年第2季")
+        .replace("2015年03月31日", "2015年06月30日")
+        .replace("2015年第1季", "2015年第2季")
+    )
+    with pytest.raises(SchemaChangedError, match="綜合損益表 has no column for 2015-Q2"):
+        parse_viewer(text, "2847", "2015-Q2")
+
+
 def test_another_company_or_quarter_is_refused(page: Callable[[str], str]) -> None:
     with pytest.raises(SchemaChangedError, match="is not 6212"):
         parse_viewer(page("t164sb01_6211_2013_1_C.html"), "6212", "2013-Q1")
