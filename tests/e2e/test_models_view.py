@@ -101,6 +101,7 @@ def test_the_serving_models_are_listed_with_their_scores(
     page: Page, live_server: LiveServer, scored: Seed
 ) -> None:
     ModelRun.objects.filter(pk="prob-h20").update(version=XSS_VERSION, status="degraded")
+    ModelRun.objects.filter(pk="reg-h5").update(model_type=XSS_VERSION)
 
     page.goto(f"{live_server.url}/#models")
 
@@ -114,6 +115,7 @@ def test_the_serving_models_are_listed_with_their_scores(
     expect(rows.nth(1)).to_contain_text("5 日")
     expect(rows.nth(1)).to_contain_text("研究期成績尚未產出")
     expect(rows.nth(2).locator("div").last).to_have_text("—")
+    expect(rows.nth(2)).to_contain_text(XSS_VERSION)
     expect(rows.nth(3)).to_contain_text("報酬區間")
     expect(rows.nth(2)).to_contain_text("MAE 5.8%，方向準確率 54.0%")
     expect(rows.nth(3)).to_contain_text("覆蓋率 79.0%，平均寬度 13.1 個百分點")
@@ -122,8 +124,11 @@ def test_the_serving_models_are_listed_with_their_scores(
     expect(rows.nth(5)).to_contain_text("降級中")
     expect(rows.nth(5).locator(".version")).to_have_text(XSS_VERSION)
     expect(page.locator("#model-table img")).to_have_count(0)
-    expect(page.locator("#model-rules")).to_contain_text("近 6 個月")
-    expect(page.locator("#model-rules")).to_contain_text("覆蓋率不在 70%–90%")
+    rules = page.locator("#model-rules")
+    expect(rules).to_contain_text("近 6 個月")
+    expect(rules).to_contain_text("換版後接著累積")
+    expect(rules).to_contain_text("報酬區間模型 20 日覆蓋率不在 70%–90%")
+    expect(rules).to_contain_text("上漲機率模型 20 日 Brier 高於 baseline")
 
 
 BARS_INSIDE_PLOT = """() => {
@@ -197,15 +202,23 @@ def test_a_slot_without_matured_days_says_so(
     expect(page.locator("#model-table .trow").nth(4)).to_contain_text("尚無到期的評估日")
 
 
-def test_month_labels_are_escaped(page: Page, live_server: LiveServer, scored: Seed) -> None:
+def test_month_labels_and_model_names_are_escaped(
+    page: Page, live_server: LiveServer, scored: Seed
+) -> None:
+    name = '"><img src=x onerror=window.__x=1>'
+
     def tampered(route: Route) -> None:
         response = route.fetch()
         body = response.json()
         body["data"][0]["month"] = "2023-<img src=x onerror=window.__x=1>"
+        body["meta"]["model_type"] = name
         route.fulfill(response=response, body=json.dumps(body))
 
     page.route("**/api/models/ic-monthly?*", tampered)
     page.goto(f"{live_server.url}/#models")
 
     expect(page.locator("#ic-chart rect.bar-model")).to_have_count(24)
-    expect(page.locator("#ic-chart img")).to_have_count(0)
+    expect(page.locator("#ic-legend")).to_contain_text(name)
+    expect(page.locator("#ic-chart img, #ic-legend img")).to_have_count(0)
+    assert name in (page.locator("#ic-chart svg").get_attribute("aria-label") or "")
+    assert page.evaluate("window.__x") is None
