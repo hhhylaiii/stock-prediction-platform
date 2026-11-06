@@ -17,7 +17,7 @@
 - 指令：`manage.py measure_api --repeat 20`。在同一個 process 裡用 Django 的 test client 打每個端點：先打一次暖機，不計入；再連打 20 次，記中位數、p95、最大值。
 - 量到的時間包含 view、查詢與序列化，不含網路與 gunicorn。
 - 環境：本機 macOS、Docker 的 PostgreSQL 16。twp 那一輪是在 2026-11-05 15:54 量的，正好在 ETL 時段內。
-- 表一以 head `44f8b5f` 量測（含 #64、#65）；表二與截圖在加深 seed 之後重量（含 #68）。
+- 表一在本 PR 的 commit「fix: keep negative monthly ic bars inside the chart」上量測，當時已含 #64、#65。表二與截圖在加深 seed 之後重量，當時已含 #68。
 
 twp 那一輪用唯讀交易連線，任何寫入都會被資料庫拒絕。throttle 每個 process 各自計數，預設 300/min；`--repeat 20` 共 231 次，用不到調高，調高只是讓 `--repeat` 可以設得更大。指令會記下每一次呼叫的狀態碼，只要有一次不同，狀態欄就會寫成像 `200/429×3` 的樣子：
 
@@ -26,7 +26,7 @@ DATABASE_URL=<twp 的連線字串> PGOPTIONS='-c default_transaction_read_only=o
   API_THROTTLE_RATE=100000/min uv run python manage.py measure_api --repeat 20
 ```
 
-seed 那一輪與截圖由一支 `slow` 測試產生。沒有設 `ACCEPTANCE_OUT` 時這支測試會略過，CI 不跑：
+seed 那一輪與截圖由一支 `slow` 測試產生。沒有設 `ACCEPTANCE_OUT` 時這支測試會略過，CI 不跑。它會在輸出目錄另寫一份 `seed-timings.md`，表二就是從這份抄來的；這個檔不入庫：
 
 ```bash
 ACCEPTANCE_OUT=docs/reports/phase5 uv run pytest tests/e2e/test_acceptance_capture.py
@@ -64,7 +64,7 @@ seed 的內容是 e2e 的基本資料再放大：
 
 - 1,842 檔股票；6 個上線 run（排名 5／20 日、絕對報酬 5 日、分位數、波動率、上漲機率）。
 - 70 個交易日裡，每一天每一檔都有 6 個 run 的預測，約 77 萬列，相當於上線三個多月沒換版。
-- 2330 有 69 個交易日的 label。
+- 2330 的 label：5 日有 65 個交易日，20 日有 50 個交易日（最後 5、20 天還沒到期）。
 - 每個 run 有 69 天的監控。
 - 研究期有 26 個月的月 IC，2330 有特徵貢獻。
 
@@ -78,7 +78,7 @@ seed 的內容是 e2e 的基本資料再放大：
 | `/api/models` | seed | 200 | 112.7 | 127.3 | 141.8 |
 | `/api/models/ic-monthly` | seed | 200 | 32.7 | 33.9 | 34.6 |
 
-表二列出會讀預測表的端點。同一輪的其他端點中位數都在 4 ms 內：stocks、prices、etl/runs、data-quality。測試另外斷言 11 個端點都是 200，p95 都在 500 ms 內。各次執行的數字會有小幅變動。
+表二列出會讀預測表的端點。同一輪的其他端點中位數都在 4 ms 內：stocks、prices、etl/runs、data-quality。測試另外斷言 11 個端點都是 200，p95 都在 500 ms 內。各次執行的數字會有變動：中位數大致穩定，最大值受單次延遲影響，兩次執行之間可能差到一倍。
 
 ## 已知風險
 
@@ -87,7 +87,7 @@ seed 的內容是 e2e 的基本資料再放大：
 - `prediction` 表沒有以 `run_id` 開頭、接著 `date` 的 index，成本會跟著服務中 run 的預測天數成長。
 - seed 只有最新一天時，`/api/models` 中位數 18 ms；加深到 70 天後是 113 ms。
 - 正常每月換版時，服務中的 run 只有一個月左右的預測。但新版沒過健全性檢查時會沿用舊版，那時天數會一直累積。
-- 加 index（例如 `(run_id, horizon, date)`）需要 migration，已回報協調決定。
+- `(run_id, horizon, date)` 的 index 在 #76，合併後重量表二。
 
 ## 三個視圖（seed 資料）
 
