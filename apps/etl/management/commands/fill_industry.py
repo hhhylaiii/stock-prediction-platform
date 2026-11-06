@@ -4,6 +4,7 @@ from argparse import ArgumentParser
 from typing import Any
 
 from django.core.management.base import BaseCommand, CommandError
+from django.utils import timezone
 
 from apps.etl.adapters import limiter_for
 from apps.etl.adapters.tpex import TpexAdapter
@@ -29,10 +30,12 @@ class Command(BaseCommand):
     def handle(self, *args: Any, **options: Any) -> None:
         start = required_date(options["start"], "--start")
         end = required_date(options["end"], "--end")
+        if end > timezone.localdate():
+            raise CommandError(f"--end {end} is after today")
         calendar = TradingDays.from_db()
         days = sample_days(calendar, start, end)
         if not days:
             raise CommandError(f"no sessions between {start} and {end}")
         adapter = ADAPTERS[options["source"]](calendar, limiter_for(options["source"]))
-        run = fill_industries(adapter, days)
+        run = fill_industries(adapter, days, since=start)
         self.stdout.write(f"{run.rows} industries filled from {len(days)} sampled days")

@@ -26,6 +26,7 @@ INDUSTRY_CHECK = "industry_fill"
 RAW_DATASET = "industry_quotes"
 INDUSTRY_TYPES = tuple(f"{number:02d}" for number in range(1, 39) if number not in (7, 13))
 QUARTER_ENDS = ((3, 31), (6, 30), (9, 30), (12, 31))
+MARKETS = {"twse": "TWSE", "tpex": "TPEx"}
 TITLED = re.compile(rf"{DAILY_QUOTES_TITLE}\((.+)\)")
 
 
@@ -38,6 +39,7 @@ class Listed(NamedTuple):
 
 def sample_days(calendar: TradingDays, start: date, end: date) -> list[date]:
     """Each quarter's last session in the span, the end standing in for a quarter not over."""
+    end = min(end, calendar.end)
     days: list[date] = []
     for year in range(start.year, end.year + 1):
         for month, day in QUARTER_ENDS:
@@ -56,20 +58,20 @@ def sample_days(calendar: TradingDays, start: date, end: date) -> list[date]:
 def named(listed: Mapping[str, Listed], known: Mapping[str, str]) -> dict[str, list[Any]]:
     """Each type's industry: the page's own name when the master uses it, else the majority's.
 
-    Each entry is [industry, page name, majority industry, its votes, stocks with one].
+    Each entry is [industry or None, page name, majority industry, its votes, stocks with one].
     """
     names = set(known.values())
     found = {}
     for kind, (page, codes) in listed.items():
         votes = Counter(known[code] for code in codes if known.get(code))
         top, count = votes.most_common(1)[0] if votes else (None, 0)
-        chosen = page if page in names else top
-        if chosen is not None:
-            found[kind] = [chosen, page, top, count, sum(votes.values())]
+        found[kind] = [page if page in names else top, page, top, count, sum(votes.values())]
     return found
 
 
-def fill_industries(adapter: TwseAdapter | TpexAdapter, days: Sequence[date]) -> EtlRun:
+def fill_industries(
+    adapter: TwseAdapter | TpexAdapter, days: Sequence[date], since: date | None = None
+) -> EtlRun:
     """Stocks without an industry take the last one they were listed under on the sampled days."""
     if not days:
         raise ValueError("no sampled days to read industries from")
@@ -87,10 +89,13 @@ def fill_industries(adapter: TwseAdapter | TpexAdapter, days: Sequence[date]) ->
             run.checkpoint = {"last_date": day.isoformat(), "seen": seen, "types": types}
             run.save(update_fields=["checkpoint"])
         with transaction.atomic():
-            for code, (industry, *_) in seen.items():
-                StockMaster.objects.filter(stock_id=code, industry="").update(industry=industry)
-            run.rows = len(seen)
-            _log(adapter.source, first, last, types, seen, blank)
+            written = {
+                code: entry
+                for code, entry in seen.items()
+                if StockMaster.objects.filter(stock_id=code, industry="").update(industry=entry[0])
+            }
+            run.rows = len(written)
+            _log(adapter, since or first, last, types, written, blank)
     return run
 
 
@@ -120,9 +125,9 @@ def _seen(
     today = day.isoformat()
     after = dict(seen)
     for kind, (_, codes) in listed.items():
-        if kind not in names:
-            continue
         industry = names[kind][0]
+        if industry is None:
+            continue
         for code in codes:
             if code not in blank:
                 continue
@@ -166,19 +171,28 @@ def _otc_type(adapter: TpexAdapter, day: date, kind: str) -> Listed:
 
 
 def _log(
-    source: str,
-    first: date,
+    adapter: TwseAdapter | TpexAdapter,
+    since: date,
     last: date,
     types: Mapping[str, Mapping[str, list[Any]]],
-    seen: Mapping[str, list[str]],
+    written: Mapping[str, list[str]],
     blank: set[str],
 ) -> None:
-    """Each sampled day's industry per type, the stocks filled and the ones still blank."""
-    alive = StockMaster.objects.filter(Q(delist_date__isnull=True) | Q(delist_date__gte=first))
-    still = set(alive.filter(stock_id__in=blank).values_list("stock_id", flat=True)) - set(seen)
+    """Each sampled day's industry per type, the stocks filled, and this market's still blank."""
+    alive = StockMaster.objects.filter(
+        Q(delist_date__isnull=True) | Q(delist_date__gte=since),
+        market=MARKETS[adapter.source],
+        stock_id__in=blank,
+        industry="",
+    )
     DataQualityLog.objects.create(
         date=last,
         check_name=INDUSTRY_CHECK,
         severity=DataQualityLog.Severity.INFO,
-        detail={"source": source, "types": types, "filled": seen, "unfilled": sorted(still)},
+        detail={
+            "source": adapter.source,
+            "types": types,
+            "filled": written,
+            "unfilled": sorted(alive.values_list("stock_id", flat=True)),
+        },
     )
