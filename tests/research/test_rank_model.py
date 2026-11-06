@@ -8,19 +8,21 @@ import pandas as pd
 import pytest
 
 from apps.etl.upsert import upsert
-from apps.research import gbdt
+from apps.research import gbdt, rank_model
 from apps.research.features.transforms import standardize
 from apps.research.metrics.ic import daily_rank_ic
 from apps.research.models import ModelRun, Prediction
 from apps.research.rank_model import (
     RANK_LABEL,
+    Variant,
     fit_rank,
     prediction_frame,
     rank_features,
     rank_inputs,
 )
 from apps.research.runs import SCREENING_MODEL, RunError, Screened, screened_features
-from apps.research.walkforward import Fold, WalkForwardConfig, generate_folds
+from apps.research.training import training_rows
+from apps.research.walkforward import Fold, WalkForwardConfig, generate_folds, time_decay_weights
 from tests.research.conftest import weekday_calendar
 
 CALENDAR = weekday_calendar(date(2010, 1, 1), date(2014, 12, 31))
@@ -217,3 +219,99 @@ def test_prediction_frame_upserts_into_the_prediction_table() -> None:
 
     stored = Prediction.objects.order_by("stock_id").values_list("stock_id", "rank", "pct")
     assert list(stored) == [("2317", 2, 0.5), ("2330", 1, 1.0), ("9999", None, None)]
+
+
+@pytest.fixture
+def boosts(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """Arguments of every boost call fit_rank makes."""
+    seen: list[dict[str, Any]] = []
+    original = rank_model.boost
+
+    def spy(rows: pd.DataFrame, fold: Fold, features: Any, label: str, *args: Any) -> Any:
+        _seed, params, feval, _rounds, _bags, layout = args
+        seen.append({"rows": rows, "label": label, "params": params, "feval": feval})
+        seen[-1]["layout"] = layout
+        return original(rows, fold, features, label, *args)
+
+    monkeypatch.setattr(rank_model, "boost", spy)
+    return seen
+
+
+def window_inputs() -> tuple[Fold, pd.DataFrame, pd.DataFrame]:
+    window = fold()
+    raw = raw_panel(CALENDAR.shift(window.train_start, -30), window.test_end)
+    return window, rank_inputs(raw, FEATURES), labels_for(raw)
+
+
+def test_variant_defaults_are_the_spec_recipe() -> None:
+    assert Variant() == Variant(every=1, half_life=None, objective="regression")
+    for bad, message in (
+        ({"every": 0}, "every"),
+        ({"half_life": 0.0}, "half_life"),
+        ({"objective": "xendcg"}, "objective"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            Variant(**bad)
+
+
+def test_fit_rank_samples_every_fifth_day_through_the_layout(boosts: list[Any]) -> None:
+    window, inputs, labels = window_inputs()
+
+    fit_rank(inputs, labels, window, FEATURES, 3, 50, variant=Variant(every=5))
+
+    (call,) = boosts
+    assert call["layout"] == gbdt.Layout(every=5)
+    assert call["label"] == RANK_LABEL
+    assert call["params"] is None
+
+
+def test_fit_rank_weights_rows_by_age_with_the_half_life(boosts: list[Any]) -> None:
+    window, inputs, labels = window_inputs()
+
+    fit_rank(inputs, labels, window, FEATURES, 3, 50, variant=Variant(half_life=24.0))
+
+    (call,) = boosts
+    rows, layout = call["rows"], call["layout"]
+    expected = time_decay_weights(rows["date"], window.train_end, 24.0)
+    np.testing.assert_allclose(rows[layout.weight].to_numpy(), expected)
+    assert rows[layout.weight].max() <= 1.0
+
+
+def test_fit_rank_lambdarank_grades_ten_levels_and_stops_on_the_rank_pct(
+    boosts: list[Any],
+) -> None:
+    window, inputs, labels = window_inputs()
+
+    boosted = fit_rank(
+        inputs, labels, window, FEATURES, 3, 200, variant=Variant(objective="lambdarank")
+    )
+
+    (call,) = boosts
+    rows = call["rows"]
+    assert call["params"] == {"objective": "lambdarank"}
+    assert call["layout"] == gbdt.Layout(group=True)
+    grades = np.minimum(np.floor(rows[RANK_LABEL] * 10), 9).astype(int)
+    np.testing.assert_array_equal(rows[call["label"]].to_numpy(), grades.to_numpy())
+    assert set(rows[call["label"]]) <= set(range(10))
+    _, valid = gbdt.split_validation(rows, window)
+    metric = call["feval"](valid["date"], valid[call["label"]])
+    np.testing.assert_array_equal(metric.frame["label"].to_numpy(), valid[RANK_LABEL].to_numpy())
+    test = inputs[inputs["date"].between(window.test_start, window.test_end)]
+    scored = test.assign(score=boosted.booster.predict(test[FEATURES])).merge(labels)
+    assert daily_rank_ic(scored, "score").mean() > 0.3
+
+
+def test_fit_rank_default_matches_the_plain_boost_bit_for_bit() -> None:
+    window, inputs, labels = window_inputs()
+
+    boosted = fit_rank(inputs, labels, window, FEATURES, 3, 120)
+
+    rows = training_rows(
+        inputs[inputs["date"].between(window.train_start, window.train_end)], labels, RANK_LABEL
+    )
+    plain = gbdt.boost(
+        rows, window, FEATURES, RANK_LABEL, 3, feval=gbdt.DailyRankIC, max_rounds=120
+    )
+    test = inputs[inputs["date"].between(window.test_start, window.test_end)][FEATURES]
+    assert boosted.rounds == plain.rounds
+    np.testing.assert_array_equal(boosted.booster.predict(test), plain.booster.predict(test))
