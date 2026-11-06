@@ -8,6 +8,7 @@ from datetime import date, time, timedelta
 from typing import Any, NamedTuple
 
 from celery import Task, shared_task
+from celery.schedules import crontab
 from django.conf import settings
 from django.core.management import call_command
 from django.db import transaction
@@ -19,14 +20,14 @@ from apps.etl.adapters.mops import REVENUE_SCAN, STATEMENT_SCAN
 from apps.etl.alerts import dispatch
 from apps.etl.catchup import catch_up
 from apps.etl.errors import SourceError, SourceNotReadyError
-from apps.etl.master_refresh import refresh_stock_master
+from apps.etl.master_refresh import DAILY_DATASET, refresh_stock_master
 from apps.etl.models import DataQualityLog
 from apps.etl.quality import CHECKS, alerting, run_checks, should_run_prediction
 from apps.etl.ratelimit import RetryableError, ThrottledError
 from apps.etl.revenue_scan import open_months
 from apps.etl.runs import covered_days
 from apps.etl.statement_summary import open_periods
-from apps.market.calendar import TradingDays
+from apps.market.calendar import OutsideCalendarError, TradingDays
 from apps.market.models import IndexDaily, IndexId
 
 logger = logging.getLogger(__name__)
@@ -61,6 +62,14 @@ BATCH_SLOTS = {
 }
 EXCHANGES = ("twse", "tpex")
 LAST_THREE = (0, 1, 2)
+
+
+class Due(NamedTuple):
+    """A run the evening check expects, of one source and dataset, covering one day."""
+
+    source: str
+    dataset: str
+    day: date
 
 
 class Fetch(NamedTuple):
@@ -106,12 +115,15 @@ def _session_today(slot: str | None = None) -> tuple[TradingDays, date] | None:
     return (calendar, today) if calendar.is_trading_day(today) else None
 
 
-def _landed(day: date, scans: frozenset[tuple[str, str]] = frozenset()) -> DataQualityLog:
-    """The daily datasets without a run for the session; a gate dataset among them is an error."""
+def _landed(day: date, owned: frozenset[Due] = frozenset()) -> DataQualityLog:
+    """The daily datasets and owned runs without a run covering them; a gate one is an error."""
+    wanted = {Due(source, dataset, day) for source, dataset in _daily_jobs()} | owned
     missing = sorted(
-        f"{source}/{dataset}"
-        for source, dataset in _daily_jobs() | scans
-        if day not in covered_days(source, dataset, [day])
+        {
+            f"{due.source}/{due.dataset}"
+            for due in wanted
+            if due.day not in covered_days(due.source, due.dataset, [due.day])
+        }
     )
     blocking = [key for key in missing if key.split("/")[1] in GATE_DATASETS]
     severity = Severity.ERROR if blocking else Severity.WARNING if missing else Severity.INFO
@@ -119,9 +131,9 @@ def _landed(day: date, scans: frozenset[tuple[str, str]] = frozenset()) -> DataQ
 
 
 def _audit(
-    day: date, calendar: TradingDays, scans: frozenset[tuple[str, str]] = frozenset()
+    day: date, calendar: TradingDays, owned: frozenset[Due] = frozenset()
 ) -> list[DataQualityLog]:
-    results = [*run_checks(day, calendar), _landed(day, scans)]
+    results = [*run_checks(day, calendar), _landed(day, owned)]
     dispatch(results)
     return results
 
@@ -274,7 +286,7 @@ def check_quality() -> int:
     if session is None:
         return 0
     calendar, today = session
-    return len(_audit(today, calendar, _scans_due(today)))
+    return len(_audit(today, calendar, _scans_due(today) | _periodic_due(today, calendar)))
 
 
 @shared_task(name="etl.us_close")
@@ -348,13 +360,37 @@ def _run_once(
     return f"success: {run.rows} rows"
 
 
-def _scans_due(day: date) -> frozenset[tuple[str, str]]:
+def _scans_due(day: date) -> frozenset[Due]:
     """MOPS scans the session should have run; only its own evening check can still act on them."""
     due = {
         STATEMENT_SCAN: bool(open_periods(day, settings.STATEMENT_SCAN_DAYS_AFTER)),
         REVENUE_SCAN: bool(open_months(day, settings.REVENUE_SCAN_DAYS_AFTER)),
     }
-    return frozenset(("mops", dataset) for dataset, open_now in due.items() if open_now)
+    return frozenset(Due("mops", dataset, day) for dataset, open_now in due.items() if open_now)
+
+
+def signal_days() -> set[int]:
+    """Days of the month the beat schedule fetches the business signal on."""
+    schedule = settings.CELERY_BEAT_SCHEDULE["etl-business-signal"]["schedule"]
+    return set(getattr(schedule, "day_of_month", ())) if isinstance(schedule, crontab) else set()
+
+
+def _periodic_due(day: date, calendar: TradingDays) -> frozenset[Due]:
+    """The master refresh, and the weekly and monthly files due since the previous session."""
+    due = {Due("stock_master", DAILY_DATASET, day)}
+    try:
+        previous = calendar.shift(day, -1)
+    except OutsideCalendarError:
+        return frozenset(due)
+    for n in range(1, (day - previous).days + 1):
+        passed = previous + timedelta(days=n)
+        if passed.weekday() == SATURDAY:
+            week = calendar.between(max(passed - timedelta(days=SATURDAY), calendar.start), passed)
+            if week:
+                due.add(Due("tdcc", "weekly_holding", week[-1]))
+        if passed.day in signal_days():
+            due.add(Due("datagov", "business_signal", passed))
+    return frozenset(due)
 
 
 def _daily_jobs() -> set[tuple[str, str]]:
