@@ -21,7 +21,7 @@ DEFAULT_CONFIG = WalkForwardConfig()
 class Command(BaseCommand):
     help = (
         "Report a return or interval run's research folds against the zero, trailing, "
-        "volatility-band and logistic baselines; tuning and holdout folds stay out."
+        "volatility-band and logistic baselines; tuning folds are listed apart, holdout stays out."
     )
 
     def add_arguments(self, parser: ArgumentParser) -> None:

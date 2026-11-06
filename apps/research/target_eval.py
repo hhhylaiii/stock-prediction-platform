@@ -1,4 +1,4 @@
-"""Research-period evaluation of return and interval runs against their SPEC §7 baselines."""
+"""Evaluation of return and interval runs against their SPEC §7 baselines over research folds."""
 
 import math
 from collections.abc import Callable, Sequence
@@ -36,6 +36,7 @@ from apps.research.prediction_cache import (
     load_predictions,
     missing_folds,
 )
+from apps.research.target_models import ECE_LIMIT
 from apps.research.training import KEYS, load_labels
 from apps.research.walkforward import Fold
 
@@ -69,7 +70,7 @@ def quantile_columns(prefix: str) -> dict[float, str]:
 
 @dataclass(frozen=True)
 class Comparison:
-    """A metric of the model and a baseline on shared rows, with the fold-paired NW t."""
+    """A metric of the model and a baseline on shared rows: research totals, folds, NW t."""
 
     model: float
     baseline: float
@@ -79,9 +80,8 @@ class Comparison:
 
 @dataclass(frozen=True)
 class ReturnEvaluation:
-    mae_model: float
     mae: dict[str, Comparison]
-    rmse: dict[str, float]
+    rmse: dict[str, tuple[float, float]]
     direction: float
     direction_t: float
 
@@ -89,9 +89,10 @@ class ReturnEvaluation:
 @dataclass(frozen=True)
 class IntervalEvaluation:
     pinball: Comparison
-    history_pinball: float
+    history: Comparison
+    crossed: int
     coverage: float
-    coverage_by_fold: pd.Series
+    coverage_by_fold: pd.DataFrame
     coverage_table: pd.DataFrame
     consistency: pd.DataFrame
     vol_mae: Comparison
@@ -99,6 +100,7 @@ class IntervalEvaluation:
     auc: float
     logistic_auc: float
     brier: Comparison
+    reliability: pd.DataFrame
     ece: float
     ece_raw: float
 
@@ -128,9 +130,9 @@ def stale_folds(scope: str, run_key: str, folds: Sequence[Fold], directory: Path
 
 
 def target_frame(run_key: str, folds: Sequence[Fold], directory: Path) -> pd.DataFrame:
-    """Both caches of the research folds up to each eval_end, with labels and tech_vol_20d."""
+    """Both caches of the tuning and research folds up to each eval_end, with labels."""
     scope = scope_of(run_key)
-    kept = [fold for fold in folds if fold.research]
+    kept = [fold for fold in folds if not fold.holdout]
     keys = [*KEYS, "in_universe", "fold"]
     boosted = load_predictions(run_key, MODEL, kept)
     rules = load_predictions(run_key, BASELINE, kept).drop(columns=["in_universe"])
@@ -146,6 +148,32 @@ def target_frame(run_key: str, folds: Sequence[Fold], directory: Path) -> pd.Dat
     return frame[ordered].reset_index(drop=True)
 
 
+def research_days(daily: pd.Series, folds: Sequence[Fold]) -> pd.Series:
+    """A daily metric on the research folds' test_start..eval_end days only."""
+    days = pd.Index(daily.index)
+    keep = pd.Series(False, index=days).to_numpy()
+    for fold in folds:
+        if fold.research:
+            keep |= (days >= fold.test_start) & (days <= fold.eval_end)
+    return daily[keep]
+
+
+def paired(first: pd.Series, second: pd.Series, folds: Sequence[Fold]) -> Comparison:
+    """Research means of two daily metrics, every fold's means and the research fold-gap NW t."""
+    model, baseline = mean_by_fold(first, folds), mean_by_fold(second, folds)
+    by_fold = pd.DataFrame(
+        {"model": model["mean"], "baseline": baseline["mean"], "tuning": model["tuning"]}
+    )
+    research = by_fold[~by_fold["tuning"].astype(bool)]
+    nw_t = paired_nw_t(research["model"], research["baseline"], FOLD_LAG)
+    return Comparison(
+        float(research_days(first, folds).mean()),
+        float(research_days(second, folds).mean()),
+        nw_t,
+        by_fold,
+    )
+
+
 def compare(
     rows: pd.DataFrame,
     folds: Sequence[Fold],
@@ -154,27 +182,19 @@ def compare(
     model: str,
     baseline: str,
 ) -> Comparison:
-    """Mean daily metric of both columns on their shared rows and the fold-paired NW t."""
+    """A daily metric of both columns on their shared rows, paired over folds."""
     shared = shared_rows(rows, [label, model, baseline])
     return paired(metric(shared, label, model), metric(shared, label, baseline), folds)
-
-
-def paired(first: pd.Series, second: pd.Series, folds: Sequence[Fold]) -> Comparison:
-    """Two daily metric series, their research fold means and the NW t of the fold gaps."""
-    kept = [fold for fold in folds if fold.research]
-    by_fold = pd.DataFrame(
-        {
-            "model": mean_by_fold(first, kept)["mean"],
-            "baseline": mean_by_fold(second, kept)["mean"],
-        }
-    )
-    nw_t = paired_nw_t(by_fold["model"], by_fold["baseline"], FOLD_LAG)
-    return Comparison(float(first.mean()), float(second.mean()), nw_t, by_fold)
 
 
 def beats(compared: Comparison) -> bool:
     """A lower-is-better gate: the model is lower and the fold-paired NW t is below −GATE_T."""
     return compared.model < compared.baseline and compared.nw_t < -GATE_T
+
+
+def no_worse(compared: Comparison) -> bool:
+    """A gate the model passes by not being above its baseline; undefined values fail."""
+    return compared.model <= compared.baseline
 
 
 def coverage_outside(by_fold: pd.Series) -> list[int]:
@@ -190,22 +210,21 @@ def coverage_passes(total: float, by_fold: pd.Series) -> bool:
     return bool(low <= total <= high) and not coverage_outside(by_fold)
 
 
+def _rmse(rows: pd.DataFrame, column: str) -> float:
+    return math.sqrt(float(daily_squared_error(rows, LABEL, column).mean()))
+
+
 def evaluate_return(frame: pd.DataFrame, folds: Sequence[Fold]) -> ReturnEvaluation:
     """MAE and RMSE against both baselines, and the direction hit rate against even odds."""
-    rows = research_rows(tradable_rows(frame), folds)
-    mae = {
-        name: compare(rows, folds, daily_absolute_error, LABEL, RETURN_COLUMN, column)
-        for name, column in RETURN_BASELINES.items()
-    }
-    rmse = {
-        name: math.sqrt(
-            daily_squared_error(shared_rows(rows, [LABEL, column]), LABEL, column).mean()
-        )
-        for name, column in {MODEL: RETURN_COLUMN, **RETURN_BASELINES}.items()
-    }
-    hits = daily_direction_hits(rows, LABEL, RETURN_COLUMN)
+    rows = tradable_rows(frame)
+    research = research_rows(rows, folds)
+    mae, rmse = {}, {}
+    for name, column in RETURN_BASELINES.items():
+        mae[name] = compare(rows, folds, daily_absolute_error, LABEL, RETURN_COLUMN, column)
+        shared = shared_rows(research, [LABEL, RETURN_COLUMN, column])
+        rmse[name] = (_rmse(shared, RETURN_COLUMN), _rmse(shared, column))
+    hits = daily_direction_hits(research, LABEL, RETURN_COLUMN)
     return ReturnEvaluation(
-        mae_model=float(daily_absolute_error(rows, LABEL, RETURN_COLUMN).mean()),
         mae=mae,
         rmse=rmse,
         direction=float(hits.mean()),
@@ -213,40 +232,52 @@ def evaluate_return(frame: pd.DataFrame, folds: Sequence[Fold]) -> ReturnEvaluat
     )
 
 
+def _pinball(
+    rows: pd.DataFrame, first: dict[float, str], second: dict[float, str], folds: Sequence[Fold]
+) -> Comparison:
+    shared = shared_rows(rows, [LABEL, *first.values(), *second.values()])
+    return paired(daily_pinball(shared, LABEL, first), daily_pinball(shared, LABEL, second), folds)
+
+
+def _up_rows(rows: pd.DataFrame, columns: Sequence[str]) -> pd.DataFrame:
+    shared = shared_rows(rows, [UP_LABEL, *columns])
+    return shared.assign(**{UP_LABEL: shared[UP_LABEL].astype(int)})
+
+
 def _ece(rows: pd.DataFrame, column: str) -> float:
-    scored = rows.dropna(subset=[column])
-    return expected_calibration_error(reliability_table(scored, UP_LABEL, column))
+    return expected_calibration_error(reliability_table(_up_rows(rows, [column]), UP_LABEL, column))
 
 
 def evaluate_interval(frame: pd.DataFrame, folds: Sequence[Fold]) -> IntervalEvaluation:
     """Quantile, volatility and probability models against their SPEC §7 baselines."""
-    rows = research_rows(tradable_rows(frame), folds)
+    rows = tradable_rows(frame)
+    research = research_rows(rows, folds)
     model, band, history = (quantile_columns(prefix) for prefix in (MODEL, "volband", "histq"))
-    quantiled = shared_rows(rows, [LABEL, *model.values(), *band.values()])
-    pinball = paired(
-        daily_pinball(quantiled, LABEL, model), daily_pinball(quantiled, LABEL, band), folds
-    )
     covered = daily_coverage(rows, LABEL, model[0.1], model[0.9])
-    kept = [fold for fold in folds if fold.research]
-    by_fold = mean_by_fold(covered, kept)["mean"]
-    vol = f"{MODEL}_vol_h{VOL_DAYS}"
-    prob = f"{MODEL}_prob_h{VOL_DAYS}"
-    up = rows.dropna(subset=[UP_LABEL])
-    up = up.assign(**{UP_LABEL: up[UP_LABEL].astype(int)})
+    by_fold = mean_by_fold(covered, folds)[["mean", "tuning"]]
+    q10, q50, q90 = (research[model[alpha]] for alpha in (0.1, 0.5, 0.9))
+    vol, prob = f"{MODEL}_vol_h{VOL_DAYS}", f"{MODEL}_prob_h{VOL_DAYS}"
+    logistic = f"logistic_h{VOL_DAYS}"
+    positive = rows[(rows[[VOL_LABEL, vol, VOLATILITY]] > 0).all(axis=1)]
+    scored = _up_rows(research, [prob, logistic])
     return IntervalEvaluation(
-        pinball=pinball,
-        history_pinball=float(daily_pinball(rows, LABEL, history).mean()),
-        coverage=float(covered.mean()),
+        pinball=_pinball(rows, model, band, folds),
+        history=_pinball(rows, model, history, folds),
+        crossed=int(((q10 > q50) | (q50 > q90)).sum()),
+        coverage=float(research_days(covered, folds).mean()),
         coverage_by_fold=by_fold,
         coverage_table=coverage_report(frame, LABEL, model[0.1], model[0.9], folds),
         consistency=consistency_report(frame, model[0.1], model[0.5], model[0.9], vol, prob, folds),
         vol_mae=compare(rows, folds, daily_absolute_error, VOL_LABEL, vol, VOLATILITY),
-        qlike=compare(rows, folds, daily_qlike, VOL_LABEL, vol, VOLATILITY),
-        auc=float(daily_auc(up, UP_LABEL, prob).mean()),
-        logistic_auc=float(daily_auc(up, UP_LABEL, f"logistic_h{VOL_DAYS}").mean()),
-        brier=compare(up, folds, daily_brier, UP_LABEL, prob, f"logistic_h{VOL_DAYS}"),
-        ece=_ece(up, prob),
-        ece_raw=_ece(up, f"{MODEL}_prob_raw_h{VOL_DAYS}"),
+        qlike=compare(positive, folds, daily_qlike, VOL_LABEL, vol, VOLATILITY),
+        auc=float(daily_auc(scored, UP_LABEL, prob).mean()),
+        logistic_auc=float(daily_auc(scored, UP_LABEL, logistic).mean()),
+        brier=compare(
+            _up_rows(rows, [prob, logistic]), folds, daily_brier, UP_LABEL, prob, logistic
+        ),
+        reliability=reliability_table(_up_rows(research, [prob]), UP_LABEL, prob),
+        ece=_ece(research, prob),
+        ece_raw=_ece(research, f"{MODEL}_prob_raw_h{VOL_DAYS}"),
     )
 
 
@@ -254,10 +285,10 @@ Evaluation = ReturnEvaluation | IntervalEvaluation
 
 
 def evaluate_run(run_key: str, folds: Sequence[Fold], directory: Path) -> Evaluation:
-    """A target run's research folds; missing caches are named first, then stale ones refused."""
+    """A target run's tuning and research folds; missing caches first, then stale ones refused."""
     scope = scope_of(run_key)
-    kept = [fold for fold in folds if fold.research]
-    if not kept:
+    kept = [fold for fold in folds if not fold.holdout]
+    if not any(fold.research for fold in kept):
         raise ValueError("no research folds to evaluate")
     for model in (BASELINE, MODEL):
         missing = missing_folds(run_key, model, kept)
@@ -284,75 +315,122 @@ def _verdict(passed: bool) -> str:
 
 
 def _gate(text: str, compared: Comparison) -> str:
+    """A line for a gate that needs the model lower with a fold-gap NW t below −GATE_T."""
     return (
         f"- {text}：模型 {_number(compared.model, 5)}、baseline {_number(compared.baseline, 5)}，"
         f"逐摺差 NW t {_number(compared.nw_t, 2)}（需 < −{GATE_T:g}）：{_verdict(beats(compared))}"
     )
 
 
+def _bound(text: str, compared: Comparison) -> str:
+    """A line for a gate the model passes by not being above its baseline."""
+    return (
+        f"- {text}：模型 {_number(compared.model, 5)}、baseline {_number(compared.baseline, 5)}，"
+        f"逐摺差 NW t {_number(compared.nw_t, 2)}（參考）：{_verdict(no_worse(compared))}"
+    )
+
+
+def _fold_name(fold: object, tuning: bool) -> str:
+    return f"{fold}（調參）" if tuning else str(fold)
+
+
 def _fold_table(compared: Comparison, name: str) -> list[str]:
     lines = ["", f"| 摺 | 模型 {name} | baseline {name} |", "| --- | --- | --- |"]
     for fold, row in compared.by_fold.iterrows():
-        lines.append(f"| {fold} | {_number(row['model'], 5)} | {_number(row['baseline'], 5)} |")
+        lines.append(
+            f"| {_fold_name(fold, bool(row['tuning']))} | {_number(row['model'], 5)} | "
+            f"{_number(row['baseline'], 5)} |"
+        )
     return lines
 
 
 def _return_lines(evaluated: ReturnEvaluation) -> list[str]:
     lines = ["## 絕對報酬 5 日", ""]
-    lines += [
-        _gate(f"MAE 低於{BASELINE_NAMES[name]}", compared)
-        for name, compared in evaluated.mae.items()
-    ]
-    rmse = "、".join(f"{name} {_number(value, 5)}" for name, value in evaluated.rmse.items())
-    lines += [
-        f"- RMSE：{rmse}",
+    for name, compared in evaluated.mae.items():
+        lines.append(_gate(f"MAE 低於{BASELINE_NAMES[name]}", compared))
+    for name, (model, baseline) in evaluated.rmse.items():
+        lines.append(
+            f"- RMSE 對{BASELINE_NAMES[name]}（同列）：模型 {_number(model, 5)}、"
+            f"baseline {_number(baseline, 5)}"
+        )
+    lines.append(
         f"- 方向準確率 {_number(evaluated.direction)}，對 50% 的 NW t "
-        f"{_number(evaluated.direction_t, 2)}",
-    ]
-    return lines + _fold_table(evaluated.mae["zero"], "MAE")
+        f"{_number(evaluated.direction_t, 2)}"
+    )
+    for name, compared in evaluated.mae.items():
+        lines += _fold_table(compared, f"MAE（對{BASELINE_NAMES[name]}）")
+    return lines
 
 
 def _coverage_lines(evaluated: IntervalEvaluation) -> list[str]:
     low, high = COVERAGE_TOTAL
     fold_low, fold_high = COVERAGE_FOLD
-    outside = coverage_outside(evaluated.coverage_by_fold)
-    folds = "無" if not outside else "、".join(map(str, outside))
+    research = evaluated.coverage_by_fold[~evaluated.coverage_by_fold["tuning"].astype(bool)]
+    outside = coverage_outside(research["mean"])
+    passed = coverage_passes(evaluated.coverage, research["mean"])
     lines = [
         f"- 總覆蓋率 {_number(evaluated.coverage)}（需在 {low:.0%} 到 {high:.0%}），"
-        f"每摺覆蓋率需在 {fold_low:.0%} 到 {fold_high:.0%}，超出的摺：{folds}："
-        f"{_verdict(coverage_passes(evaluated.coverage, evaluated.coverage_by_fold))}",
+        f"每摺覆蓋率需在 {fold_low:.0%} 到 {fold_high:.0%}，超出的研究摺："
+        f"{'無' if not outside else '、'.join(map(str, outside))}：{_verdict(passed)}",
         "",
-        "| tech_vol_20d 五分位 | 覆蓋率 | 平均寬度 |",
-        "| --- | --- | --- |",
+        "| 摺 | 覆蓋率 |",
+        "| --- | --- |",
     ]
+    for fold, row in evaluated.coverage_by_fold.iterrows():
+        lines.append(f"| {_fold_name(fold, bool(row['tuning']))} | {_number(row['mean'])} |")
+    lines += ["", "| tech_vol_20d 五分位 | 覆蓋率 | 平均寬度 |", "| --- | --- | --- |"]
     for bucket, row in evaluated.coverage_table.iterrows():
         lines.append(f"| {bucket} | {_number(row['coverage'])} | {_number(row['width'])} |")
     return lines
 
 
+def _probability_lines(evaluated: IntervalEvaluation) -> list[str]:
+    lines = [
+        "## 上漲機率",
+        "",
+        f"- 日均 AUC（同列）：模型 {_number(evaluated.auc)}、logistic "
+        f"{_number(evaluated.logistic_auc)}",
+        _bound("Brier 不高於 logistic", evaluated.brier),
+        f"- ECE 低於 {ECE_LIMIT:g}：校準後 {_number(evaluated.ece)}（校準前 "
+        f"{_number(evaluated.ece_raw)}）：{_verdict(evaluated.ece < ECE_LIMIT)}",
+        *_fold_table(evaluated.brier, "Brier"),
+        "",
+        "| 機率區間 | 平均機率 | 實際比例 | 列數 |",
+        "| --- | --- | --- | --- |",
+    ]
+    for _, row in evaluated.reliability.iterrows():
+        lines.append(
+            f"| {row['lower']:.1f}–{row['upper']:.1f} | {_number(row['mean_prob'])} | "
+            f"{_number(row['frac_positive'])} | {int(row['n_rows'])} |"
+        )
+    return lines
+
+
 def _interval_lines(evaluated: IntervalEvaluation) -> list[str]:
+    history = evaluated.history
     lines = [
         "## 區間 20 日",
         "",
         _gate("pinball 低於波動率區間", evaluated.pinball),
-        f"- 歷史分位數（sanity 下限）pinball {_number(evaluated.history_pinball, 5)}",
+        f"- pinball 低於歷史分位數（sanity 下限，同列）：模型 {_number(history.model, 5)}、"
+        f"歷史分位數 {_number(history.baseline, 5)}：{_verdict(history.model < history.baseline)}",
+        f"- 分位數交叉（q10 > q50 或 q50 > q90）的研究列數 {evaluated.crossed}："
+        f"{_verdict(evaluated.crossed == 0)}",
         *_coverage_lines(evaluated),
         *_fold_table(evaluated.pinball, "pinball"),
         "",
         "## 波動率",
         "",
-        _gate("MAE 低於 tech_vol_20d", evaluated.vol_mae),
-        _gate("QLIKE 低於 tech_vol_20d", evaluated.qlike),
+        _bound("MAE 不高於 tech_vol_20d", evaluated.vol_mae),
+        _bound("QLIKE 不高於 tech_vol_20d", evaluated.qlike),
+        *_fold_table(evaluated.vol_mae, "MAE"),
+        *_fold_table(evaluated.qlike, "QLIKE"),
         "",
-        "## 上漲機率",
-        "",
-        f"- 日均 AUC：模型 {_number(evaluated.auc)}、logistic {_number(evaluated.logistic_auc)}",
-        f"- Brier 不高於 logistic：模型 {_number(evaluated.brier.model, 5)}、logistic "
-        f"{_number(evaluated.brier.baseline, 5)}，逐摺差 NW t {_number(evaluated.brier.nw_t, 2)}："
-        f"{_verdict(evaluated.brier.model <= evaluated.brier.baseline)}",
-        f"- ECE：校準後 {_number(evaluated.ece)}、校準前 {_number(evaluated.ece_raw)}",
+        *_probability_lines(evaluated),
         "",
         "## 輸出一致性",
+        "",
+        "universe 內全部列（含 t+1 不可交易的列），研究摺。",
         "",
         "| 項目 | 平均比例 | 最高比例 | 超過 10% 的天數 | 天數 |",
         "| --- | --- | --- | --- | --- |",
@@ -365,18 +443,16 @@ def _interval_lines(evaluated: IntervalEvaluation) -> list[str]:
     return lines
 
 
+INTRO = (
+    "指標只算研究摺 test_start..eval_end 內、universe 內 t+1 可交易的列；"
+    "調參摺列在每摺表並標註，不計入總體指標與關卡。"
+)
+
+
 def report(run_key: str, evaluated: Evaluation) -> str:
     """Markdown of a target run's research-period metrics, baselines and SPEC §7 gates."""
-    body = (
-        _return_lines(evaluated)
-        if isinstance(evaluated, ReturnEvaluation)
-        else _interval_lines(evaluated)
-    )
-    lines = [
-        f"# 目標評估：{run_key}",
-        "",
-        "研究摺的 test_start..eval_end，只算 universe 內 t+1 可交易的列。",
-        "",
-        *body,
-    ]
-    return "\n".join(lines) + "\n"
+    if isinstance(evaluated, ReturnEvaluation):
+        body = _return_lines(evaluated)
+    else:
+        body = _interval_lines(evaluated)
+    return "\n".join([f"# 目標評估：{run_key}", "", INTRO, "", *body]) + "\n"

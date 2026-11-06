@@ -34,7 +34,13 @@ from apps.research.metrics.forecast import (
 )
 from apps.research.metrics.stats import newey_west_t, paired_nw_t
 from apps.research.models import BacktestMetric, FeatureDaily, LabelDaily, ModelRun
-from apps.research.prediction_cache import MissingFoldsError, fold_path
+from apps.research.prediction_cache import (
+    MissingFoldsError,
+    fold_notes,
+    fold_path,
+    load_fold_predictions,
+    save_fold_predictions,
+)
 from apps.research.walkforward import Fold
 from tests.research.run_panels import CONFIG, build_panel, folds, research, weekdays
 
@@ -89,20 +95,61 @@ def scored(frame: pd.DataFrame) -> pd.DataFrame:
     return frame[frame["in_universe"] & frame["untradable_t1"].eq(False)]
 
 
+def shared(frame: pd.DataFrame, *columns: str) -> pd.DataFrame:
+    return frame.dropna(subset=list(columns))
+
+
 def fold_means(daily: pd.Series, chosen: list[Fold]) -> pd.Series:
     return mean_by_fold(daily, chosen)["mean"]
 
 
-def test_the_frame_joins_both_caches_and_the_labels_over_research_test_rows(runs: Path) -> None:
+def studied(chosen: list[Fold]) -> list[Fold]:
+    return [fold for fold in chosen if fold.research]
+
+
+def research_mean(daily: pd.Series, chosen: list[Fold]) -> float:
+    """The mean of a daily metric over the research folds' days, built without target_eval."""
+    days = pd.Index(daily.index)
+    keep = np.zeros(len(days), dtype=bool)
+    for fold in studied(chosen):
+        keep |= (days >= fold.test_start) & (days <= fold.eval_end)
+    return float(daily[keep].mean())
+
+
+def check_paired(
+    compared: target_eval.Comparison, first: pd.Series, second: pd.Series, chosen: list[Fold]
+) -> None:
+    """Research totals and NW t over research folds; every non-holdout fold in the table."""
+    kept = studied(chosen)
+    assert compared.model == pytest.approx(research_mean(first, chosen))
+    assert compared.baseline == pytest.approx(research_mean(second, chosen))
+    assert compared.nw_t == pytest.approx(
+        paired_nw_t(fold_means(first, kept), fold_means(second, kept), target_eval.FOLD_LAG)
+    )
+    assert list(compared.by_fold.index) == [fold.index for fold in chosen]
+    assert list(compared.by_fold["tuning"]) == [fold.tuning for fold in chosen]
+    np.testing.assert_allclose(compared.by_fold["model"], fold_means(first, chosen))
+    np.testing.assert_allclose(compared.by_fold["baseline"], fold_means(second, chosen))
+
+
+def in_research(frame: pd.DataFrame, chosen: list[Fold]) -> pd.DataFrame:
+    keep = pd.Series(False, index=frame.index)
+    for fold in studied(chosen):
+        keep |= (frame["date"] >= fold.test_start) & (frame["date"] <= fold.eval_end)
+    return frame[keep]
+
+
+def test_the_frame_joins_both_caches_and_the_labels_over_tuning_and_research_rows(
+    runs: Path,
+) -> None:
     chosen = research()
 
     frame = target_eval.target_frame(INTERVAL_KEY, chosen, runs)
 
-    kept = [fold for fold in chosen if fold.research]
-    assert kept
-    assert len(kept) < len(chosen)
-    assert set(frame["fold"]) == {fold.index for fold in kept}
-    ends = frame["fold"].map({fold.index: fold.eval_end for fold in kept})
+    assert any(fold.tuning for fold in chosen)
+    assert studied(chosen)
+    assert set(frame["fold"]) == {fold.index for fold in chosen}
+    ends = frame["fold"].map({fold.index: fold.eval_end for fold in chosen})
     assert (frame["date"] <= ends).all()
     keys = ["stock_id", "date"]
     labels = pd.DataFrame(
@@ -119,61 +166,58 @@ def test_the_frame_joins_both_caches_and_the_labels_over_research_test_rows(runs
 
 def test_return_scores_mae_rmse_and_direction_against_both_baselines(runs: Path) -> None:
     chosen = research()
-    kept = [fold for fold in chosen if fold.research]
+    frame = target_eval.target_frame(RETURN_KEY, chosen, runs)
 
-    evaluated = target_eval.evaluate_return(
-        target_eval.target_frame(RETURN_KEY, chosen, runs), chosen
-    )
+    evaluated = target_eval.evaluate_return(frame, chosen)
 
-    rows = scored(target_eval.target_frame(RETURN_KEY, chosen, runs))
-    model = daily_absolute_error(rows, "fwd_ret_open", "lightgbm_ret_h5")
+    rows = scored(frame)
     for name, column in (("zero", "zero_h5"), ("trailing", "trailing_h5")):
-        shared = rows.dropna(subset=["lightgbm_ret_h5", column])
-        first = daily_absolute_error(shared, "fwd_ret_open", "lightgbm_ret_h5")
-        second = daily_absolute_error(shared, "fwd_ret_open", column)
-        compared = evaluated.mae[name]
-        assert compared.model == pytest.approx(first.mean())
-        assert compared.baseline == pytest.approx(second.mean())
-        assert compared.nw_t == pytest.approx(
-            paired_nw_t(fold_means(first, kept), fold_means(second, kept), target_eval.FOLD_LAG)
+        both = shared(rows, "fwd_ret_open", "lightgbm_ret_h5", column)
+        check_paired(
+            evaluated.mae[name],
+            daily_absolute_error(both, "fwd_ret_open", "lightgbm_ret_h5"),
+            daily_absolute_error(both, "fwd_ret_open", column),
+            chosen,
         )
-        assert list(compared.by_fold.index) == [fold.index for fold in kept]
-        squared = daily_squared_error(shared, "fwd_ret_open", column)
-        assert evaluated.rmse[name] == pytest.approx(math.sqrt(squared.mean()))
-    assert evaluated.rmse["lightgbm"] == pytest.approx(
-        math.sqrt(daily_squared_error(rows, "fwd_ret_open", "lightgbm_ret_h5").mean())
-    )
-    assert evaluated.mae_model == pytest.approx(model.mean())
-    hits = daily_direction_hits(rows, "fwd_ret_open", "lightgbm_ret_h5")
+        pooled = in_research(both, chosen)
+        assert evaluated.rmse[name] == pytest.approx(
+            tuple(
+                math.sqrt(daily_squared_error(pooled, "fwd_ret_open", value).mean())
+                for value in ("lightgbm_ret_h5", column)
+            )
+        )
+    hits = daily_direction_hits(in_research(rows, chosen), "fwd_ret_open", "lightgbm_ret_h5")
     assert evaluated.direction == pytest.approx(hits.mean())
     assert evaluated.direction_t == pytest.approx(newey_west_t(hits - 0.5, 5))
 
 
 def test_interval_scores_pinball_coverage_volatility_and_probability(runs: Path) -> None:
     chosen = research()
-    kept = [fold for fold in chosen if fold.research]
     frame = target_eval.target_frame(INTERVAL_KEY, chosen, runs)
 
     evaluated = target_eval.evaluate_interval(frame, chosen)
 
     rows = scored(frame)
     model = {0.1: "lightgbm_q10_h20", 0.5: "lightgbm_q50_h20", 0.9: "lightgbm_q90_h20"}
-    band = {0.1: "volband_q10_h20", 0.5: "volband_q50_h20", 0.9: "volband_q90_h20"}
-    first = daily_pinball(rows, "fwd_ret_open", model)
-    second = daily_pinball(rows, "fwd_ret_open", band)
-    assert evaluated.pinball.model == pytest.approx(first.mean())
-    assert evaluated.pinball.baseline == pytest.approx(second.mean())
-    assert evaluated.pinball.nw_t == pytest.approx(
-        paired_nw_t(fold_means(first, kept), fold_means(second, kept), target_eval.FOLD_LAG)
-    )
-    history = {0.1: "histq_q10_h20", 0.5: "histq_q50_h20", 0.9: "histq_q90_h20"}
-    assert evaluated.history_pinball == pytest.approx(
-        daily_pinball(rows, "fwd_ret_open", history).mean()
-    )
+    for compared, other in (
+        (evaluated.pinball, "volband"),
+        (evaluated.history, "histq"),
+    ):
+        baseline = {alpha: column.replace("lightgbm", other) for alpha, column in model.items()}
+        both = shared(rows, "fwd_ret_open", *model.values(), *baseline.values())
+        check_paired(
+            compared,
+            daily_pinball(both, "fwd_ret_open", model),
+            daily_pinball(both, "fwd_ret_open", baseline),
+            chosen,
+        )
+    pooled = in_research(rows, chosen)
+    q10, q50, q90 = (pooled[model[alpha]] for alpha in (0.1, 0.5, 0.9))
+    assert evaluated.crossed == int(((q10 > q50) | (q50 > q90)).sum())
     covered = daily_coverage(rows, "fwd_ret_open", "lightgbm_q10_h20", "lightgbm_q90_h20")
-    assert evaluated.coverage == pytest.approx(covered.mean())
-    pd.testing.assert_series_equal(
-        evaluated.coverage_by_fold, fold_means(covered, kept), check_names=False
+    assert evaluated.coverage == pytest.approx(research_mean(covered, chosen))
+    pd.testing.assert_frame_equal(
+        evaluated.coverage_by_fold, mean_by_fold(covered, chosen)[["mean", "tuning"]]
     )
     pd.testing.assert_frame_equal(
         evaluated.coverage_table,
@@ -191,28 +235,111 @@ def test_interval_scores_pinball_coverage_volatility_and_probability(runs: Path)
             chosen,
         ),
     )
-    vol = daily_qlike(rows, "fwd_vol_20d", "lightgbm_vol_h20")
-    assert evaluated.qlike.model == pytest.approx(vol.mean())
-    assert evaluated.qlike.baseline == pytest.approx(
-        daily_qlike(rows, "fwd_vol_20d", "tech_vol_20d").mean()
+    vols = shared(rows, "fwd_vol_20d", "lightgbm_vol_h20", "tech_vol_20d")
+    check_paired(
+        evaluated.vol_mae,
+        daily_absolute_error(vols, "fwd_vol_20d", "lightgbm_vol_h20"),
+        daily_absolute_error(vols, "fwd_vol_20d", "tech_vol_20d"),
+        chosen,
     )
-    assert evaluated.vol_mae.model == pytest.approx(
-        daily_absolute_error(rows, "fwd_vol_20d", "lightgbm_vol_h20").mean()
+    positive = vols[(vols[["fwd_vol_20d", "lightgbm_vol_h20", "tech_vol_20d"]] > 0).all(axis=1)]
+    check_paired(
+        evaluated.qlike,
+        daily_qlike(positive, "fwd_vol_20d", "lightgbm_vol_h20"),
+        daily_qlike(positive, "fwd_vol_20d", "tech_vol_20d"),
+        chosen,
     )
     up = rows.assign(fwd_up_5pct=rows["fwd_up_5pct"].astype(int))
-    assert evaluated.auc == pytest.approx(daily_auc(up, "fwd_up_5pct", "lightgbm_prob_h20").mean())
-    assert evaluated.logistic_auc == pytest.approx(
-        daily_auc(up, "fwd_up_5pct", "logistic_h20").mean()
+    both = shared(up, "lightgbm_prob_h20", "logistic_h20")
+    check_paired(
+        evaluated.brier,
+        daily_brier(both, "fwd_up_5pct", "lightgbm_prob_h20"),
+        daily_brier(both, "fwd_up_5pct", "logistic_h20"),
+        chosen,
     )
-    assert evaluated.brier.model == pytest.approx(
-        daily_brier(up, "fwd_up_5pct", "lightgbm_prob_h20").mean()
+    both = in_research(both, chosen)
+    assert evaluated.auc == pytest.approx(
+        daily_auc(both, "fwd_up_5pct", "lightgbm_prob_h20").mean()
+    )
+    assert evaluated.logistic_auc == pytest.approx(
+        daily_auc(both, "fwd_up_5pct", "logistic_h20").mean()
+    )
+    research_up = in_research(up, chosen)
+    pd.testing.assert_frame_equal(
+        evaluated.reliability, reliability_table(research_up, "fwd_up_5pct", "lightgbm_prob_h20")
     )
     for column, value in (
         ("lightgbm_prob_h20", evaluated.ece),
         ("lightgbm_prob_raw_h20", evaluated.ece_raw),
     ):
-        table = reliability_table(up.dropna(subset=[column]), "fwd_up_5pct", column)
+        table = reliability_table(shared(research_up, column), "fwd_up_5pct", column)
         assert value == pytest.approx(expected_calibration_error(table))
+
+
+def numbers(compared: target_eval.Comparison) -> tuple[float, float, float]:
+    return compared.model, compared.baseline, compared.nw_t
+
+
+def picked(frame: pd.DataFrame, chosen: list[Fold], count: int = 40) -> pd.Index:
+    """Research rows the metrics count, spread over the period."""
+    rows = in_research(scored(frame), chosen)
+    return rows.index[:: max(len(rows) // count, 1)][:count]
+
+
+def test_return_skips_untradable_rows_and_pairs_each_baseline_on_its_own_rows(runs: Path) -> None:
+    chosen = research()
+    frame = target_eval.target_frame(RETURN_KEY, chosen, runs)
+    original = target_eval.evaluate_return(frame, chosen)
+    rows = picked(frame, chosen)
+    dropped = target_eval.evaluate_return(frame.drop(rows), chosen)
+
+    marked = frame.index.isin(rows)
+    untradable = frame.assign(
+        untradable_t1=frame["untradable_t1"].mask(marked, True),
+        fwd_ret_open=frame["fwd_ret_open"].mask(marked, 5.0),
+    )
+    gapped = frame.assign(zero_h5=frame["zero_h5"].mask(marked))
+
+    skipped = target_eval.evaluate_return(untradable, chosen)
+    paired = target_eval.evaluate_return(gapped, chosen)
+
+    for name in ("zero", "trailing"):
+        assert numbers(skipped.mae[name]) == pytest.approx(numbers(dropped.mae[name]))
+        assert skipped.rmse[name] == pytest.approx(dropped.rmse[name])
+    assert skipped.direction == pytest.approx(dropped.direction)
+    assert numbers(paired.mae["zero"]) == pytest.approx(numbers(dropped.mae["zero"]))
+    assert numbers(paired.mae["trailing"]) == pytest.approx(numbers(original.mae["trailing"]))
+    assert paired.rmse["zero"] == pytest.approx(dropped.rmse["zero"])
+    assert paired.rmse["trailing"] == pytest.approx(original.rmse["trailing"])
+    assert paired.mae["zero"].model != pytest.approx(original.mae["zero"].model)
+
+
+def test_interval_pairs_history_auc_and_qlike_on_their_shared_rows(runs: Path) -> None:
+    chosen = research()
+    frame = target_eval.target_frame(INTERVAL_KEY, chosen, runs)
+    original = target_eval.evaluate_interval(frame, chosen)
+    rows = frame.index.isin(picked(frame, chosen))
+    dropped = target_eval.evaluate_interval(frame[~rows], chosen)
+
+    gapped = target_eval.evaluate_interval(
+        frame.assign(
+            histq_q50_h20=frame["histq_q50_h20"].mask(rows),
+            logistic_h20=frame["logistic_h20"].mask(rows),
+            tech_vol_20d=frame["tech_vol_20d"].mask(rows, 0.0),
+        ),
+        chosen,
+    )
+
+    for compared, expected in (
+        (gapped.history, dropped.history),
+        (gapped.qlike, dropped.qlike),
+        (gapped.brier, dropped.brier),
+        (gapped.pinball, original.pinball),
+    ):
+        assert numbers(compared) == pytest.approx(numbers(expected))
+    assert gapped.auc == pytest.approx(dropped.auc)
+    assert gapped.logistic_auc == pytest.approx(dropped.logistic_auc)
+    assert gapped.auc != pytest.approx(original.auc)
 
 
 def comparison(model: float, baseline: float, nw_t: float) -> target_eval.Comparison:
@@ -222,8 +349,25 @@ def comparison(model: float, baseline: float, nw_t: float) -> target_eval.Compar
 def test_lower_is_better_gates_need_a_newey_west_t_below_minus_two() -> None:
     assert target_eval.beats(comparison(0.01, 0.02, -2.5))
     assert not target_eval.beats(comparison(0.01, 0.02, -1.9))
+    assert not target_eval.beats(comparison(0.01, 0.02, -2.0))
     assert not target_eval.beats(comparison(0.03, 0.02, -2.5))
     assert not target_eval.beats(comparison(0.01, 0.02, math.nan))
+
+
+@pytest.mark.parametrize(
+    ("model", "baseline", "passed"),
+    [
+        (0.01, 0.02, True),
+        (0.02, 0.02, True),
+        (0.03, 0.02, False),
+        (math.nan, 0.02, False),
+        (0.01, math.nan, False),
+    ],
+)
+def test_bounded_gates_pass_when_the_model_is_not_above_its_baseline(
+    model: float, baseline: float, passed: bool
+) -> None:
+    assert target_eval.no_worse(comparison(model, baseline, 3.0)) is passed
 
 
 @pytest.mark.parametrize(
@@ -247,6 +391,130 @@ def test_coverage_needs_the_total_and_every_fold_inside_their_bands(
     assert target_eval.coverage_passes(total, folds_coverage) is passed
 
 
+def made(model: float, baseline: float, nw_t: float) -> target_eval.Comparison:
+    """A comparison over a tuning fold 1 and research folds 5 and 6."""
+    by_fold = pd.DataFrame(
+        {"model": [0.9, model, model], "baseline": [0.1, baseline, baseline]},
+        index=pd.Index([1, 5, 6], name="fold"),
+    ).assign(tuning=[True, False, False])
+    return target_eval.Comparison(model, baseline, nw_t, by_fold)
+
+
+def test_the_return_report_states_each_gate_with_its_numbers() -> None:
+    evaluated = target_eval.ReturnEvaluation(
+        mae={"zero": made(0.01, 0.02, -2.5), "trailing": made(0.01, 0.011, -1.5)},
+        rmse={"zero": (0.02, 0.03), "trailing": (0.02, 0.021)},
+        direction=0.53,
+        direction_t=2.4,
+    )
+
+    text = target_eval.report(RETURN_KEY, evaluated)
+
+    assert (
+        "MAE 低於零預測：模型 0.01000、baseline 0.02000，逐摺差 NW t -2.50（需 < −2）：通過" in text
+    )
+    assert "MAE 低於過去 60 日平均：模型 0.01000、baseline 0.01100，逐摺差 NW t -1.50" in text
+    assert "（需 < −2）：未過" in text
+    assert "RMSE 對零預測（同列）：模型 0.02000、baseline 0.03000" in text
+    assert "方向準確率 0.5300，對 50% 的 NW t 2.40" in text
+    assert "| 1（調參） | 0.90000 | 0.10000 |" in text
+    assert "| 5 | 0.01000 | 0.02000 |" in text
+    assert "調參摺列在每摺表並標註，不計入總體指標與關卡" in text
+
+
+def frame_of(rows: dict[str, list[Any]], index: list[int]) -> pd.DataFrame:
+    return pd.DataFrame(rows, index=pd.Index(index, name="fold"))
+
+
+def interval_evaluation(**changes: Any) -> target_eval.IntervalEvaluation:
+    values: dict[str, Any] = {
+        "pinball": made(0.10, 0.12, -3.0),
+        "history": made(0.10, 0.11, 0.0),
+        "crossed": 0,
+        "coverage": 0.80,
+        "coverage_by_fold": frame_of(
+            {"mean": [0.95, 0.80, 0.78], "tuning": [True, False, False]}, [1, 5, 6]
+        ),
+        "coverage_table": pd.DataFrame(
+            {"coverage": [0.8], "width": [0.2]}, index=pd.Index([1], name="bucket")
+        ),
+        "consistency": pd.DataFrame(
+            {"mean_share": [0.01], "max_share": [0.05], "days_over": [0], "n_days": [30]},
+            index=["width_ratio"],
+        ),
+        "vol_mae": made(0.010, 0.010, 0.5),
+        "qlike": made(0.20, 0.19, -4.0),
+        "auc": 0.56,
+        "logistic_auc": 0.55,
+        "brier": made(0.09, 0.10, -1.0),
+        "reliability": pd.DataFrame(
+            {
+                "lower": [0.0],
+                "upper": [0.1],
+                "mean_prob": [0.05],
+                "frac_positive": [0.06],
+                "n_rows": [100],
+            },
+            index=[1],
+        ),
+        "ece": 0.03,
+        "ece_raw": 0.08,
+    }
+    return target_eval.IntervalEvaluation(**{**values, **changes})
+
+
+def test_the_interval_report_states_each_gate_with_its_numbers() -> None:
+    text = target_eval.report(INTERVAL_KEY, interval_evaluation())
+
+    assert "pinball 低於波動率區間：模型 0.10000、baseline 0.12000，逐摺差 NW t -3.00" in text
+    assert (
+        "pinball 低於歷史分位數（sanity 下限，同列）：模型 0.10000、歷史分位數 0.11000：通過"
+        in text
+    )
+    assert "分位數交叉（q10 > q50 或 q50 > q90）的研究列數 0：通過" in text
+    assert (
+        "總覆蓋率 0.8000（需在 75% 到 85%），每摺覆蓋率需在 70% 到 90%，超出的研究摺：無：通過"
+        in text
+    )
+    assert "| 1（調參） | 0.9500 |" in text
+    assert (
+        "MAE 不高於 tech_vol_20d：模型 0.01000、baseline 0.01000，逐摺差 NW t 0.50（參考）：通過"
+        in text
+    )
+    assert (
+        "QLIKE 不高於 tech_vol_20d：模型 0.20000、baseline 0.19000，逐摺差 NW t -4.00（參考）：未過"
+        in text
+    )
+    assert (
+        "Brier 不高於 logistic：模型 0.09000、baseline 0.10000，逐摺差 NW t -1.00（參考）：通過"
+        in text
+    )
+    assert "ECE 低於 0.05：校準後 0.0300（校準前 0.0800）：通過" in text
+    assert "| 0.0–0.1 | 0.0500 | 0.0600 | 100 |" in text
+    assert "universe 內全部列（含 t+1 不可交易的列），研究摺。" in text
+    for heading in ("## 區間 20 日", "## 波動率", "## 上漲機率", "## 輸出一致性"):
+        assert heading in text, heading
+
+
+def test_the_interval_report_fails_coverage_crossing_and_ece_on_research_folds() -> None:
+    text = target_eval.report(
+        INTERVAL_KEY,
+        interval_evaluation(
+            crossed=3,
+            ece=0.06,
+            history=made(0.12, 0.11, 0.0),
+            coverage_by_fold=frame_of(
+                {"mean": [0.95, 0.69, math.nan], "tuning": [True, False, False]}, [1, 5, 6]
+            ),
+        ),
+    )
+
+    assert "超出的研究摺：5、6：未過" in text
+    assert "研究列數 3：未過" in text
+    assert "校準後 0.0600（校準前 0.0800）：未過" in text
+    assert "歷史分位數 0.11000：未過" in text
+
+
 @pytest.fixture
 def command(runs: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(evaluate_targets, "DEFAULT_CONFIG", CONFIG)
@@ -266,26 +534,6 @@ def test_evaluate_targets_writes_the_report(command: Path, tmp_path: Path, run_k
     assert not BacktestMetric.objects.exists()
 
 
-def test_reports_name_each_gate_and_its_numbers(command: Path) -> None:
-    returned = target_eval.report(
-        RETURN_KEY, target_eval.evaluate_run(RETURN_KEY, research(), command)
-    )
-    interval = target_eval.report(
-        INTERVAL_KEY, target_eval.evaluate_run(INTERVAL_KEY, research(), command)
-    )
-
-    assert "## 絕對報酬 5 日" in returned
-    assert "MAE 低於零預測" in returned
-    assert "MAE 低於過去 60 日平均" in returned
-    assert "方向準確率" in returned
-    for heading in ("## 區間 20 日", "## 波動率", "## 上漲機率", "## 輸出一致性"):
-        assert heading in interval, heading
-    assert "總覆蓋率" in interval
-    assert "每摺覆蓋率" in interval
-    assert "Brier 不高於 logistic" in interval
-    assert "ECE" in interval
-
-
 def test_evaluate_targets_refuses_other_scopes_missing_and_stale_caches(command: Path) -> None:
     with pytest.raises(CommandError, match="start with return- or interval-"):
         call_command("evaluate_targets", run_key="rank-wf1", stdout=StringIO())
@@ -297,6 +545,19 @@ def test_evaluate_targets_refuses_other_scopes_missing_and_stale_caches(command:
     export_year(2016, command)
     with pytest.raises(CommandError, match=r"return-wf1 .* stale"):
         call_command("evaluate_targets", run_key=RETURN_KEY, stdout=StringIO())
+
+
+def test_evaluate_run_refuses_a_baseline_fit_on_other_features(runs: Path) -> None:
+    fold = studied(research())[0]
+    notes = fold_notes(RETURN_KEY, "baseline", fold.index)
+    predictions = load_fold_predictions(RETURN_KEY, "baseline", fold)
+    save_fold_predictions(
+        RETURN_KEY, "baseline", fold, predictions, notes={**notes, "feature_hash": "other"}
+    )
+
+    assert target_eval.stale_folds("return", RETURN_KEY, research(), runs) == [fold.index]
+    with pytest.raises(ValueError, match=rf"folds \[{fold.index}\] of return-wf1 .* stale"):
+        target_eval.evaluate_run(RETURN_KEY, research(), runs)
 
 
 def test_evaluate_run_names_missing_lightgbm_folds(runs: Path) -> None:
