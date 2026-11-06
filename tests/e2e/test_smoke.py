@@ -51,7 +51,7 @@ def test_models_view_lists_every_run_of_the_day_and_each_check(
         "daily_price 1,842 列，前一交易日 1,840 列",
         "daily_price：整列 缺 1 檔、close 缺 2 檔",
         "過期：SOX",
-        "全部資料集都已更新",
+        "全部資料集與排程工作都已更新",
         "新增 1 檔",
     ):
         expect(checks.filter(has_text=summary)).to_have_count(1)

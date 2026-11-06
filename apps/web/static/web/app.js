@@ -15,7 +15,7 @@
     missing_values: 'standard 表普通股當日缺值',
     trading_calendar: '所有日期都在交易日曆內',
     index_freshness: '市場指數的最新收盤',
-    etl_runs: '每日資料集都已更新',
+    etl_runs: '資料集與排程工作都已更新',
     stock_master: '股票清單異動',
     us_close: '美股收盤',
     output_width_ratio: '區間寬度比異常',
@@ -751,7 +751,7 @@
       case 'us_close': return Object.keys(d.stale || {}).length ? '未更新：' + Object.keys(d.stale).join('、') : '全部已更新';
       case 'etl_runs': {
         const blocking = d.blocking || [], rest = (d.missing || []).filter(key => !blocking.includes(key));
-        if (!blocking.length && !rest.length) return '全部資料集都已更新';
+        if (!blocking.length && !rest.length) return '全部資料集與排程工作都已更新';
         return [blocking.length ? '缺閘門資料集：' + blocking.join('、') : '', rest.length ? '尚未更新：' + rest.join('、') : ''].filter(Boolean).join('；');
       }
       case 'stock_master': {

@@ -1,5 +1,5 @@
 from collections.abc import Callable, Iterator
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -15,6 +15,7 @@ from apps.etl.errors import SchemaChangedError, SourceNotReadyError
 from apps.etl.models import DataQualityLog, EtlRun
 from apps.etl.quality import CHECKS
 from apps.etl.ratelimit import RetryableError, ThrottledError
+from apps.etl.trading_calendar import REFRESH_DATASET, REFRESH_SOURCE
 from apps.market.calendar import TradingDays
 from apps.market.models import IndexDaily, TradingCalendar
 from config.celery import app
@@ -23,6 +24,10 @@ DAY = date(2026, 10, 28)
 TAIPEI = ZoneInfo("Asia/Taipei")
 DAILY_JOBS = {(job.source, job.dataset) for jobs in tasks.BATCHES.values() for job in jobs}
 SCANS = {("mops", "statement_scan"), ("mops", "revenue_scan")}
+MASTER = ("stock_master", "stock_master_daily")
+WEEKLY = ("tdcc", "weekly_holding")
+SIGNAL = ("datagov", "business_signal")
+CALENDAR = (REFRESH_SOURCE, REFRESH_DATASET)
 
 pytestmark = pytest.mark.usefixtures("october_2026_in_db")
 
@@ -81,6 +86,14 @@ def landed(day: date, jobs: set[tuple[str, str]]) -> None:
         EtlRun.objects.create(
             source=source, dataset=dataset, start_date=day, end_date=day, status="success"
         )
+
+
+def refreshed(day: date) -> None:
+    """The 15:10 calendar refresh of the session, which covers through the day before."""
+    eve = day - timedelta(days=1)
+    EtlRun.objects.create(
+        source=CALENDAR[0], dataset=CALENDAR[1], start_date=eve, end_date=eve, status="success"
+    )
 
 
 def checked(day: date, *extra: tuple[str, str]) -> None:
@@ -380,7 +393,10 @@ def test_sessions_missed_since_the_schedule_began_are_audited(
     assert {call[0][0] for call in sent} == set(since_start[1:])
     listed = [key for row in audited for key in row.detail["missing"]]
     assert listed
-    assert not [key for key in listed if key.startswith("mops/")]
+    owned = {
+        f"{source}/{dataset}" for source, dataset in (*SCANS, MASTER, WEEKLY, SIGNAL, CALENDAR)
+    }
+    assert not [key for key in listed if key in owned]
 
 
 def test_a_day_without_trading_is_not_prepared(
@@ -438,7 +454,8 @@ def test_only_a_missing_gate_dataset_makes_the_landed_row_an_error(
     absent: set[tuple[str, str]],
     severity: str,
 ) -> None:
-    landed(DAY, (DAILY_JOBS | SCANS) - absent)
+    landed(DAY, (DAILY_JOBS | SCANS | {MASTER}) - absent)
+    refreshed(DAY)
     today(DAY)
     tasks.check_quality()
     row = DataQualityLog.objects.get(check_name="etl_runs")
@@ -451,7 +468,8 @@ def test_a_scan_due_without_a_successful_run_warns(
     sent: list[list[tuple[date, str, str]]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    landed(DAY, DAILY_JOBS)
+    landed(DAY, DAILY_JOBS | {MASTER})
+    refreshed(DAY)
     EtlRun.objects.create(
         source="mops", dataset="revenue_scan", start_date=DAY, end_date=DAY, status="failed"
     )
@@ -472,6 +490,125 @@ def test_a_scan_due_without_a_successful_run_warns(
     assert DataQualityLog.objects.get(check_name="etl_runs").detail["missing"] == [
         "mops/revenue_scan"
     ]
+
+
+def missing_on(day: date, today: Callable[..., None]) -> list[str]:
+    today(day)
+    tasks.check_quality()
+    row = DataQualityLog.objects.get(date=day, check_name="etl_runs")
+    assert row.detail["blocking"] == []
+    missing: list[str] = row.detail["missing"]
+    return missing
+
+
+@pytest.mark.usefixtures("sent")
+def test_the_evening_check_lists_a_master_refresh_that_did_not_run(
+    today: Callable[..., None],
+) -> None:
+    landed(DAY, DAILY_JOBS | SCANS)
+    refreshed(DAY)
+    EtlRun.objects.create(
+        source=MASTER[0], dataset=MASTER[1], start_date=DAY, end_date=DAY, status="failed"
+    )
+    assert missing_on(DAY, today) == ["stock_master/stock_master_daily"]
+    assert DataQualityLog.objects.get(check_name="etl_runs").severity == "warning"
+    landed(DAY, {MASTER})
+    assert missing_on(DAY, today) == []
+
+
+@pytest.mark.usefixtures("sent")
+def test_the_first_session_after_a_saturday_owns_that_weeks_holding_file(
+    today: Callable[..., None],
+) -> None:
+    after, later = date(2026, 10, 27), date(2026, 10, 28)
+    for day in (after, later):
+        landed(day, DAILY_JOBS | SCANS | {MASTER})
+        refreshed(day)
+    EtlRun.objects.create(
+        source=WEEKLY[0], dataset=WEEKLY[1], start_date=after, end_date=after, status="success"
+    )
+    assert missing_on(after, today) == ["tdcc/weekly_holding"]
+    assert missing_on(later, today) == []
+    landed(date(2026, 10, 22), {WEEKLY})
+    assert missing_on(after, today) == []
+
+
+@pytest.mark.usefixtures("sent")
+def test_the_session_on_the_15th_owns_the_monthly_business_signal(
+    today: Callable[..., None],
+) -> None:
+    due, later = date(2026, 10, 15), date(2026, 10, 16)
+    for day in (due, later):
+        landed(day, DAILY_JOBS | SCANS | {MASTER})
+        refreshed(day)
+    assert missing_on(due, today) == ["datagov/business_signal"]
+    assert missing_on(later, today) == []
+    landed(due, {SIGNAL})
+    assert missing_on(due, today) == []
+
+
+def test_the_monthly_due_day_follows_the_beat_schedule(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert tasks.signal_days() == {15}
+    beat = {**settings.CELERY_BEAT_SCHEDULE}
+    beat["etl-business-signal"] = {"schedule": crontab(hour=10, minute=0, day_of_month="1,20")}
+    monkeypatch.setattr(settings, "CELERY_BEAT_SCHEDULE", beat)
+    assert tasks.signal_days() == {1, 20}
+    calendar = TradingDays.from_db()
+    signal = tasks.Due(*SIGNAL, date(2026, 10, 20))
+    assert signal in tasks._periodic_due(date(2026, 10, 20), calendar)
+    assert not [
+        due for due in tasks._periodic_due(DAY.replace(day=15), calendar) if due[:2] == SIGNAL
+    ]
+
+
+@pytest.mark.usefixtures("sent")
+def test_a_due_day_off_the_calendar_belongs_to_the_next_session(
+    today: Callable[..., None], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    beat = {**settings.CELERY_BEAT_SCHEDULE}
+    beat["etl-business-signal"] = {"schedule": crontab(hour=10, minute=0, day_of_month="10")}
+    monkeypatch.setattr(settings, "CELERY_BEAT_SCHEDULE", beat)
+    session = date(2026, 10, 12)
+    landed(session, DAILY_JOBS | SCANS | {MASTER, WEEKLY})
+    refreshed(session)
+    assert missing_on(session, today) == ["datagov/business_signal", "tdcc/weekly_holding"]
+    landed(date(2026, 10, 10), {SIGNAL})
+    landed(date(2026, 10, 8), {WEEKLY})
+    assert missing_on(session, today) == []
+
+
+@pytest.mark.usefixtures("sent")
+def test_the_evening_check_lists_a_calendar_refresh_that_did_not_run(
+    today: Callable[..., None],
+) -> None:
+    landed(DAY, DAILY_JOBS | SCANS | {MASTER})
+    assert missing_on(DAY, today) == ["trading_calendar/trading_calendar_refresh"]
+    EtlRun.objects.create(
+        source=CALENDAR[0],
+        dataset=CALENDAR[1],
+        start_date=date(2026, 10, 1),
+        end_date=DAY - timedelta(days=1),
+        status="success",
+    )
+    assert missing_on(DAY, today) == []
+
+
+@pytest.mark.usefixtures("catch_ups", "sent")
+def test_a_listed_periodic_miss_stays_listed_until_it_lands(
+    today: Callable[..., None], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("apps.etl.tasks.call_command", lambda name, **kwargs: None)
+    landed(DAY, DAILY_JOBS | SCANS)
+    refreshed(DAY)
+    assert missing_on(DAY, today) == ["stock_master/stock_master_daily"]
+    next_day = date(2026, 10, 29)
+    today(next_day, time(15, 10))
+    tasks.prepare_day()
+    row = DataQualityLog.objects.get(date=DAY, check_name="etl_runs")
+    assert (row.severity, row.detail["missing"]) == ("warning", ["stock_master/stock_master_daily"])
+    landed(DAY, {MASTER})
+    tasks.prepare_day()
+    assert DataQualityLog.objects.get(date=DAY, check_name="etl_runs").severity == "info"
 
 
 def test_the_us_close_loads_the_last_session_and_logs_stale_series(
@@ -554,13 +691,53 @@ def test_a_week_without_sessions_has_no_holding_to_fetch(
     assert fake.runs == []
 
 
-def test_the_business_signal_runs_on_its_day(
-    today: Callable[..., None], adapter: Callable[..., FakeAdapter]
+@pytest.mark.usefixtures("catch_ups", "sent")
+def test_a_later_master_refresh_clears_a_missed_one_but_a_later_week_does_not(
+    today: Callable[..., None], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("apps.etl.tasks.call_command", lambda name, **kwargs: None)
+    session = date(2026, 10, 27)
+    landed(session, DAILY_JOBS | SCANS)
+    refreshed(session)
+    assert missing_on(session, today) == ["stock_master/stock_master_daily", "tdcc/weekly_holding"]
+    landed(date(2026, 10, 28), {MASTER})
+    landed(date(2026, 10, 30), {WEEKLY})
+    today(date(2026, 10, 29), time(15, 10))
+    tasks.prepare_day()
+    row = DataQualityLog.objects.get(date=session, check_name="etl_runs")
+    assert (row.severity, row.detail["missing"]) == ("warning", ["tdcc/weekly_holding"])
+
+
+def test_a_week_without_sessions_owes_no_holding_file() -> None:
+    TradingCalendar.objects.filter(date__range=(date(2026, 10, 19), date(2026, 10, 22))).update(
+        is_trading_day=False
+    )
+    calendar = TradingDays.from_db()
+    weekly = [due for due in tasks._periodic_due(date(2026, 10, 27), calendar) if due[:2] == WEEKLY]
+    assert weekly == [tasks.Due(*WEEKLY, date(2026, 10, 16))]
+
+
+def test_the_first_session_of_the_calendar_owes_only_the_daily_refreshes() -> None:
+    first = date(2026, 10, 1)
+    due = tasks._periodic_due(first, TradingDays.from_db())
+    assert {item[:2] for item in due} == {MASTER, CALENDAR}
+
+
+@pytest.mark.parametrize(
+    ("ran", "recorded"),
+    [
+        (date(2026, 10, 15), date(2026, 10, 15)),
+        (date(2026, 10, 18), date(2026, 10, 15)),
+        (date(2026, 10, 3), date(2026, 10, 3)),
+    ],
+)
+def test_the_business_signal_is_recorded_on_its_due_day_even_when_late(
+    today: Callable[..., None], adapter: Callable[..., FakeAdapter], ran: date, recorded: date
 ) -> None:
     fake = adapter()
-    today(date(2026, 10, 15))
+    today(ran)
     tasks.business_signal.apply().get()
-    assert fake.runs == [("business_signal", date(2026, 10, 15), date(2026, 10, 15))]
+    assert fake.runs == [("business_signal", recorded, recorded)]
 
 
 def test_the_last_statement_scan_is_where_filings_stop_counting_for_the_session() -> None:
