@@ -62,6 +62,7 @@ BATCH_SLOTS = {
 }
 EXCHANGES = ("twse", "tpex")
 LAST_THREE = (0, 1, 2)
+CALENDAR_REFRESH = ("trading_calendar", "trading_calendar_refresh")
 
 
 class Due(NamedTuple):
@@ -150,7 +151,7 @@ def _reaudit(day: date, calendar: TradingDays | None = None) -> None:
     if any(check in CHECKS and level == Severity.ERROR for check, level in before):
         results.extend(run_checks(day, calendar or TradingDays.from_db()))
     if any(check == ETL_RUNS_CHECK for check, _ in before):
-        results.append(_landed(day))
+        results.append(_landed(day, _still_listed(day, calendar or TradingDays.from_db())))
     fresh = [row for row in alerting(results) if (row.check_name, row.severity) not in before]
     if fresh:
         dispatch(fresh)
@@ -281,7 +282,7 @@ def revenue_scan(self: Task[Any, Any], slot: str) -> str:
 
 @shared_task(name="etl.check_quality")
 def check_quality() -> int:
-    """The five daily checks after the evening ETL, plus which daily datasets did not land."""
+    """The five daily checks after the evening ETL, plus which expected runs did not land."""
     session = _session_today("CHECK_QUALITY")
     if session is None:
         return 0
@@ -342,9 +343,11 @@ def weekly_holding(self: Task[Any, Any]) -> str:
 
 @shared_task(bind=True, max_retries=None, name="etl.business_signal")
 def business_signal(self: Task[Any, Any]) -> str:
-    """data.gov.tw's monthly file on its due day, which need not be a session."""
+    """data.gov.tw's monthly file, recorded on its due day even when beat fires it late."""
     today = timezone.localtime().date()
-    return _run_once(self, "datagov", "business_signal", today, TradingDays.from_db())
+    due = [day for day in signal_days() if day <= today.day]
+    on = today.replace(day=max(due)) if due else today
+    return _run_once(self, "datagov", "business_signal", on, TradingDays.from_db())
 
 
 def _run_once(
@@ -376,8 +379,11 @@ def signal_days() -> set[int]:
 
 
 def _periodic_due(day: date, calendar: TradingDays) -> frozenset[Due]:
-    """The master refresh, and the weekly and monthly files due since the previous session."""
-    due = {Due("stock_master", DAILY_DATASET, day)}
+    """Master and calendar refreshes, and weekly and monthly files due since the last session."""
+    due = {
+        Due("stock_master", DAILY_DATASET, day),
+        Due(*CALENDAR_REFRESH, day - timedelta(days=1)),
+    }
     try:
         previous = calendar.shift(day, -1)
     except OutsideCalendarError:
@@ -391,6 +397,15 @@ def _periodic_due(day: date, calendar: TradingDays) -> frozenset[Due]:
         if passed.day in signal_days():
             due.add(Due("datagov", "business_signal", passed))
     return frozenset(due)
+
+
+def _still_listed(day: date, calendar: TradingDays) -> frozenset[Due]:
+    """Periodic runs the session's own check listed; a later audit keeps them until they land."""
+    row = DataQualityLog.objects.filter(date=day, check_name=ETL_RUNS_CHECK).first()
+    listed = set(row.detail.get("missing", [])) if row is not None else set()
+    return frozenset(
+        due for due in _periodic_due(day, calendar) if f"{due.source}/{due.dataset}" in listed
+    )
 
 
 def _daily_jobs() -> set[tuple[str, str]]:
