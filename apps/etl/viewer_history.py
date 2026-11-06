@@ -1,4 +1,4 @@
-"""Quarters FinMind lacks for delisted companies, read one stock at a time from the XBRL viewer."""
+"""Every settled quarter of a delisted company from the XBRL viewer, to insert or to compare."""
 
 from collections.abc import Callable
 from datetime import date, timedelta
@@ -32,15 +32,14 @@ def viewer_periods(
 def viewer_frame(
     stock_id: str, periods: list[str], stored: set[str], page: Page, columns: list[str]
 ) -> pd.DataFrame:
-    """Rows for the quarters not stored, and for stored ones whose quarter before was read too."""
+    """Rows for every quarter: missing ones to insert, stored ones to compare (plan K18)."""
     missing = [period for period in periods if period not in stored]
-    reports = _reports(stock_id, _needed(missing), page)
+    reports = _reports(stock_id, _needed(periods), page)
     records: list[dict[str, Any]] = []
     for period in periods:
         current = reports.get(period)
-        earlier = previous_period(period)
-        before = reports.get(earlier)
-        if current is None or (period in stored and before is None and earlier >= IFRS_FROM):
+        before = reports.get(previous_period(period))
+        if current is None:
             continue
         rows = statement_rows(
             _summary(stock_id, current), _summary(stock_id, before), int(period[-1])
@@ -48,16 +47,24 @@ def viewer_frame(
         records.extend({**row, "period": period} for row in rows)
     frame = pd.DataFrame(records, columns=columns, dtype=object)
     frame.attrs["absent"] = [period for period in missing if reports.get(period) is None]
+    frame.attrs["stored_absent"] = [
+        period for period in periods if period in stored and reports.get(period) is None
+    ]
     frame.attrs["no_revenue"] = [
         period for period in missing if _lacks(reports.get(period), INCOME, REVENUE)
+    ]
+    frame.attrs["stored_no_revenue"] = [
+        period
+        for period in periods
+        if period in stored and _lacks(reports.get(period), INCOME, REVENUE)
     ]
     return frame
 
 
-def _needed(missing: list[str]) -> list[str]:
+def _needed(periods: list[str]) -> list[str]:
     """The quarter before each one too: flows, EPS and ROE are taken against it."""
-    earlier = {previous_period(period) for period in missing}
-    return sorted(set(missing) | {period for period in earlier if period >= IFRS_FROM})
+    earlier = {previous_period(period) for period in periods}
+    return sorted(set(periods) | {period for period in earlier if period >= IFRS_FROM})
 
 
 def _lacks(figures: Figures | None, report: str, names: tuple[str, ...]) -> bool:

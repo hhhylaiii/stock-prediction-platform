@@ -72,7 +72,7 @@ SCANS = frozenset({STATEMENT_SCAN, REVENUE_SCAN})
 REVENUE_PATH = "/nas/t21"
 SUMMARY_PATH = "/mops/web/ajax_"
 VIEWER_PATH = "/server-java/t164sb01"
-NOTES = ("incomplete", "stock_id", "absent", "no_revenue")
+NOTES = ("incomplete", "stock_id", "absent", "stored_absent", "no_revenue", "stored_no_revenue")
 SUMMARY_ENCODING = "utf-8"
 EXPORT_NAME = re.compile(r"name='filename' value='[^']*'")
 LISTING_PATH = "/server-java/t57sb01"
@@ -514,7 +514,7 @@ class MopsAdapter(BaseAdapter):
         return found
 
     def _viewer(self, stock_id: str, start: date, end: date) -> pd.DataFrame:
-        """Settled quarters the stock filed while listed; stored ones only feed the conversion."""
+        """Settled quarters the stock filed while listed; stored ones are read to compare."""
         listed = StockMaster.objects.filter(stock_id=stock_id).values_list("delist_date", flat=True)
         days_after = int(settings.STATEMENT_SCAN_DAYS_AFTER)
         periods = viewer_periods(start, end, timezone.localdate(), days_after, listed.first())
@@ -523,7 +523,8 @@ class MopsAdapter(BaseAdapter):
 
         def page(period: str, kind: str) -> str:
             params, body = self.summaries.viewer(stock_id, int(period[:4]), int(period[-1]), kind)
-            self.save_raw(STATEMENT_VIEWER, params, {"html": body})
+            kept = self.save_raw(STATEMENT_VIEWER, params, {"html": body})
+            RawMops.objects.filter(pk=kept.pk).update(fetched_at=timezone.now())
             return body
 
         frame = viewer_frame(stock_id, periods, stored, page, SCAN_COLUMNS)
