@@ -110,9 +110,9 @@ def summary_frame() -> pd.DataFrame:
 
     Without the quarter before, only what needs none is read: balances and first quarters.
     """
-    pages = _latest(STATEMENT_HISTORY, ("report", "TYPEK", "year", "season"))
-    periods = sorted({_summary_period(params) for params in pages})
-    summaries = {period: _summary(period, pages) for period in periods}
+    pages = latest_pages(STATEMENT_HISTORY, ("report", "TYPEK", "year", "season"))
+    periods = sorted({summary_period(params) for params in pages})
+    summaries = {period: kept_summaries(period, pages) for period in periods}
     empty: Summary = {report: {} for report in REPORTS}
     records = []
     for period in periods:
@@ -129,7 +129,7 @@ def viewer_frame_from_raw(stock_ids: Sequence[str] | None = None) -> pd.DataFram
     """
     keys = ("CO_ID", "SYEAR", "SSEASON", "REPORT_ID")
     asked = {"request_params__CO_ID__in": list(stock_ids)} if stock_ids else {}
-    pages = _latest(STATEMENT_VIEWER, keys, **asked)
+    pages = latest_pages(STATEMENT_VIEWER, keys, **asked)
     by_stock: dict[str, set[str]] = {}
     for code, year, season, _ in pages:
         if not stock_ids or code in stock_ids:
@@ -150,7 +150,9 @@ def viewer_frame_from_raw(stock_ids: Sequence[str] | None = None) -> pd.DataFram
     return frame
 
 
-def _latest(dataset: str, keys: tuple[str, ...], **match: object) -> dict[tuple[str, ...], str]:
+def latest_pages(
+    dataset: str, keys: tuple[str, ...], **match: object
+) -> dict[tuple[str, ...], str]:
     """The page stored last for each request."""
     rows = RawMops.objects.filter(dataset=dataset, **match).order_by("fetched_at", "id")
     return {
@@ -159,11 +161,11 @@ def _latest(dataset: str, keys: tuple[str, ...], **match: object) -> dict[tuple[
     }
 
 
-def _summary_period(params: tuple[str, ...]) -> str:
+def summary_period(params: tuple[str, ...]) -> str:
     return f"{int(params[2]) + ROC_OFFSET}-Q{int(params[3])}"
 
 
-def _summary(period: str, pages: dict[tuple[str, ...], str]) -> Summary:
+def kept_summaries(period: str, pages: dict[tuple[str, ...], str]) -> Summary:
     """Both markets of the three summaries, as the backfill read them; a filed one is not empty."""
     year, season = str(int(period[:4]) - ROC_OFFSET), f"{int(period[-1]):02d}"
     found: dict[str, dict[str, dict[str, float | None]]] = {}
