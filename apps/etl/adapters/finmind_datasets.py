@@ -177,7 +177,8 @@ def ex_date_announcements(
 ) -> dict[date, date | None]:
     """The session each ex-date was first announced in; none if that comes after the ex-date."""
     seen: dict[date, date] = {}
-    for row in checked_rows(policy, POLICY_KEYS, "TaiwanStockDividend", stock_id):
+    keys = (*POLICY_KEYS, "AnnouncementDate")
+    for row in checked_rows(policy, keys, "TaiwanStockDividend", stock_id):
         day = _optional_day(row.get("AnnouncementDate"), "TaiwanStockDividend")
         if day is None:
             continue

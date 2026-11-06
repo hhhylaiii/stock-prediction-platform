@@ -72,6 +72,19 @@ def test_a_bad_announcement_time_is_refused(esun: Rows) -> None:
         ex_date_announcements(policy(esun, AnnouncementTime="8pm"), "2884", SESSION)
 
 
+def test_answers_without_announcement_dates_are_refused(esun: Rows) -> None:
+    rows = [{k: v for k, v in row.items() if k != "AnnouncementDate"} for row in policy(esun)]
+    with pytest.raises(SchemaChangedError, match="AnnouncementDate"):
+        ex_date_announcements(rows, "2884", SESSION)
+
+
+def test_an_announcement_past_the_calendar_rejects_the_stock(esun: Rows) -> None:
+    rows = policy(esun, AnnouncementDate="2028-01-03", CashExDividendTradingDate="2028-02-01")
+    rows = [{**row, "StockExDividendTradingDate": "2028-02-01"} for row in rows]
+    with pytest.raises(SchemaChangedError, match="calendar"):
+        ex_date_announcements(rows, "2884", SESSION)
+
+
 def test_events_carry_the_date_only_when_a_session_rule_is_given(esun: Rows) -> None:
     dated = dividend_events(policy(esun), [], "2884", session=SESSION).iloc[0]
     assert dated["announce_date"] == date(2013, 7, 31)
@@ -114,3 +127,4 @@ def test_the_command_reads_stored_answers_again(
     assert "1 events dated across 2 stocks" in out
     assert "rejected 2330: SchemaChangedError" in err
     assert DividendEvent.objects.get(stock_id="2884").announce_date == date(2013, 7, 31)
+

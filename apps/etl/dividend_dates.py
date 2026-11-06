@@ -1,16 +1,16 @@
 """When each ex-date became public, from FinMind's dividend announcements; blanks only."""
 
 from collections.abc import Mapping, Sequence
-from datetime import date, time
+from datetime import date, datetime, time
 from typing import Any, NamedTuple
 
 from django.db import transaction
 
 from apps.etl.adapters.finmind_datasets import Session, ex_date_announcements
-from apps.etl.errors import SourceError
+from apps.etl.errors import SchemaChangedError, SourceError
 from apps.etl.filings import filing_session
 from apps.etl.models import RawFinmind
-from apps.market.calendar import TradingDays
+from apps.market.calendar import CalendarError, TradingDays
 from apps.market.models import DividendEvent
 
 POLICY = "dividend_policy"
@@ -24,7 +24,14 @@ class Reapplied(NamedTuple):
 
 def announcement_session(calendar: TradingDays, cutoff: time) -> Session:
     """Announcements before the evening cutoff count for that session, as filings do."""
-    return lambda moment: filing_session(moment, calendar, cutoff)
+
+    def session(moment: datetime) -> date:
+        try:
+            return filing_session(moment, calendar, cutoff)
+        except CalendarError as exc:
+            raise SchemaChangedError(f"announcement {moment} is off the trading calendar") from exc
+
+    return session
 
 
 def fill_announce_dates(stock_id: str, announced: Mapping[date, date | None]) -> int:
