@@ -8,10 +8,10 @@ import pytest
 from django.core.management import call_command
 
 from apps.etl.adapters.mops import STATEMENT_SCAN
-from apps.etl.cumulative_margins import MARGIN_CHECK, clear_cumulative_margins
+from apps.etl.cumulative_margins import MARGIN_CHECK, clear_cumulative_margins, spans
 from apps.etl.models import DataQualityLog, EtlRun, RawMops
 from apps.etl.mops_history import STATEMENT_HISTORY, STATEMENT_VIEWER
-from apps.etl.statement_summary import REPORTS, SEASON_LABELS
+from apps.etl.statement_summary import GROSS_PROFIT, REPORTS, REVENUE, SEASON_LABELS
 from apps.market.models import FinancialStatement
 
 H1_GROSS = 36_896 / 216_026
@@ -77,9 +77,11 @@ def test_a_year_to_date_margin_is_cleared_and_a_quarter_one_kept(
             "fields": {"gross_margin": [H1_GROSS, None, "cumulative"]},
         }
     ]
-    assert logged()["unmatched"] == [
+    assert logged()["unmatched"] == []
+    assert logged()["unverifiable"] == [
         {"period": "2013-Q2", "fin_type": "consolidated", "field": "op_margin", "value": 0.5}
     ]
+    assert DataQualityLog.objects.get(check_name=MARGIN_CHECK).date == date(2013, 6, 30)
 
 
 @pytest.mark.django_db
@@ -193,5 +195,45 @@ def test_only_the_stocks_asked_for_are_judged(fixture_path: Callable[[str], Path
         announce_date=date(2014, 6, 3),
         gross_margin=320_083 / 1_452_830,
     )
-    assert clear_cumulative_margins(["4526"]).kinds == {"cumulative": 1}
+    stored("2013-Q3", gross_margin=0.5)
+    cleared = clear_cumulative_margins(["4526"])
+    assert (cleared.kinds, cleared.unchecked) == ({"cumulative": 1}, 0)
     assert margins()[0] == pytest.approx(H1_GROSS)
+
+
+@pytest.mark.django_db
+def test_before_ifrs_a_margin_beside_a_left_out_revenue_is_cleared_unverified() -> None:
+    stored("2012-Q2", gross_margin=0.3, op_margin=0.1)
+    stored("2012-Q3", revenue=100, gross_margin=0.3)
+    assert clear_cumulative_margins().kinds == {"unverified": 2}
+    assert (margins("2012-Q2"), margins("2012-Q3")) == ((None, None), (0.3, None))
+    assert logged()["changes"][0]["fields"]["gross_margin"] == [0.3, None, "unverified"]
+
+
+@pytest.mark.django_db
+def test_a_rerun_drops_notes_the_new_pages_settle(fixture_path: Callable[[str], Path]) -> None:
+    save_viewer(fixture_path, 2)
+    stored(op_margin=Q2_OPERATING)
+    assert clear_cumulative_margins().unverifiable == 1
+    save_viewer(fixture_path, 1)
+    assert clear_cumulative_margins().unverifiable == 0
+    assert margins()[1] == pytest.approx(Q2_OPERATING)
+    assert not DataQualityLog.objects.filter(check_name=MARGIN_CHECK).exists()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(("offset", "kinds"), [(5e-5, {"cumulative": 1}), (2e-4, {})])
+def test_a_margin_matches_within_one_hundredth_of_a_point(
+    fixture_path: Callable[[str], Path], offset: float, kinds: dict[str, int]
+) -> None:
+    save_viewer(fixture_path, 2)
+    stored(gross_margin=H1_GROSS + offset)
+    assert clear_cumulative_margins().kinds == kinds
+
+
+def test_a_span_without_revenue_is_skipped_and_a_tie_keeps_the_quarter() -> None:
+    revenue, gross = REVENUE[0], GROSS_PROFIT[0]
+    empty_first = {1: {revenue: 0.0, gross: 0.0}, 2: {revenue: 100.0, gross: 30.0}}
+    assert spans(0.3, 2, empty_first, GROSS_PROFIT) == [1, 2]
+    flat = {1: {revenue: 100.0, gross: 30.0}, 2: {revenue: 100.0, gross: 30.0}}
+    assert spans(0.3, 2, flat, GROSS_PROFIT) == [2]
