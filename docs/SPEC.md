@@ -252,7 +252,7 @@ Oct 29, 2026 · @Owen Lai
 4. 標準化：個股層級特徵做當日橫截面 z-score，均值與標準差只用 universe 內的股票算。Ridge 與 logistic baseline 一律用 z-score 值；排名模型的 LightGBM 也用 z-score 值，原值跨年度有漂移，樹模型看不出相對當日市場的高低；絕對報酬、區間、波動、機率模型的 LightGBM 用原值並加入市場層級特徵，市場層級特徵進模型前先在訓練窗內依分位切成 5 級，見第 7 節模型表。市場層級特徵與 `ind_sector_id` 不做橫截面 z-score，市場層級特徵排名模型不使用。當日 universe 沒有離散度時 z 為 0，不是 NaN。
 5. 缺值：Ridge 與 logistic 填當日中位數並加 `_missing` 旗標；LightGBM 保留 NaN。
 6. 寫入 `feature_daily`，只存 winsorize 前的原值與 `in_universe`，同時輸出 Parquet 分區檔（依年份）。步驟 3 到 5 的 winsorize、z-score、填值與 `_missing` 旗標在訓練與推論管線按日重算，不落表，參數一律由同一天的訓練 universe 算出。每日重算最近 60 個交易日的特徵與已可結算的 label，以 upsert 覆蓋，處理除權息與財報延遲入庫造成的歷史錯值。
-7. 特徵驗收：Phase 3 產出每個特徵的單因子 rank IC，只用前 4 摺的訓練窗計算（測試期落在 2014 到 2015 年，與第 7 節調參同一組摺），之後不再用新資料重篩；單因子 rank IC 對 5 日與 20 日的 `fwd_rank_pct` 各算一次；成對相關取日橫截面 Spearman 的平均，特徵依兩個 horizon 中較大的單因子 IC 絕對值由高到低保留，與已保留特徵的相關絕對值高於 0.95 的剔除；訊號型特徵在兩個 horizon 的 rank IC 絕對值都低於 0.005 才剔除，任一 horizon 的 IC 有值天數不到篩選窗一半時不判定、保留並記錄；條件型特徵（`size_*`、`liq_*`、`tech_vol_*`、`risk_*`、`fund_days_since_fs`、`ind_sector_id`、`*_days_to_*`）不受 IC 門檻約束。市場層級特徵不篩選，記在同一列 `model_run` 的 params.unscreened，非排名模型照第 4 步加回。保留清單寫入 `model_run.feature_list`；剔除清單在 Phase 4 定案後不得依 2025 年起的 holdout 結果再改。第二批特徵每加一組重跑同一套篩選與 walk-forward，總體 OOS rank IC 沒有提高就不留。
+7. 特徵驗收：Phase 3 產出每個特徵的單因子 rank IC，只用調參摺（測試期落在 2014 到 2015 年的摺，與第 7 節調參同一組）的訓練窗計算，篩選窗從第一個調參摺的訓練起點到最後一個調參摺的訓練終點，之後不再用新資料重篩；單因子 rank IC 對 5 日與 20 日的 `fwd_rank_pct` 各算一次；成對相關取日橫截面 Spearman 的平均，特徵依兩個 horizon 中較大的單因子 IC 絕對值由高到低保留，與已保留特徵的相關絕對值高於 0.95 的剔除；訊號型特徵在兩個 horizon 的 rank IC 絕對值都低於 0.005 才剔除，任一 horizon 的 IC 有值天數不到篩選窗一半時不判定、保留並記錄；條件型特徵（`size_*`、`liq_*`、`tech_vol_*`、`risk_*`、`fund_days_since_fs`、`ind_sector_id`、`*_days_to_*`）不受 IC 門檻約束。市場層級特徵不篩選，記在同一列 `model_run` 的 params.unscreened，非排名模型照第 4 步加回。保留清單寫入 `model_run.feature_list`；剔除清單在 Phase 4 定案後不得依 2025 年起的 holdout 結果再改。第二批特徵每加一組重跑同一套篩選與 walk-forward，總體 OOS rank IC 沒有提高就不留。
 
 **Label 定義**
 
@@ -308,13 +308,13 @@ Oct 29, 2026 · @Owen Lai
 3. 訓練窗長度是參數，不是定案：Phase 4 在研究期同一組摺上比較 36 個月、60 個月、expanding 加時間衰減權重（半衰期 24 個月），以總體 OOS rank IC 選定後寫回本節。60 個月窗的第一摺只能從 2015 年起，三種窗長一律只比 2015 年起的摺。
 4. 訓練列取樣：20 日 label 每檔每天一列，相鄰 20 列的 label 高度重疊，有效樣本遠低於列數。Phase 4 粗跑比較「全部列」與「每 5 個交易日取一列」兩版，後者訓練快 5 倍、減少對重疊列的過擬合，OOS rank IC 不輸就採用；預測與評估仍每日對全市場做。
 5. Early stopping 的驗證集固定是訓練窗最後 6 個月，與前段訓練資料之間同樣留 20 個交易日 embargo；排名目標用每日 rank IC 當停止指標（自訂 feval，每 10 輪算一次），其他目標用各自的 loss。取得最佳輪數後，以整個訓練窗重訓固定輪數再產出測試期預測。測試期永遠不得用於 early stopping 或任何選擇。
-6. 超參數只在研究期前 4 摺（測試期落在 2014 到 2015 年）聯合調一次，之後凍結；這 4 摺的指標已不是純 OOS，不計入總體指標，另行標註。正式上線後每年重調一次，只用重調時點之前的資料。單摺的 IC 噪音太大，不逐摺調。
+6. 超參數只在研究期中測試期落在 2014 到 2015 年的摺（調參摺；季摺是前 8 摺，每 6 個月一摺的粗跑是前 4 摺）聯合調一次，之後凍結；調參摺的指標已不是純 OOS，不計入總體指標，另行標註。正式上線後每年重調一次，只用重調時點之前的資料。單摺的 IC 噪音太大，不逐摺調。
 7. 永遠不用隨機 K-fold；任何以隨機切分得到的指標一律視為無效。
 8. 算力：完整 walk-forward 約 51 摺（研究期 44、holdout 7），每摺 8 個 GBDT 模型（排名 2、絕對報酬 1、分位數 3、波動率 1、機率 1），單 seed、全部列粗估一到兩天，每 5 日取樣約五分之一。調參與窗長比較先用每 6 個月一摺粗跑，定案後再跑完整版；每摺的預測結果快取成 Parquet，指標重算不重訓。
 
 **評估指標**
 
-- 排名：日頻 rank IC（每日預測分數與 `fwd_rank_pct` 的 Spearman 相關）的均值、標準差與 ICIR（均值 / 標準差）。20 日 label 重疊使日 IC 序列自相關，顯著性用 Newey-West t 值，lag 等於 horizon。關卡（研究期，不含調參用的前 4 摺）：OOS rank IC 均值大於 0 且 NW t 值大於 2；逐摺比較 LightGBM 的 IC 高於 Ridge 的摺數達 60% 以上。目標值（日頻，初始設定，Phase 4 第一輪結果後校正）：20 日 IC 0.03、ICIR 0.3；5 日 IC 0.02、ICIR 0.2。
+- 排名：日頻 rank IC（每日預測分數與 `fwd_rank_pct` 的 Spearman 相關）的均值、標準差與 ICIR（均值 / 標準差）。20 日 label 重疊使日 IC 序列自相關，顯著性用 Newey-West t 值，lag 等於 horizon。關卡（研究期，不含調參摺）：OOS rank IC 均值大於 0 且 NW t 值大於 2；逐摺比較 LightGBM 的 IC 高於 Ridge 的摺數達 60% 以上。目標值（日頻，初始設定，Phase 4 第一輪結果後校正）：20 日 IC 0.03、ICIR 0.3；5 日 IC 0.02、ICIR 0.2。
 - 中性化 IC：每日把預測分數對產業 dummy（`stock_master` 產業代碼）、`size_log_mcap`、`risk_beta_250d`、`tech_vol_20d` 做橫截面迴歸取殘差，再算殘差與 `fwd_rank_pct` 的 rank IC。中性化 IC 接近 0 代表訊號只是產業、規模或 beta 曝險，十分位組合會變成產業賭注；Phase 4 據此決定排名 label 是否改為殘差化排名（第 10 節待決）。
 - 排名穩定性：報每摺與每年的 IC、IC 大於 0 的摺數比例、前 10 名特徵重要度在各摺的變動；另依 `liq_dollar_vol_med_20d` 當日三分位分組各報 IC，台股小型股的 IC 常不可交易，大型股那一組的 IC 才是可用訊號的下限。
 - 十分位組合：每日在 universe 內依分數分 10 組、等權；持有期等於 horizon，用 overlapping tranches（20 日 horizon 即 20 組各持有 20 日，每日只換其中一組），不每日全換；進場價用 `fwd_ret_*_open`，`untradable_t1 = 1` 的列跳過。主報表是第 10 組減 universe 等權的月化超額報酬與最大回撤；多空（第 10 組減第 1 組）為輔，因台股小型股放空不可行。另報只取成交金額前三分之一股票重做的十分位版本。
@@ -376,8 +376,8 @@ Oct 29, 2026 · @Owen Lai
 | Phase 0 專案骨架 | Django 專案、PostgreSQL、Docker Compose、`apps/etl` adapter 介面、`stock_master` 與 `trading_calendar` | `manage.py fetch --source twse --dataset daily_price --date 2026-10-28` 可寫入 raw 與 standard 表；測試框架可跑 | 1 週 |
 | Phase 1 歷史回補 | FinMind adapter；2010 年起的日價量、籌碼、月營收、財報、股利全部入庫（股權分散表不回補歷史，Phase 2 起由集保每週累積）；checkpoint 續跑 | 抽樣 20 檔、每檔 3 個年度與證交所逐日核對無誤差；表中存在已下市股票 | 1 到 2 週 |
 | Phase 2 每日增量與品質 | 證交所、櫃買中心、集保、MOPS、yfinance adapter；Celery 排程；`data_quality_log`；告警 | 連續 5 個交易日自動更新，無人工介入；品質檢查能攔下人為注入的錯誤資料 | 1 到 2 週 |
-| Phase 3 特徵與 baseline | `feature_daily`、`label_daily`、PIT 對齊、三類目標的 label 與 baseline（Ridge、logistic、零預測）、walk-forward、IC 報表 | 第 8 節的九個自動化測試全部通過；IC 報表產出，含每個特徵的單因子 rank IC；成對相關高於 0.95 的特徵只留一個，前 4 摺訓練窗 rank IC 絕對值低於 0.005 的訊號型特徵已剔除並記錄 | 1 到 2 週 |
-| Phase 4 主模型 | 三類目標（排名、絕對報酬、區間與機率）的 LightGBM 訓練與 5 seed bagging、XGBoost 對照（可選）、walk-forward 含窗長比較、ensemble、`model_run` 與 `prediction` 與 model\_monitor 表、每月重訓與影子模型門檻、事後評估工作、第二批特徵逐組加入並比較、最終 holdout 一次性執行 | 研究期（2014 到 2024，不含調參用的前 4 摺）LightGBM 的 OOS rank IC 大於 0 且 Newey-West t 值大於 2，逐摺贏過 Ridge 的摺數達 60%；中性化 IC 與依成交金額分三組的 IC 報表產出；十分位報酬（持有期等於 horizon、只扣實際換手成本）報表產出；5 日絕對報酬 MAE 以逐摺配對 NW t 大於 2 優於零預測；區間 pinball loss 優於波動率區間 baseline，總體覆蓋率在 75% 到 85% 之間且每摺在 70% 到 90% 之間；分位數不交叉；機率 ECE 低於 0.05；設計定案後 2025 年起的 holdout 只跑一次並記錄；model\_monitor 有資料 | 2 到 3 週，含 walk-forward 計算時間 |
+| Phase 3 特徵與 baseline | `feature_daily`、`label_daily`、PIT 對齊、三類目標的 label 與 baseline（Ridge、logistic、零預測）、walk-forward、IC 報表 | 第 8 節的九個自動化測試全部通過；IC 報表產出，含每個特徵的單因子 rank IC；成對相關高於 0.95 的特徵只留一個，調參摺訓練窗 rank IC 絕對值低於 0.005 的訊號型特徵已剔除並記錄 | 1 到 2 週 |
+| Phase 4 主模型 | 三類目標（排名、絕對報酬、區間與機率）的 LightGBM 訓練與 5 seed bagging、XGBoost 對照（可選）、walk-forward 含窗長比較、ensemble、`model_run` 與 `prediction` 與 model\_monitor 表、每月重訓與影子模型門檻、事後評估工作、第二批特徵逐組加入並比較、最終 holdout 一次性執行 | 研究期（2014 到 2024，不含調參摺）LightGBM 的 OOS rank IC 大於 0 且 Newey-West t 值大於 2，逐摺贏過 Ridge 的摺數達 60%；中性化 IC 與依成交金額分三組的 IC 報表產出；十分位報酬（持有期等於 horizon、只扣實際換手成本）報表產出；5 日絕對報酬 MAE 以逐摺配對 NW t 大於 2 優於零預測；區間 pinball loss 優於波動率區間 baseline，總體覆蓋率在 75% 到 85% 之間且每摺在 70% 到 90% 之間；分位數不交叉；機率 ECE 低於 0.05；設計定案後 2025 年起的 holdout 只跑一次並記錄；model\_monitor 有資料 | 2 到 3 週，含 walk-forward 計算時間 |
 | Phase 5 服務層 | DRF API：`/predictions`、`/stocks/{id}/features`、`/stocks/{id}/history`、`/models`；報酬到價格與區間的換算（每檔用自己的最新收盤價）；簡單查詢頁面 | API 回傳最新交易日的預測排名、預測價格、價格區間、上漲機率與特徵；回應時間 500 毫秒內 | 1 到 2 週 |
 | Phase 6 即時（可選） | Fugle 即時報價、Shioaji 下單介面、盤中監控 | 盤中可取得追蹤清單的即時價；下單走模擬帳戶驗證 | 視需求 |
 
