@@ -29,7 +29,7 @@ def rows_of(out: StringIO) -> list[list[str]]:
 def test_every_endpoint_gets_its_median_p95_and_max(
     runs: Runs, calendar_in_db: list[object], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    clock = ticks([0.001, 0.003, 0.002])
+    clock = ticks([0.001] * 10 + [0.002] * 9 + [0.05])
     monkeypatch.setattr(measure_api.time, "perf_counter", lambda: next(clock))
     calls = []
     real_get = Client.get
@@ -41,13 +41,13 @@ def test_every_endpoint_gets_its_median_p95_and_max(
     monkeypatch.setattr(Client, "get", counted)
     out = StringIO()
 
-    call_command("measure_api", "--repeat", "3", stdout=out)
+    call_command("measure_api", "--repeat", "20", stdout=out)
 
     rows = rows_of(out)
     assert len(rows) == 11
-    assert rows[0] == ["`/api/stocks/2330`", "200", "2.0", "3.0", "3.0"]
-    assert all(row[1] == "200" for row in rows)
-    assert len(calls) == 11 * (3 + 1)
+    assert rows[0] == ["`/api/stocks/2330`", "200", "1.5", "2.0", "50.0"]
+    assert all(row[1:] == ["200", "1.5", "2.0", "50.0"] for row in rows)
+    assert len(calls) == 11 * (20 + 1)
 
 
 def test_statuses_other_than_the_first_are_counted(
