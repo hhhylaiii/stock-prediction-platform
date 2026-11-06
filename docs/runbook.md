@@ -24,6 +24,15 @@ docker compose exec -T worker python manage.py shell -c "from django.conf import
 - 要列出下方排程表的 15 個項目。舊映像的排程可能是空的：2026-11-01 起的 worker 用舊映像帶著空排程跑了 4 天，什麼都沒抓，直到 11/05 重建才上線。
 - 第一個時段過後再看 `docker compose logs worker | grep "Sending due task"`，確認排程有送出任務。
 
+worker 只掛主機 `artifacts/` 底下的 `features`、`models`、`predictions` 三個子目錄（研究指令在主機上跑，worker 讀寫同一份；`reports/` 不掛）。重建後確認三個路徑都在掛載點下、讀得到主機的特徵分區：
+
+```bash
+docker compose exec -T worker python manage.py shell -c "from django.conf import settings as s; import os; print(s.FEATURE_PARQUET_DIR, s.MODEL_DIR, s.RESEARCH_CACHE_DIR, sorted(os.listdir(s.FEATURE_PARQUET_DIR))[:3])"
+```
+
+- 三個路徑都要是 `/app/artifacts/...`；`.env` 若設了 `FEATURE_PARQUET_DIR`、`MODEL_DIR`、`RESEARCH_CACHE_DIR`，容器會改用那個值，掛載就沒有作用。
+- 拉到這個 compose 之後，下一次碰到 worker 的 `docker compose up -d` 就會換掉 worker 容器（映像不重建），挑排程表上沒有任務的時段。
+
 ## 啟動
 
 ```bash

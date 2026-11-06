@@ -33,6 +33,10 @@ services:
   worker:
     <<: *app
     command: ["celery", "-A", "config", "worker", "--beat", "--loglevel=${LOG_LEVEL:-INFO}", "--schedule=/tmp/celerybeat-schedule"]
+    volumes:
+      - ./artifacts/features:/app/artifacts/features
+      - ./artifacts/models:/app/artifacts/models
+      - ./artifacts/predictions:/app/artifacts/predictions
     healthcheck:
       test: ["CMD-SHELL", "celery -A config inspect ping -d celery@$$HOSTNAME --timeout 5"]
       interval: 30s
