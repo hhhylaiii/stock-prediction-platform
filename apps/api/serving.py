@@ -86,7 +86,7 @@ def warn_unreadable_periods(run_id: str) -> None:
 
 
 def day_of(value: object) -> date | None:
-    """The params.degraded_on date, or None unless it is a YYYY-MM-DD string."""
+    """A params date, or None unless it is a YYYY-MM-DD string."""
     if not isinstance(value, str) or not ISO_DAY.fullmatch(value):
         return None
     try:
@@ -99,14 +99,16 @@ def periods_of(run_id: str, value: object) -> tuple[tuple[date, date], ...]:
     """The readable [start, end) periods of params.alert_periods; a warning names the rest."""
     if value is None:
         return ()
-    entries = value if isinstance(value, list) else [value]
+    if not isinstance(value, list):
+        warn_unreadable_periods(run_id)
+        return ()
     periods = []
-    for entry in entries:
+    for entry in value:
         if isinstance(entry, dict):
             start, end = day_of(entry.get("start")), day_of(entry.get("end"))
             if start is not None and end is not None and start <= end:
                 periods.append((start, end))
-    if len(periods) < len(entries):
+    if len(periods) < len(value):
         warn_unreadable_periods(run_id)
     return tuple(periods)
 

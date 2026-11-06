@@ -405,6 +405,7 @@ def test_an_active_run_reads_only_its_closed_periods(client: Client, history: Mo
     "entries",
     [
         "2026-07-01",
+        {"start": "2026-07-01", "end": "2026-09-01"},
         [{"start": "soon", "end": "2026-09-01"}],
         [{"start": "2026-07-01"}],
         [{"start": "2026-09-01", "end": "2026-07-01"}],
