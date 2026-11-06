@@ -84,11 +84,13 @@ def test_only_announced_cash_dividends_that_go_ex_after_the_start_are_loaded() -
             event("2016-01-04", "1", "2015-12-20"),
             event("2016-12-20", "1", "2016-12-01"),
             event("2016-02-15", "1", "2016-02-01"),
+            event("2016-12-21", "1", "2016-11-30"),
         ]
     )
 
     loaded = load_ex_dates(d("2016-02-15"), d("2016-11-30"))
 
     assert loaded.to_dict("records") == [
-        {"stock_id": "2330", "announce_date": d("2016-03-01"), "ex_date": d("2016-03-14")}
+        {"stock_id": "2330", "announce_date": d("2016-03-01"), "ex_date": d("2016-03-14")},
+        {"stock_id": "2330", "announce_date": d("2016-11-30"), "ex_date": d("2016-12-21")},
     ]
