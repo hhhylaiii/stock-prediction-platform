@@ -1,6 +1,7 @@
 import math
 import warnings
 from datetime import date, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,7 @@ from apps.market.models import (
     DailyPrice,
     DailyValuation,
     DividendEvent,
+    FinancialStatement,
     IndexDaily,
     SharesOutstanding,
     StockMaster,
@@ -174,6 +176,38 @@ def test_every_input_group_reaches_the_frame() -> None:
     assert row["mkt_days_to_quarter_end"] == len(CALENDAR.between(d("2016-03-03"), d("2016-03-31")))
     k = len(CALENDAR.between(d("2015-12-01"), d("2016-03-02"))) - 1
     assert row["mkt_taiex_ret_5d"] == pytest.approx(taiex_close(k) / taiex_close(k - 5) - 1)
+
+
+def test_industry_neutral_features_reach_the_frame() -> None:
+    listed("2330", "2013-01-02", "2016-03-31")
+    listed("1101", "2013-01-02", "2016-03-31", step=-0.05)
+    quarters = [
+        ("2014-Q4", "2015-03-31"),
+        *((f"2015-Q{q}", f"2015-{3 * q + 2:02d}-14") for q in (1, 2, 3)),
+    ]
+    FinancialStatement.objects.bulk_create(
+        FinancialStatement(stock_id=stock_id, period=period, eps=eps, announce_date=d(announce))
+        for stock_id, eps in (("2330", Decimal("2")), ("1101", Decimal("1")))
+        for period, announce in quarters
+    )
+
+    frame = build_feature_frame(CALENDAR, d("2016-03-01"), d("2016-03-04"))
+
+    day = frame[frame["date"] == d("2016-03-02")].set_index("stock_id")
+
+    def value(stock_id: str, name: str) -> float:
+        return float(day[name].loc[stock_id])
+
+    mom = (value("2330", "tech_mom_250_20") - value("1101", "tech_mom_250_20")) / 2
+    ep = (value("2330", "fund_ep") - value("1101", "fund_ep")) / 2
+    k = len(CALENDAR.between(d("2013-01-02"), d("2016-03-02"))) - 1
+    assert day["in_universe"].all()
+    assert value("2330", "ind_mom_neutral") == pytest.approx(mom)
+    assert value("1101", "ind_mom_neutral") == pytest.approx(-mom)
+    assert value("2330", "ind_ep_neutral") == pytest.approx(ep)
+    assert value("1101", "ind_ep_neutral") == pytest.approx(-ep)
+    assert mom > 0
+    assert value("2330", "fund_ep") == pytest.approx(8 / (100 + 0.1 * k))
 
 
 def test_a_later_start_gives_the_same_features() -> None:
