@@ -10,7 +10,7 @@ Oct 29, 2026 · @Owen Lai
 
 **成功標準**
 
-- 資料層：本地資料庫完整保存 2010 年起的日價量、籌碼、月營收、財報，股權分散表從開始接集保起每週累積、不回補歷史，每日自動更新，缺漏可被偵測並告警。
+- 資料層：本地資料庫完整保存 2010 年起的日價量、籌碼、月營收、財報（下市公司沒有免費官方來源的月營收除外，見第 3 節），股權分散表從開始接集保起每週累積、不回補歷史，每日自動更新，缺漏可被偵測並告警。
 - 模型層：Ridge 迴歸為 baseline，LightGBM 多 seed bagging 為主模型，XGBoost 為可選對照；全部以 walk-forward 驗證（2014 到 2024 為研究期，2025 起為只跑一次的最終 holdout），排名模型的 rank IC 必須統計顯著且優於 baseline，絕對報酬模型的 MAE 必須優於「永遠預測 0」，區間模型的 pinball loss 必須優於波動率區間 baseline、實際覆蓋率接近宣稱的 80%。
 - 服務層：Django 提供 API 與頁面，可查詢任一股票的最新預測排名、預測價格與價格區間、上漲機率、所用特徵、歷史預測準確度；訓練 universe 外的股票照常回傳預測並標示 in\_universe = 0。
 
@@ -79,7 +79,7 @@ Oct 29, 2026 · @Owen Lai
 - 每類資料指定一個 primary source；其他來源只做比對驗證，不混用。
 - 價量 primary：證交所與櫃買中心；籌碼 primary：證交所與櫃買中心；財報與月營收 primary：MOPS；股權分散 primary：集保。
 - FinMind 是回補與驗證來源，每日增量不依賴它，避免非商業授權與維護時間影響正式流程。
-- FinMind 對 2016 到 2020 年下市的股票缺財報、月營收、股本與部分籌碼，這些缺口只補缺的列：財報與月營收用 MOPS 歷史彙總頁（下市公司不在彙總頁上，財報改讀 XBRL 檢視頁），股本與籌碼用證交所、櫃買每日表。下市公司的月營收沒有免費官方來源，維持缺值，由第 6 節的季營收年增率提供營收訊號。
+- FinMind 對 2016 到 2020 年下市的股票缺財報、月營收、股本與部分籌碼，這些缺口只補缺的列：財報與月營收用 MOPS 歷史彙總頁（下市公司不在彙總頁上，財報改讀 XBRL 檢視頁），股本與籌碼用證交所、櫃買每日表（交易所每日表補缺尚未實作）。下市公司的月營收沒有免費官方來源，維持缺值，由第 6 節的季營收年增率提供營收訊號。
 
 ## 4. 資料模型與儲存
 
@@ -116,7 +116,7 @@ Oct 29, 2026 · @Owen Lai
 | `feature_daily` | stock\_id, date | 欄位命名 `<group>_<name>_<window>`，例如 `tech_ret_20d`、`chip_fi_net_5d`、`fund_rev_yoy`；另有 `in_universe` 旗標 | 寬表，只存原值與 in\_universe；winsorize、z-score、填值在管線做，不落表；也同步輸出 Parquet 供訓練 |
 | `label_daily` | stock\_id, date, horizon | fwd\_ret、fwd\_ret\_open、fwd\_rank\_pct、fwd\_vol\_20d、fwd\_up\_5pct、untradable\_t1 | 還原價計算；horizon 為 5 或 20；fwd\_ret\_open 以 t+1 還原開盤價進場，是訓練、評估與回測一律使用的版本，fwd\_ret 只供對照；fwd\_vol\_20d 為未來 20 日日報酬標準差；fwd\_up\_5pct 為 20 日漲幅是否超過 5%；horizon 內下市以最後成交價結算，列保留 |
 | `model_run` | run\_id | run\_key、model\_type、objective（rank、regression、quantile、volatility、classification）、version、train\_start、train\_end、params（JSON）、feature\_list、seed、lib\_versions、feature\_hash、status、ic\_mean、icir、created\_at | 每次訓練一列；同一次 walk-forward 的各摺、各模型共用一個 run\_key |
-| `prediction` | run\_id, stock\_id, date, horizon | score、rank、pct、ret\_pred、q10、q50、q90、vol\_pred、prob\_up\_5pct、in\_universe | API 讀這張表；每列只存該列 run 產出的欄位，其他為 NULL，API 依 (stock\_id, date, horizon) 合併各類目標服務中的 run；預測價與價格區間在 API 層用當日收盤價換算，不存進表 |
+| `prediction` | run\_id, stock\_id, date, horizon | score、rank、pct、ret\_pred、q10、q50、q90、vol\_pred、prob\_up\_5pct、in\_universe | API 讀這張表；每列只存該列 run 產出的欄位，其他為 NULL，API 依 (stock\_id, date) 合併各角色當天服務的 run，波動率兩個 horizon 都讀 20 日 run；同類有多個 run 時依 active、degraded、retired 的順序，再取最新的；預測價與價格區間在 API 層用當日收盤價換算，不存進表 |
 | `prediction_contrib` | run\_id, stock\_id, date, horizon, position | feature、contrib、n\_features | 排名預測的逐檔特徵貢獻（LightGBM pred\_contrib，5 seed 平均）：前 5 名各一列，最後一列 feature = `_rest` 是其餘特徵的合計，n\_features 為合計的特徵數；同一筆預測內 feature 不重複；服務層「這次預測怎麼來的」讀這張表 |
 | `model_monitor` | run\_id, date, horizon | ic、coverage、brier、direction\_acc、mae、width、auc、n\_stocks | 事後評估結果；date 是預測日；每日對 horizon 已到期的預測計算，服務層的歷史預測準確度讀這張表 |
 | `backtest_metric` | id；唯一鍵 run\_key, model\_type, objective, horizon, metric, grain, period\_start, period\_end, segment | value、created\_at | walk-forward 指標的長表；grain 為 total、fold、year、month，segment 標子群（例如成交金額三分位）；模型頁的 IC 與 baseline 對比讀這張表，`model_monitor` 只存上線後的事後評估 |
@@ -151,7 +151,7 @@ Oct 29, 2026 · @Owen Lai
 1. 從證交所與櫃買中心取得全部上市、上櫃清單，含已下市股票，建立 `stock_master`。
 2. 依 `stock_master` 逐檔向 FinMind 拉 2010-01-01 至今的日價量、三大法人、融資券、借券、外資持股、月營收、財報、股利。股權分散表不回補（FinMind 限付費會員），由集保每週累積；注意、處置、全額交割的歷史不用 FinMind，改用證交所、櫃買的官方查詢回補。
 3. 某一檔的來源資料不能用（格式改變、日期不在 `trading_calendar`、缺欄位）時只拒收那一檔，記進 checkpoint 的 `rejected`，其他股票照常寫入，整次跑完標 failed；連續 `ETL_MAX_CONSECUTIVE_REJECTIONS`（預設 20）檔被拒收時停下，checkpoint 倒回這串拒收之前，續跑時重抓。連線錯誤與配額用盡仍整批停下。
-4. 月營收與財報的 `announce_date`：FinMind 沒有公告日，回補時先存法定截止日的下一個交易日（保守值，只會晚不會早）。月營收的截止日是次月 10 日（2026 年起保險業可到 15 日，保守值一律用 15 日），月初遇休市的平日順延；財報 Q1、Q2、Q3 是 5/31、8/31、11/30，年報是隔年 3/31（2010 年度以前是 4/30）。財報再以證交所電子書（t57sb01）的實際上傳時間覆寫，規則見第 6 節處理步驟 2；月營收查不到歷史申報日，研究期維持保守值，上線後由每日掃描記錄實際申報日。
+4. 月營收與財報的 `announce_date`：FinMind 沒有公告日，回補時先存法定截止日的下一個交易日（保守值，只會晚不會早）。月營收的截止日是次月 10 日（截止月份在 2026 年起保險業可到 15 日，這段期間的保守值不分產業一律用 15 日），月初遇休市的平日順延；財報 Q1、Q2、Q3 是 5/31、8/31、11/30，年報是隔年 3/31（2010 年度以前是 4/30）。財報再以證交所電子書（t57sb01）的實際上傳時間覆寫，規則見第 6 節處理步驟 2；月營收查不到歷史申報日，研究期維持保守值，上線後由每日掃描記錄實際申報日。
 5. 約 2,000 檔乘以 8 個 dataset，在 600 次/小時的上限下需要分批跑數小時；排在週一到週六執行，避開週日維護時間。
 6. 回補完成後抽樣比對：至少 20 檔、每檔 3 個年度，與證交所 `STOCK_DAY` 的收盤價與成交量逐日核對。
 
@@ -169,14 +169,14 @@ Oct 29, 2026 · @Owen Lai
 | 21:30 | 融資融券餘額、借券（約 20:30、22:30 更新）；當沖交易統計（第二批）抓當日與前兩個交易日（T、T+1、T+2 各更新一次，以 T+2 為準） | 證交所、櫃買中心 | 每交易日 |
 | 22:40 | 注意與處置名單再抓一次（名單可能晚於 16:30 公布） | 證交所、櫃買中心 | 每交易日 |
 | 22:50 | 資料品質檢查，並列出當日該跑卻沒有成功的工作 | — | 每交易日 |
-| 23:00 | 個股層級特徵計算、label 更新 | 研究層 | 每交易日，研究閘門通過後（見資料品質檢查） |
+| 23:00 | 個股層級特徵計算、label 更新 | 研究層 | 每交易日，研究閘門通過後（見資料品質檢查；尚未排程） |
 | 05:30（t+1） | 美股、費半、TSM ADR 的美國 t 日收盤，匯率的倫敦 t−1 日收盤（倫敦 t 日的收盤在台北 t+1 07:00 後才收完）；抓不到不寫補值列，由特徵端 asof 沿用前一個收盤，並寫 data\_quality\_log | yfinance | 每交易日 |
-| 06:00（t+1） | 市場層級特徵計算（美股、匯率）、產出預測 | 研究層 | 每交易日，開盤前 |
+| 06:00（t+1） | 市場層級特徵計算（美股、匯率）、產出預測 | 研究層 | 每交易日，開盤前（尚未排程） |
 | 週六 10:00 | 股權分散表 | 集保 | 每週 |
 | 每月 15 日 10:00 | 景氣燈號；M 月的資料在 M+2 月 15 日寫入，以那天為 announce\_date（國發會約每月 27 日發布上月，年假會延後） | data.gov.tw | 每月 |
 | 每月 1 日 | 出口、匯率利率（尚未實作） | data.gov.tw | 每月 |
 
-公布時間會變動，排程只是起跑時間；每個工作要先檢查來源是否已有當日資料，沒有就 30 分鐘後重試，最多 6 次。網路錯誤（逾時、斷線、5xx）比照重試；被限流時只在 adapter 內冷卻，冷卻完仍被限流就當天放棄，隔日補抓。
+公布時間會變動，排程只是起跑時間；每個工作要先檢查來源是否已有當日資料，沒有就 30 分鐘後重試，最多 6 次。網路錯誤（逾時、斷線、5xx）比照重試；被限流時只在 adapter 內冷卻，冷卻完仍被限流就當天放棄，隔日補抓。05:30 美股收盤只抓一次、不重試，缺的由 asof 沿用；15:10 本身就是補抓，不另外重試。
 
 月營收與財報掃描：寫入時間在當天 22:50 品質檢查之前的算當天公告，否則算下一個交易日；已有的列只新增不改，同一期數字不同時記 `revenue_source_mismatch`、`statement_source_mismatch`（info），不覆蓋。
 
@@ -184,7 +184,7 @@ Oct 29, 2026 · @Owen Lai
 
 - 當日有資料的股票數與前一交易日相比差異超過 5% 就告警；這項算全部代號（含 ETF 等非普通股）。
 - 單日漲跌幅超過 10% 且無除權息紀錄的普通股標記為待查。
-- 每張 standard 表的當日缺值比例超過 1% 就告警；缺值只算普通股。
+- daily\_price、daily\_chip、daily\_valuation 的當日缺值比例超過 1% 就告警（收盤價用 5%，因為有停牌與無成交）；缺值只算普通股。
 - 日期必須存在於 `trading_calendar`，否則整批拒收；歷史回補只拒收該檔（見歷史回補）。
 - 結果寫入 `data_quality_log`，severity 為 error 時不執行當日預測。
 - 研究閘門：研究層的每日任務要等兩個交易所的日價量、指數、三大法人、融資融券、借券、外資持股、本益比與淨值比這些當日快照都有成功的 `etl_run`，且當日品質檢查沒有 error；注意、處置、全額交割、流通股數變動、當沖不擋，漏一天只是晚一天反映，隔日補抓。
@@ -247,7 +247,7 @@ Oct 29, 2026 · @Owen Lai
 **處理步驟（每日對全市場執行）**
 
 1. 定義 universe：特徵與預測對全部上市、上櫃普通股計算；訓練 universe 排除停牌、上市未滿 60 個交易日、處置期間、全額交割、當日無成交、20 日成交金額中位數低於 1,000 萬元的股票；注意股不排除，以 `tech_attention_t` 當特徵；處置與全額交割期間來自 `disposition_event`。以下所有橫截面統計與 label 的百分位都只在當日訓練 universe 內計算；universe 外的股票套用同一天的轉換參數照常推論，`feature_daily` 與 `prediction` 都帶 `in_universe` 旗標，API 回傳時標示，事後評估不計入。
-2. 可用時點對齊：每個特徵依表中「可用時點」以 merge\_asof 對齊到 t；基本面與總經用 announce\_date，weekly\_holding 用 publish\_date，美股用美國日曆日 ≤ t 的最近一個收盤，美國休市日自動取前一日；美元兌台幣用倫敦日 ≤ t−1 的最近一個收盤，週五與連假前也一樣。財報的 announce\_date：沒有更正紀錄的照實際上傳日，晚於法定截止日也延後；有更正紀錄的只拿來提早、不延後；有重編報表的期別用最後一次重編的上傳日；交易日 22:40 以後或非交易日上傳的算下一個交易日。財報數字一律用該期報表當時公布的原值，不用之後報表重分類過的比較期數字。前後期報表種類（個體、合併）不同時，revenue、gross\_margin、op\_margin、operating\_cf 不跨種類取前期，相關的年增與 TTM 為 NaN；月營收訊號讀到 2013-01 兩側的月份時為 NaN（2013 年起改為 IFRS 合併營收）。
+2. 可用時點對齊：每個特徵依表中「可用時點」以 merge\_asof 對齊到 t；基本面與總經用 announce\_date，weekly\_holding 用 publish\_date，美股用美國日曆日 ≤ t 的最近一個收盤，美國休市日自動取前一日；美元兌台幣用倫敦日 ≤ t−1 的最近一個收盤，週五與連假前也一樣。財報的 announce\_date：沒有更正紀錄的照實際上傳日，晚於法定截止日也延後；有更正紀錄的只拿來提早、不延後；有重編報表的期別用最後一次重編的上傳日；交易日 22:40 以後或非交易日上傳的算下一個交易日。財報數字：2013-Q1 起，revenue、net\_income、operating\_cf、debt\_ratio、roe 用該期報表當時公布的 MOPS 原值（彙總表、XBRL 檢視頁）覆寫 FinMind 重分類過的比較期數字，eps 只補 FinMind 的空值；gross\_margin、op\_margin 仍是 FinMind 值（MOPS 沒有這兩欄），MOPS 空缺時把 FinMind 的累計比率清成 NULL 一項尚未實作。前後期報表種類（個體、合併）不同時，revenue、gross\_margin、op\_margin、operating\_cf 不跨種類取前期，相關的年增與 TTM 為 NaN；月營收訊號讀到 2013-01 兩側的月份時為 NaN（2013 年起改為 IFRS 合併營收）。
 3. 極值處理：個股層級特徵以當日 universe 內 1% / 99% 分位 winsorize；某一側的截斷界會讓 universe 全部變成同值時（稀疏的 0/1 與計數特徵），那一側改用 universe 的極值當界；市場層級特徵與 `ind_sector_id` 不做。
 4. 標準化：個股層級特徵做當日橫截面 z-score，均值與標準差只用 universe 內的股票算。Ridge 與 logistic baseline 一律用 z-score 值；排名模型的 LightGBM 也用 z-score 值，原值跨年度有漂移，樹模型看不出相對當日市場的高低；絕對報酬、區間、波動、機率模型的 LightGBM 用原值並加入市場層級特徵，市場層級特徵進模型前先在訓練窗內依分位切成 5 級，見第 7 節模型表。市場層級特徵與 `ind_sector_id` 不做橫截面 z-score，市場層級特徵排名模型不使用。當日 universe 沒有離散度時 z 為 0，不是 NaN。
 5. 缺值：Ridge 與 logistic 填當日中位數並加 `_missing` 旗標；LightGBM 保留 NaN。
@@ -296,7 +296,7 @@ Oct 29, 2026 · @Owen Lai
 - 20 日的預測報酬與價格區間來自同一個分位數模型，不會出現預測價落在區間外的情況。
 - 波動率區間與分位數區間的寬度比落在 0.5 到 2 之外的股票，每日寫入 `data_quality_log`，severity 為 warning；比例超過 10% 要追查。
 - 分位數模型的覆蓋率告警成立（見模型管理與上線後監控）的期間，價格區間改用以預測報酬為中心的波動率區間：收盤價 × (1 + ret\_pred ± 1.28 × vol\_pred × √(h/252))，預測價仍落在區間內；缺 vol\_pred 時用 `tech_vol_20d`；API 回應附 `interval_source` 欄位標明來源。
-- 5 日沒有分位數模型：API 一律用同一式（h = 5，以 √(5/252) 縮放）給波動率區間並標 `interval_source = volatility`；頁面依「波動率區間不預設展示」，5 日不畫區間。
+- 5 日沒有分位數模型：API 用同一式（h = 5，以 √(5/252) 縮放）給波動率區間並標 `interval_source = volatility`；缺 vol\_pred 時改用 tech\_vol\_20d 並標 `tech_vol_20d`，缺 ret\_pred 時以 0 為中心；頁面依「波動率區間不預設展示」，5 日不畫區間。
 - 上漲機率與 q50 矛盾的列（prob\_up\_5pct 大於 0.5 但 q50 小於 5%，或 prob\_up\_5pct 小於 0.5 但 q50 大於 5%）每日計數，比例超過 10% 要追查。
 - `ret_pred` 與 q10/q50/q90 以 t+1 還原開盤價為基準，展示層仍以最新收盤價換算，差額是隔夜跳空，屬已知近似，不另修正。
 - 訓練 universe 外的股票照常輸出，API 附 `in_universe` 欄位，事後評估不計入。
@@ -330,7 +330,7 @@ Oct 29, 2026 · @Owen Lai
 - 每次訓練寫一列 `model_run`，含參數、特徵清單、訓練區間、指標、seed、套件版本、特徵 Parquet 的 hash；模型檔以 `run_id` 命名存檔。`status` 取值 candidate、active、degraded、retired。
 - 每月重訓：新模型 N 以當下為訓練窗終點；同時訓一個設定相同的影子模型 N′，訓練窗截止在 6 個月加 20 個交易日之前，用來在最近 6 個月上做 OOS 檢查。上線門檻全部是對 N 的健全性檢查，不拿 N′ 跟舊模型比 IC（兩個同配方模型比 6 個月 IC 是噪音，且 N′ 看不到 N 新加入的最近 6 個月資料）：(1) N 與現役模型在最新交易日的預測 Spearman 相關 ≥ 0.7；(2) N 與現役模型 gain 前 10 名特徵重疊 ≥ 6 個；(3) N′ 最近 6 個月 OOS 達絕對門檻：排名 rank IC > 0、區間覆蓋率在 70% 到 90%、機率 Brier 不高於 logistic baseline、波動率 QLIKE 不高於 `tech_vol_20d` baseline、5 日 MAE 不高於零預測；(4) N 訓練窗內 `data_quality_log` 無 severity = error 的紀錄。任一不過，舊模型續用、告警並記錄原因，是否強制換模由人工決定。
 - 線上預測只用 `model_run` 中 `status = active` 的版本，每類目標各一個。
-- 事後評估：每日對 horizon 已到期的預測，從 `prediction` 與 `label_daily` 算實際 rank IC、覆蓋率、Brier、方向準確率（同樣不計 label 為 0 的列），寫入 `model_monitor` 表；服務層的「歷史預測準確度」讀這張表。
+- 事後評估：每日對 horizon 已到期的預測，從 `prediction` 與 `label_daily` 算實際 rank IC、覆蓋率、區間寬度、Brier、AUC、MAE（報酬或波動率，依 run 的目標）、方向準確率（同樣不計 label 為 0 的列），只算 universe 內且 `untradable_t1 = 0` 的列，寫入 `model_monitor` 表；服務層的「歷史預測準確度」讀這張表。
 - 告警：60 個交易日滾動 rank IC 低於門檻、覆蓋率出 70% 到 90%、Brier 高於 logistic baseline，任一成立就告警並把該模型 `status` 改 degraded，API 回應附警示；是否停用由人工決定。滾動 IC 的門檻不用固定 0：20 日 horizon 下 60 個交易日只有約 3 個獨立樣本，健康模型（IC 0.03）也會有約三成時間滾動均值小於 0；門檻取研究期 walk-forward 全部 60 日滾動 IC 的 5% 分位，寫進 `model_run.params`，每次重訓更新。
 - 第 8 節的標籤打亂測試在每次完整 walk-forward 前執行一次。
 
@@ -374,9 +374,9 @@ Oct 29, 2026 · @Owen Lai
 | 階段 | 交付物 | 驗收條件 | 預估 |
 | --- | --- | --- | --- |
 | Phase 0 專案骨架 | Django 專案、PostgreSQL、Docker Compose、`apps/etl` adapter 介面、`stock_master` 與 `trading_calendar` | `manage.py fetch --source twse --dataset daily_price --date 2026-10-28` 可寫入 raw 與 standard 表；測試框架可跑 | 1 週 |
-| Phase 1 歷史回補 | FinMind adapter；2010 年起的日價量、籌碼、月營收、財報、股利全部入庫（股權分散表不回補歷史，Phase 2 起由集保每週累積）；checkpoint 續跑 | 抽樣 20 檔、每檔 3 個年度與證交所逐日核對無誤差；表中存在已下市股票 | 1 到 2 週 |
+| Phase 1 歷史回補 | FinMind adapter；2010 年起的日價量、籌碼、月營收、財報、股利全部入庫（FinMind 缺的下市股資料見第 3 節；股權分散表不回補歷史，Phase 2 起由集保每週累積）；checkpoint 續跑 | 抽樣 20 檔、每檔 3 個年度與證交所逐日核對無誤差；表中存在已下市股票 | 1 到 2 週 |
 | Phase 2 每日增量與品質 | 證交所、櫃買中心、集保、MOPS、yfinance adapter；Celery 排程；`data_quality_log`；告警 | 連續 5 個交易日自動更新，無人工介入；品質檢查能攔下人為注入的錯誤資料 | 1 到 2 週 |
-| Phase 3 特徵與 baseline | `feature_daily`、`label_daily`、PIT 對齊、三類目標的 label 與 baseline（Ridge、logistic、零預測）、walk-forward、IC 報表 | 第 8 節的九個自動化測試全部通過；IC 報表產出，含每個特徵的單因子 rank IC；成對相關高於 0.95 的特徵只留一個，調參摺訓練窗 rank IC 絕對值低於 0.005 的訊號型特徵已剔除並記錄 | 1 到 2 週 |
+| Phase 3 特徵與 baseline | `feature_daily`、`label_daily`、PIT 對齊、三類目標的 label 與 baseline（Ridge、logistic、零預測）、walk-forward、IC 報表 | 第 8 節的九個自動化測試全部通過；IC 報表產出，含每個特徵的單因子 rank IC；成對相關高於 0.95 的特徵只留一個，低 IC 的訊號型特徵依第 6 節處理步驟 7 的規則剔除並記錄 | 1 到 2 週 |
 | Phase 4 主模型 | 三類目標（排名、絕對報酬、區間與機率）的 LightGBM 訓練與 5 seed bagging、XGBoost 對照（可選）、walk-forward 含窗長比較、ensemble、`model_run` 與 `prediction` 與 model\_monitor 表、每月重訓與影子模型門檻、事後評估工作、第二批特徵逐組加入並比較、最終 holdout 一次性執行 | 研究期（2014 到 2024，不含調參摺）LightGBM 的 OOS rank IC 大於 0 且 Newey-West t 值大於 2，逐摺贏過 Ridge 的摺數達 60%；中性化 IC 與依成交金額分三組的 IC 報表產出；十分位報酬（持有期等於 horizon、只扣實際換手成本）報表產出；5 日絕對報酬 MAE 以逐摺配對 NW t 大於 2 優於零預測；區間 pinball loss 優於波動率區間 baseline，總體覆蓋率在 75% 到 85% 之間且每摺在 70% 到 90% 之間；分位數不交叉；機率 ECE 低於 0.05；設計定案後 2025 年起的 holdout 只跑一次並記錄；model\_monitor 有資料 | 2 到 3 週，含 walk-forward 計算時間 |
 | Phase 5 服務層 | DRF API：`/predictions`、`/stocks/{id}/features`、`/stocks/{id}/history`、`/models`；報酬到價格與區間的換算（每檔用自己的最新收盤價）；簡單查詢頁面 | API 回傳最新交易日的預測排名、預測價格、價格區間、上漲機率與特徵；回應時間 500 毫秒內 | 1 到 2 週 |
 | Phase 6 即時（可選） | Fugle 即時報價、Shioaji 下單介面、盤中監控 | 盤中可取得追蹤清單的即時價；下單走模擬帳戶驗證 | 視需求 |
@@ -387,7 +387,7 @@ Oct 29, 2026 · @Owen Lai
 
 **如何使用本文件**
 
-- 匯出為 Markdown 存成 repo 內的 `docs/SPEC.md`，並在 `CLAUDE.md` 第一行寫「實作前先讀 docs/SPEC.md，第 8 節為硬性規則」。
+- `docs/SPEC.md` 是唯一的規格來源（最初由 claude.ai 原文匯出），`CLAUDE.md` 第一行寫「實作前先讀 docs/SPEC.md，第 8 節為硬性規則」。
 - 文件中的圖只是輔助，匯出後可能不保留；表格與文字才是規格本體。
 - 規格與程式碼衝突時，以本文件為準並回報差異；需要偏離時先在 plan 中說明理由。
 - 本文件的數值（參數起點、工時、閾值）是初始設定，可在 plan 中提議調整，但第 8 節的規則不可調。
