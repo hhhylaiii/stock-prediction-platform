@@ -320,12 +320,16 @@ def test_fit_probability_calibrates_on_the_validation_tail_only_when_ece_is_high
     assert (np.diff(probs[order]) >= -1e-12).all()
 
 
+@pytest.mark.parametrize(("limit", "calibrated"), [(-1.0, True), (1.0, False)])
 def test_fit_probability_calibrates_the_bag_average_of_seeds_fit_before_validation(
-    data: tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame], monkeypatch: pytest.MonkeyPatch
+    data: tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame],
+    monkeypatch: pytest.MonkeyPatch,
+    limit: float,
+    calibrated: bool,
 ) -> None:
-    inputs, labels, _ = data
+    inputs, labels, test = data
     window = fold()
-    monkeypatch.setattr(target_models, "ECE_LIMIT", -1.0)
+    monkeypatch.setattr(target_models, "ECE_LIMIT", limit)
 
     fitted = fit_probability(inputs, labels, window, FEATURES, seed=1, max_rounds=200, bags=3)
 
@@ -344,6 +348,12 @@ def test_fit_probability_calibrates_the_bag_average_of_seeds_fit_before_validati
     assert fitted.ece == pytest.approx(
         expected_calibration_error(reliability_table(scored, UP, "prob", 10))
     )
+    if not calibrated:
+        assert fitted.calibrator is None
+        np.testing.assert_array_equal(
+            fitted.predict(test, FEATURES), fitted.boosted.booster.predict(test[FEATURES])
+        )
+        return
     assert fitted.calibrator is not None
     alone = target_models.IsotonicRegression(y_min=0.0, y_max=1.0, out_of_bounds="clip")
     alone.fit(expected, valid[UP].to_numpy())
