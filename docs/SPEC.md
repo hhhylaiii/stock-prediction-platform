@@ -37,7 +37,7 @@ Oct 29, 2026 · @Owen Lai
 
 ## 2. 系統架構與技術選型
 
-系統分三層：資料層（ETL 與 PostgreSQL）、研究層（特徵、訓練、回測，獨立於 Web 執行）、服務層（Django API 與頁面）。研究層只讀資料庫、只寫 `prediction` 與 `model_run` 兩張表，Web 永遠不直接呼叫外部資料 API。
+系統分三層：資料層（ETL 與 PostgreSQL）、研究層（特徵、訓練、回測，獨立於 Web 執行）、服務層（Django API 與頁面）。研究層只讀資料庫、只寫研究層自己的表（`feature_daily`、`label_daily`、`model_run`、`prediction`、`prediction_contrib`、`model_monitor`、`backtest_metric`、`holdout_run`），另把模型輸出檢查與告警寫進 `data_quality_log`（check 名稱以 `output_`、`monitor_`、`model_` 開頭，severity 最高 warning）；Web 永遠不直接呼叫外部資料 API。
 
 報酬換算成價格的工作放在服務層：每檔股票用自己當日的收盤價計算預測價與價格區間，模型層只輸出報酬、分位數、波動率與機率，不輸出價格。
 
