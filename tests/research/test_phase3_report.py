@@ -1,0 +1,235 @@
+import math
+from datetime import date
+
+import pandas as pd
+import pytest
+
+from apps.market.calendar import TradingDays
+from apps.research.phase3_report import (
+    fill_counts,
+    fill_table,
+    missing_counts,
+    missing_table,
+    month_ranges,
+    monthly_ic,
+    render,
+    statement_coverage,
+    strongest,
+)
+from tests.research.conftest import weekday_calendar
+
+NAN = math.nan
+
+
+def d(text: str) -> date:
+    return date.fromisoformat(text)
+
+
+def rows() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "stock_id": ["9999", "9999", "9999", "2330", "2330", "2330", "1101"],
+            "date": [d("2016-01-04"), d("2016-01-05"), d("2016-01-06")] * 2 + [d("2016-01-04")],
+            "in_universe": [True, True, True, True, True, True, False],
+            "fund_ep": [NAN, NAN, 0.1, 0.1, 0.1, 0.1, NAN],
+            "fund_rev_yoy": [0.3, 0.3, NAN, 0.2, 0.3, 0.2, 0.3],
+            "fund_rev_yoy_q": [0.3, 0.3, NAN, 0.1, 0.3, 0.1, 0.3],
+        }
+    )
+
+
+DELISTED = pd.Series({"9999": True, "2330": False, "1101": False})
+
+
+def test_missing_counts_add_up_over_chunks_and_split_by_later_delisting() -> None:
+    frame = rows()
+    whole = missing_counts(frame, DELISTED, ["fund_ep", "fund_rev_yoy"])
+    halves = missing_counts(frame.iloc[:4], DELISTED, ["fund_ep", "fund_rev_yoy"]).add(
+        missing_counts(frame.iloc[4:], DELISTED, ["fund_ep", "fund_rev_yoy"]), fill_value=0
+    )
+
+    pd.testing.assert_frame_equal(whole, halves, check_dtype=False)
+    assert whole.loc["fund_ep"].to_dict() == {
+        "missing_current": 0,
+        "missing_delisted": 2,
+        "rows_current": 3,
+        "rows_delisted": 3,
+    }
+
+
+def test_missing_table_matches_the_saved_before_table_and_flags_gaps() -> None:
+    counts = pd.DataFrame(
+        {
+            "missing_current": [1, 0, 30, 0],
+            "missing_delisted": [5, 0, 60, 1],
+            "rows_current": [100, 100, 100, 100],
+            "rows_delisted": [100, 100, 100, 100],
+        },
+        index=["fund_ep", "tech_ret_1d", "chip_dealer_self_net_5d", "size_log_mcap"],
+    )
+
+    table = missing_table(counts)
+
+    assert list(table.columns) == [
+        "current",
+        "delisted",
+        "rows_current",
+        "rows_delisted",
+        "ratio",
+        "gap_pp",
+        "flag",
+    ]
+    assert table.loc["fund_ep", "ratio"] == pytest.approx(5.0)
+    assert table.loc["fund_ep", "flag"]
+    assert math.isnan(float(table["ratio"]["tech_ret_1d"]))
+    assert not table.loc["tech_ret_1d", "flag"]
+    assert table.loc["chip_dealer_self_net_5d", "gap_pp"] == pytest.approx(30.0)
+    assert table.loc["chip_dealer_self_net_5d", "flag"]
+    assert not table.loc["size_log_mcap", "flag"]
+
+
+def test_fill_counts_take_rows_whose_value_is_the_fallback_value() -> None:
+    counts = fill_counts(rows(), DELISTED, {"fund_rev_yoy": "fund_rev_yoy_q"})
+
+    assert counts.loc["fund_rev_yoy"].to_dict() == {
+        "filled_current": 1,
+        "filled_delisted": 2,
+        "rows_current": 3,
+        "rows_delisted": 3,
+    }
+    table = fill_table(counts)
+    assert table.loc["fund_rev_yoy", "current"] == pytest.approx(1 / 3)
+    assert table.loc["fund_rev_yoy", "delisted"] == pytest.approx(2 / 3)
+    assert table.loc["fund_rev_yoy", "ratio"] == pytest.approx(2.0)
+    assert not table.loc["fund_rev_yoy", "flag"]
+
+
+def test_month_ranges_join_consecutive_months() -> None:
+    months = ["2016-01", "2016-02", "2016-03", "2016-05", "2016-12", "2017-01"]
+
+    assert month_ranges(months) == "2016-01–2016-03、2016-05、2016-12–2017-01"
+    assert month_ranges([]) == "無"
+
+
+def test_monthly_ic_marks_months_with_fewer_ic_days_than_trading_days() -> None:
+    calendar: TradingDays = weekday_calendar(date(2016, 1, 1), date(2016, 2, 29))
+    days = calendar.between(date(2016, 1, 1), date(2016, 2, 29))
+    stocks = [f"{1000 + k}" for k in range(40)]
+    frame = pd.DataFrame(
+        [
+            {
+                "stock_id": stock,
+                "date": day,
+                "tech_ret_1d": float(k) if day.month == 1 or day.day > 5 else NAN,
+                "fwd_rank_pct": (k + 1) / len(stocks),
+            }
+            for day in days
+            for k, stock in enumerate(stocks)
+        ]
+    )
+
+    table = monthly_ic(frame, ["tech_ret_1d"], "fwd_rank_pct", calendar)
+
+    january = table[(table["feature"] == "tech_ret_1d") & (table["month"] == "2016-01")].iloc[0]
+    february = table[(table["feature"] == "tech_ret_1d") & (table["month"] == "2016-02")].iloc[0]
+    assert january["ic"] == pytest.approx(1.0)
+    assert january["days"] == january["trading_days"] == 21
+    assert january["complete"]
+    assert february["trading_days"] == 21
+    assert february["days"] == 16
+    assert not february["complete"]
+
+
+def test_statement_coverage_lists_fundamental_features_left_unjudged() -> None:
+    params = {
+        "window_days": 100,
+        "min_coverage": 0.5,
+        "days": {
+            "fund_ep": {"5": 100, "20": 100},
+            "fund_roe_ttm": {"5": 40, "20": 30},
+            "fund_debt_ratio": {"5": 50, "20": 60},
+            "tech_ret_1d": {"5": 10, "20": 10},
+        },
+    }
+
+    table = statement_coverage(params)
+
+    assert list(table.index) == ["fund_ep", "fund_roe_ttm", "fund_debt_ratio"]
+    assert table["judged"].tolist() == [True, False, True]
+    assert table.to_dict("index")["fund_ep"] == {
+        "days_h5": 100,
+        "days_h20": 100,
+        "coverage": 1.0,
+        "judged": True,
+    }
+    assert table.loc["fund_roe_ttm", "coverage"] == pytest.approx(0.3)
+    assert not table.loc["fund_roe_ttm", "judged"]
+
+
+def test_render_lists_only_flagged_gaps_and_marks_incomplete_months() -> None:
+    before = pd.DataFrame(
+        {"current": [0.004, 0.0], "delisted": [0.209, 0.0], "ratio": [55.3, NAN]},
+        index=["size_log_mcap", "tech_ret_1d"],
+    ).assign(rows_current=100, rows_delisted=10, gap_pp=[20.5, 0.0], flag=[True, False])
+    after = missing_table(
+        pd.DataFrame(
+            {
+                "missing_current": [0, 0],
+                "missing_delisted": [1, 0],
+                "rows_current": [100, 100],
+                "rows_delisted": [10, 10],
+            },
+            index=["size_log_mcap", "tech_ret_1d"],
+        )
+    )
+    fills = fill_table(
+        pd.DataFrame(
+            {"filled_current": [10], "filled_delisted": [5], "rows_current": [100]}
+            | {"rows_delisted": [10]},
+            index=["fund_rev_yoy"],
+        )
+    )
+    monthly = pd.DataFrame(
+        {
+            "horizon": [5, 5],
+            "feature": ["fund_ep", "fund_ep"],
+            "month": ["2014-01", "2014-02"],
+            "ic": [0.0123, -0.02],
+            "days": [20, 15],
+            "trading_days": [20, 19],
+            "complete": [True, False],
+        }
+    )
+
+    text = render(
+        header={"run_id": "k.screening", "start": "2010-12-06", "end": "2015-08-31"}
+        | {"window_days": 1170, "kept": 56, "dropped": 2},
+        coverage=statement_coverage(
+            {"window_days": 100, "min_coverage": 0.5, "days": {"fund_roe_ttm": {"5": 30, "20": 30}}}
+        ),
+        gaps=(before, after, "2010-01-01", "2020-12-31"),
+        fills=(fills, {"fund_rev_yoy": "fund_rev_yoy_q"}),
+        masked={"fund_rev_mom": frozenset({"2016-01", "2016-02"})},
+        monthly=monthly,
+        top=["fund_ep"],
+    )
+
+    assert "| size_log_mcap | 20.9%／0.4% | 10.0%／0.0% |" in text
+    assert "| tech_ret_1d |" not in text
+    assert "| fund_rev_yoy | fund_rev_yoy_q | 50.0%／10.0% | 5.00 | 是 |" in text
+    assert "| fund_rev_mom | 2016-01–2016-02 |" in text
+    assert "| fund_roe_ttm | 30／30 | 30.0% | 不判定 |" in text
+    assert "| 2014-01 | 0.0123 |" in text
+    assert "| 2014-02 | -0.0200† |" in text
+
+
+def test_strongest_ranks_features_by_their_largest_absolute_ic() -> None:
+    ic: dict[str, dict[str, float | None]] = {
+        "tech_ret_1d": {"5": 0.01, "20": -0.05},
+        "fund_ep": {"5": 0.02, "20": None},
+        "chip_big_holder_pct_chg_1w": {"5": None, "20": None},
+        "size_log_mcap": {"5": 0.03, "20": 0.04},
+    }
+
+    assert strongest(ic, 2) == ["tech_ret_1d", "size_log_mcap"]
+    assert strongest(ic, 10)[-1] == "chip_big_holder_pct_chg_1w"
