@@ -1,0 +1,70 @@
+<html><head><title>電子資料查詢作業</title><meta http-equiv="Content-Type" content="text/html;charset=big5"><link rel='stylesheet' href='/ppp.css' type='text/css'></head><body>
+<style text='text/css'>
+<!--
+	 TH{color:#000099;font-weight:normal;font-size:10pt}
+-->
+</style>
+<script>
+function readfile(kind,coid,filename)
+{
+	var f = document.forms[0];
+	f.step.value = 9;
+	f.kind.value = kind;
+	f.co_id.value = coid;
+	f.filename.value = filename;
+	f.submit();
+}
+var win = null;
+function readfile2(kind,coid,filename)
+{
+	var f = document.forms[0];
+	var today = new Date();
+	var rand = today.getTime();
+	if (win==null || win.closed){
+		win = window.open('','download'+rand);
+	}
+	f.target = 'download'+rand;
+	f.step.value = 9;
+	f.kind.value = kind;
+	f.co_id.value = coid;
+	f.filename.value = filename;
+	f.submit();
+	f.target = this;
+}
+</script>
+<center>
+<h2><font color="blue">電子資料查詢作業</font></h2>
+<form name='fm' action='/server-java/t57sb01' method='post'>
+
+<input type='hidden' name='check2858' value='Y'>
+<input type='hidden' name='co_id' value='2880'>
+<input type='hidden' name='colorchg' value='1'>
+<input type='hidden' name='year' value='98'>
+<input type='hidden' name='step' value='1'>
+<input type='hidden' name='seamon' value=''>
+<input type='hidden' name='mtype' value='A'>
+<table align='center' border='5' bordercolor='#FF6600' bgcolor='#FFFFFF'>
+<tr><th>公司代號</th><th>公司名稱</th><th>&nbsp;</th></tr>
+<tr><td>2880</td><td>華南金</td><td><input type='image' src='/image/t56sf26.gif' border='0'></td></tr>
+<tr><td>28800001</td><td>華南銀行</td><td><a href='javascript:setCoid("5838");'><img src='/image/t56sf26.gif' border='0'></a></td></tr>
+<tr><td>28800002</td><td>華南永昌</td><td><a href='javascript:setCoid("000930");'><img src='/image/t56sf26.gif' border='0'></a></td></tr>
+<tr><td>28800004</td><td>華南保</td><td><a href='javascript:setCoid("2848");'><img src='/image/t56sf26.gif' border='0'></a></td></tr>
+<tr><td>28800005</td><td>華南投信</td><td><a href='javascript:setCoid("A00012");'><img src='/image/t56sf26.gif' border='0'></a></td></tr>
+<tr><td>28800006</td><td>華南金創</td><td>&nbsp;</td></tr>
+<tr><td>28800007</td><td>華南金管</td><td>&nbsp;</td></tr>
+<tr><td>28800008</td><td>華南金資</td><td>&nbsp;</td></tr>
+<tr><td>28800009</td><td>華銀保代</td><td>&nbsp;</td></tr>
+<tr><td>28800010</td><td>華南投顧</td><td>&nbsp;</td></tr>
+<tr><td>28800011</td><td>華南期貨</td><td><a href='javascript:setCoid("021141");'><img src='/image/t56sf26.gif' border='0'></a></td></tr>
+<tr><td>28800013</td><td>華永資管</td><td>&nbsp;</td></tr>
+</table>
+<br><table align='center' width='80%'><tr><td>本網站提供查詢金融控股公司已公開發行之子公司各季財務報告，暨未公開發行之證券商或期貨商子公司年度及半年度財務報告。</td></tr></table>
+</from>
+<script>
+function setCoid(coid)
+{
+	var f = document.fm;
+	f.co_id.value = coid;
+	f.submit();
+}
+</script>

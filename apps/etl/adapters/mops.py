@@ -91,6 +91,8 @@ FINANCIAL_REPORT = "財務報告書"
 ENGLISH = "英文版"
 SUPPLEMENTS = frozenset({"關係企業合併報表"})
 RESTATED_MARKS = ("(重編)", "重編")
+HOLDING_CHOOSER = "name='check2858'"
+HOLDING_OWN = {"check2858": "Y"}
 REPORT_TYPES = {
     "IFRSs合併財報": FinType.CONSOLIDATED,
     "母子公司合併報表": FinType.CONSOLIDATED,
@@ -118,7 +120,7 @@ class MopsClient(SourceClient):
         return cls(limiter, str(settings.MOPS_DOC_BASE_URL), float(settings.MOPS_TIMEOUT), session)
 
     def listing(self, code: str, roc_year: int) -> tuple[dict[str, str], str]:
-        """The year's financial report files of one company, as the Big5 page decodes."""
+        """The year's report files of one company; a holding company is asked again for its own."""
         params = {
             "step": "1",
             "colorchg": "1",
@@ -128,7 +130,11 @@ class MopsClient(SourceClient):
             "mtype": REPORT_KIND,
         }
         url = f"{self.base_url}{LISTING_PATH}"
-        return params, self.limiter.call(lambda: self._page(url, params))
+        page = self.limiter.call(lambda: self._page(url, params))
+        if HOLDING_CHOOSER not in page:
+            return params, page
+        own = {**params, **HOLDING_OWN}
+        return own, self.limiter.call(lambda: self._page(url, own))
 
     def _page(self, url: str, params: dict[str, str]) -> str:
         """A page asking to query less is a failure the limiter backs off from and retries."""

@@ -60,7 +60,7 @@ def text(body: bytes) -> str:
     return body.decode("cp950", errors="replace")
 
 
-def serve(code: str, roc_year: int, body: bytes) -> None:
+def serve(code: str, roc_year: int, body: bytes, **extra: str) -> None:
     params = {
         "step": "1",
         "colorchg": "1",
@@ -68,6 +68,7 @@ def serve(code: str, roc_year: int, body: bytes) -> None:
         "year": str(roc_year),
         "seamon": "",
         "mtype": "A",
+        **extra,
     }
     responses.get(URL, body=body, match=[matchers.query_param_matcher(params)])
 
@@ -202,6 +203,39 @@ def test_old_restatements_named_without_brackets_are_restated(page: Callable[[st
         (CONSOLIDATED, at("2012-01-07 14:43:06"), True),
     ]
     assert {f.period for f in found if f.restated} == {"2009-Q1", "2009-Q2"}
+
+
+@pytest.mark.django_db
+@responses.activate
+def test_a_holding_company_is_asked_again_for_its_own_reports(
+    adapter: MopsAdapter, page: Callable[[str], bytes]
+) -> None:
+    serve("2880", 98, page("2880_98"))
+    serve("2880", 98, page("2880_98_own"), check2858="Y")
+    statement("2880", "2009-Q1", CONSOLIDATED, date(2009, 6, 1))
+    frame = adapter.fetch(STATEMENT_FILING, date(2009, 1, 1), date(2009, 12, 31), "2880")
+    assert frame[["period", "fin_type", "uploaded_at"]].values.tolist() == [
+        ["2009-Q1", CONSOLIDATED, at("2009-05-08 18:14:41")],
+        ["2009-Q2", CONSOLIDATED, at("2009-08-28 13:07:41")],
+        ["2009-Q3", CONSOLIDATED, at("2009-11-12 11:54:01")],
+        ["2009-Q4", CONSOLIDATED, at("2010-04-29 14:43:28")],
+    ]
+    assert ["check2858=Y" in str(call.request.url) for call in responses.calls] == [False, True]
+    (raw,) = RawMops.objects.filter(dataset=STATEMENT_FILING)
+    assert raw.request_params["check2858"] == "Y"
+
+
+@pytest.mark.django_db
+@responses.activate
+def test_a_holding_company_still_choosing_after_asking_again_fails(
+    adapter: MopsAdapter, page: Callable[[str], bytes]
+) -> None:
+    serve("2880", 98, page("2880_98"))
+    serve("2880", 98, page("2880_98"), check2858="Y")
+    statement("2880", "2009-Q1", CONSOLIDATED, date(2009, 6, 1))
+    with pytest.raises(SchemaChangedError, match="report table"):
+        adapter.fetch(STATEMENT_FILING, date(2009, 1, 1), date(2009, 12, 31), "2880")
+    assert len(responses.calls) == 2
 
 
 @pytest.mark.django_db
