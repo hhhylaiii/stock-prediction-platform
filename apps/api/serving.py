@@ -11,9 +11,9 @@ from datetime import date, datetime
 from statistics import fmean
 from typing import Any
 
-from django.db.models import F, Max, Q, QuerySet
+from django.db.models import F, OuterRef, Q, QuerySet, Subquery
 
-from apps.research.models import ModelMonitor, ModelObjective, ModelStatus, Prediction
+from apps.research.models import ModelMonitor, ModelObjective, ModelRun, ModelStatus, Prediction
 from apps.research.runs import SCREENING_MODEL
 
 STATUS_ORDER = (ModelStatus.ACTIVE, ModelStatus.DEGRADED, ModelStatus.RETIRED)
@@ -150,12 +150,38 @@ def eligible() -> QuerySet[Prediction]:
     )
 
 
-def latest_served_date(horizon: int) -> date | None:
-    rows = eligible().filter(
-        horizon=horizon, run__objective=ModelObjective.RANK, run__status__in=SERVING
+def latest_days(slots: Iterable[Slot]) -> dict[Slot, date]:
+    """Each slot's latest day among its active and degraded runs, one index probe per run."""
+    wanted = set(slots)
+    horizons = sorted({slot.horizon for slot in wanted})
+    newest = {
+        f"h{horizon}": Subquery(
+            Prediction.objects.filter(run_id=OuterRef("run_id"), horizon=horizon)
+            .order_by("-date")
+            .values("date")[:1]
+        )
+        for horizon in horizons
+    }
+    runs = (
+        ModelRun.objects.filter(
+            status__in=SERVING, objective__in={slot.objective for slot in wanted}
+        )
+        .exclude(model_type=SCREENING_MODEL)
+        .annotate(**newest)
+        .values("objective", *newest)
     )
-    latest: date | None = rows.aggregate(latest=Max("date"))["latest"]
-    return latest
+    days: dict[Slot, date] = {}
+    for row in runs:
+        for horizon in horizons:
+            slot, day = Slot(row["objective"], horizon), row[f"h{horizon}"]
+            if slot in wanted and day is not None and (slot not in days or day > days[slot]):
+                days[slot] = day
+    return days
+
+
+def latest_served_date(horizon: int) -> date | None:
+    slot = Slot(ModelObjective.RANK, horizon)
+    return latest_days([slot]).get(slot)
 
 
 def best_runs(candidates: Iterable[ServingRun], slots: Iterable[Slot]) -> dict[Slot, ServingRun]:

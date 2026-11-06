@@ -90,6 +90,7 @@ def test_prediction_keys_and_indexes() -> None:
     assert primary_key_columns("prediction") == [["run_id", "stock_id", "date", "horizon"]]
     assert ["date", "horizon", "rank"] in index_columns("prediction")
     assert ["stock_id", "date"] in index_columns("prediction")
+    assert ["run_id", "horizon", "date"] in index_columns("prediction")
 
 
 def test_contrib_keys_and_indexes() -> None:
