@@ -98,7 +98,7 @@ Oct 29, 2026 · @Owen Lai
 | `stock_master` | stock\_id | name、market（TWSE/TPEx）、industry、list\_date、delist\_date | 證交所、櫃買中心 | — |
 | `trading_calendar` | date | is\_trading\_day、note（補班、颱風假） | 證交所 | — |
 | `daily_price` | stock\_id, date | open、high、low、close、volume（股）、turnover（元）、adj\_factor | 證交所、櫃買中心 | date |
-| `dividend_event` | stock\_id, ex\_date | cash\_dividend、stock\_dividend、adj\_factor；減資、分割、面額變更存成只帶 adj\_factor 的列（現金、股票股利為 0） | FinMind | ex\_date |
+| `dividend_event` | stock\_id, ex\_date | cash\_dividend、stock\_dividend、adj\_factor、announce\_date（除權息日第一次公開的交易日，22:40 以後公告的算下一個交易日；沒有公告日的留空）；減資、分割、面額變更存成只帶 adj\_factor 的列（現金、股票股利為 0） | FinMind | ex\_date、announce\_date |
 | `daily_chip` | stock\_id, date | fi\_net、it\_net、dealer\_self\_net、dealer\_hedge\_net（股）、margin\_balance、margin\_limit、short\_balance、sbl\_short\_balance、fi\_holding\_pct、day\_trade\_volume（股，第二批） | 證交所、櫃買中心 | date |
 | `weekly_holding` | stock\_id, data\_date, level | level（1–15）、holders、shares、pct、publish\_date | 集保 | publish\_date（data\_date 隔日） |
 | `monthly_revenue` | stock\_id, period（YYYY-MM） | revenue、yoy、mom | MOPS | announce\_date |
@@ -107,7 +107,7 @@ Oct 29, 2026 · @Owen Lai
 | `macro_indicator` | indicator\_id, period | value | data.gov.tw | announce\_date |
 | `shares_outstanding` | stock\_id, effective\_date | shares、reason（增資、減資、庫藏股註銷） | 證交所、櫃買中心 | effective\_date |
 | `daily_valuation` | stock\_id, date | pe、pb、dividend\_yield（交易所每日公布的本益比、股價淨值比、殖利率） | 證交所、櫃買中心；歷史用 FinMind | date |
-| `disposition_event` | stock\_id, start\_date, type | end\_date、type（注意、處置、全額交割） | 證交所、櫃買中心（含歷史） | start\_date |
+| `disposition_event` | stock\_id, start\_date, type | end\_date、type（注意、處置、全額交割；櫃買「屬管理股票」也存成全額交割） | 證交所、櫃買中心（含歷史） | start\_date |
 
 **feature 與模型層**
 
@@ -120,6 +120,7 @@ Oct 29, 2026 · @Owen Lai
 | `prediction_contrib` | run\_id, stock\_id, date, horizon, position | feature、contrib、n\_features | 排名預測的逐檔特徵貢獻（LightGBM pred\_contrib，5 seed 平均）：前 5 名各一列，最後一列 feature = `_rest` 是其餘特徵的合計，n\_features 為合計的特徵數；同一筆預測內 feature 不重複；服務層「這次預測怎麼來的」讀這張表 |
 | `model_monitor` | run\_id, date, horizon | ic、coverage、brier、direction\_acc、mae、width、auc、n\_stocks | 事後評估結果；date 是預測日；每日對 horizon 已到期的預測計算，服務層的歷史預測準確度讀這張表 |
 | `backtest_metric` | id；唯一鍵 run\_key, model\_type, objective, horizon, metric, grain, period\_start, period\_end, segment | value、created\_at | walk-forward 指標的長表；grain 為 total、fold、year、month，segment 標子群（例如成交金額三分位）；模型頁的 IC 與 baseline 對比讀這張表，`model_monitor` 只存上線後的事後評估 |
+| `holdout_run` | id；唯一鍵 (scope, attempt)、run\_key | scope（rank、return、interval）、attempt、run\_key、last\_date、reason、claimed\_at | holdout 只跑一次的紀錄：每個 scope 第一次是 attempt 1，之後重跑每次加一列並必須寫 reason，舊結果保留；每次 claim 換一個 run\_key，晚於 last\_date 的 holdout 摺拒跑 |
 | `etl_run` | run\_id | source、dataset、date\_range、status、rows、error | 每次 ETL 一列 |
 | `data_quality_log` | id | date、check\_name、severity、detail | 品質檢查結果 |
 
@@ -130,7 +131,7 @@ Oct 29, 2026 · @Owen Lai
 - 價量表照收來源的整張表（含 ETF、ETN、特別股、TDR），只研究普通股由 universe 篩選；外幣計價的證券（雙幣 ETF 的外幣櫃位，代號第 6 碼為 K、M、S、C）不進 standard 表。
 - 時間戳一律 `Asia/Taipei`，日期欄位用 `DATE` 型別。
 - `daily_price` 存原始價與 `adj_factor`，還原價在查詢時相乘，不另存一份。
-- 索引：所有 `(stock_id, date)` 表建複合索引，`prediction` 再加 `(date, horizon, rank)`。
+- 索引：所有 `(stock_id, date)` 表建複合索引，`prediction` 再加 `(date, horizon, rank)` 與 `(run_id, horizon, date)`。
 - 大量寫入用 `bulk_create` 或 PostgreSQL `COPY`，並以 upsert 保證重跑冪等。
 
 ## 5. ETL 與排程
