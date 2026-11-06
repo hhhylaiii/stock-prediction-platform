@@ -81,9 +81,17 @@ def chip_features(panel: pd.DataFrame) -> pd.DataFrame:
     return feature_frame(panel, columns, feature_names(Group.CHIP))
 
 
+def _day_trades(panel: pd.DataFrame) -> pd.Series:
+    """Day-trade shares; a stock left out of its market's table on a loaded day was not eligible."""
+    shares = _flow(panel, "day_trade_volume")
+    listed = panel["day_trade_volume"].notna()
+    loaded = listed.groupby([panel["date"], panel["market"]]).transform("any")
+    return shares.mask(loaded & shares.isna(), 0.0)
+
+
 def _day_trade_ratio(panel: pd.DataFrame) -> pd.Series:
     """Day-trade share of volume over five days settled at least two trading days ago (T+2)."""
-    trades = rolling(_flow(panel, "day_trade_volume"), panel, CHANGE_DAYS, "sum", CHANGE_DAYS)
+    trades = rolling(_day_trades(panel), panel, CHANGE_DAYS, "sum", CHANGE_DAYS)
     volume = rolling(traded(panel, "volume"), panel, CHANGE_DAYS, "sum", CHANGE_DAYS)
     return shifted(ratio(trades, volume), panel, SETTLE_DAYS)
 

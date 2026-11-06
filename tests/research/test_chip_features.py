@@ -237,6 +237,28 @@ def test_day_trade_ratio_reads_only_days_settled_two_trading_days_ago() -> None:
     assert math.isnan(at(features, "2330", 11, "chip_day_trade_ratio_5d"))
 
 
+def test_a_stock_left_out_of_its_market_day_trade_table_was_not_eligible() -> None:
+    eligible = [100.0] * 9
+    eligible[5] = NAN
+    left_out = [NAN] * 9
+    panel = pd.concat(
+        [
+            listing("2330", rising(9)).assign(**chips(9, day_trade_volume=eligible)),
+            listing("2014", rising(9)).assign(**chips(9, day_trade_volume=left_out)),
+            listing("6488", rising(9), market="TPEx").assign(**chips(9, day_trade_volume=left_out)),
+        ],
+        ignore_index=True,
+    ).sort_values(["stock_id", "date"], ignore_index=True)
+
+    features = second_batch_chip_features(panel)
+
+    assert at(features, "2014", 6, "chip_day_trade_ratio_5d") == 0.0
+    assert math.isnan(at(features, "2014", 8, "chip_day_trade_ratio_5d"))
+    assert at(features, "2330", 6, "chip_day_trade_ratio_5d") == pytest.approx(0.1)
+    assert math.isnan(at(features, "2330", 8, "chip_day_trade_ratio_5d"))
+    assert math.isnan(at(features, "6488", 6, "chip_day_trade_ratio_5d"))
+
+
 def test_holding_change_institutional_net_and_buy_streak() -> None:
     closes = rising(27)
     closes[6] = NAN
