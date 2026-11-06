@@ -205,7 +205,7 @@ Oct 29, 2026 · @Owen Lai
 
 ## 6. 特徵工程
 
-六組特徵。台股資料以「t 日收盤後可知」為準，美股與匯率用美國 t 日收盤（台北 t+1 約 05:00 可得），全部早於 t+1 開盤進場；每個特徵在表中註明可用時點。前五組是個股層級；第六組「市場層級」對全市場同值，只給絕對報酬、區間、波動、機率模型用，排名模型不用。四種 label：未來 5 日與 20 日還原報酬（以 t+1 還原開盤價進場）、其當日橫截面百分位、未來 20 日實現波動、20 日漲幅是否超過 5%。第一版 63 個特徵；表中標「第二批」的 14 個在 Phase 4 主模型過關後依序加入，每加一組重跑第 7 步的篩選與 walk-forward，總體 OOS rank IC 沒有提高就不留。先求正確再求多。
+六組特徵。台股資料以「t 日收盤後可知」為準，美股用美國 t 日收盤（台北 t+1 約 05:00 可得），美元兌台幣用倫敦日 ≤ t−1 的收盤（倫敦 t 日的收盤在台北 t+1 06:00 時還沒收完），全部早於 t+1 開盤進場；每個特徵在表中註明可用時點。前五組是個股層級；第六組「市場層級」對全市場同值，只給絕對報酬、區間、波動、機率模型用，排名模型不用。四種 label：未來 5 日與 20 日還原報酬（以 t+1 還原開盤價進場）、其當日橫截面百分位、未來 20 日實現波動、20 日漲幅是否超過 5%。第一版 64 個特徵；表中標「第二批」的 14 個照常計算並存進 `feature_daily`，訓練預設只讀第一批，在 Phase 4 主模型過關後依序加入，每加一組重跑第 7 步的篩選與 walk-forward，總體 OOS rank IC 沒有提高就不留。先求正確再求多。
 
 | 類別 | 特徵（欄位名） | 來源表 | 可用時點 | 備註 |
 | --- | --- | --- | --- | --- |
@@ -222,35 +222,36 @@ Oct 29, 2026 · @Owen Lai
 | 籌碼面 | `chip_it_net_5d` `chip_dealer_self_net_5d` `chip_dealer_hedge_net_5d` | daily\_chip、shares\_outstanding | t 日晚間 | 投信；自營商分自行買賣與避險；皆除以流通股數 |
 | 籌碼面 | `chip_margin_chg_5d` `chip_margin_usage` `chip_short_ratio` | daily\_chip、shares\_outstanding | t 日晚間 | 融資餘額 5 日變化 / 流通股數；融資使用率 = 融資餘額 / 融資限額；券資比 |
 | 籌碼面 | `chip_fi_holding_pct` `chip_sbl_short_chg_5d` | daily\_chip、shares\_outstanding | t 日晚間 | 外資持股比；借券賣出餘額 5 日變化 / 流通股數，用借券賣出餘額而非借券餘額 |
-| 籌碼面 | `chip_big_holder_pct_chg_1w` `chip_holder_count_chg_1w` | weekly\_holding | publish\_date，即 data\_date 隔日的週六 | 400 張以上級距占比週變化、總股東人數週變化；取 publish\_date ≤ t 的最近一期；level 16、17 排除 |
+| 籌碼面 | `chip_big_holder_pct_chg_1w` `chip_holder_count_chg_1w` | weekly\_holding | publish\_date，即 data\_date 隔日 | 400 張以上級距占比週變化、總股東人數週變化；取 publish\_date ≤ t 的最近一期；level 16、17 排除 |
 | 基本面 | `fund_rev_yoy` `fund_rev_3m_yoy` `fund_rev_mom` | monthly\_revenue | announce\_date | 單月 yoy、近 3 個月合計 yoy、mom |
 | 基本面 | `fund_ep` `fund_eps_yoy` | financial\_statement、daily\_price | announce\_date | E/P = EPS TTM / 收盤價，虧損為負值，不用本益比；EPS TTM 為 PIT 最近四季合計，Q4 由年報減前三季；EPS yoy 為 TTM 年增，分母取去年 TTM 絕對值，去年為負或零時 NaN |
 | 基本面 | `fund_bp` `fund_dividend_yield` | daily\_valuation | t 日晚間 | 證交所、櫃買每日公布的股價淨值比與殖利率；B/P = 1 / 股價淨值比 |
 | 基本面 | `fund_roe_ttm` `fund_gross_margin` `fund_op_margin` `fund_debt_ratio` | financial\_statement | announce\_date | 以 announce\_date 對齊 |
 | 基本面 | `fund_gm_yoy_chg` `fund_opm_yoy_chg` `fund_cfo_to_ni` | financial\_statement | announce\_date | 毛利率、營益率較去年同季的變化；營業現金流 / 淨利，TTM |
 | 基本面 | `fund_days_since_fs` | financial\_statement | announce\_date | 距最近一期財報公告的交易日數 |
+| 基本面 | `fund_rev_yoy_q` | financial\_statement | announce\_date | 單季營收對 4 季前的年增率，4 季前 ≤ 0 時 NaN；下市股缺月營收時仍有營收訊號 |
 | 產業與風險 | `risk_beta_250d` `risk_idio_vol_60d` | daily\_price、index\_daily | t 日晚間 | 250 日回歸的 beta，上市股對加權指數、上櫃股對櫃買指數；60 日殘差報酬標準差 |
 | 產業與風險 | `ind_sector_ret_20d` `ind_rel_ret_20d` | daily\_price、stock\_master | t 日晚間 | 個股所屬產業 20 日平均報酬；個股 20 日報酬減產業平均 |
 | 市場層級 | `mkt_taiex_ret_5d` `mkt_taiex_ret_20d` `mkt_sox_ret_5d` | index\_daily | 台股 t 日晚間；美股用美國 t 日收盤，台北 t+1 約 05:00 可得 | 大盤、費半；全市場同值，排名模型不用、不做橫截面 z-score |
-| 市場層級 | `mkt_tsm_adr_gap` `mkt_usdtwd_chg_20d` | index\_daily | 美國 t 日收盤，台北 t+1 約 05:00 可得 | ADR 溢價 = TSM ADR 收盤 × 美元兌台幣 / 5 / 2330 台股 t 日收盤 − 1，1 ADR 為 5 股；匯率 20 日變化；同上 |
+| 市場層級 | `mkt_tsm_adr_gap` `mkt_usdtwd_chg_20d` | index\_daily | TSM ADR 用美國 t 日收盤，台北 t+1 約 05:00 可得；美元兌台幣用倫敦日 ≤ t−1 的收盤 | ADR 溢價 = TSM ADR 收盤 × 美元兌台幣 / 5 / 2330 台股 t 日收盤 − 1，1 ADR 為 5 股；匯率 20 日變化；同上 |
 | 市場層級 | `mkt_business_signal` | macro\_indicator | announce\_date | 景氣燈號分數；同上 |
 | 技術面 | `tech_parkinson_vol_20d` `tech_gap_1d` `tech_close_loc_5d` | daily\_price | t 日晚間 | 第二批。Parkinson 波動 = √(20 日平均 ln(高/低)² / (4 ln 2))，年化；跳空 = 開盤 / 前收 − 1；收盤在 5 日高低區間的位置，0 到 1 |
 | 技術面 | `tech_max_ret_20d` `tech_skew_60d` | daily\_price | t 日晚間 | 第二批。過去 20 日最大單日報酬，樂透效應；60 日日報酬偏態 |
-| 籌碼面 | `chip_day_trade_ratio_5d` | daily\_chip | t 日晚間 | 第二批。5 日當沖成交股數 / 5 日成交股數；證交所與櫃買每日公布，daily\_chip 需新增 day\_trade\_volume 欄位 |
+| 籌碼面 | `chip_day_trade_ratio_5d` | daily\_chip | t−6 到 t−2 的 T+2 定案值 | 第二批。5 日當沖成交股數 / 5 日成交股數，5 日是 t−6 到 t−2（當沖表在 T、T+1、T+2 各更新一次，以 T+2 為準）；同市場當天有當沖表、該檔不在表上算 0，整個市場當天沒資料才是空值；證交所與櫃買每日公布，daily\_chip 需新增 day\_trade\_volume 欄位 |
 | 籌碼面 | `chip_fi_holding_chg_20d` `chip_it_net_20d` `chip_fi_buy_streak` | daily\_chip、shares\_outstanding | t 日晚間 | 第二批。外資持股比 20 日變化，百分點；投信 20 日淨買 / 流通股數；外資連續淨買超交易日數 |
 | 產業與風險 | `ind_sector_id` `ind_mom_neutral` `ind_ep_neutral` | stock\_master、daily\_price、financial\_statement | t 日晚間 | 第二批。產業代碼，LightGBM 以 categorical 處理，Ridge 不用；`tech_mom_250_20` 與 `fund_ep` 減同日同產業中位數 |
-| 基本面 | `fund_days_to_ex_date` | dividend\_event | t 日晚間 | 第二批。距下一個已公告除息日的交易日數，無公告為 NaN；填息效應 |
+| 基本面 | `fund_days_to_ex_date` | dividend\_event | t 日晚間 | 第二批。距下一個已公告、有現金股利（`cash_dividend > 0`）的除息日的交易日數，無公告為 NaN；填息效應 |
 | 市場層級 | `mkt_days_to_quarter_end` | trading\_calendar | t 日晚間 | 第二批。距季末的交易日數，投信作帳；全市場同值，排名模型不用 |
 
 **處理步驟（每日對全市場執行）**
 
 1. 定義 universe：特徵與預測對全部上市、上櫃普通股計算；訓練 universe 排除停牌、上市未滿 60 個交易日、處置期間、全額交割、當日無成交、20 日成交金額中位數低於 1,000 萬元的股票；注意股不排除，以 `tech_attention_t` 當特徵；處置與全額交割期間來自 `disposition_event`。以下所有橫截面統計與 label 的百分位都只在當日訓練 universe 內計算；universe 外的股票套用同一天的轉換參數照常推論，`feature_daily` 與 `prediction` 都帶 `in_universe` 旗標，API 回傳時標示，事後評估不計入。
-2. 可用時點對齊：每個特徵依表中「可用時點」以 merge\_asof 對齊到 t；基本面與總經用 announce\_date，weekly\_holding 用 publish\_date，美股與匯率用美國日曆日 ≤ t 的最近一個收盤，美國休市日自動取前一日。
-3. 極值處理：個股層級特徵以當日 universe 內 1% / 99% 分位 winsorize；市場層級特徵與 `ind_sector_id` 不做。
+2. 可用時點對齊：每個特徵依表中「可用時點」以 merge\_asof 對齊到 t；基本面與總經用 announce\_date，weekly\_holding 用 publish\_date，美股用美國日曆日 ≤ t 的最近一個收盤，美國休市日自動取前一日；美元兌台幣用倫敦日 ≤ t−1 的最近一個收盤，週五與連假前也一樣。財報的 announce\_date：沒有更正紀錄的照實際上傳日，晚於法定截止日也延後；有更正紀錄的只拿來提早、不延後；有重編報表的期別用最後一次重編的上傳日；交易日 22:40 以後或非交易日上傳的算下一個交易日。財報數字一律用該期報表當時公布的原值，不用之後報表重分類過的比較期數字。前後期報表種類（個體、合併）不同時，revenue、gross\_margin、op\_margin、operating\_cf 不跨種類取前期，相關的年增與 TTM 為 NaN；月營收訊號讀到 2013-01 兩側的月份時為 NaN（2013 年起改為 IFRS 合併營收）。
+3. 極值處理：個股層級特徵以當日 universe 內 1% / 99% 分位 winsorize；某一側的截斷界會讓 universe 全部變成同值時（稀疏的 0/1 與計數特徵），那一側改用 universe 的極值當界；市場層級特徵與 `ind_sector_id` 不做。
 4. 標準化：個股層級特徵做當日橫截面 z-score，均值與標準差只用 universe 內的股票算。Ridge 與 logistic baseline 一律用 z-score 值；排名模型的 LightGBM 也用 z-score 值，原值跨年度有漂移，樹模型看不出相對當日市場的高低；絕對報酬、區間、波動、機率模型的 LightGBM 用原值並加入市場層級特徵，市場層級特徵進模型前先在訓練窗內依分位切成 5 級，見第 7 節模型表。市場層級特徵與 `ind_sector_id` 不做橫截面 z-score，市場層級特徵排名模型不使用。
 5. 缺值：Ridge 與 logistic 填當日中位數並加 `_missing` 旗標；LightGBM 保留 NaN。
 6. 寫入 `feature_daily`，只存 winsorize 前的原值與 `in_universe`，同時輸出 Parquet 分區檔（依年份）。步驟 3 到 5 的 winsorize、z-score、填值與 `_missing` 旗標在訓練與推論管線按日重算，不落表，參數一律由同一天的訓練 universe 算出。每日重算最近 60 個交易日的特徵與已可結算的 label，以 upsert 覆蓋，處理除權息與財報延遲入庫造成的歷史錯值。
-7. 特徵驗收：Phase 3 產出每個特徵的單因子 rank IC，只用前 4 摺的訓練窗計算（測試期落在 2014 到 2015 年，與第 7 節調參同一組摺），之後不再用新資料重篩；成對相關取日橫截面 Spearman 的平均，高於 0.95 的留單因子 IC 絕對值高者；訊號型特徵全期 rank IC 絕對值低於 0.005 的剔除；條件型特徵（`size_*`、`liq_*`、`tech_vol_*`、`risk_*`、`fund_days_since_fs`、`ind_sector_id`、`*_days_to_*`）不受 IC 門檻約束。保留清單寫入 `model_run.feature_list`；剔除清單在 Phase 4 定案後不得依 2025 年起的 holdout 結果再改。第二批特徵每加一組重跑同一套篩選與 walk-forward，總體 OOS rank IC 沒有提高就不留。
+7. 特徵驗收：Phase 3 產出每個特徵的單因子 rank IC，只用前 4 摺的訓練窗計算（測試期落在 2014 到 2015 年，與第 7 節調參同一組摺），之後不再用新資料重篩；單因子 rank IC 對 5 日與 20 日的 `fwd_rank_pct` 各算一次；成對相關取日橫截面 Spearman 的平均，特徵依兩個 horizon 中較大的單因子 IC 絕對值由高到低保留，與已保留特徵的相關絕對值高於 0.95 的剔除；訊號型特徵在兩個 horizon 的 rank IC 絕對值都低於 0.005 才剔除，任一 horizon 的 IC 有值天數不到篩選窗一半時不判定、保留並記錄；條件型特徵（`size_*`、`liq_*`、`tech_vol_*`、`risk_*`、`fund_days_since_fs`、`ind_sector_id`、`*_days_to_*`）不受 IC 門檻約束。保留清單寫入 `model_run.feature_list`；剔除清單在 Phase 4 定案後不得依 2025 年起的 holdout 結果再改。第二批特徵每加一組重跑同一套篩選與 walk-forward，總體 OOS rank IC 沒有提高就不留。
 
 **Label 定義**
 
