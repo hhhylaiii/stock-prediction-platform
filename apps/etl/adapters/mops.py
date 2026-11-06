@@ -23,13 +23,14 @@ from apps.etl.deadlines import (
     visible_from,
 )
 from apps.etl.errors import SchemaChangedError, SourceError
-from apps.etl.filings import FILING_COLUMNS, Filing, apply_statement_filings
+from apps.etl.filings import FILING_COLUMNS, Filing, apply_statement_filings, quarter_end
 from apps.etl.models import EtlRun, RawMops
 from apps.etl.mops_history import (
     HISTORIES,
     IFRS_FROM,
     REVENUE_HISTORY,
     STATEMENT_HISTORY,
+    STATEMENT_VIEWER,
     insert_missing_history,
     months_between,
     periods_between,
@@ -59,8 +60,9 @@ from apps.etl.statement_summary import (
     previous_period,
     statement_rows,
 )
+from apps.etl.viewer_history import viewer_frame, viewer_periods
 from apps.market.calendar import TradingDays
-from apps.market.models import FinancialStatement, FinType
+from apps.market.models import FinancialStatement, FinType, StockMaster
 
 MOPS_MIN_INTERVAL = 5.0
 STATEMENT_FILING = "statement_filing"
@@ -69,6 +71,8 @@ REVENUE_SCAN = "revenue_scan"
 SCANS = frozenset({STATEMENT_SCAN, REVENUE_SCAN})
 REVENUE_PATH = "/nas/t21"
 SUMMARY_PATH = "/mops/web/ajax_"
+VIEWER_PATH = "/server-java/t164sb01"
+NOTES = ("incomplete", "stock_id", "absent", "no_revenue")
 SUMMARY_ENCODING = "utf-8"
 EXPORT_NAME = re.compile(r"name='filename' value='[^']*'")
 LISTING_PATH = "/server-java/t57sb01"
@@ -176,6 +180,20 @@ class MopsSummaryClient(SourceClient):
         params = {"market": market, "year": str(roc_year), "month": str(month)}
         return {**params, "origin": str(origin)}, body.decode(PAGE_ENCODING, errors="replace")
 
+    def viewer(
+        self, stock_id: str, year: int, season: int, report: str
+    ) -> tuple[dict[str, str], str]:
+        """One company's filed XBRL quarter: C consolidated, A individual; delisted ones too."""
+        params = {
+            "step": "1",
+            "CO_ID": stock_id,
+            "SYEAR": str(year),
+            "SSEASON": str(season),
+            "REPORT_ID": report,
+        }
+        body = self.get_content(f"{self.base_url}{VIEWER_PATH}", params)
+        return params, body.decode(PAGE_ENCODING, errors="replace")
+
 
 class _Rows(HTMLParser):
     """Text of every table cell, row by row, each row tagged with the table it sits in."""
@@ -277,7 +295,7 @@ def _uploaded_at(text: str, code: str, roc_year: int) -> datetime:
 class MopsAdapter(BaseAdapter):
     source = "mops"
     raw_model = RawMops
-    datasets = frozenset({STATEMENT_FILING, *SCANS, *HISTORIES})
+    datasets = frozenset({STATEMENT_FILING, STATEMENT_VIEWER, *SCANS, *HISTORIES})
     per_stock = True
 
     def __init__(
@@ -293,7 +311,7 @@ class MopsAdapter(BaseAdapter):
     def run(self, dataset: str, start: date, end: date, stock_id: str | None = None) -> EtlRun:
         """Scans read today's pages; filing dates go stock by stock through backfill."""
         self.require_dataset(dataset)
-        if dataset == STATEMENT_FILING:
+        if dataset in (STATEMENT_FILING, STATEMENT_VIEWER):
             raise ValueError(f"{self.source}/{dataset} goes stock by stock; use manage.py backfill")
         today = timezone.localdate()
         if dataset in SCANS and (start, end) != (today, today):
@@ -335,6 +353,8 @@ class MopsAdapter(BaseAdapter):
             return self._scan(end) if dataset == STATEMENT_SCAN else self._revenue_scan(end)
         if stock_id is None:
             raise ValueError(f"{self.source}/{dataset} goes stock by stock; give a stock")
+        if dataset == STATEMENT_VIEWER:
+            return self._viewer(stock_id, start, end)
         filings: list[Filing] = []
         for year in _statement_years(stock_id, start, end):
             params, page = self.client.listing(stock_id, year - ROC_OFFSET)
@@ -348,7 +368,7 @@ class MopsAdapter(BaseAdapter):
         self.require_dataset(dataset)
         if raw_df.empty:
             return raw_df
-        if dataset in (STATEMENT_SCAN, STATEMENT_HISTORY):
+        if dataset in (STATEMENT_SCAN, STATEMENT_HISTORY, STATEMENT_VIEWER):
             kept = raw_df[raw_df[VALUE_COLUMNS].notna().any(axis=1)].reset_index(drop=True)
             kept.attrs.update(raw_df.attrs)
             return kept
@@ -367,12 +387,10 @@ class MopsAdapter(BaseAdapter):
             session = scan_session(timezone.now(), self.calendar)
             insert = insert_new_statements if dataset == STATEMENT_SCAN else insert_new_revenues
             return insert(frame, timezone.localdate(), session)
-        if dataset in HISTORIES:
+        if dataset in HISTORIES or dataset == STATEMENT_VIEWER:
             span = (frame.attrs["start"], frame.attrs["end"])
-            waiting = frame.attrs.get("incomplete", {})
-            return insert_missing_history(
-                dataset, frame, self._conservative(dataset), span, waiting
-            )
+            notes = {name: frame.attrs[name] for name in NOTES if name in frame.attrs}
+            return insert_missing_history(dataset, frame, self._conservative(dataset), span, notes)
         if frame.empty:
             return 0
         cutoff = time.fromisoformat(settings.FILING_VISIBLE_BEFORE)
@@ -411,7 +429,7 @@ class MopsAdapter(BaseAdapter):
             for row in statement_rows(current, previous, int(period[-1])):
                 records.append({**row, "period": period})
         frame = pd.DataFrame(records, columns=SCAN_COLUMNS, dtype=object)
-        frame.attrs["incomplete"] = waits
+        frame.attrs["incomplete"] = {period: codes for period, codes in waits.items() if codes}
         return frame
 
     def _summaries(self, period: str, filed: bool, dataset: str) -> Summary:
@@ -469,6 +487,24 @@ class MopsAdapter(BaseAdapter):
                 raise SchemaChangedError(f"MOPS t21sc03 {period} lists a company twice")
             found |= companies
         return found
+
+    def _viewer(self, stock_id: str, start: date, end: date) -> pd.DataFrame:
+        """Settled quarters the stock filed while listed; stored ones only feed the conversion."""
+        listed = StockMaster.objects.filter(stock_id=stock_id).values_list("delist_date", flat=True)
+        days_after = int(settings.STATEMENT_SCAN_DAYS_AFTER)
+        periods = viewer_periods(start, end, timezone.localdate(), days_after, listed.first())
+        kept = FinancialStatement.objects.filter(stock_id=stock_id, period__in=periods)
+        stored = set(kept.values_list("period", flat=True))
+
+        def page(period: str, kind: str) -> str:
+            params, body = self.summaries.viewer(stock_id, int(period[:4]), int(period[-1]), kind)
+            self.save_raw(STATEMENT_VIEWER, params, {"html": body})
+            return body
+
+        frame = viewer_frame(stock_id, periods, stored, page, SCAN_COLUMNS)
+        last = quarter_end(periods[-1]) if periods else end
+        frame.attrs.update(start=start, end=last, stock_id=stock_id)
+        return frame
 
     def _conservative(self, dataset: str) -> Callable[[str], date]:
         """The deadline-based date FinMind rows carry, for periods first seen long after."""

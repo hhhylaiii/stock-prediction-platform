@@ -193,6 +193,27 @@ uv run python manage.py fetch --source mops --dataset statement_history --start 
 - 兩種頁面都是 MOPS 現在的狀態：彙總表只列現在還公開發行的公司，2013 年起的月營收頁也是 2026-11-04 重新產生的，所以下市公司不會出現在裡面。下市公司的財報要另外用 XBRL 檢視頁補（K17b）；月營收找不到來源（K19）。
 - 每年約 48 個月營收請求、24 到 30 個財報請求，6 秒一次。避開 19:00 和 22:40 前後，那兩個時段 worker 的每日掃描也在打 mopsov。
 
+### 下市公司的財報（plan K17b）
+
+彙總表不列下市公司，改用 XBRL 檢視頁（t164sb01），一家公司一季一頁，下市公司也查得到：
+
+```bash
+uv run python manage.py shell -v 0 -c "from apps.market.models import StockMaster as M; print('\n'.join(M.objects.filter(delist_date__gte='2013-04-01', stock_id__regex=r'^[1-9][0-9]{3}$').exclude(stock_id__startswith='91').order_by('stock_id').values_list('stock_id', flat=True)), end='')" > delisted.txt
+test -s delisted.txt && sed 's/^/--stock /' delisted.txt | xargs uv run python manage.py backfill --source mops --dataset statement_viewer --from 2013-01-01
+```
+
+- 只看 2013-Q1 起、在下市日之前結束、而且每日掃描已經不看的季別。先問合併報表（`REPORT_ID=C`），沒有就問個別報表（`A`）；同一家公司上一季回答的種類下一季先問。
+- 只抓 standard 表沒有的季別，以及每一季的前一季（Q1 也抓前一年 Q4，ROE 才算得出來）。單季值和彙總表用同一套換算（`statement_rows`）。前一季也讀到的已存季別會拿來對照，不改。
+- 寫入和 log 跟彙總表歷史相同：保守公告日，`statement_viewer_mismatch` 每檔股票一列（`detail.stock_id`），區間結尾是最後一季的季底，所以重跑到哪一天都是同一列。另外 `absent` 列出兩種報表都查不到的季別（檢視頁回「檔案不存在」或「查無資料」的查詢表單），例如下市前停止申報的公司，或 2013 年後才上市的公司在上市前沒有申報的季別；`no_revenue` 列出認不得營收科目的季別，毛利率、營益率也會跟著是空的，要人工看那家公司的科目名稱。證券商的「收益合計」不當營收，和 FinMind、彙總表一致（證券、銀行的 revenue 都是空的）。重跑時沒有重讀的季別，上次記下的 `rows`、`types` 照留。
+- 保守公告日對晚申報的公司偏早，下市公司又常晚申報，所以補完一定要接著跑 `statement_filing`，換成實際上傳日（doc.twse 查得到下市公司）：
+
+  ```bash
+  uv run python manage.py shell -v 0 -c "from apps.etl.models import DataQualityLog as L; print('\n'.join(sorted({a['stock_id'] for log in L.objects.filter(check_name='statement_viewer_mismatch') for a in log.detail.get('added', [])})), end='')" > viewer_added.txt
+  test -s viewer_added.txt && sed 's/^/--stock /' viewer_added.txt | xargs uv run python manage.py backfill --source mops --dataset statement_filing --from 2013-01-01
+  ```
+- 91 開頭的存託憑證是外國發行人，不用這張表申報，所以排除。
+- 每家公司每季約 1 個請求，6 秒一次；全部下市公司約 1,500 個請求，約 2.5 小時。和每日掃描是同一台 mopsov，在 23:00 之後或早上跑，避開 19:00 和 22:40 前後。
+
 ## 告警
 
 warning 與 error 一律寫 log；`.env` 設了 `ALERT_WEBHOOK_URL` 就另外 POST JSON：

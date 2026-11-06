@@ -15,11 +15,15 @@ from apps.market.models import FinancialStatement, MonthlyRevenue
 
 REVENUE_HISTORY = "revenue_history"
 STATEMENT_HISTORY = "statement_history"
+STATEMENT_VIEWER = "statement_viewer"
 HISTORIES = frozenset({REVENUE_HISTORY, STATEMENT_HISTORY})
 MISMATCH_CHECKS = {
     REVENUE_HISTORY: "revenue_history_mismatch",
     STATEMENT_HISTORY: "statement_history_mismatch",
+    STATEMENT_VIEWER: "statement_viewer_mismatch",
 }
+SCOPE = ("span", "stock_id")
+COMPARED = ("rows", "types")
 IFRS_FROM = "2013-Q1"
 REVENUE_FROM = "2013-01"
 MONEY_TOLERANCE = 1000
@@ -64,22 +68,24 @@ def insert_missing_history(
     frame: pd.DataFrame,
     dated: Callable[[str], date],
     span: tuple[date, date],
-    waiting: dict[str, list[str]],
+    notes: dict[str, Any],
 ) -> int:
     """New periods only, from their conservative date; one log per span says what differs."""
     model: type[models.Model] = MonthlyRevenue if dataset == REVENUE_HISTORY else FinancialStatement
     stored = _stored(model, frame)
     new: list[models.Model] = []
+    seen: set[tuple[str, str]] = set()
     detail: dict[str, Any] = {
         "span": [span[0].isoformat(), span[1].isoformat()],
         "added": [],
         "rows": [],
         "types": [],
-        "incomplete": {period: codes for period, codes in waiting.items() if codes},
+        **notes,
     }
     for raw in frame.to_dict("records"):
         record = {str(name): value for name, value in raw.items()}
         key = {"stock_id": record["stock_id"], "period": record["period"]}
+        seen.add((record["stock_id"], record["period"]))
         rows = stored.get((record["stock_id"], record["period"]))
         row = None if rows is None else rows.get(record.get("fin_type", ""))
         if rows is None:
@@ -89,20 +95,35 @@ def insert_missing_history(
             detail["types"].append({**key, "stored": sorted(rows), "found": record["fin_type"]})
         elif fields := _differences(dataset, row, record):
             detail["rows"].append({**key, "fields": fields})
-    _record(model, new, MISMATCH_CHECKS[dataset], detail)
+    _record(model, new, MISMATCH_CHECKS[dataset], detail, seen)
     return len(new)
 
 
-def _record(model: type[models.Model], new: list[models.Model], check: str, found: Any) -> None:
-    """Rows and the span's log together; a rerun replaces the log but keeps every row it added."""
+def _record(
+    model: type[models.Model],
+    new: list[models.Model],
+    check: str,
+    found: Any,
+    seen: set[tuple[str, str]],
+) -> None:
+    """Rows and the span's log together; a rerun keeps what it added and what it did not reread."""
+    scope = {f"detail__{key}": found[key] for key in SCOPE if key in found}
     with transaction.atomic():
         model._default_manager.bulk_create(new)
-        earlier = DataQualityLog.objects.filter(check_name=check, detail__span=found["span"])
+        earlier = DataQualityLog.objects.filter(check_name=check, **scope)
         kept = [entry for log in earlier for entry in log.detail.get("added", [])]
         added = sorted({(entry["stock_id"], entry["period"]) for entry in [*kept, *found["added"]]})
         detail = {**found, "added": [{"stock_id": code, "period": p} for code, p in added]}
+        for key in COMPARED:
+            unread = [
+                entry
+                for log in earlier
+                for entry in log.detail.get(key, [])
+                if (entry["stock_id"], entry["period"]) not in seen
+            ]
+            detail[key] = [*unread, *found[key]]
         earlier.delete()
-        if any(detail[part] for part in ("added", "rows", "types", "incomplete")):
+        if any(value for key, value in detail.items() if key not in SCOPE):
             DataQualityLog.objects.create(
                 date=date.fromisoformat(detail["span"][1]),
                 check_name=check,
@@ -128,7 +149,7 @@ def _stored(
 
 def _differences(dataset: str, row: Any, record: dict[str, Any]) -> dict[str, list[Any]]:
     """Figures the pages give differently (SPEC §8.5); growth rates differ by design."""
-    if dataset == STATEMENT_HISTORY:
+    if dataset != REVENUE_HISTORY:
         return figure_differences(row, record)
     if row.revenue is None or abs(row.revenue - record["revenue"]) > MONEY_TOLERANCE:
         return {"revenue": [row.revenue, record["revenue"]]}
