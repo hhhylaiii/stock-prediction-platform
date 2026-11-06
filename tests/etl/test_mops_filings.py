@@ -60,7 +60,7 @@ def text(body: bytes) -> str:
     return body.decode("cp950", errors="replace")
 
 
-def serve(code: str, roc_year: int, body: bytes) -> None:
+def serve(code: str, roc_year: int, body: bytes, **extra: str) -> None:
     params = {
         "step": "1",
         "colorchg": "1",
@@ -68,6 +68,7 @@ def serve(code: str, roc_year: int, body: bytes) -> None:
         "year": str(roc_year),
         "seamon": "",
         "mtype": "A",
+        **extra,
     }
     responses.get(URL, body=body, match=[matchers.query_param_matcher(params)])
 
@@ -192,8 +193,12 @@ def test_restated_reports_are_marked_with_their_own_upload(page: Callable[[str],
     assert not any(f.restated for f in found if f.period != "2018-Q4")
 
 
-def test_old_restatements_named_without_brackets_are_restated(page: Callable[[str], bytes]) -> None:
-    found = parse_listing(text(page("1310_98")), "1310", 98)
+@pytest.mark.parametrize("mark", ["重編", "第二次重編"])
+def test_old_restatements_named_without_brackets_are_restated(
+    page: Callable[[str], bytes], mark: str
+) -> None:
+    listing = text(page("1310_98")).replace("重編", mark)
+    found = parse_listing(listing, "1310", 98)
     q1 = [(f.fin_type, f.uploaded_at, f.restated) for f in found if f.period == "2009-Q1"]
     assert q1 == [
         (INDIVIDUAL, at("2012-01-04 21:36:43"), False),
@@ -202,6 +207,113 @@ def test_old_restatements_named_without_brackets_are_restated(page: Callable[[st
         (CONSOLIDATED, at("2012-01-07 14:43:06"), True),
     ]
     assert {f.period for f in found if f.restated} == {"2009-Q1", "2009-Q2"}
+
+
+def test_a_second_restatement_is_a_restatement_and_dates_the_period(
+    adapter: MopsAdapter, page: Callable[[str], bytes]
+) -> None:
+    found = parse_listing(text(page("2305_105")), "2305", 105)
+    q1 = [(f.fin_type, f.uploaded_at, f.restated) for f in found if f.period == "2016-Q1"]
+    assert q1 == [
+        (CONSOLIDATED, at("2017-02-15 19:59:51"), False),
+        (CONSOLIDATED, at("2017-02-20 18:33:21"), True),
+        (CONSOLIDATED, at("2017-03-07 16:21:33"), True),
+    ]
+    normalized = adapter.normalize(STATEMENT_FILING, pd.DataFrame(found))
+    first = normalized[normalized["period"] == "2016-Q1"]
+    assert first[["uploaded_at", "restated"]].values.tolist() == [[at("2017-03-07 16:21:33"), True]]
+
+
+def test_a_bank_branch_report_is_not_an_announcement(page: Callable[[str], bytes]) -> None:
+    found = parse_listing(text(page("2837_107")), "2837", 107)
+    q4 = {(f.fin_type, f.uploaded_at) for f in found if f.period == "2018-Q4"}
+    assert q4 == {
+        (CONSOLIDATED, at("2019-03-29 15:41:02")),
+        (INDIVIDUAL, at("2019-03-29 15:39:59")),
+    }
+
+
+def test_an_old_fiscal_year_report_is_its_quarter_parent_report(
+    page: Callable[[str], bytes],
+) -> None:
+    found = parse_listing(text(page("2718_101")), "2718", 101)
+    assert [(f.period, f.fin_type, f.uploaded_at) for f in found] == [
+        ("2012-Q1", INDIVIDUAL, at("2012-04-30 11:35:43")),
+        ("2012-Q2", INDIVIDUAL, at("2012-08-28 09:09:49")),
+        ("2012-Q3", INDIVIDUAL, at("2012-10-31 09:54:26")),
+        ("2012-Q4", INDIVIDUAL, at("2013-03-26 16:52:18")),
+    ]
+
+
+def test_an_old_fiscal_year_report_beside_a_current_one_of_its_quarter_fails(
+    page: Callable[[str], bytes],
+) -> None:
+    listing = text(page("2718_101")).replace("101 年 第四季", "101 年 第三季")
+    with pytest.raises(SchemaChangedError, match="old and current fiscal year"):
+        parse_listing(listing, "2718", 101)
+
+
+def test_an_old_fiscal_year_report_beside_another_kind_of_report_is_kept(
+    page: Callable[[str], bytes],
+) -> None:
+    listing = text(page("2718_101"))
+    q3 = listing.index("101 年 第三季")
+    listing = listing[:q3] + listing[q3:].replace("母公司財報", "母子公司合併報表", 1)
+    listing = listing.replace("101 年 第四季", "101 年 第三季")
+    found = parse_listing(listing, "2718", 101)
+    q3_kinds = sorted((f.fin_type, f.uploaded_at) for f in found if f.period == "2012-Q3")
+    assert q3_kinds == [
+        (CONSOLIDATED, at("2012-10-31 09:54:26")),
+        (INDIVIDUAL, at("2013-03-26 16:52:18")),
+    ]
+
+
+@pytest.mark.django_db
+@responses.activate
+def test_a_holding_company_is_asked_again_for_its_own_reports(
+    adapter: MopsAdapter, page: Callable[[str], bytes]
+) -> None:
+    serve("2880", 98, page("2880_98"))
+    serve("2880", 98, page("2880_98_own"), check2858="Y")
+    statement("2880", "2009-Q1", CONSOLIDATED, date(2009, 6, 1))
+    frame = adapter.fetch(STATEMENT_FILING, date(2009, 1, 1), date(2009, 12, 31), "2880")
+    assert frame[["period", "fin_type", "uploaded_at"]].values.tolist() == [
+        ["2009-Q1", CONSOLIDATED, at("2009-05-08 18:14:41")],
+        ["2009-Q2", CONSOLIDATED, at("2009-08-28 13:07:41")],
+        ["2009-Q3", CONSOLIDATED, at("2009-11-12 11:54:01")],
+        ["2009-Q4", CONSOLIDATED, at("2010-04-29 14:43:28")],
+    ]
+    assert ["check2858=Y" in str(call.request.url) for call in responses.calls] == [False, True]
+    (raw,) = RawMops.objects.filter(dataset=STATEMENT_FILING)
+    assert raw.request_params["check2858"] == "Y"
+
+
+@pytest.mark.django_db
+@responses.activate
+def test_asking_a_holding_company_again_waits_out_a_request_to_query_less(
+    adapter: MopsAdapter, page: Callable[[str], bytes], fake_sleep: RecordingSleep
+) -> None:
+    serve("2880", 98, page("2880_98"))
+    serve("2880", 98, page("throttled"), check2858="Y")
+    serve("2880", 98, page("2880_98_own"), check2858="Y")
+    statement("2880", "2009-Q1", CONSOLIDATED, date(2009, 6, 1))
+    frame = adapter.fetch(STATEMENT_FILING, date(2009, 1, 1), date(2009, 12, 31), "2880")
+    assert len(frame) == 4
+    assert len(responses.calls) == 3
+    assert LIMIT.backoff(0) in fake_sleep.calls
+
+
+@pytest.mark.django_db
+@responses.activate
+def test_a_holding_company_still_choosing_after_asking_again_fails(
+    adapter: MopsAdapter, page: Callable[[str], bytes]
+) -> None:
+    serve("2880", 98, page("2880_98"))
+    serve("2880", 98, page("2880_98"), check2858="Y")
+    statement("2880", "2009-Q1", CONSOLIDATED, date(2009, 6, 1))
+    with pytest.raises(SchemaChangedError, match="report table"):
+        adapter.fetch(STATEMENT_FILING, date(2009, 1, 1), date(2009, 12, 31), "2880")
+    assert len(responses.calls) == 2
 
 
 @pytest.mark.django_db

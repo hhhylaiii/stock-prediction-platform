@@ -93,8 +93,11 @@ CODE, YEAR, KIND, DETAIL, UPLOADED, CORRECTION = (
 HEADER = (CODE, YEAR, KIND, DETAIL, UPLOADED, CORRECTION)
 FINANCIAL_REPORT = "財務報告書"
 ENGLISH = "英文版"
-SUPPLEMENTS = frozenset({"關係企業合併報表"})
-RESTATED_MARKS = ("(重編)", "重編")
+SUPPLEMENTS = frozenset({"關係企業合併報表", "國際金融業務分行財報"})
+RESTATED = re.compile(r"(?:\((?:第.次)?重編\)|(?:第.次)?重編)$")
+OLD_FISCAL_YEAR = "舊會計年制--"
+HOLDING_CHOOSER = "name='check2858'"
+HOLDING_OWN = {"check2858": "Y"}
 REPORT_TYPES = {
     "IFRSs合併財報": FinType.CONSOLIDATED,
     "母子公司合併報表": FinType.CONSOLIDATED,
@@ -122,7 +125,7 @@ class MopsClient(SourceClient):
         return cls(limiter, str(settings.MOPS_DOC_BASE_URL), float(settings.MOPS_TIMEOUT), session)
 
     def listing(self, code: str, roc_year: int) -> tuple[dict[str, str], str]:
-        """The year's financial report files of one company, as the Big5 page decodes."""
+        """The year's report files of one company; a holding company is asked again for its own."""
         params = {
             "step": "1",
             "colorchg": "1",
@@ -132,7 +135,11 @@ class MopsClient(SourceClient):
             "mtype": REPORT_KIND,
         }
         url = f"{self.base_url}{LISTING_PATH}"
-        return params, self.limiter.call(lambda: self._page(url, params))
+        page = self.limiter.call(lambda: self._page(url, params))
+        if HOLDING_CHOOSER not in page:
+            return params, page
+        own = {**params, **HOLDING_OWN}
+        return own, self.limiter.call(lambda: self._page(url, own))
 
     def _page(self, url: str, params: dict[str, str]) -> str:
         """A page asking to query less is a failure the limiter backs off from and retries."""
@@ -241,7 +248,8 @@ def parse_listing(page: str, code: str, roc_year: int) -> list[Filing]:
         raise SchemaChangedError(f"doc.twse {code} {roc_year} fiscal year is {shown}")
     table, header = parser.rows[starts[0]]
     position = {name: header.index(name) for name in HEADER}
-    filings = []
+    filings: list[Filing] = []
+    old: set[int] = set()
     for where, row in parser.rows[starts[0] + 1 :]:
         if where != table:
             continue
@@ -250,13 +258,30 @@ def parse_listing(page: str, code: str, roc_year: int) -> list[Filing]:
         cells = {name: row[index] for name, index in position.items()}
         if ENGLISH not in cells[DETAIL] and _report(cells[DETAIL])[0] not in SUPPLEMENTS:
             filings.append(_filing(cells, code, roc_year))
+            if cells[DETAIL].startswith(OLD_FISCAL_YEAR):
+                old.add(len(filings) - 1)
+    _refuse_mixed_fiscal_years(filings, old, code, roc_year)
     return filings
+
+
+def _refuse_mixed_fiscal_years(
+    filings: list[Filing], old: set[int], code: str, roc_year: int
+) -> None:
+    """Which of two fiscal years' reports FinMind holds is unknowable, so neither dates it."""
+    kinds = [(f.period, f.fin_type) for f in filings]
+    current = {kind for index, kind in enumerate(kinds) if index not in old}
+    mixed = sorted(current & {kinds[index] for index in old})
+    if mixed:
+        raise SchemaChangedError(
+            f"doc.twse {code} {roc_year} lists old and current fiscal year reports for {mixed}"
+        )
 
 
 def _report(detail: str) -> tuple[str, bool]:
     """The report named by a detail, and whether that upload restates it."""
-    mark = next((mark for mark in RESTATED_MARKS if detail.endswith(mark)), "")
-    return detail.removesuffix(mark), bool(mark)
+    report = detail.removeprefix(OLD_FISCAL_YEAR)
+    mark = RESTATED.search(report)
+    return (report, False) if mark is None else (report[: mark.start()], True)
 
 
 def _filing(cells: dict[str, str], code: str, roc_year: int) -> Filing:
