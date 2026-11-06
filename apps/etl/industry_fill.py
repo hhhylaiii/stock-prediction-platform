@@ -1,14 +1,21 @@
 """Industries the stock master lacks, from the exchanges' quotes listed by industry (plan K17c)."""
 
+import re
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from datetime import date
-from typing import Any
+from typing import Any, NamedTuple
 
 from django.db import transaction
+from django.db.models import Q
 
-from apps.etl.adapters.tpex import TpexAdapter
-from apps.etl.adapters.twse import TwseAdapter
+from apps.etl.adapters.exchange_tables import NO_DATA_STAT, find_table
+from apps.etl.adapters.tpex import OTC_QUOTES_PATH, TpexAdapter
+from apps.etl.adapters.tpex_tables import QUOTED_TITLE, _rows
+from apps.etl.adapters.tpex_tables import check_answer as tpex_answered
+from apps.etl.adapters.twse import DAILY_QUOTES_PATH, DAILY_QUOTES_TITLE, TwseAdapter
+from apps.etl.adapters.twse_tables import check_answer as twse_answered
+from apps.etl.errors import SchemaChangedError
 from apps.etl.exchange_rows import stock_code
 from apps.etl.models import DataQualityLog, EtlRun
 from apps.etl.runs import failing_on_termination, tracked_run
@@ -17,11 +24,16 @@ from apps.market.models import StockMaster
 
 INDUSTRY_CHECK = "industry_fill"
 RAW_DATASET = "industry_quotes"
-TWSE_QUOTES = "/rwd/zh/afterTrading/MI_INDEX"
-TPEX_QUOTES = "/www/zh-tw/afterTrading/otc"
-QUOTES_TITLE = "每日收盤行情"
 INDUSTRY_TYPES = tuple(f"{number:02d}" for number in range(1, 39) if number not in (7, 13))
 QUARTER_ENDS = ((3, 31), (6, 30), (9, 30), (12, 31))
+TITLED = re.compile(rf"{DAILY_QUOTES_TITLE}\((.+)\)")
+
+
+class Listed(NamedTuple):
+    """The industry a type's page names, if any, and the codes it lists."""
+
+    page: str | None
+    codes: list[str]
 
 
 def sample_days(calendar: TradingDays, start: date, end: date) -> list[date]:
@@ -41,14 +53,20 @@ def sample_days(calendar: TradingDays, start: date, end: date) -> list[date]:
     return days
 
 
-def named(listed: Mapping[str, Sequence[str]], known: Mapping[str, str]) -> dict[str, str]:
-    """Each type's name: the industry most of its stocks with a known one carry."""
-    names = {}
-    for kind, codes in listed.items():
+def named(listed: Mapping[str, Listed], known: Mapping[str, str]) -> dict[str, list[Any]]:
+    """Each type's industry: the page's own name when the master uses it, else the majority's.
+
+    Each entry is [industry, page name, majority industry, its votes, stocks with one].
+    """
+    names = set(known.values())
+    found = {}
+    for kind, (page, codes) in listed.items():
         votes = Counter(known[code] for code in codes if known.get(code))
-        if votes:
-            names[kind] = votes.most_common(1)[0][0]
-    return names
+        top, count = votes.most_common(1)[0] if votes else (None, 0)
+        chosen = page if page in names else top
+        if chosen is not None:
+            found[kind] = [chosen, page, top, count, sum(votes.values())]
+    return found
 
 
 def fill_industries(adapter: TwseAdapter | TpexAdapter, days: Sequence[date]) -> EtlRun:
@@ -58,69 +76,109 @@ def fill_industries(adapter: TwseAdapter | TpexAdapter, days: Sequence[date]) ->
     blank = set(StockMaster.objects.filter(industry="").values_list("stock_id", flat=True))
     known = dict(StockMaster.objects.exclude(industry="").values_list("stock_id", "industry"))
     seen: dict[str, list[str]] = {}
-    types: dict[str, dict[str, str]] = {}
+    types: dict[str, dict[str, list[Any]]] = {}
     first, last = days[0], days[-1]
     with failing_on_termination(), tracked_run(adapter.source, "fill:industry", first, last) as run:
         for day in days:
             listed = listed_by_type(adapter, day)
             names = named(listed, known)
-            types[day.isoformat()] = names
-            for kind, codes in listed.items():
-                for code in codes:
-                    if code in blank and kind in names:
-                        since = seen[code][2] if code in seen else day.isoformat()
-                        seen[code] = [names[kind], kind, since, day.isoformat()]
-            run.checkpoint = {"last_date": day.isoformat(), "seen": seen}
+            types = {**types, day.isoformat(): names}
+            seen = _seen(seen, listed, names, blank, day)
+            run.checkpoint = {"last_date": day.isoformat(), "seen": seen, "types": types}
             run.save(update_fields=["checkpoint"])
         with transaction.atomic():
             for code, (industry, *_) in seen.items():
                 StockMaster.objects.filter(stock_id=code, industry="").update(industry=industry)
             run.rows = len(seen)
-            _log(adapter.source, last, types, seen)
+            _log(adapter.source, first, last, types, seen, blank)
     return run
 
 
-def listed_by_type(adapter: TwseAdapter | TpexAdapter, day: date) -> dict[str, list[str]]:
-    """The codes each industry type lists that day, each answer kept as raw first."""
+def listed_by_type(adapter: TwseAdapter | TpexAdapter, day: date) -> dict[str, Listed]:
+    """What each industry type lists that day, each answer kept as raw first."""
     found = {}
     for kind in INDUSTRY_TYPES:
         if isinstance(adapter, TwseAdapter):
-            codes = _twse_codes(adapter, day, kind)
+            listed = _twse_type(adapter, day, kind)
         else:
-            codes = _otc(adapter, day, kind)
-        if codes:
-            found[kind] = codes
+            listed = _otc_type(adapter, day, kind)
+        if listed.codes:
+            found[kind] = listed
+    if not found:
+        raise SchemaChangedError(f"{adapter.source} {day}: no industry type lists any stock")
     return found
 
 
-def _twse_codes(adapter: TwseAdapter, day: date, kind: str) -> list[str]:
+def _seen(
+    seen: Mapping[str, list[str]],
+    listed: Mapping[str, Listed],
+    names: Mapping[str, list[Any]],
+    blank: set[str],
+    day: date,
+) -> dict[str, list[str]]:
+    """Blank stocks with the industry seen that day; first seen counts from the last change."""
+    today = day.isoformat()
+    after = dict(seen)
+    for kind, (_, codes) in listed.items():
+        if kind not in names:
+            continue
+        industry = names[kind][0]
+        for code in codes:
+            if code not in blank:
+                continue
+            before = seen.get(code)
+            since = before[2] if before and before[0] == industry else today
+            after[code] = [industry, kind, since, today]
+    return after
+
+
+def _twse_type(adapter: TwseAdapter, day: date, kind: str) -> Listed:
     params = {"date": f"{day:%Y%m%d}", "type": kind, "response": "json"}
-    payload: dict[str, Any] = adapter.client.get_json(TWSE_QUOTES, params)
+    payload: dict[str, Any] = adapter.client.get_json(DAILY_QUOTES_PATH, params)
     adapter.save_raw(RAW_DATASET, params, payload)
+    if NO_DATA_STAT in str(payload.get("stat", "")):
+        return Listed(None, [])
+    twse_answered(payload, day)
     tables = [
-        table
+        (match.group(1), table["data"])
         for table in payload.get("tables") or []
-        if QUOTES_TITLE in str(table.get("title") or "") and table.get("data")
+        if (match := TITLED.search(str(table.get("title") or ""))) and table.get("data")
     ]
-    return [stock_code(row[0]) for table in tables for row in table["data"]]
+    if len(tables) > 1:
+        raise SchemaChangedError(
+            f"TWSE MI_INDEX type {kind} on {day} has {len(tables)} quote tables"
+        )
+    if not tables:
+        return Listed(None, [])
+    page, rows = tables[0]
+    return Listed(page, [stock_code(row[0]) for row in rows])
 
 
-def _otc(adapter: TpexAdapter, day: date, kind: str) -> list[str]:
+def _otc_type(adapter: TpexAdapter, day: date, kind: str) -> Listed:
     form = {"date": f"{day:%Y/%m/%d}", "type": kind, "response": "json"}
-    payload: dict[str, Any] = adapter.client.post_json(TPEX_QUOTES, form)
+    payload: dict[str, Any] = adapter.client.post_json(OTC_QUOTES_PATH, form)
     adapter.save_raw(RAW_DATASET, form, payload)
-    tables = payload.get("tables") or []
-    rows = (tables[0].get("data") or []) if tables else []
-    return [stock_code(row[0]) for row in rows]
+    tpex_answered(payload, day)
+    table = find_table(payload, QUOTED_TITLE)
+    rows = _rows(table, f"otc type {kind}")
+    page = str(table.get("category") or "").strip() or None
+    return Listed(page, [stock_code(row[0]) for row in rows])
 
 
 def _log(
-    source: str, last: date, types: dict[str, dict[str, str]], seen: dict[str, list[str]]
+    source: str,
+    first: date,
+    last: date,
+    types: Mapping[str, Mapping[str, list[Any]]],
+    seen: Mapping[str, list[str]],
+    blank: set[str],
 ) -> None:
-    """The industry each type stood for on each sampled day, and the stocks filled."""
+    """Each sampled day's industry per type, the stocks filled and the ones still blank."""
+    alive = StockMaster.objects.filter(Q(delist_date__isnull=True) | Q(delist_date__gte=first))
+    still = set(alive.filter(stock_id__in=blank).values_list("stock_id", flat=True)) - set(seen)
     DataQualityLog.objects.create(
         date=last,
         check_name=INDUSTRY_CHECK,
         severity=DataQualityLog.Severity.INFO,
-        detail={"source": source, "types": types, "filled": seen},
+        detail={"source": source, "types": types, "filled": seen, "unfilled": sorted(still)},
     )
