@@ -98,7 +98,7 @@ Oct 29, 2026 · @Owen Lai
 | `stock_master` | stock\_id | name、market（TWSE/TPEx）、industry、list\_date、delist\_date | 證交所、櫃買中心 | — |
 | `trading_calendar` | date | is\_trading\_day、note（補班、颱風假） | 證交所 | — |
 | `daily_price` | stock\_id, date | open、high、low、close、volume（股）、turnover（元）、adj\_factor | 證交所、櫃買中心 | date |
-| `dividend_event` | stock\_id, ex\_date | cash\_dividend、stock\_dividend、adj\_factor | FinMind | ex\_date |
+| `dividend_event` | stock\_id, ex\_date | cash\_dividend、stock\_dividend、adj\_factor；減資、分割、面額變更存成只帶 adj\_factor 的列（現金、股票股利為 0） | FinMind | ex\_date |
 | `daily_chip` | stock\_id, date | fi\_net、it\_net、dealer\_self\_net、dealer\_hedge\_net（股）、margin\_balance、margin\_limit、short\_balance、sbl\_short\_balance、fi\_holding\_pct、day\_trade\_volume（股，第二批） | 證交所、櫃買中心 | date |
 | `weekly_holding` | stock\_id, data\_date, level | level（1–15）、holders、shares、pct、publish\_date | 集保 | publish\_date（data\_date 隔日） |
 | `monthly_revenue` | stock\_id, period（YYYY-MM） | revenue、yoy、mom | MOPS | announce\_date |
@@ -107,7 +107,7 @@ Oct 29, 2026 · @Owen Lai
 | `macro_indicator` | indicator\_id, period | value | data.gov.tw | announce\_date |
 | `shares_outstanding` | stock\_id, effective\_date | shares、reason（增資、減資、庫藏股註銷） | 證交所、櫃買中心 | effective\_date |
 | `daily_valuation` | stock\_id, date | pe、pb、dividend\_yield（交易所每日公布的本益比、股價淨值比、殖利率） | 證交所、櫃買中心；歷史用 FinMind | date |
-| `disposition_event` | stock\_id, start\_date, type | end\_date、type（注意、處置、全額交割） | 證交所、櫃買中心；歷史用 FinMind | start\_date |
+| `disposition_event` | stock\_id, start\_date, type | end\_date、type（注意、處置、全額交割） | 證交所、櫃買中心（含歷史） | start\_date |
 
 **feature 與模型層**
 
@@ -115,16 +115,18 @@ Oct 29, 2026 · @Owen Lai
 | --- | --- | --- | --- |
 | `feature_daily` | stock\_id, date | 欄位命名 `<group>_<name>_<window>`，例如 `tech_ret_20d`、`chip_fi_net_5d`、`fund_rev_yoy`；另有 `in_universe` 旗標 | 寬表，只存原值與 in\_universe；winsorize、z-score、填值在管線做，不落表；也同步輸出 Parquet 供訓練 |
 | `label_daily` | stock\_id, date, horizon | fwd\_ret、fwd\_ret\_open、fwd\_rank\_pct、fwd\_vol\_20d、fwd\_up\_5pct、untradable\_t1 | 還原價計算；horizon 為 5 或 20；fwd\_ret\_open 以 t+1 還原開盤價進場，是訓練、評估與回測一律使用的版本，fwd\_ret 只供對照；fwd\_vol\_20d 為未來 20 日日報酬標準差；fwd\_up\_5pct 為 20 日漲幅是否超過 5%；horizon 內下市以最後成交價結算，列保留 |
-| `model_run` | run\_id | model\_type、objective（rank、regression、quantile、volatility、classification）、version、train\_start、train\_end、params（JSON）、feature\_list、seed、lib\_versions、feature\_hash、status、ic\_mean、icir | 每次訓練一列 |
-| `prediction` | run\_id, stock\_id, date, horizon | score、rank、pct、ret\_pred、q10、q50、q90、vol\_pred、prob\_up\_5pct、in\_universe | API 讀這張表；預測價與價格區間在 API 層用當日收盤價換算，不存進表 |
-| `model_monitor` | run\_id, date, horizon | ic、coverage、brier、direction\_acc、n\_stocks | 事後評估結果；每日對 horizon 已到期的預測計算，服務層的歷史預測準確度讀這張表 |
+| `model_run` | run\_id | run\_key、model\_type、objective（rank、regression、quantile、volatility、classification）、version、train\_start、train\_end、params（JSON）、feature\_list、seed、lib\_versions、feature\_hash、status、ic\_mean、icir、created\_at | 每次訓練一列；同一次 walk-forward 的各摺、各模型共用一個 run\_key |
+| `prediction` | run\_id, stock\_id, date, horizon | score、rank、pct、ret\_pred、q10、q50、q90、vol\_pred、prob\_up\_5pct、in\_universe | API 讀這張表；每列只存該列 run 產出的欄位，其他為 NULL，API 依 (stock\_id, date, horizon) 合併各類目標服務中的 run；預測價與價格區間在 API 層用當日收盤價換算，不存進表 |
+| `prediction_contrib` | run\_id, stock\_id, date, horizon, position | feature、contrib、n\_features | 排名預測的逐檔特徵貢獻（LightGBM pred\_contrib，5 seed 平均）：前 5 名各一列，最後一列 feature = `_rest` 是其餘特徵的合計，n\_features 為合計的特徵數；同一筆預測內 feature 不重複；服務層「這次預測怎麼來的」讀這張表 |
+| `model_monitor` | run\_id, date, horizon | ic、coverage、brier、direction\_acc、mae、width、auc、n\_stocks | 事後評估結果；date 是預測日；每日對 horizon 已到期的預測計算，服務層的歷史預測準確度讀這張表 |
+| `backtest_metric` | id；唯一鍵 run\_key, model\_type, objective, horizon, metric, grain, period\_start, period\_end, segment | value、created\_at | walk-forward 指標的長表；grain 為 total、fold、year、month，segment 標子群（例如成交金額三分位）；模型頁的 IC 與 baseline 對比讀這張表，`model_monitor` 只存上線後的事後評估 |
 | `etl_run` | run\_id | source、dataset、date\_range、status、rows、error | 每次 ETL 一列 |
 | `data_quality_log` | id | date、check\_name、severity、detail | 品質檢查結果 |
 
 **規則**
 
 - 成交量統一為「股」，金額統一為「元」；來源若為張（1 張 = 1,000 股）在 normalize 時轉換。
-- 成交量與成交金額含一般、零股、盤後定價、鉅額交易，與證交所 `MI_INDEX`、`STOCK_DAY` 相同；開高低收只反映一般交易，所以判斷當日有無成交看收盤價是否為空，不看成交量。
+- 成交量與成交金額：證交所含一般、零股、盤後定價、鉅額交易，與 `MI_INDEX`、`STOCK_DAY` 相同；櫃買不含鉅額（含零股、盤後定價），與 FinMind 回補同定義；開高低收只反映一般交易，所以判斷當日有無成交看收盤價是否為空，不看成交量。
 - 價量表照收來源的整張表（含 ETF、ETN、特別股、TDR），只研究普通股由 universe 篩選；外幣計價的證券（雙幣 ETF 的外幣櫃位，代號第 6 碼為 K、M、S、C）不進 standard 表。
 - 時間戳一律 `Asia/Taipei`，日期欄位用 `DATE` 型別。
 - `daily_price` 存原始價與 `adj_factor`，還原價在查詢時相乘，不另存一份。
