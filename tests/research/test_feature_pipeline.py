@@ -21,7 +21,7 @@ from apps.market.models import (
     TradingCalendar,
     WeeklyHolding,
 )
-from apps.research.features.build import FRAME_COLUMNS, build_feature_frame
+from apps.research.features.build import FEATURE_COLUMNS, FRAME_COLUMNS, build_feature_frame
 from apps.research.features.registry import feature_names
 from apps.research.features.store import export_year, read_partitions, write_features
 from apps.research.models import FeatureDaily
@@ -110,13 +110,19 @@ def inputs(stock_id: str) -> None:
 def stored() -> pd.DataFrame:
     rows = FeatureDaily.objects.order_by("date", "stock_id").values_list(*FRAME_COLUMNS)
     frame = pd.DataFrame(list(rows), columns=FRAME_COLUMNS)
-    return frame.astype(dict.fromkeys(feature_names(batch=1), "float64"))
+    return frame.astype(dict.fromkeys(FEATURE_COLUMNS, "float64"))
 
 
-def test_feature_daily_holds_the_first_batch_raw_values() -> None:
+def test_feature_daily_holds_the_raw_values_of_both_batches() -> None:
     names = [field.name for field in FeatureDaily._meta.concrete_fields if not field.primary_key]
 
-    assert names == ["stock_id", "date", "in_universe", *feature_names(batch=1)]
+    assert names == [
+        "stock_id",
+        "date",
+        "in_universe",
+        *feature_names(batch=1),
+        *feature_names(batch=2),
+    ]
 
 
 def test_the_frame_has_one_row_per_listed_stock_and_trading_day_in_range() -> None:
@@ -154,6 +160,9 @@ def test_every_input_group_reaches_the_frame() -> None:
     assert row["chip_big_holder_pct_chg_1w"] == pytest.approx(2.5)
     assert row["chip_holder_count_chg_1w"] == pytest.approx((1_100 + 1_111) / (1_000 + 1_011) - 1)
     assert row["fund_bp"] == pytest.approx(0.5)
+    k = len(CALENDAR.between(d("2015-06-01"), d("2016-03-02"))) - 1
+    assert row["tech_gap_1d"] == pytest.approx((100 + 0.1 * k) / (100 + 0.1 * (k - 1)) - 1)
+    assert row["mkt_days_to_quarter_end"] == len(CALENDAR.between(d("2016-03-03"), d("2016-03-31")))
     k = len(CALENDAR.between(d("2015-12-01"), d("2016-03-02"))) - 1
     assert row["mkt_taiex_ret_5d"] == pytest.approx(taiex_close(k) / taiex_close(k - 5) - 1)
 
@@ -242,6 +251,25 @@ def test_a_partition_written_before_a_feature_existed_asks_for_a_rebuild(tmp_pat
         match=r"2016.*lacks tech_ret_1d, fund_rev_yoy_q.*--start 2016-01-01 --end 2016-12-31",
     ):
         read_partitions(d("2016-03-01"), d("2016-03-31"), tmp_path)
+
+
+def test_training_reads_the_first_batch_even_from_a_partition_without_the_second(
+    tmp_path: Path,
+) -> None:
+    listed("2330", "2015-06-01", "2016-03-31")
+    frame = build_feature_frame(CALENDAR, d("2016-03-01"), d("2016-03-31"))
+    write_features(frame, d("2016-03-01"), d("2016-03-31"))
+    path = export_year(2016, tmp_path)
+    assert path is not None
+    second = feature_names(batch=2)
+    pd.read_parquet(path).drop(columns=second).to_parquet(path, index=False)
+
+    first = read_partitions(d("2016-03-01"), d("2016-03-31"), tmp_path)
+
+    assert list(first.columns) == ["stock_id", "date", "in_universe", *feature_names(batch=1)]
+    pd.testing.assert_frame_equal(first, stored()[list(first.columns)])
+    with pytest.raises(ValueError, match=f"lacks {second[0]}, {second[1]}"):
+        read_partitions(d("2016-03-01"), d("2016-03-31"), tmp_path, FRAME_COLUMNS)
 
 
 def test_an_empty_year_leaves_no_partition_and_the_directory_reads(tmp_path: Path) -> None:

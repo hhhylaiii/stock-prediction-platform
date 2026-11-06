@@ -8,12 +8,21 @@ import pandas as pd
 
 from apps.market.calendar import TradingDays
 from apps.market.models import DailyChip, WeeklyHolding
-from apps.research.features.common import carried, feature_frame, ratio, rolling, shifted
+from apps.research.features.common import (
+    carried,
+    feature_frame,
+    ratio,
+    rolling,
+    shifted,
+    traded,
+)
 from apps.research.features.registry import Group, feature_names
 from apps.research.panel import require_sorted
 
 FLOW_DAYS = (1, 5, 20)
 CHANGE_DAYS = 5
+LONG_DAYS = 20
+SETTLE_DAYS = 2
 BIG_HOLDER_LEVELS = range(12, 16)
 HOLDER_LEVELS = range(1, 16)
 HOLDING_COLUMNS = ["stock_id", "publish_date", "big_holder_pct_chg", "holder_count_chg"]
@@ -27,6 +36,7 @@ CHIP_COLUMNS = [
     "short_balance",
     "sbl_short_balance",
     "fi_holding_pct",
+    "day_trade_volume",
 ]
 HOLDING_LOOKBACK = timedelta(days=42)
 HOLDING_STALE = pd.Timedelta(21, unit="D")
@@ -69,6 +79,43 @@ def chip_features(panel: pd.DataFrame) -> pd.DataFrame:
         "chip_holder_count_chg_1w": panel["holder_count_chg"],
     }
     return feature_frame(panel, columns, feature_names(Group.CHIP))
+
+
+def _day_trades(panel: pd.DataFrame) -> pd.Series:
+    """Day-trade shares; a stock left out of its market's table on a loaded day was not eligible."""
+    shares = _flow(panel, "day_trade_volume")
+    listed = panel["day_trade_volume"].notna()
+    loaded = listed.groupby([panel["date"], panel["market"]]).transform("any")
+    return shares.mask(loaded & shares.isna(), 0.0)
+
+
+def _day_trade_ratio(panel: pd.DataFrame) -> pd.Series:
+    """Day-trade share of volume over five days settled at least two trading days ago (T+2)."""
+    trades = rolling(_day_trades(panel), panel, CHANGE_DAYS, "sum", CHANGE_DAYS)
+    volume = rolling(traded(panel, "volume"), panel, CHANGE_DAYS, "sum", CHANGE_DAYS)
+    return shifted(ratio(trades, volume), panel, SETTLE_DAYS)
+
+
+def _buy_streak(panel: pd.DataFrame) -> pd.Series:
+    """Consecutive rows of foreign net buying up to each row; a missing flow resets the count."""
+    flow = _flow(panel, "fi_net")
+    buying = flow > 0
+    runs = (~buying).groupby([panel["stock_id"], panel["segment"]]).cumsum()
+    streak = buying.astype("float64").groupby([panel["stock_id"], panel["segment"], runs]).cumsum()
+    return streak.where(flow.notna())
+
+
+def second_batch_chip_features(panel: pd.DataFrame) -> pd.DataFrame:
+    """Second-batch chip features of every row; needs the chip columns with day-trade volume."""
+    require_sorted(panel)
+    holding = _balance(panel, "fi_holding_pct")
+    columns = {
+        "chip_day_trade_ratio_5d": _day_trade_ratio(panel),
+        "chip_fi_holding_chg_20d": holding - shifted(holding, panel, LONG_DAYS),
+        "chip_it_net_20d": _net(panel, "it_net", LONG_DAYS),
+        "chip_fi_buy_streak": _buy_streak(panel),
+    }
+    return feature_frame(panel, columns, feature_names(Group.CHIP, batch=2))
 
 
 def _trading_weeks(dates: pd.Series, calendar: TradingDays) -> pd.Series:

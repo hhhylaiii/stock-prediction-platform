@@ -1,7 +1,8 @@
-"""Every first-batch feature of a date range, assembled from the feature groups (SPEC §6)."""
+"""Every stored feature of a date range, both batches, assembled from the groups (SPEC §6)."""
 
 from datetime import date
 
+import numpy as np
 import pandas as pd
 
 from apps.market.calendar import TradingDays
@@ -11,16 +12,26 @@ from apps.research.features.chip import (
     chip_features,
     load_chips,
     load_holding_changes,
+    second_batch_chip_features,
 )
 from apps.research.features.fundamental import attach_fundamentals, fundamental_features
 from apps.research.features.inputs import load_feature_panel
-from apps.research.features.market import attach_market_features, load_market_features
-from apps.research.features.registry import Group, feature_names
+from apps.research.features.market import (
+    MARKET_NAMES,
+    attach_market_features,
+    load_market_features,
+)
+from apps.research.features.registry import feature_names
 from apps.research.features.size_risk import industry_risk_features, size_liquidity_features
-from apps.research.features.technical import technical_features
+from apps.research.features.technical import (
+    second_batch_technical_features,
+    technical_features,
+)
 
-FEATURE_COLUMNS = feature_names(batch=1)
+FEATURE_COLUMNS = [*feature_names(batch=1), *feature_names(batch=2)]
+PENDING = ["ind_sector_id", "ind_mom_neutral", "ind_ep_neutral", "fund_days_to_ex_date"]
 FRAME_COLUMNS = ["stock_id", "date", "in_universe", *FEATURE_COLUMNS]
+FIRST_BATCH_COLUMNS = ["stock_id", "date", "in_universe", *feature_names(batch=1)]
 FRAME_TYPES: dict[str, str] = {"in_universe": "bool", **dict.fromkeys(FEATURE_COLUMNS, "float64")}
 
 
@@ -34,14 +45,20 @@ def _with_inputs(panel: pd.DataFrame, calendar: TradingDays, end: date) -> pd.Da
 
 
 def compute_features(panel: pd.DataFrame) -> pd.DataFrame:
-    """Stock, date, universe flag and every first-batch feature of each panel row."""
+    """Stock, date, universe flag and every stored feature of each panel row.
+
+    The second batch is stored for later evaluation; screening and training read the first only.
+    """
     groups = [
         technical_features(panel),
+        second_batch_technical_features(panel),
         size_liquidity_features(panel),
         industry_risk_features(panel),
         chip_features(panel),
+        second_batch_chip_features(panel),
         fundamental_features(panel),
-        panel[feature_names(Group.MARKET)],
+        panel[MARKET_NAMES],
+        pd.DataFrame(dict.fromkeys(PENDING, np.nan), index=panel.index),
     ]
     values = pd.concat(
         [group.drop(columns=["stock_id", "date"], errors="ignore") for group in groups], axis=1

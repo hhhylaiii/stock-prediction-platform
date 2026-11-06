@@ -8,7 +8,10 @@ import pytest
 from apps.research.features.inputs import FEATURE_WARMUP
 from apps.research.features.registry import Group, feature_names
 from apps.research.features.size_risk import size_liquidity_features
-from apps.research.features.technical import technical_features
+from apps.research.features.technical import (
+    second_batch_technical_features,
+    technical_features,
+)
 from tests.research.feature_panels import at, listing, rising
 
 NAN = math.nan
@@ -245,3 +248,76 @@ def test_limit_counts_cover_exactly_twenty_rows() -> None:
 def test_unsorted_panel_is_refused() -> None:
     with pytest.raises(ValueError, match="sorted"):
         technical_features(listing("2330", rising(10)).iloc[::-1])
+
+
+def test_second_batch_columns_follow_the_registry() -> None:
+    features = second_batch_technical_features(listing("2330", rising(30), adj_open=rising(30)))
+
+    assert list(features.columns) == ["stock_id", "date", *feature_names(Group.TECHNICAL, batch=2)]
+
+
+@pytest.mark.parametrize("bar", [False, True], ids=["halted", "bar without trades"])
+def test_parkinson_volatility_averages_squared_log_ranges_with_idle_days_flat(bar: bool) -> None:
+    closes = wavy(30)
+    closes[25] = NAN
+    highs = [c * 1.02 if not math.isnan(c) else NAN for c in closes]
+    lows = [c * 0.99 if not math.isnan(c) else NAN for c in closes]
+    has_bar = [bar or not math.isnan(c) for c in closes]
+    features = second_batch_technical_features(
+        listing("2330", closes, adj_high=highs, adj_low=lows, adj_open=closes, has_bar=has_bar)
+    )
+    squared = [0.0 if k == 25 else math.log(1.02 / 0.99) ** 2 for k in range(30)]
+
+    assert math.isnan(at(features, "2330", 18, "tech_parkinson_vol_20d"))
+    assert at(features, "2330", 29, "tech_parkinson_vol_20d") == pytest.approx(
+        math.sqrt(np.mean(squared[10:30]) / (4 * math.log(2))) * ROOT
+    )
+
+
+def test_gap_compares_the_open_with_the_carried_previous_close() -> None:
+    closes = rising(8)
+    closes[4] = NAN
+    opens = [c + 0.5 for c in rising(8)]
+    features = second_batch_technical_features(listing("2330", closes, adj_open=opens))
+
+    assert math.isnan(at(features, "2330", 0, "tech_gap_1d"))
+    assert at(features, "2330", 3, "tech_gap_1d") == pytest.approx(103.5 / 102 - 1)
+    assert math.isnan(at(features, "2330", 4, "tech_gap_1d"))
+    assert at(features, "2330", 5, "tech_gap_1d") == pytest.approx(105.5 / 103 - 1)
+
+
+def test_close_location_sits_inside_the_five_day_range() -> None:
+    closes = [100.0, 104.0, 98.0, 101.0, 103.0, NAN, 102.0]
+    highs = [c + 1 for c in closes]
+    lows = [c - 1 for c in closes]
+    flat = [100.0] * 7
+    panel = pd.concat(
+        [
+            listing("2330", closes, adj_high=highs, adj_low=lows, adj_open=closes),
+            listing("1101", flat, adj_open=flat),
+        ],
+        ignore_index=True,
+    )
+
+    features = second_batch_technical_features(panel)
+
+    assert math.isnan(at(features, "2330", 3, "tech_close_loc_5d"))
+    assert at(features, "2330", 4, "tech_close_loc_5d") == pytest.approx((103 - 97) / (105 - 97))
+    assert at(features, "2330", 5, "tech_close_loc_5d") == pytest.approx((103 - 97) / (105 - 97))
+    assert at(features, "2330", 6, "tech_close_loc_5d") == pytest.approx((102 - 97) / (104 - 97))
+    assert math.isnan(at(features, "1101", 6, "tech_close_loc_5d"))
+
+
+def test_max_return_and_skew_need_full_windows_of_flat_returns() -> None:
+    closes = wavy(70)
+    closes[40] = NAN
+    features = second_batch_technical_features(listing("2330", closes, adj_open=closes))
+    filled = pd.Series(closes).ffill()
+    steps = filled / filled.shift(1) - 1
+
+    assert math.isnan(at(features, "2330", 19, "tech_max_ret_20d"))
+    assert at(features, "2330", 20, "tech_max_ret_20d") == pytest.approx(steps[1:21].max())
+    assert at(features, "2330", 50, "tech_max_ret_20d") == pytest.approx(steps[31:51].max())
+    assert math.isnan(at(features, "2330", 59, "tech_skew_60d"))
+    assert at(features, "2330", 60, "tech_skew_60d") == pytest.approx(steps[1:61].skew())
+    assert at(features, "2330", 69, "tech_skew_60d") == pytest.approx(steps[10:70].skew())
