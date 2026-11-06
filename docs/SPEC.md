@@ -271,8 +271,8 @@ Oct 29, 2026 · @Owen Lai
 | --- | --- | --- | --- | --- |
 | Ridge、logistic | baseline，可解釋 | 當日橫截面 z-score 特徵，缺值已填並帶 `_missing` 旗標 | Ridge 的 alpha、logistic 的 C 都由訓練窗內的時間序列 CV 在 0.1 到 100 之間選 | 預測分數、係數表（每個特徵的權重與符號） |
 | LightGBM | 主模型 | 排名目標用 z-score 值；絕對報酬、區間、波動率、機率目標用原值並加入市場層級特徵，保留 NaN（見第 6 節處理步驟）。市場層級特徵每日全市場同值，樹會靠它認出日期、等於 in-sample 看到大盤走勢，所以先在訓練窗內依分位切成 5 級再進模型；Phase 4 比較有、無市場特徵兩版，OOS 指標沒有提高就不用 | objective 依目標（見下表）；num\_leaves 31、learning\_rate 0.02、feature\_fraction 0.7、bagging\_fraction 0.8、min\_data\_in\_leaf 200、lambda\_l2 1；early stopping 100 輪，驗證集與停止指標見 walk-forward 一節 | 預測分數、feature importance（gain）與各摺前 10 名的變動 |
-| LightGBM seed bagging | 正式輸出 | 同 LightGBM | 同一組參數、同一輪數訓 5 個 seed（`seed`、`bagging_seed`、`feature_fraction_seed` 不同），原始分數平均；研究階段的 walk-forward 用單 seed，只有最終驗證跑與正式上線用 5 seed | `prediction` 表的 score、ret\_pred、q10/q50/q90、vol\_pred、prob\_up\_5pct |
-| XGBoost（可選） | 對照模型，只用來抓實作錯誤 | 同 LightGBM | tree\_method hist；max\_depth 6、eta 0.02、subsample 0.8、colsample\_bytree 0.7 | 與 LightGBM 的 rank IC 差異超過 20% 時要追查實作；不進 ensemble，不是上線條件 |
+| LightGBM seed bagging | 正式輸出 | 同 LightGBM | 同一組參數、同一輪數訓 5 個 seed（`seed`、`bagging_seed`、`feature_fraction_seed` 不同），排名與回歸平均原始分數，機率模型平均各 seed 的機率，校準套在平均後的輸出；研究階段的 walk-forward 用單 seed，只有最終驗證跑與正式上線用 5 seed | `prediction` 表的 score、ret\_pred、q10/q50/q90、vol\_pred、prob\_up\_5pct |
+| XGBoost（可選） | 對照模型，只用來抓實作錯誤 | 同 LightGBM | tree\_method hist；max\_depth 6、eta 0.02、subsample 0.8、colsample\_bytree 0.7、min\_child\_weight 200（對應 LightGBM 的 min\_data\_in\_leaf 200） | 與 LightGBM 的 rank IC 差異超過 20% 時要追查實作；不進 ensemble，不是上線條件 |
 | Ensemble（可選） | 排名目標的最終分數 | Ridge 與 LightGBM bagging 的分數 | 兩者各自轉當日 rank 後平均；walk-forward 總體 rank IC 不高於 LightGBM 單獨就不用 | `prediction` 表的 score |
 
 調參範圍只有四個：num\_leaves 15 到 63、min\_data\_in\_leaf 200 到 2,000、lambda\_l2 0 到 10、feature\_fraction 0.5 到 0.8；learning\_rate 固定 0.02，輪數由 early stopping 決定。
@@ -285,7 +285,7 @@ Oct 29, 2026 · @Owen Lai
 | 絕對報酬 5 日 | `fwd_ret_5d`\_open | regression（Huber，對極端報酬較穩）；LightGBM 的 alpha 即 Huber delta，預設 0.9 對 5 日報酬約等於 20 個標準差、實際上就是 L2；設為訓練窗內 fwd\_ret\_5d\_open MAD 的 1.5 倍，約 0.05 | ret\_pred（horizon 5） | 預測價 = 當日收盤價 × (1 + ret\_pred)，每檔用自己的收盤價 |
 | 絕對報酬 20 日 | 不另訓模型 | 取報酬區間模型的 q50 | ret\_pred（horizon 20）= q50 | 同上；預測價必然落在價格區間內 |
 | 報酬區間 | `fwd_ret_20d`\_open | quantile，alpha = 0.1、0.5、0.9 各訓一個模型；預測後逐列排序，保證 q10 ≤ q50 ≤ q90 | q10, q50, q90 | 價格區間 = 收盤價 × (1 + q10) 到 收盤價 × (1 + q90)；這是展示用的主區間 |
-| 波動率 | log(`fwd_vol_20d`) | regression（L2）對 log 值，預測取 exp 還原；最重要的輸入是 `tech_vol_20d`、`tech_vol_60d` | vol\_pred（年化） | 80% 區間 = 收盤價 × exp(±1.28 × vol\_pred × √(20/252))；只做 fallback 與 sanity check，不預設展示 |
+| 波動率 | log(`fwd_vol_20d`) | regression（L2）對 log 值，預測取 exp 還原；最重要的輸入是 `tech_vol_20d`、`tech_vol_60d` | vol\_pred（年化） | 80% 區間 = 收盤價 × exp(±1.28 × vol\_pred × √(20/252))，做 sanity check；fallback 改以預測報酬為中心（見輸出一致性）；不預設展示 |
 | 上漲機率 | `fwd_up_5pct` | binary | prob\_up\_5pct | 直接顯示機率；ECE 高於 0.05 時以 early-stopping 驗證集做 isotonic 校準再上線 |
 
 分類目標的 baseline 用 logistic regression；分位數目標的 baseline 用波動率區間（q50 = 0，q10 與 q90 = ±1.28 × tech\_vol\_20d × √(20/252)），訓練窗內的無條件歷史分位數只當 sanity 下限，打不過它代表實作有錯；波動率目標的 baseline 是直接拿 `tech_vol_20d` 當預測。絕對報酬與 q50 的輸出會明顯集中在 0 附近，這是個股報酬可預測性低的正常現象，不要為了拉開分布去調整。
@@ -294,7 +294,8 @@ Oct 29, 2026 · @Owen Lai
 
 - 20 日的預測報酬與價格區間來自同一個分位數模型，不會出現預測價落在區間外的情況。
 - 波動率區間與分位數區間的寬度比落在 0.5 到 2 之外的股票，每日寫入 `data_quality_log`，severity 為 warning；比例超過 10% 要追查。
-- 分位數模型的覆蓋率告警成立（見模型管理與上線後監控）的期間，價格區間改用波動率區間，API 回應附 `interval_source` 欄位標明來源。
+- 分位數模型的覆蓋率告警成立（見模型管理與上線後監控）的期間，價格區間改用以預測報酬為中心的波動率區間：收盤價 × (1 + ret\_pred ± 1.28 × vol\_pred × √(h/252))，預測價仍落在區間內；缺 vol\_pred 時用 `tech_vol_20d`；API 回應附 `interval_source` 欄位標明來源。
+- 5 日沒有分位數模型：API 一律用同一式（h = 5，以 √(5/252) 縮放）給波動率區間並標 `interval_source = volatility`；頁面依「波動率區間不預設展示」，5 日不畫區間。
 - 上漲機率與 q50 矛盾的列（prob\_up\_5pct 大於 0.5 但 q50 小於 5%，或 prob\_up\_5pct 小於 0.5 但 q50 大於 5%）每日計數，比例超過 10% 要追查。
 - `ret_pred` 與 q10/q50/q90 以 t+1 還原開盤價為基準，展示層仍以最新收盤價換算，差額是隔夜跳空，屬已知近似，不另修正。
 - 訓練 universe 外的股票照常輸出，API 附 `in_universe` 欄位，事後評估不計入。
