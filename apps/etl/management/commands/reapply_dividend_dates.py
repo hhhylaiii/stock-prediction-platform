@@ -7,7 +7,8 @@ from typing import Any
 from django.conf import settings
 from django.core.management.base import BaseCommand
 
-from apps.etl.dividend_dates import announcement_session, reapply_announce_dates
+from apps.etl.adapters.finmind import reapply_announce_dates
+from apps.etl.dividend_dates import announcement_session
 from apps.market.calendar import TradingDays
 
 

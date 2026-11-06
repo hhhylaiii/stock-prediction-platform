@@ -9,12 +9,12 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
+from apps.etl.dividend_dates import Session
 from apps.etl.errors import SchemaChangedError
 from apps.market.models import ShareChangeReason
 
 logger = logging.getLogger(__name__)
 Row = Mapping[str, Any]
-Session = Callable[[datetime], date]
 TAIPEI = ZoneInfo("Asia/Taipei")
 DAY_END = time(23, 59, 59)
 PRICE_KEYS = ("date", "stock_id", "open", "max", "min", "close", "Trading_Volume", "Trading_money")

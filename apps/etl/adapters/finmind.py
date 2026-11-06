@@ -2,29 +2,31 @@
 
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import date, datetime, timedelta
 from datetime import time as clock_time
-from typing import Any
+from typing import Any, NamedTuple
 
 import pandas as pd
 import requests
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
+from django.db import transaction
 from django.utils import timezone
 
 from apps.etl.adapters.base import BaseAdapter
 from apps.etl.adapters.finmind_datasets import (
     chip_rows,
     dividend_events,
+    ex_date_announcements,
     price_bars,
     share_counts,
     valuations,
 )
 from apps.etl.adapters.finmind_fundamentals import monthly_revenues, statements
 from apps.etl.client import SourceClient
-from apps.etl.dividend_dates import announcement_session, fill_announce_dates
-from apps.etl.errors import SchemaChangedError, SourceRequestError
+from apps.etl.dividend_dates import Session, announcement_session, fill_announce_dates
+from apps.etl.errors import SchemaChangedError, SourceError, SourceRequestError
 from apps.etl.models import RawFinmind
 from apps.etl.ratelimit import RateLimiter, ThrottledError
 from apps.etl.share_counts import drop_repeated_counts
@@ -374,3 +376,27 @@ def _rows_from(raw_df: pd.DataFrame, finmind_dataset: str) -> list[dict[str, Any
 
 def _is_missing(value: Any) -> bool:
     return isinstance(value, float) and value != value
+
+
+class Reapplied(NamedTuple):
+    filled: int
+    stocks: int
+    rejected: dict[str, str]
+
+
+def reapply_announce_dates(session: Session, stock_ids: Sequence[str] | None = None) -> Reapplied:
+    """Every stored dividend answer read again, without fetching."""
+    answers = RawFinmind.objects.filter(dataset=RAW_NAMES["TaiwanStockDividend"])
+    if stock_ids:
+        answers = answers.filter(request_params__data_id__in=list(stock_ids))
+    by_stock: dict[str, list[Any]] = {}
+    for params, payload in answers.values_list("request_params", "payload").iterator():
+        by_stock.setdefault(str(params["data_id"]), []).extend(payload.get("data", []))
+    filled, rejected = 0, {}
+    for code, rows in sorted(by_stock.items()):
+        try:
+            with transaction.atomic():
+                filled += fill_announce_dates(code, ex_date_announcements(rows, code, session))
+        except SourceError as exc:
+            rejected[code] = f"{type(exc).__name__}: {exc}"
+    return Reapplied(filled, len(by_stock), rejected)

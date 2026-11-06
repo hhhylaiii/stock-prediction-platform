@@ -1,5 +1,8 @@
+import subprocess
+import sys
 from collections.abc import Callable
 from datetime import date, time, timedelta
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -146,3 +149,10 @@ def test_the_command_can_take_only_the_stocks_named(
     assert "1 events dated across 1 stocks" in capsys.readouterr().out
     dates = dict(DividendEvent.objects.values_list("stock_id", "announce_date"))
     assert dates == {"2884": None, "2885": date(2013, 7, 31)}
+
+
+def test_the_command_loads_in_a_fresh_process() -> None:
+    root = Path(__file__).resolve().parents[2]
+    command = [sys.executable, "manage.py", "reapply_dividend_dates", "--help"]
+    result = subprocess.run(command, cwd=root, capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr[-400:]
