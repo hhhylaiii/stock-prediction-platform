@@ -287,7 +287,7 @@ def test_gap_compares_the_open_with_the_carried_previous_close() -> None:
 
 
 def test_close_location_sits_inside_the_five_day_range() -> None:
-    closes = [100.0, 104.0, 98.0, 101.0, 103.0, 102.0, 102.0]
+    closes = [100.0, 104.0, 98.0, 101.0, 103.0, NAN, 102.0]
     highs = [c + 1 for c in closes]
     lows = [c - 1 for c in closes]
     flat = [100.0] * 7
@@ -303,6 +303,7 @@ def test_close_location_sits_inside_the_five_day_range() -> None:
 
     assert math.isnan(at(features, "2330", 3, "tech_close_loc_5d"))
     assert at(features, "2330", 4, "tech_close_loc_5d") == pytest.approx((103 - 97) / (105 - 97))
+    assert at(features, "2330", 5, "tech_close_loc_5d") == pytest.approx((103 - 97) / (105 - 97))
     assert at(features, "2330", 6, "tech_close_loc_5d") == pytest.approx((102 - 97) / (104 - 97))
     assert math.isnan(at(features, "1101", 6, "tech_close_loc_5d"))
 

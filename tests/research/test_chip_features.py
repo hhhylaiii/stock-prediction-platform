@@ -238,12 +238,12 @@ def test_day_trade_ratio_reads_only_days_settled_two_trading_days_ago() -> None:
 
 
 def test_holding_change_institutional_net_and_buy_streak() -> None:
-    closes = rising(26)
+    closes = rising(27)
     closes[6] = NAN
-    flows = [1.0, 2.0, -1.0, 3.0, 1.0, 2.0, 5.0, 4.0, NAN, 6.0] + [1.0] * 16
-    holding = [30.0 + 0.1 * k for k in range(26)]
+    flows = [1.0, 2.0, -1.0, 3.0, 1.0, 2.0, 5.0, 4.0, NAN, 6.0] + [1.0] * 17
+    holding = [NAN if k == 6 else 30.0 + 0.1 * k for k in range(27)]
     panel = listing("2330", closes, shares=1_000_000.0).assign(
-        **chips(26, fi_net=flows, fi_holding_pct=holding)
+        **chips(27, fi_net=flows, fi_holding_pct=holding)
     )
 
     features = second_batch_chip_features(panel)
@@ -255,5 +255,6 @@ def test_holding_change_institutional_net_and_buy_streak() -> None:
     assert at(features, "2330", 25, "chip_fi_buy_streak") == 17.0
     assert math.isnan(at(features, "2330", 19, "chip_fi_holding_chg_20d"))
     assert at(features, "2330", 25, "chip_fi_holding_chg_20d") == pytest.approx(2.0)
+    assert at(features, "2330", 26, "chip_fi_holding_chg_20d") == pytest.approx(2.1)
     assert math.isnan(at(features, "2330", 18, "chip_it_net_20d"))
     assert at(features, "2330", 25, "chip_it_net_20d") == pytest.approx(19 * 100 / 1e6)
