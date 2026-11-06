@@ -156,6 +156,14 @@ def verdict(experiment: Experiment, table: pd.DataFrame) -> str:
     return chosen
 
 
+def _setting(arm: Arm) -> str:
+    """One line naming an arm's window and rank variant."""
+    config, variant = arm.config, arm.variant
+    window = "expanding" if config.window == "expanding" else f"rolling {config.train_months} 個月"
+    decay = "—" if variant.half_life is None else f"{variant.half_life:g} 個月"
+    return f"{window}，每 {variant.every} 日一列，半衰期 {decay}，objective {variant.objective}"
+
+
 def _cell(value: float) -> str:
     return "—" if math.isnan(value) else f"{value:.4f}"
 
@@ -170,6 +178,7 @@ def experiment_report(
     lines = [f"# 實驗：{experiment.name}（{run_key}）", ""]
     if note:
         lines += [f"> {note}", ""]
+    lines += [f"- {arm.name}：{_setting(arm)}" for arm in experiment.arms]
     folds = sorted(daily["fold"].unique())
     lines += [
         f"- 比較 {len(folds)} 個研究摺（摺 {folds[0]}–{folds[-1]}），每組各自的快取 run_key "

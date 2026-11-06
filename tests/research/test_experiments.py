@@ -151,8 +151,14 @@ def test_train_arms_fit_each_arm_under_its_own_key_and_share_the_base(
     ]
     assert calls[2][2] == []
     assert calls[0][2] == [fold.index for fold in folds["base"]]
-    grades = ModelRun.objects.filter(run_key="rank-exp-lambdarank").values_list("params", flat=True)
-    assert {params["variant"]["objective"] for params in grades} == {"lambdarank"}
+    graded = ModelRun.objects.filter(run_key="rank-exp-lambdarank")
+    assert {run.params["variant"]["objective"] for run in graded} == {"lambdarank"}
+    assert {run.params["lightgbm"]["objective"] for run in graded} == {"lambdarank"}
+    assert {run.params["label"] for run in graded} == {"fwd_rank_level"}
+    assert {run.params["graded_from"] for run in graded} == {"fwd_rank_pct"}
+    plain = ModelRun.objects.filter(run_key="rank-exp-base")
+    assert {run.params["lightgbm"]["objective"] for run in plain} == {"regression"}
+    assert {run.params["label"] for run in plain} == {"fwd_rank_pct"}
 
 
 @pytest.mark.django_db
@@ -196,6 +202,7 @@ def test_experiment_report_shows_the_verdict_small_gaps_and_folds() -> None:
     text = experiment_report(chosen, "rank-exp", daily, note="暫定特徵")
 
     assert "暫定特徵" in text
+    assert "- every5：rolling 6 個月，每 1 日一列，半衰期 —，objective regression" in text
     assert "| every5 | 0.0620 | 0.0500 | 0.0560 | +0.0010 |" in text
     assert "採用 every5" in text
     assert "小於 0.01" in text
@@ -241,4 +248,49 @@ def test_rank_experiment_refuses_bad_keys_before_training(command: Path) -> None
         call_command(
             "rank_experiment", name="window", run_key="rank-" + "x" * 30, stdout=StringIO()
         )
+    assert not ModelRun.objects.filter(model_type="lightgbm").exists()
+
+
+def test_compared_folds_drop_periods_an_arm_lacks_and_those_before_2015() -> None:
+    calendar = weekday_calendar(date(2005, 1, 1), date(2026, 12, 31))
+    late = WalkForwardConfig(data_start=date(2011, 1, 1))
+    early = WalkForwardConfig(
+        data_start=date(2005, 1, 1), first_test=date(2012, 1, 1), tuning_end=date(2012, 12, 31)
+    )
+
+    shortened = compared_folds(experiments.experiments(late)["window"], calendar, date(2026, 11, 6))
+    started = compared_folds(experiments.experiments(early)["window"], calendar, date(2026, 11, 6))
+
+    for folds, first in ((shortened, date(2016, 7, 1)), (started, date(2015, 1, 1))):
+        periods = {name: [fold.test_start for fold in chosen] for name, chosen in folds.items()}
+        assert periods["base"] == periods["w60"] == periods["expanding"]
+        assert periods["base"][0] == first
+
+
+def test_an_arm_missing_a_horizon_has_no_mean_and_never_wins() -> None:
+    chosen = experiment("not_worse", "base", "every5")
+    daily = pd.DataFrame(
+        {
+            "arm": ["base", "base", "every5"],
+            "fold": [3, 3, 3],
+            "horizon": [5, 20, 5],
+            "date": [date(2016, 10, 3)] * 3,
+            "ic": [0.05, 0.04, 0.09],
+        }
+    )
+
+    table = summary(chosen, daily)
+
+    assert np.isnan(float(table["mean"]["every5"]))
+    assert verdict(chosen, table) == "base"
+
+
+@pytest.mark.django_db
+def test_rank_experiment_stops_when_the_shuffle_check_fails(
+    command: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(rank_experiment, "shuffle_check", lambda *args: 0.5)
+
+    with pytest.raises(CommandError, match="shuffle check on fold"):
+        call_command("rank_experiment", name="sampling", run_key="rank-exp", stdout=StringIO())
     assert not ModelRun.objects.filter(model_type="lightgbm").exists()

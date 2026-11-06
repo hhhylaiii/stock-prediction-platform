@@ -50,6 +50,8 @@ from apps.research.prediction_cache import (
 )
 from apps.research.ranges import years
 from apps.research.rank_model import (
+    GRADE,
+    LEVELS,
     MODEL_TYPE,
     RANK_LABEL,
     SPEC_RECIPE,
@@ -303,15 +305,19 @@ def _rank(job: Job) -> FoldFit:
         evaluated = _evaluated(job, inputs, labels, RANK_LABEL)
         scores = np.asarray(boosted.booster.predict(evaluated[features]))
         oos = _oos(scores, evaluated, horizon)
+        ranking = job.variant.objective == "lambdarank"
         params = {
             "rounds": boosted.rounds,
             "valid_ic": _plain(boosted.valid_score),
             "feval_every": FEVAL_EVERY,
             "variant": asdict(job.variant),
+            "lightgbm": {**BASE_PARAMS, "objective": job.variant.objective, **seeded(job.seed)},
+            **({"graded_from": RANK_LABEL, "levels": LEVELS} if ranking else {}),
             "ic_nw_t": oos["ic_nw_t"],
             "importance_gain": _gains(boosted.booster, features),
         }
-        run = _run(job, ModelObjective.RANK, horizon, RANK_LABEL, params, oos)
+        label = GRADE if ranking else RANK_LABEL
+        run = _run(job, ModelObjective.RANK, horizon, label, params, oos)
         trained.append((run, boosted.booster))
     return FoldFit(columns, trained)
 
