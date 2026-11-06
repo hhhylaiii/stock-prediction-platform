@@ -401,6 +401,17 @@ def test_an_active_run_reads_only_its_closed_periods(client: Client, history: Mo
     assert sources == ["quantile", "quantile", "quantile", "volatility"]
 
 
+def test_every_day_inside_each_of_several_periods_sets_the_band_aside(
+    client: Client, history: ModelRun
+) -> None:
+    after_newest = SESSIONS[SESSIONS.index(NEWEST) + 1]
+    params = {"alert_periods": [period(OLDEST, SECOND), period(NEWEST, after_newest)]}
+
+    sources = sources_with(client, "active", params)
+
+    assert sources == ["volatility", "quantile", "volatility", "volatility"]
+
+
 @pytest.mark.parametrize(
     "entries",
     [
