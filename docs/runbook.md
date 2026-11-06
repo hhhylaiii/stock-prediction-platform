@@ -52,7 +52,7 @@ docker compose logs -f worker
 | --- | --- | --- | --- |
 | 15:10 | `etl.prepare_day` | `refresh_calendar` 更正交易日曆（失敗寫 log，當晚 22:50 的 `etl_runs` 列出），再 `catch_up` 補抓前 14 天到前一交易日漏掉的日子；排程開始後沒跑過品質檢查的交易日（至少前一交易日）補跑，跑過但還有告警的重新判斷 | 先補抓再跑當日 |
 | 15:30 | `etl.run_batch prices` | 證交所、櫃買日價量與指數 | — |
-| 16:00 | `etl.refresh_master` | 用當天行情更新 `stock_master` | PR 2.5c |
+| 16:00 | `etl.refresh_master` | 用當天行情更新 `stock_master` | — |
 | 16:30 | `etl.run_batch afternoon` | 三大法人、本益比與淨值比、注意、處置、全額交割；證交所外資持股與發行股數 | 借券、當沖在 21:30；櫃買外資持股與發行股數在 18:30 |
 | 18:30 | `etl.run_batch qfii` | 櫃買外資持股與發行股數 | 櫃買每日 18:00、22:00 更新 |
 | 19:00 | `etl.statement_scan STATEMENTS` | MOPS 財報彙總表（綜合損益、資產負債、現金流量，上市、上櫃），正在申報的季別與前一季，見下方「財報每日掃描」 | 季底隔天到保守截止日後 45 天 |
@@ -64,7 +64,7 @@ docker compose logs -f worker
 | 22:50 | `etl.check_quality` | 五項品質檢查，另寫一列 `etl_runs`，列出當天沒完成的 dataset，以及這晚負責的排程工作哪些沒有成功的 run，一起送告警（見下方研究閘門） | — |
 | 05:30 | `etl.us_close` | 前一個台股交易日的費半、TSM ADR、美元台幣，每個交易日只跑一次，寫一列 `data_quality_log`（`us_close`）：費半、TSM 早於那天、或美元台幣早於再前一個交易日，就是 warning | 美元台幣在倫敦 23:59 才收盤，05:30 本來就只有前一天 |
 | 週六 10:00 | `etl.weekly_holding` | 集保股權分散表，抓最近一個已結束的週（週一才醒來也是抓上週），日期用那週最後一個交易日；漏跑時由週六之後第一個交易日（週六本身是交易日就是當天）的 `etl_runs` 列出 | — |
-| 每月 15 日 10:00 | `etl.business_signal` | data.gov.tw 景氣燈號；晚跑時 run 記在當月的排程日；漏跑時由排程日當天或之後第一個交易日的 `etl_runs` 列出 | 資料在次次月 15 日才公布 |
+| 每月 15 日 10:00 | `etl.business_signal` | data.gov.tw 景氣燈號；晚跑時 run 記在當月的排程日；漏跑時由排程日當天或之後第一個交易日的 `etl_runs` 列出 | M 月的資料在 M+2 月 15 日寫入，並以那天為 announce_date；國發會約每月 27 日發布上月，年假會延後 |
 
 ### 研究閘門
 
