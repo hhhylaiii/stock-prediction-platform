@@ -1,3 +1,4 @@
+import math
 from dataclasses import replace
 from datetime import date
 from io import StringIO
@@ -34,6 +35,7 @@ from apps.research.runs import SCREENING_MODEL
 from apps.research.walkforward import WalkForwardConfig, generate_folds
 from tests.research.conftest import weekday_calendar
 from tests.research.run_panels import CONFIG, weekdays
+from tests.research.run_panels import folds as panel_folds
 
 
 def table(means: dict[str, float]) -> pd.DataFrame:
@@ -84,6 +86,22 @@ def test_the_spec_experiments_compare_these_arms_on_six_month_folds() -> None:
     }
     shared = (sampling.arms[0], objective.arms[0], stopping.arms[0], stopping.arms[1], base)
     assert len({arm.config for arm in shared}) == 1
+
+
+@pytest.mark.parametrize("ic", [math.nan, -0.5, 0.5])
+def test_the_shuffle_guard_stops_on_a_missing_or_leak_sized_ic(
+    monkeypatch: pytest.MonkeyPatch, ic: float
+) -> None:
+    monkeypatch.setattr(experiments, "shuffle_check", lambda *args: ic)
+
+    with pytest.raises(ValueError, match="shuffle check on fold 3"):
+        experiments.checked_shuffle(replace(panel_folds()[0], index=3), Path(), 0)
+
+
+def test_the_shuffle_guard_passes_a_small_ic_through(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(experiments, "shuffle_check", lambda *args: -0.001)
+
+    assert experiments.checked_shuffle(panel_folds()[0], Path(), 0) == -0.001
 
 
 def test_arm_keys_keep_seed_zero_and_suffix_the_other_seeds() -> None:
@@ -453,7 +471,7 @@ def test_an_arm_missing_a_horizon_has_no_mean_and_never_wins() -> None:
 def test_rank_experiment_stops_when_the_shuffle_check_fails(
     command: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(rank_experiment, "shuffle_check", lambda *args: 0.5)
+    monkeypatch.setattr(experiments, "shuffle_check", lambda *args: 0.5)
 
     with pytest.raises(CommandError, match="shuffle check on fold"):
         call_command("rank_experiment", name="sampling", run_key="rank-exp", stdout=StringIO())
@@ -476,7 +494,7 @@ def test_rank_experiment_needs_a_screening_before_the_shuffle_check(
     command: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     shuffled: list[Any] = []
-    monkeypatch.setattr(rank_experiment, "shuffle_check", lambda *args: shuffled.append(args))
+    monkeypatch.setattr(experiments, "shuffle_check", lambda *args: shuffled.append(args))
     ModelRun.objects.filter(model_type=SCREENING_MODEL).delete()
 
     with pytest.raises(CommandError, match="screened features"):

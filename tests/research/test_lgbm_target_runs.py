@@ -458,3 +458,52 @@ def test_bagged_target_folds_bag_every_booster(panel: Path) -> None:
     cached = load_fold_predictions("interval-wf1", MODEL, fold)
     assert cached[INTERVAL_COLUMNS].notna().all().all()
     assert (cached["lightgbm_q10_h20"] <= cached["lightgbm_q90_h20"]).all()
+
+
+def test_target_recipes_keep_their_fingerprints_at_the_spec_design() -> None:
+    assert recipe("return", FEATURES, 0) == "4-02656190ccdb"
+    assert recipe("interval", FEATURES, 0) == "4-23c61a13464c"
+    assert recipe("interval", FEATURES, 0, target=target_models.TARGET_RECIPE) == "4-23c61a13464c"
+    assert recipe("interval", FEATURES, 0, target=target_models.TargetVariant(market=False)) != (
+        "4-23c61a13464c"
+    )
+
+
+def test_target_scopes_drop_the_market_features_when_the_variant_asks(panel: Path) -> None:
+    alone = target_models.TargetVariant(market=False)
+
+    assert lgbm_runs.scope_features("return") == FEATURES
+    assert lgbm_runs.scope_features("interval", alone) == KEPT
+    assert lgbm_runs.scope_features("rank", alone) == lgbm_runs.scope_features("rank")
+
+
+@pytest.mark.parametrize("scope", ["return", "interval"])
+def test_a_target_fold_without_market_features_trains_on_stock_features_only(
+    panel: Path, scope: str
+) -> None:
+    fold = research()[0]
+    alone = target_models.TargetVariant(market=False)
+
+    assert run_folds(scope, [fold], f"{scope}-wf1", panel, target=alone) == [fold.index]
+
+    fitted = ModelRun.objects.filter(run_key=f"{scope}-wf1").exclude(model_type=SCREENING_MODEL)
+    assert fitted.exists()
+    for run in fitted:
+        assert run.feature_list == KEPT
+        assert set(run.params["importance_gain"]) == set(KEPT)
+        assert run.params["market_bins"] == {}
+    notes = fold_notes(f"{scope}-wf1", MODEL, fold.index)
+    assert notes["recipe"] == recipe(scope, KEPT, 0, target=alone)
+    assert run_folds(scope, [fold], f"{scope}-wf1", panel, target=alone) == []
+    assert run_folds(scope, [fold], f"{scope}-wf1", panel) == [fold.index]
+
+
+def test_rank_folds_refuse_a_target_variant(panel: Path) -> None:
+    with pytest.raises(ValueError, match="target variants apply to the return and interval"):
+        run_folds(
+            "rank",
+            research()[:1],
+            "rank-wf1",
+            panel,
+            target=target_models.TargetVariant(market=False),
+        )
