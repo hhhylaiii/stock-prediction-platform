@@ -28,7 +28,8 @@ VALID_FACTOR = 2
 WINDOW_FROM = date(2015, 1, 1)
 SMALL_GAP = 0.02
 MIN_SEEDS = 3
-SUGGESTED_SEEDS = ",".join(map(str, bag_seeds(0, MIN_SEEDS)))
+TUNING_SEEDS = tuple(bag_seeds(0, MIN_SEEDS))
+SUGGESTED_SEEDS = ",".join(map(str, TUNING_SEEDS))
 RULES = {
     "best": "總體 rank IC（5 日與 20 日平均）最高的一組；同分留 base",
     "not_worse": "總體 rank IC 不低於 base 就採用",
@@ -118,7 +119,11 @@ def train_arms(
     seeds: Sequence[int],
 ) -> dict[str, list[int]]:
     """Fit each arm's folds once per seed under its own run_key; current caches are kept."""
-    unresolved = [arm.name for arm in experiment.arms if arm.tuned and not arm.variant.fixed_rounds]
+    unresolved = [
+        arm.name
+        for arm in experiment.arms
+        if arm.tuned and set(dict(arm.variant.fixed_rounds)) != set(HORIZONS)
+    ]
     if unresolved:
         raise ValueError(f"fix the rounds of {unresolved} with with_tuned_rounds before training")
     return {
@@ -226,18 +231,23 @@ def tuning_rounds(
     calendar: TradingDays,
     last: date,
     directory: Path,
-    seeds: Sequence[int],
 ) -> dict[int, int]:
-    """Median best round per horizon of the base arm on its tuning folds, fitted when missing."""
+    """Median best round per horizon of the base arm's tuning folds under TUNING_SEEDS."""
     base = experiment.arms[0]
     tuning = [fold for fold in generate_folds(calendar, last, base.config) if fold.tuning]
     if not tuning:
         raise ValueError(f"{experiment.name} has no tuning folds to fix its rounds on")
-    for seed in seeds:
+    for seed in TUNING_SEEDS:
         key = arm_key(run_key, base, seed)
         lgbm_runs.run_folds(HoldoutScope.RANK, tuning, key, directory, seed, variant=base.variant)
     alone = replace(experiment, arms=(base,))
-    rounds = stopping_rounds(alone, run_key, {base.name: tuning}, seeds)
+    rounds = stopping_rounds(alone, run_key, {base.name: tuning}, TUNING_SEEDS)
+    expected = len(tuning) * len(TUNING_SEEDS) * len(HORIZONS)
+    if len(rounds) < expected:
+        raise ValueError(
+            f"tuning folds lack {expected - len(rounds)} of {expected} best rounds in model_run "
+            f"under {arm_key(run_key, base)}; drop that run and fit its tuning folds again"
+        )
     medians = rounds.groupby("horizon")["best"].median()
     return {horizon: round(float(medians[horizon])) for horizon in HORIZONS if horizon in medians}
 
@@ -268,7 +278,8 @@ def _setting(arm: Arm) -> str:
         line += f"，至少 {variant.min_rounds} 輪"
     if variant.fixed_rounds:
         counts = "、".join(f"{horizon} 日 {count} 輪" for horizon, count in variant.fixed_rounds)
-        line += f"，固定 {counts}（調參摺最佳輪數的中位數）"
+        seeds = ", ".join(map(str, TUNING_SEEDS))
+        line += f"，固定 {counts}（調參摺 seed {seeds} 最佳輪數的中位數）"
     elif arm.tuned:
         line += "，輪數由調參摺定"
     return line

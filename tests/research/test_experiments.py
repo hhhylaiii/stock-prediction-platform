@@ -532,19 +532,23 @@ def test_the_tuned_arm_fixes_each_horizon_to_the_tuning_folds_median_best_round(
 ) -> None:
     chosen = experiments.experiments(CONFIG)["stopping"]
 
-    rounds = experiments.tuning_rounds(chosen, "rank-exp", calendar(), weekdays()[-1], small, (0,))
+    rounds = experiments.tuning_rounds(chosen, "rank-exp", calendar(), weekdays()[-1], small)
 
     base = chosen.arms[0]
     tuning = [
         fold for fold in generate_folds(calendar(), weekdays()[-1], base.config) if fold.tuning
     ]
     assert tuning
+    assert experiments.TUNING_SEEDS == (0, 3, 6)
     for horizon in (5, 20):
         best = [
             ModelRun.objects.get(
-                run_id=lgbm_runs.run_id("rank-exp-base", "rank", horizon, fold)
+                run_id=lgbm_runs.run_id(
+                    experiments.arm_key("rank-exp", base, seed), "rank", horizon, fold
+                )
             ).params["best_round"]
             for fold in tuning
+            for seed in experiments.TUNING_SEEDS
         ]
         assert rounds[horizon] == round(float(np.median(best)))
     resolved = experiments.with_tuned_rounds(chosen, rounds)
@@ -553,13 +557,64 @@ def test_the_tuned_arm_fixes_each_horizon_to_the_tuning_folds_median_best_round(
     assert resolved.arms[:3] == chosen.arms[:3]
     line = experiments._setting(tuned)
     assert f"固定 5 日 {rounds[5]} 輪、20 日 {rounds[20]} 輪" in line
+    assert "seed 0, 3, 6" in line
+
+
+def fake_tuning(
+    monkeypatch: pytest.MonkeyPatch, best: dict[tuple[int, int], int]
+) -> list[tuple[str, int]]:
+    """No tuning fits, and stopping rounds read from best keyed by seed and horizon."""
+    monkeypatch.setattr(experiments, "COARSE_MONTHS", 1)
+    trained: list[tuple[str, int]] = []
+
+    def fit(scope: str, folds: Any, run_key: str, directory: Path, seed: int, **kwargs: Any) -> Any:
+        trained.append((run_key, seed))
+        return []
+
+    def read(experiment: Experiment, run_key: str, folds: Any, seeds: Any) -> pd.DataFrame:
+        (tuning,) = folds.values()
+        rows = [
+            ["base", seed, horizon, fold.index, best[(seed, horizon)], best[(seed, horizon)]]
+            for fold in tuning
+            for (seed, horizon) in best
+        ]
+        return pd.DataFrame(rows, columns=experiments.ROUND_COLUMNS)
+
+    monkeypatch.setattr(experiments.lgbm_runs, "run_folds", fit)
+    monkeypatch.setattr(experiments, "stopping_rounds", read)
+    return trained
+
+
+def test_tuning_rounds_take_the_median_over_the_tuning_seeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    best = {(0, 5): 1, (3, 5): 11, (6, 5): 401, (0, 20): 5, (3, 20): 300, (6, 20): 7}
+    trained = fake_tuning(monkeypatch, best)
+    chosen = experiments.experiments(CONFIG)["stopping"]
+
+    rounds = experiments.tuning_rounds(chosen, "rank-exp", calendar(), weekdays()[-1], Path())
+
+    assert rounds == {5: 11, 20: 7}
+    assert trained == [("rank-exp-base", 0), ("rank-exp-base-s3", 3), ("rank-exp-base-s6", 6)]
+
+
+def test_tuning_rounds_refuse_tuning_folds_without_a_recorded_round(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_tuning(monkeypatch, {(0, 5): 1, (3, 5): 11, (6, 5): 401, (0, 20): 5})
+    chosen = experiments.experiments(CONFIG)["stopping"]
+
+    with pytest.raises(ValueError, match="tuning folds lack"):
+        experiments.tuning_rounds(chosen, "rank-exp", calendar(), weekdays()[-1], Path())
 
 
 def test_train_arms_refuse_a_tuned_arm_whose_rounds_are_not_fixed() -> None:
     chosen = experiments.experiments(CONFIG)["stopping"]
+    half = experiments.with_tuned_rounds(chosen, {5: 7})
 
-    with pytest.raises(ValueError, match="with_tuned_rounds"):
-        experiments.train_arms(chosen, "rank-exp", {}, Path(), (0,))
+    for unresolved in (chosen, half):
+        with pytest.raises(ValueError, match="with_tuned_rounds"):
+            experiments.train_arms(unresolved, "rank-exp", {}, Path(), (0,))
 
 
 @pytest.mark.django_db
@@ -574,9 +629,7 @@ def test_rank_experiment_fixes_the_tuned_rounds_before_training_the_arms(
     )
 
     chosen = experiments.experiments(CONFIG)["stopping"]
-    rounds = experiments.tuning_rounds(
-        chosen, "rank-exp", calendar(), weekdays()[-1], command, (0,)
-    )
+    rounds = experiments.tuning_rounds(chosen, "rank-exp", calendar(), weekdays()[-1], command)
     assert f"tuned rounds from the tuning folds: {rounds}" in out.getvalue()
     text = output.read_text()
     assert (

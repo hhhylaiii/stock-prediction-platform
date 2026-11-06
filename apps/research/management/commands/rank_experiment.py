@@ -13,6 +13,7 @@ from apps.research import lgbm_runs
 from apps.research.baseline_runs import check_run_key, shuffle_check
 from apps.research.ensemble import write_report
 from apps.research.experiments import (
+    SUGGESTED_SEEDS,
     arm_key,
     compared_folds,
     daily_ics,
@@ -43,7 +44,7 @@ class Command(BaseCommand):
         parser.add_argument("--name", required=True, choices=sorted(experiments(DEFAULT_CONFIG)))
         parser.add_argument("--run-key", required=True)
         parser.add_argument("--last-date")
-        parser.add_argument("--seeds", default="0", help="Distinct seeds, e.g. 0,1,2.")
+        parser.add_argument("--seeds", default="0", help=f"Distinct seeds, e.g. {SUGGESTED_SEEDS}.")
         parser.add_argument("--note", help="Caveat printed at the top of the report.")
         parser.add_argument("--output", help="Markdown file to write; prints when left out.")
 
@@ -87,7 +88,7 @@ class Command(BaseCommand):
             directory = settings.FEATURE_PARQUET_DIR
             self._shuffle(folds[experiment.arms[0].name][0], seeds[0])
             if any(arm.tuned for arm in experiment.arms):
-                rounds = tuning_rounds(experiment, run_key, calendar, last, directory, seeds)
+                rounds = tuning_rounds(experiment, run_key, calendar, last, directory)
                 self.stdout.write(f"tuned rounds from the tuning folds: {rounds}")
                 experiment = with_tuned_rounds(experiment, rounds)
             ran = train_arms(experiment, run_key, folds, directory, seeds)

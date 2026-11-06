@@ -258,6 +258,7 @@ def test_variant_defaults_are_the_spec_recipe() -> None:
         ({"min_rounds": -1}, "min_rounds"),
         ({"fixed_rounds": ((5, 0),)}, "fixed_rounds"),
         ({"fixed_rounds": ((5, 3), (5, 4))}, "fixed_rounds"),
+        ({"fixed_rounds": ((10, 3),)}, "fixed_rounds"),
         ({"half_life": 0.0}, "half_life"),
         ({"objective": "xendcg"}, "objective"),
     ):

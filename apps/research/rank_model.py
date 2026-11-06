@@ -8,6 +8,7 @@ import pandas as pd
 
 from apps.research.features.transforms import STOCK_LEVEL, standardize
 from apps.research.gbdt import MAX_ROUNDS, Boosted, DailyRankIC, Feval, Layout, boost
+from apps.research.labels import HORIZONS
 from apps.research.runs import Screened
 from apps.research.training import training_rows
 from apps.research.walkforward import Fold, time_decay_weights
@@ -46,7 +47,12 @@ class Variant:
         if self.min_rounds < 0:
             raise ValueError(f"min_rounds must not be negative, not {self.min_rounds}")
         horizons = [horizon for horizon, _ in self.fixed_rounds]
-        if len(set(horizons)) < len(horizons) or any(n < 1 for _, n in self.fixed_rounds):
+        unknown = set(horizons) - set(HORIZONS)
+        if (
+            unknown
+            or len(set(horizons)) < len(horizons)
+            or any(n < 1 for _, n in self.fixed_rounds)
+        ):
             raise ValueError(
                 f"fixed_rounds needs one positive count per horizon: {self.fixed_rounds}"
             )
