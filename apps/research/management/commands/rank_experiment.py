@@ -13,7 +13,7 @@ from apps.research.baseline_runs import check_run_key
 from apps.research.ensemble import write_report
 from apps.research.experiments import (
     SUGGESTED_SEEDS,
-    WINDOWS,
+    TUNING_SEEDS,
     arm_key,
     checked_shuffle,
     compared_folds,
@@ -23,7 +23,9 @@ from apps.research.experiments import (
     parse_seeds,
     stopping_rounds,
     train_arms,
+    tuning_folds,
     tuning_rounds,
+    window_arms,
     with_tuned_rounds,
 )
 from apps.research.holdout import HoldoutError, holdout_claimed
@@ -47,7 +49,7 @@ class Command(BaseCommand):
         parser.add_argument(
             "--window",
             default="base",
-            choices=WINDOWS,
+            choices=list(window_arms(DEFAULT_CONFIG)),
             help="Training window the experiments other than window build on.",
         )
         parser.add_argument("--run-key", required=True)
@@ -62,7 +64,10 @@ class Command(BaseCommand):
                 "--window sets the layout of the other experiments; the window experiment "
                 "compares every window"
             )
-        experiment = experiments(DEFAULT_CONFIG, options["window"])[options["name"]]
+        try:
+            experiment = experiments(DEFAULT_CONFIG, options["window"])[options["name"]]
+        except ValueError as error:
+            raise CommandError(str(error)) from error
         run_key = options["run_key"]
         if holdout_claimed(HoldoutScope.RANK):
             raise CommandError("a rank holdout run exists, so the rank design is frozen (SPEC §7)")
@@ -83,8 +88,12 @@ class Command(BaseCommand):
             self.stdout.write(f"fold {first.index}: shuffled OOS rank IC {shuffled:.4f}")
             if any(arm.tuned for arm in experiment.arms):
                 rounds = tuning_rounds(experiment, run_key, calendar, last, directory)
-                self.stdout.write(f"tuned rounds from the tuning folds: {rounds}")
-                experiment = with_tuned_rounds(experiment, rounds)
+                tuning = [fold.index for fold in tuning_folds(experiment, calendar, last)]
+                seeds_used = ", ".join(map(str, TUNING_SEEDS))
+                self.stdout.write(
+                    f"tuned rounds from tuning folds {tuning} × seeds {seeds_used}: {rounds}"
+                )
+                experiment = with_tuned_rounds(experiment, rounds, tuning)
             ran = train_arms(experiment, run_key, folds, directory, seeds)
             daily = daily_ics(experiment, run_key, folds, seeds)
             stopped = stopping_rounds(experiment, run_key, folds, seeds)

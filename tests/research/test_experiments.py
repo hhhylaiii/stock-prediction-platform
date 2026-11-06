@@ -379,6 +379,28 @@ def test_experiment_report_shows_the_verdict_small_gaps_and_folds() -> None:
     assert "## 各 seed" not in text
     assert "## 停止輪數" not in text
     assert "| 3 | 0.0500 | 0.0400 | 0.0540 | 0.0400 |" in text
+    assert "- 判定規則：總體 rank IC 不低於 base 就採用" in text
+    assert "| 組 | 5 日 IC | 20 日 IC | 平均 | 與 base 差 | seed 間標準差 |" in text
+
+
+def test_experiment_reports_name_the_first_arm_of_a_chosen_window() -> None:
+    chosen = experiment("best", "w60", "w60-floor")
+    daily = pd.DataFrame(
+        {
+            "seed": [0] * 4,
+            "arm": ["w60", "w60-floor"] * 2,
+            "fold": [3] * 4,
+            "horizon": [5, 5, 20, 20],
+            "date": [date(2016, 10, 3)] * 4,
+            "ic": [0.05, 0.05, 0.04, 0.04],
+        }
+    )
+
+    text = experiment_report(chosen, "rank-exp", daily)
+
+    assert "- 判定規則：總體 rank IC（5 日與 20 日平均）最高的一組；同分留 w60" in text
+    assert "| 組 | 5 日 IC | 20 日 IC | 平均 | 與 w60 差 | seed 間標準差 |" in text
+    assert "base" not in text
 
 
 def test_experiment_report_judges_close_arms_on_three_seeds_and_lists_rounds() -> None:
@@ -660,6 +682,64 @@ def fake_tuning(
     return trained
 
 
+def test_w60_has_one_coarse_tuning_fold_and_the_other_windows_four() -> None:
+    days = weekday_calendar(date(2005, 1, 1), date(2026, 12, 31))
+    picked = {
+        window: [
+            fold.index
+            for fold in experiments.tuning_folds(
+                experiments.experiments(WalkForwardConfig(), window)["stopping"],
+                days,
+                date(2026, 10, 30),
+            )
+        ]
+        for window in ("base", "w60", "expanding")
+    }
+
+    assert picked == {"base": [0, 1, 2, 3], "w60": [3], "expanding": [0, 1, 2, 3]}
+
+
+def test_tuning_rounds_fit_the_chosen_window_on_its_tuning_folds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    best = {(0, 5): 1, (3, 5): 11, (6, 5): 401, (0, 20): 5, (3, 20): 300, (6, 20): 7}
+    trained = fake_tuning(monkeypatch, best)
+    monkeypatch.setattr(experiments, "LONG_MONTHS", 7)
+    chosen = experiments.experiments(CONFIG, "w60")["stopping"]
+
+    rounds = experiments.tuning_rounds(chosen, "rank-exp", calendar(), weekdays()[-1], Path())
+
+    assert rounds == {5: 11, 20: 7}
+    assert trained == [("rank-exp-w60", 0), ("rank-exp-w60-s3", 3), ("rank-exp-w60-s6", 6)]
+
+
+def test_tuned_settings_name_the_tuning_folds_behind_the_rounds() -> None:
+    stopping = experiments.experiments(WalkForwardConfig(), "w60")["stopping"]
+
+    fixed = experiments.with_tuned_rounds(stopping, {5: 7, 20: 9}, [3]).arms[2]
+
+    assert fixed.tuned_from == (3,)
+    assert experiments._setting(fixed).endswith(
+        "，固定 5 日 7 輪、20 日 9 輪（調參摺 3，共 1 摺 × seed 0, 3, 6 最佳輪數的中位數）"
+    )
+    assert experiments.with_tuned_rounds(stopping, {5: 7, 20: 9}).arms[0:2] == stopping.arms[0:2]
+
+
+def test_the_window_choices_are_the_window_arms() -> None:
+    parser = rank_experiment.Command().create_parser("manage.py", "rank_experiment")
+    window = next(action for action in parser._actions if action.dest == "window")
+
+    assert list(window.choices or []) == list(experiments.window_arms(CONFIG))
+
+
+@pytest.mark.django_db
+def test_rank_experiment_reports_an_unknown_window_as_a_command_error(command: Path) -> None:
+    with pytest.raises(CommandError, match="window must be one of"):
+        call_command(
+            "rank_experiment", name="sampling", run_key="rank-exp", window="w36", stdout=StringIO()
+        )
+
+
 def test_tuning_rounds_take_the_median_over_the_tuning_seeds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -705,12 +785,11 @@ def test_rank_experiment_fixes_the_tuned_rounds_before_training_the_arms(
 
     chosen = experiments.experiments(CONFIG)["stopping"]
     rounds = experiments.tuning_rounds(chosen, "rank-exp", calendar(), weekdays()[-1], command)
-    assert f"tuned rounds from the tuning folds: {rounds}" in out.getvalue()
+    tuning = [fold.index for fold in experiments.tuning_folds(chosen, calendar(), weekdays()[-1])]
+    assert f"tuned rounds from tuning folds {tuning} × seeds 0, 3, 6: {rounds}" in out.getvalue()
     text = output.read_text()
-    assert (
-        f"- tuned：{experiments._setting(experiments.with_tuned_rounds(chosen, rounds).arms[2])}"
-        in text
-    )
+    tuned = experiments.with_tuned_rounds(chosen, rounds, tuning).arms[2]
+    assert f"- tuned：{experiments._setting(tuned)}" in text
     fitted = ModelRun.objects.filter(run_key="rank-exp-tuned")
     refits = {(run.run_id.split(".")[2], run.params["rounds"]) for run in fitted}
     assert refits == {("h5", rounds[5]), ("h20", rounds[20])}
