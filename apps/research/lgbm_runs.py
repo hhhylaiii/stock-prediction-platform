@@ -88,7 +88,7 @@ from apps.research.walkforward import Fold
 MODEL = MODEL_TYPE
 RANK_FIELDS = (RANK_LABEL, "untradable_t1")
 RECIPE_VERSION = "4"
-LATER_DEFAULTS: dict[str, Any] = {"min_rounds": 0}
+LATER_DEFAULTS: dict[str, Any] = {"min_rounds": 0, "fixed_rounds": ()}
 MAX_ROUNDS = DEFAULT_MAX_ROUNDS
 SCOPE_HORIZONS: dict[str, tuple[int, ...]] = {
     HoldoutScope.RANK: HORIZONS,
@@ -308,8 +308,9 @@ def _rank(job: Job) -> FoldFit:
     columns, trained = {}, []
     for horizon in HORIZONS:
         labels = load_labels(fold.train_start, fold.eval_end, horizon, RANK_FIELDS)
+        fixed = job.variant.fixed_for(horizon)
         boosted = fit_rank(
-            inputs, labels, fold, features, job.seed, MAX_ROUNDS, job.bags, job.variant
+            inputs, labels, fold, features, job.seed, MAX_ROUNDS, job.bags, job.variant, fixed
         )
         test = inputs[read.test][features]
         columns[f"{MODEL}_h{horizon}"] = np.asarray(boosted.booster.predict(test))
@@ -319,6 +320,7 @@ def _rank(job: Job) -> FoldFit:
         ranking = job.variant.objective == "lambdarank"
         params = {
             "rounds": boosted.rounds,
+            "best_round": boosted.best,
             "valid_ic": _plain(boosted.valid_score),
             "feval_every": FEVAL_EVERY,
             "variant": variant_note(job.variant),

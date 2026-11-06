@@ -234,7 +234,11 @@ def boosts(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
     ) -> Any:
         _seed, params, feval, _rounds, _bags, layout = args
         seen.append({"rows": rows, "label": label, "params": params, "feval": feval})
-        seen[-1].update(layout=layout, min_rounds=kwargs.get("min_rounds"))
+        seen[-1].update(
+            layout=layout,
+            min_rounds=kwargs.get("min_rounds"),
+            fixed_rounds=kwargs.get("fixed_rounds"),
+        )
         return original(rows, fold, features, label, *args, **kwargs)
 
     monkeypatch.setattr(rank_model, "boost", spy)
@@ -252,6 +256,8 @@ def test_variant_defaults_are_the_spec_recipe() -> None:
     for bad, message in (
         ({"every": 0}, "every"),
         ({"min_rounds": -1}, "min_rounds"),
+        ({"fixed_rounds": ((5, 0),)}, "fixed_rounds"),
+        ({"fixed_rounds": ((5, 3), (5, 4))}, "fixed_rounds"),
         ({"half_life": 0.0}, "half_life"),
         ({"objective": "xendcg"}, "objective"),
     ):
@@ -279,6 +285,20 @@ def test_fit_rank_passes_the_variant_round_floor_to_boost(boosts: list[Any]) -> 
     (call,) = boosts
     assert call["min_rounds"] == 120
     assert boosted.rounds >= 120
+
+
+def test_fit_rank_refits_the_fixed_rounds_it_is_given(boosts: list[Any]) -> None:
+    window, inputs, labels = window_inputs()
+    variant = Variant(fixed_rounds=((5, 11), (20, 13)))
+
+    boosted = fit_rank(inputs, labels, window, FEATURES, 3, 400, variant=variant, fixed_rounds=11)
+
+    (call,) = boosts
+    assert call["fixed_rounds"] == 11
+    assert boosted.rounds == 11
+    assert variant.fixed_for(5) == 11
+    assert variant.fixed_for(20) == 13
+    assert Variant().fixed_for(5) == 0
 
 
 def test_fit_rank_weights_rows_by_age_with_the_half_life(boosts: list[Any]) -> None:

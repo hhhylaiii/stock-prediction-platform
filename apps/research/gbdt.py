@@ -91,12 +91,13 @@ def split_validation(rows: pd.DataFrame, fold: Fold) -> tuple[pd.DataFrame, pd.D
 
 @dataclass(frozen=True)
 class Boosted:
-    """The refit booster, its round count, and the probe's validation score and predictions."""
+    """The refit booster, its round count, and the probe's validation score, predictions, best."""
 
     booster: lgb.Booster | Bagged
     rounds: int
     valid_score: float
     valid_scores: np.ndarray
+    best: int
 
 
 @dataclass(frozen=True)
@@ -165,10 +166,11 @@ def boost(
     bags: int = 1,
     layout: Layout = EVERY_ROW,
     min_rounds: int = 0,
+    fixed_rounds: int = 0,
 ) -> Boosted:
     """Find the best round on the validation tail, then refit every row per bag seed.
 
-    Sampling thins the fit and refit rows, not the validation tail; min_rounds floors the refit.
+    Sampling thins fit and refit rows, not the validation tail; fixed or min rounds set the refit.
     """
     fit, valid = split_validation(rows, fold)
     kept = sampled(rows, layout.every)
@@ -189,10 +191,10 @@ def boost(
     best = probe.best_iteration or probe.current_iteration()
     score = next(iter(probe.best_score["valid"].values()))
     scores = np.asarray(probe.predict(valid[list(features)], num_iteration=best))
-    rounds = max(best, min_rounds)
+    rounds = fixed_rounds or max(best, min_rounds)
     members = [
         refit(kept, features, label, member, rounds, params, layout)
         for member in bag_seeds(seed, bags)
     ]
     final = members[0] if bags == 1 else Bagged(tuple(members))
-    return Boosted(final, rounds, float(score), scores)
+    return Boosted(final, rounds, float(score), scores, best)

@@ -346,6 +346,23 @@ def test_boost_refits_for_at_least_min_rounds_but_keeps_the_probe_best(
     assert floored.valid_score == plain.valid_score
     np.testing.assert_array_equal(floored.valid_scores, plain.valid_scores)
     assert below.rounds == plain.rounds
+    assert floored.best == below.best == plain.best == plain.rounds
+
+
+def test_boost_with_fixed_rounds_refits_exactly_that_many(
+    train_calls: list[dict[str, Any]],
+) -> None:
+    rows, window = training_window(), fold()
+
+    plain = boost(rows, window, FEATURES, LABEL, seed=1, feval=DailyRankIC, max_rounds=400)
+    fixed = boost(
+        rows, window, FEATURES, LABEL, seed=1, feval=DailyRankIC, max_rounds=400, fixed_rounds=7
+    )
+
+    assert [call["_rounds"] for call in train_calls if not call["_probe"]] == [plain.rounds, 7]
+    assert fixed.rounds == 7
+    assert fixed.best == plain.best == plain.rounds
+    assert fixed.valid_score == plain.valid_score
 
 
 def test_boost_with_one_bag_returns_the_booster_lightgbm_trains_directly() -> None:

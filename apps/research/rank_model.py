@@ -34,6 +34,7 @@ class Variant:
     half_life: float | None = None
     objective: str = "regression"
     min_rounds: int = 0
+    fixed_rounds: tuple[tuple[int, int], ...] = ()
 
     def __post_init__(self) -> None:
         if self.every < 1:
@@ -44,6 +45,15 @@ class Variant:
             raise ValueError(f"objective must be one of {OBJECTIVES}, not {self.objective!r}")
         if self.min_rounds < 0:
             raise ValueError(f"min_rounds must not be negative, not {self.min_rounds}")
+        horizons = [horizon for horizon, _ in self.fixed_rounds]
+        if len(set(horizons)) < len(horizons) or any(n < 1 for _, n in self.fixed_rounds):
+            raise ValueError(
+                f"fixed_rounds needs one positive count per horizon: {self.fixed_rounds}"
+            )
+
+    def fixed_for(self, horizon: int) -> int:
+        """The horizon's fixed refit rounds; 0 leaves them to early stopping."""
+        return dict(self.fixed_rounds).get(horizon, 0)
 
 
 SPEC_RECIPE = Variant()
@@ -75,6 +85,7 @@ def fit_rank(
     max_rounds: int = MAX_ROUNDS,
     bags: int = 1,
     variant: Variant = SPEC_RECIPE,
+    fixed_rounds: int = 0,
 ) -> Boosted:
     """Fit on the fold's tradable universe rows, stopping on validation daily rank IC.
 
@@ -110,6 +121,7 @@ def fit_rank(
         bags,
         layout,
         min_rounds=variant.min_rounds,
+        fixed_rounds=fixed_rounds,
     )
 
 

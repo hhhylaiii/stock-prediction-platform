@@ -372,12 +372,33 @@ def test_recipe_changes_with_the_rank_variant() -> None:
     assert first not in recipes
 
 
-def test_the_round_floor_leaves_recipes_cached_before_it_unchanged() -> None:
-    """Caches fitted before min_rounds existed stay current while the floor is unset."""
-    for variant in (Variant(), Variant(every=5), Variant(half_life=24.0)):
-        before = {"every": variant.every, "half_life": variant.half_life, "objective": "regression"}
-        assert lgbm_runs.variant_note(variant) == before
+def test_round_rules_leave_the_recipes_cached_before_them_unchanged() -> None:
+    """The recipes #85 cached under, so the sampling and window caches stay current."""
+    cached = {
+        Variant(): "4-4d15a2077795",
+        Variant(every=5): "4-99806676f8ae",
+        Variant(half_life=24.0): "4-6f1b9e97ee44",
+        Variant(objective="lambdarank"): "4-841ef888398c",
+    }
+    for variant, value in cached.items():
+        assert recipe("rank", KEPT, 0, variant=variant) == value, variant
     assert lgbm_runs.variant_note(Variant(min_rounds=200))["min_rounds"] == 200
+    fixed = lgbm_runs.variant_note(Variant(fixed_rounds=((5, 300), (20, 400))))
+    assert fixed["fixed_rounds"] == ((5, 300), (20, 400))
+    assert "fixed_rounds" not in lgbm_runs.variant_note(Variant())
+
+
+def test_fixed_rounds_refit_each_horizon_for_its_own_count(panel: Path) -> None:
+    fold = research()[0]
+    variant = Variant(fixed_rounds=((5, 7), (20, 9)))
+
+    run_folds("rank", [fold], "rank-wf1", panel, variant=variant)
+
+    for horizon, rounds in ((5, 7), (20, 9)):
+        run = ModelRun.objects.get(run_id=lgbm_runs.run_id("rank-wf1", "rank", horizon, fold))
+        assert run.params["rounds"] == rounds
+        assert run.params["best_round"] >= 1
+        assert run.params["variant"]["fixed_rounds"] == [[5, 7], [20, 9]]
 
 
 def test_variants_are_refused_outside_the_rank_scope(panel: Path) -> None:
