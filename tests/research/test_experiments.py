@@ -72,12 +72,10 @@ def test_the_spec_experiments_compare_these_arms_on_six_month_folds() -> None:
     assert [(arm.name, arm.variant, arm.tuned) for arm in stopping.arms] == [
         ("base", SPEC_RECIPE, False),
         ("floor", Variant(min_rounds=MIN_ROUNDS), False),
-        ("valid12", SPEC_RECIPE, False),
         ("tuned", SPEC_RECIPE, True),
     ]
-    assert stopping.arms[3].config == base.config
+    assert stopping.arms[2].config == base.config
     assert MIN_ROUNDS == 200
-    assert stopping.arms[2].config == replace(base.config, valid_months=12)
     assert {name: item.rule for name, item in chosen.items()} == {
         "window": "best",
         "sampling": "not_worse",
@@ -102,6 +100,44 @@ def test_the_shuffle_guard_passes_a_small_ic_through(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(experiments, "shuffle_check", lambda *args: -0.001)
 
     assert experiments.checked_shuffle(panel_folds()[0], Path(), 0) == -0.001
+
+
+@pytest.mark.parametrize("window", ["w60", "expanding"])
+def test_the_other_experiments_build_on_the_chosen_window(window: str) -> None:
+    chosen = experiments.experiments(WalkForwardConfig(), window)
+    plain = experiments.experiments(WalkForwardConfig())["window"]
+    picked = {arm.name: arm for arm in plain.arms}[window]
+
+    assert chosen["window"] == plain
+    stopping = chosen["stopping"]
+    assert [arm.name for arm in stopping.arms] == [window, f"{window}-floor", f"{window}-tuned"]
+    assert stopping.arms[0] == picked
+    assert {arm.config for arm in stopping.arms} == {picked.config}
+    assert stopping.arms[1].variant == replace(picked.variant, min_rounds=MIN_ROUNDS)
+    assert stopping.arms[2].variant == picked.variant
+    assert stopping.arms[2].tuned
+    fixed = experiments.with_tuned_rounds(stopping, {5: 7, 20: 9}).arms[2]
+    assert fixed.variant == replace(picked.variant, fixed_rounds=((5, 7), (20, 9)))
+    sampling, objective = chosen["sampling"].arms, chosen["objective"].arms
+    assert [arm.name for arm in sampling] == [window, f"{window}-every5"]
+    assert sampling[1].variant == replace(picked.variant, every=SAMPLE_EVERY)
+    assert [arm.name for arm in objective] == [window, f"{window}-lambdarank"]
+    assert objective[1].variant == replace(picked.variant, objective="lambdarank")
+    assert {arm.config for arm in (*sampling, *objective)} == {picked.config}
+
+
+def test_the_spec_window_keeps_the_arm_names_experiments_already_cached() -> None:
+    chosen = experiments.experiments(CONFIG, "base")
+
+    assert {name: [arm.name for arm in item.arms] for name, item in chosen.items()} == {
+        "window": ["base", "w60", "expanding"],
+        "sampling": ["base", "every5"],
+        "objective": ["base", "lambdarank"],
+        "stopping": ["base", "floor", "tuned"],
+    }
+    assert chosen == experiments.experiments(CONFIG)
+    with pytest.raises(ValueError, match="window must be one of base, w60, expanding"):
+        experiments.experiments(CONFIG, "w36")
 
 
 def test_arm_keys_keep_seed_zero_and_suffix_the_other_seeds() -> None:
@@ -351,6 +387,28 @@ def test_experiment_report_shows_the_verdict_small_gaps_and_folds() -> None:
     assert "## 各 seed" not in text
     assert "## 停止輪數" not in text
     assert "| 3 | 0.0500 | 0.0400 | 0.0540 | 0.0400 |" in text
+    assert "- 判定規則：總體 rank IC 不低於 base 就採用" in text
+    assert "| 組 | 5 日 IC | 20 日 IC | 平均 | 與 base 差 | seed 間標準差 |" in text
+
+
+def test_experiment_reports_name_the_first_arm_of_a_chosen_window() -> None:
+    chosen = experiment("best", "w60", "w60-floor")
+    daily = pd.DataFrame(
+        {
+            "seed": [0] * 4,
+            "arm": ["w60", "w60-floor"] * 2,
+            "fold": [3] * 4,
+            "horizon": [5, 5, 20, 20],
+            "date": [date(2016, 10, 3)] * 4,
+            "ic": [0.05, 0.05, 0.04, 0.04],
+        }
+    )
+
+    text = experiment_report(chosen, "rank-exp", daily)
+
+    assert "- 判定規則：總體 rank IC（5 日與 20 日平均）最高的一組；同分留 w60" in text
+    assert "| 組 | 5 日 IC | 20 日 IC | 平均 | 與 w60 差 | seed 間標準差 |" in text
+    assert "base" not in text
 
 
 def test_experiment_report_judges_close_arms_on_three_seeds_and_lists_rounds() -> None:
@@ -522,13 +580,42 @@ def test_rank_experiment_refuses_bad_seeds_before_training(command: Path, seeds:
     assert not ModelRun.objects.filter(model_type="lightgbm").exists()
 
 
-def test_the_stopping_settings_name_the_round_floor_and_the_validation_length() -> None:
-    _, floor, longer, tuned = experiments.experiments(WalkForwardConfig())["stopping"].arms
+def test_the_stopping_settings_name_the_round_floor_and_the_tuned_rounds() -> None:
+    _, floor, tuned = experiments.experiments(WalkForwardConfig())["stopping"].arms
 
     assert experiments._setting(floor).endswith("，至少 200 輪")
-    assert "驗證段 12 個月" in experiments._setting(longer)
     assert "驗證段 6 個月" in experiments._setting(floor)
     assert experiments._setting(tuned).endswith("，輪數由調參摺定")
+
+
+@pytest.mark.django_db
+def test_rank_experiment_trains_the_chosen_window_under_its_arm_names(
+    command: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(experiments, "LONG_MONTHS", 7)
+    out = StringIO()
+
+    call_command(
+        "rank_experiment",
+        name="sampling",
+        run_key="rank-exp",
+        window="w60",
+        stdout=out,
+    )
+
+    assert "rank-exp-w60: ran folds" in out.getvalue()
+    assert "rank-exp-w60-every5: ran folds" in out.getvalue()
+    assert not ModelRun.objects.filter(run_key="rank-exp-base").exists()
+    assert "- w60：rolling 7 個月" in out.getvalue()
+
+
+@pytest.mark.django_db
+def test_rank_experiment_refuses_a_window_for_the_window_experiment(command: Path) -> None:
+    with pytest.raises(CommandError, match="--window sets the layout of the other experiments"):
+        call_command(
+            "rank_experiment", name="window", run_key="rank-exp", window="w60", stdout=StringIO()
+        )
+    assert not ModelRun.objects.filter(model_type="lightgbm").exists()
 
 
 @pytest.mark.django_db
@@ -570,9 +657,9 @@ def test_the_tuned_arm_fixes_each_horizon_to_the_tuning_folds_median_best_round(
         ]
         assert rounds[horizon] == round(float(np.median(best)))
     resolved = experiments.with_tuned_rounds(chosen, rounds)
-    tuned = resolved.arms[3]
+    tuned = resolved.arms[2]
     assert tuned.variant == Variant(fixed_rounds=((5, rounds[5]), (20, rounds[20])))
-    assert resolved.arms[:3] == chosen.arms[:3]
+    assert resolved.arms[:2] == chosen.arms[:2]
     line = experiments._setting(tuned)
     assert f"固定 5 日 {rounds[5]} 輪、20 日 {rounds[20]} 輪" in line
     assert "seed 0, 3, 6" in line
@@ -601,6 +688,64 @@ def fake_tuning(
     monkeypatch.setattr(experiments.lgbm_runs, "run_folds", fit)
     monkeypatch.setattr(experiments, "stopping_rounds", read)
     return trained
+
+
+def test_w60_has_one_coarse_tuning_fold_and_the_other_windows_four() -> None:
+    days = weekday_calendar(date(2005, 1, 1), date(2026, 12, 31))
+    picked = {
+        window: [
+            fold.index
+            for fold in experiments.tuning_folds(
+                experiments.experiments(WalkForwardConfig(), window)["stopping"],
+                days,
+                date(2026, 10, 30),
+            )
+        ]
+        for window in ("base", "w60", "expanding")
+    }
+
+    assert picked == {"base": [0, 1, 2, 3], "w60": [3], "expanding": [0, 1, 2, 3]}
+
+
+def test_tuning_rounds_fit_the_chosen_window_on_its_tuning_folds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    best = {(0, 5): 1, (3, 5): 11, (6, 5): 401, (0, 20): 5, (3, 20): 300, (6, 20): 7}
+    trained = fake_tuning(monkeypatch, best)
+    monkeypatch.setattr(experiments, "LONG_MONTHS", 7)
+    chosen = experiments.experiments(CONFIG, "w60")["stopping"]
+
+    rounds = experiments.tuning_rounds(chosen, "rank-exp", calendar(), weekdays()[-1], Path())
+
+    assert rounds == {5: 11, 20: 7}
+    assert trained == [("rank-exp-w60", 0), ("rank-exp-w60-s3", 3), ("rank-exp-w60-s6", 6)]
+
+
+def test_tuned_settings_name_the_tuning_folds_behind_the_rounds() -> None:
+    stopping = experiments.experiments(WalkForwardConfig(), "w60")["stopping"]
+
+    fixed = experiments.with_tuned_rounds(stopping, {5: 7, 20: 9}, [3]).arms[2]
+
+    assert fixed.tuned_from == (3,)
+    assert experiments._setting(fixed).endswith(
+        "，固定 5 日 7 輪、20 日 9 輪（調參摺 3，共 1 摺 × seed 0, 3, 6 最佳輪數的中位數）"
+    )
+    assert experiments.with_tuned_rounds(stopping, {5: 7, 20: 9}).arms[0:2] == stopping.arms[0:2]
+
+
+def test_the_window_choices_are_the_window_arms() -> None:
+    parser = rank_experiment.Command().create_parser("manage.py", "rank_experiment")
+    window = next(action for action in parser._actions if action.dest == "window")
+
+    assert list(window.choices or []) == list(experiments.window_arms(CONFIG))
+
+
+@pytest.mark.django_db
+def test_rank_experiment_reports_an_unknown_window_as_a_command_error(command: Path) -> None:
+    with pytest.raises(CommandError, match="window must be one of"):
+        call_command(
+            "rank_experiment", name="sampling", run_key="rank-exp", window="w36", stdout=StringIO()
+        )
 
 
 def test_tuning_rounds_take_the_median_over_the_tuning_seeds(
@@ -648,12 +793,11 @@ def test_rank_experiment_fixes_the_tuned_rounds_before_training_the_arms(
 
     chosen = experiments.experiments(CONFIG)["stopping"]
     rounds = experiments.tuning_rounds(chosen, "rank-exp", calendar(), weekdays()[-1], command)
-    assert f"tuned rounds from the tuning folds: {rounds}" in out.getvalue()
+    tuning = [fold.index for fold in experiments.tuning_folds(chosen, calendar(), weekdays()[-1])]
+    assert f"tuned rounds from tuning folds {tuning} × seeds 0, 3, 6: {rounds}" in out.getvalue()
     text = output.read_text()
-    assert (
-        f"- tuned：{experiments._setting(experiments.with_tuned_rounds(chosen, rounds).arms[3])}"
-        in text
-    )
+    tuned = experiments.with_tuned_rounds(chosen, rounds, tuning).arms[2]
+    assert f"- tuned：{experiments._setting(tuned)}" in text
     fitted = ModelRun.objects.filter(run_key="rank-exp-tuned")
     refits = {(run.run_id.split(".")[2], run.params["rounds"]) for run in fitted}
     assert refits == {("h5", rounds[5]), ("h20", rounds[20])}

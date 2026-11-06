@@ -5,6 +5,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 from django.conf import settings
@@ -27,16 +28,15 @@ LONG_MONTHS = 60
 HALF_LIFE = 24.0
 SAMPLE_EVERY = 5
 MIN_ROUNDS = 200
-VALID_FACTOR = 2
 WINDOW_FROM = date(2015, 1, 1)
 SMALL_GAP = 0.02
 MIN_SEEDS = 3
 TUNING_SEEDS = tuple(bag_seeds(0, MIN_SEEDS))
 SUGGESTED_SEEDS = ",".join(map(str, TUNING_SEEDS))
 RULES = {
-    "best": "總體 rank IC（5 日與 20 日平均）最高的一組；同分留 base",
-    "not_worse": "總體 rank IC 不低於 base 就採用",
-    "better": "總體 rank IC 嚴格高於 base 才採用",
+    "best": "總體 rank IC（5 日與 20 日平均）最高的一組；同分留 {first}",
+    "not_worse": "總體 rank IC 不低於 {first} 就採用",
+    "better": "總體 rank IC 嚴格高於 {first} 才採用",
 }
 DAILY_COLUMNS = ["arm", "seed", "fold", "horizon", "date", "ic"]
 ROUND_COLUMNS = ["arm", "seed", "horizon", "fold", "best", "rounds"]
@@ -52,6 +52,7 @@ class Arm:
     variant: Variant
     tuned: bool = False
     target: TargetVariant = TARGET_RECIPE
+    tuned_from: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -63,27 +64,41 @@ class Experiment:
     arms: tuple[Arm, ...]
 
 
-def experiments(base: WalkForwardConfig) -> dict[str, Experiment]:
-    """The SPEC §7 rank experiments, each on base's layout with a fold every six months."""
+def window_arms(base: WalkForwardConfig) -> dict[str, Arm]:
+    """The SPEC §7 training windows on base's layout with a fold every six months."""
     coarse = replace(base, step_months=COARSE_MONTHS, test_months=COARSE_MONTHS)
-    plain = Arm("base", coarse, SPEC_RECIPE)
-    long = Arm("w60", replace(coarse, train_months=LONG_MONTHS), SPEC_RECIPE)
-    decayed = Arm("expanding", replace(coarse, window="expanding"), Variant(half_life=HALF_LIFE))
-    floor = Arm("floor", coarse, Variant(min_rounds=MIN_ROUNDS))
-    months = VALID_FACTOR * coarse.valid_months
-    longer = Arm(f"valid{months}", replace(coarse, valid_months=months), SPEC_RECIPE)
-    tuned = Arm("tuned", coarse, SPEC_RECIPE, tuned=True)
     return {
-        "window": Experiment("window", "best", (plain, long, decayed)),
+        "base": Arm("base", coarse, SPEC_RECIPE),
+        "w60": Arm("w60", replace(coarse, train_months=LONG_MONTHS), SPEC_RECIPE),
+        "expanding": Arm(
+            "expanding", replace(coarse, window="expanding"), Variant(half_life=HALF_LIFE)
+        ),
+    }
+
+
+def _derived(window: Arm, name: str, **changes: Any) -> Arm:
+    """An arm on a window's layout and variant with changes; names carry a non-SPEC window."""
+    prefix = "" if window.name == "base" else f"{window.name}-"
+    return Arm(f"{prefix}{name}", window.config, replace(window.variant, **changes))
+
+
+def experiments(base: WalkForwardConfig, window: str = "base") -> dict[str, Experiment]:
+    """The SPEC §7 rank experiments; all but the window one build on the chosen window."""
+    windows = window_arms(base)
+    if window not in windows:
+        raise ValueError(f"window must be one of {', '.join(windows)}, not {window!r}")
+    plain = windows[window]
+    floor = _derived(plain, "floor", min_rounds=MIN_ROUNDS)
+    tuned = replace(_derived(plain, "tuned"), tuned=True)
+    return {
+        "window": Experiment("window", "best", tuple(windows.values())),
         "sampling": Experiment(
-            "sampling", "not_worse", (plain, Arm("every5", coarse, Variant(every=SAMPLE_EVERY)))
+            "sampling", "not_worse", (plain, _derived(plain, "every5", every=SAMPLE_EVERY))
         ),
         "objective": Experiment(
-            "objective",
-            "better",
-            (plain, Arm("lambdarank", coarse, Variant(objective="lambdarank"))),
+            "objective", "better", (plain, _derived(plain, "lambdarank", objective="lambdarank"))
         ),
-        "stopping": Experiment("stopping", "best", (plain, floor, longer, tuned)),
+        "stopping": Experiment("stopping", "best", (plain, floor, tuned)),
     }
 
 
@@ -214,7 +229,7 @@ def summary(experiment: Experiment, daily: pd.DataFrame) -> pd.DataFrame:
 
 
 def verdict(experiment: Experiment, table: pd.DataFrame) -> str:
-    """The arm the experiment's rule adopts; the SPEC recipe whenever the rule is not met."""
+    """The arm the experiment's rule adopts; the first arm whenever the rule is not met."""
     default, *others = [arm.name for arm in experiment.arms]
     means = table["mean"]
     chosen = default
@@ -249,6 +264,12 @@ def stopping_rounds(
     return pd.DataFrame(rows, columns=ROUND_COLUMNS)
 
 
+def tuning_folds(experiment: Experiment, calendar: TradingDays, last: date) -> list[Fold]:
+    """The tuning folds of the experiment's first arm, whose best rounds fix the tuned arm."""
+    first = experiment.arms[0]
+    return [fold for fold in generate_folds(calendar, last, first.config) if fold.tuning]
+
+
 def tuning_rounds(
     experiment: Experiment,
     run_key: str,
@@ -256,9 +277,9 @@ def tuning_rounds(
     last: date,
     directory: Path,
 ) -> dict[int, int]:
-    """Median best round per horizon of the base arm's tuning folds under TUNING_SEEDS."""
+    """Median best round per horizon of the first arm's tuning folds under TUNING_SEEDS."""
     base = experiment.arms[0]
-    tuning = [fold for fold in generate_folds(calendar, last, base.config) if fold.tuning]
+    tuning = tuning_folds(experiment, calendar, last)
     if not tuning:
         raise ValueError(f"{experiment.name} has no tuning folds to fix its rounds on")
     for seed in TUNING_SEEDS:
@@ -276,11 +297,15 @@ def tuning_rounds(
     return {horizon: round(float(medians[horizon])) for horizon in HORIZONS if horizon in medians}
 
 
-def with_tuned_rounds(experiment: Experiment, rounds: Mapping[int, int]) -> Experiment:
-    """The experiment with each tuned arm refitting every fold for the given rounds."""
+def with_tuned_rounds(
+    experiment: Experiment, rounds: Mapping[int, int], folds: Sequence[int] = ()
+) -> Experiment:
+    """The experiment with each tuned arm refitting every fold for rounds taken from folds."""
     fixed = tuple(sorted(rounds.items()))
     arms = tuple(
-        replace(arm, variant=replace(arm.variant, fixed_rounds=fixed)) if arm.tuned else arm
+        replace(arm, variant=replace(arm.variant, fixed_rounds=fixed), tuned_from=tuple(folds))
+        if arm.tuned
+        else arm
         for arm in experiment.arms
     )
     return replace(experiment, arms=arms)
@@ -303,7 +328,11 @@ def _setting(arm: Arm) -> str:
     if variant.fixed_rounds:
         counts = "、".join(f"{horizon} 日 {count} 輪" for horizon, count in variant.fixed_rounds)
         seeds = ", ".join(map(str, TUNING_SEEDS))
-        line += f"，固定 {counts}（調參摺 seed {seeds} 最佳輪數的中位數）"
+        source = "調參摺"
+        if arm.tuned_from:
+            listed = "、".join(map(str, arm.tuned_from))
+            source = f"調參摺 {listed}，共 {len(arm.tuned_from)} 摺 ×"
+        line += f"，固定 {counts}（{source} seed {seeds} 最佳輪數的中位數）"
     elif arm.tuned:
         line += "，輪數由調參摺定"
     return line
@@ -316,7 +345,7 @@ def _cell(value: float) -> str:
 def _table_lines(table: pd.DataFrame) -> list[str]:
     base = table["mean"].iloc[0]
     lines = [
-        "| 組 | 5 日 IC | 20 日 IC | 平均 | 與 base 差 | seed 間標準差 |",
+        f"| 組 | 5 日 IC | 20 日 IC | 平均 | 與 {table.index[0]} 差 | seed 間標準差 |",
         "| --- | --- | --- | --- | --- | --- |",
     ]
     for name, row in table.iterrows():
@@ -418,7 +447,8 @@ def experiment_report(
         f"- 比較 {len(folds)} 個研究摺（摺 {folds[0]}–{folds[-1]}），seed "
         f"{', '.join(map(str, seeds))}；每組的快取 run_key 為 `{run_key}-<組名>`，"
         "seed 不是 0 時再加 `-s<seed>`",
-        f"- 判定規則：{RULES[experiment.rule]}；多個 seed 時取各 seed 的平均",
+        f"- 判定規則：{RULES[experiment.rule].format(first=experiment.arms[0].name)}；"
+        "多個 seed 時取各 seed 的平均",
         "",
         *_table_lines(table),
         "",
