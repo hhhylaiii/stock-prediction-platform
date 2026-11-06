@@ -253,6 +253,21 @@ def test_an_old_fiscal_year_report_beside_a_current_one_of_its_quarter_fails(
         parse_listing(listing, "2718", 101)
 
 
+def test_an_old_fiscal_year_report_beside_another_kind_of_report_is_kept(
+    page: Callable[[str], bytes],
+) -> None:
+    listing = text(page("2718_101"))
+    q3 = listing.index("101 年 第三季")
+    listing = listing[:q3] + listing[q3:].replace("母公司財報", "母子公司合併報表", 1)
+    listing = listing.replace("101 年 第四季", "101 年 第三季")
+    found = parse_listing(listing, "2718", 101)
+    q3_kinds = sorted((f.fin_type, f.uploaded_at) for f in found if f.period == "2012-Q3")
+    assert q3_kinds == [
+        (CONSOLIDATED, at("2012-10-31 09:54:26")),
+        (INDIVIDUAL, at("2013-03-26 16:52:18")),
+    ]
+
+
 @pytest.mark.django_db
 @responses.activate
 def test_a_holding_company_is_asked_again_for_its_own_reports(
@@ -271,6 +286,21 @@ def test_a_holding_company_is_asked_again_for_its_own_reports(
     assert ["check2858=Y" in str(call.request.url) for call in responses.calls] == [False, True]
     (raw,) = RawMops.objects.filter(dataset=STATEMENT_FILING)
     assert raw.request_params["check2858"] == "Y"
+
+
+@pytest.mark.django_db
+@responses.activate
+def test_asking_a_holding_company_again_waits_out_a_request_to_query_less(
+    adapter: MopsAdapter, page: Callable[[str], bytes], fake_sleep: RecordingSleep
+) -> None:
+    serve("2880", 98, page("2880_98"))
+    serve("2880", 98, page("throttled"), check2858="Y")
+    serve("2880", 98, page("2880_98_own"), check2858="Y")
+    statement("2880", "2009-Q1", CONSOLIDATED, date(2009, 6, 1))
+    frame = adapter.fetch(STATEMENT_FILING, date(2009, 1, 1), date(2009, 12, 31), "2880")
+    assert len(frame) == 4
+    assert len(responses.calls) == 3
+    assert LIMIT.backoff(0) in fake_sleep.calls
 
 
 @pytest.mark.django_db
