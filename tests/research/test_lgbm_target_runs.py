@@ -1,4 +1,5 @@
 from io import StringIO
+from itertools import count
 from pathlib import Path
 from typing import Any
 
@@ -553,6 +554,35 @@ def test_relative_label_folds_rerun_when_the_taiex_closes_change(panel: Path) ->
 
     assert run_folds("interval", [fold], "interval-abs", panel) == []
     assert run_folds("interval", [fold], "interval-rel", panel, target=relative) == [fold.index]
+
+
+def test_relative_label_folds_follow_the_taiex_closes_twenty_sessions_past_eval_end(
+    panel: Path,
+) -> None:
+    store_taiex()
+    fold = research()[0]
+    relative = target_models.TargetVariant(relative_up=True)
+    run_folds("interval", [fold], "interval-rel", panel, target=relative)
+    calendar = TradingDays.from_db()
+    beyond = IndexDaily.objects.filter(index_id="TAIEX", date=calendar.shift(fold.eval_end, 21))
+    reach = IndexDaily.objects.filter(index_id="TAIEX", date=calendar.shift(fold.eval_end, 20))
+
+    assert beyond.update(close=2) == 1
+    assert run_folds("interval", [fold], "interval-rel", panel, target=relative) == []
+    assert reach.update(close=2) == 1
+    assert run_folds("interval", [fold], "interval-rel", panel, target=relative) == [fold.index]
+
+
+def test_a_taiex_change_while_fitting_names_the_taiex_closes(
+    panel: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store_taiex()
+    calls = count()
+    monkeypatch.setattr(lgbm_runs, "market_digest", lambda start, end: str(next(calls)))
+    relative = target_models.TargetVariant(relative_up=True)
+
+    with pytest.raises(RuntimeError, match="label_daily or TAIEX changed while fitting fold"):
+        run_folds("interval", research()[:1], "interval-rel", panel, target=relative)
 
 
 def test_return_folds_refuse_the_relative_label(panel: Path) -> None:

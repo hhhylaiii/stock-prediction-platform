@@ -533,7 +533,8 @@ def run_fold(
         read = fold_inputs(fold, fold.train_start, fold.test_end, directory, features)
     fitted = FITS[scope](Job(fold, run_key, read, features, seed, bags, variant, target))
     if label_digest(scope, fold, target) != labels_digest:
-        raise RuntimeError(f"label_daily changed while fitting fold {fold.index}; run it again")
+        changed = "label_daily or TAIEX" if target.relative_up else "label_daily"
+        raise RuntimeError(f"{changed} changed while fitting fold {fold.index}; run it again")
     for run, model in fitted.trained:
         record_run(run, model, fold=fold)
     rows = read.raw.loc[read.test, ROW_KEYS].reset_index(drop=True)

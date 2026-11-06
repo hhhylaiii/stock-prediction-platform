@@ -90,6 +90,10 @@ def test_the_relative_up_experiment_follows_a_market_verdict_against_market_feat
     assert absolute == chosen["market-interval"].arms[0]
     assert (absolute.name, relative.name) == ("nomarket", "relative-nomarket")
     assert relative.target == TargetVariant(market=False, relative_up=True)
+    assert chosen["relative-up"].caveats[-1] == (
+        "第一組沿用 market-interval 的 nomarket 組；market-interval 判定採用市場特徵時，"
+        "拿掉 --no-market 重跑"
+    )
     assert (
         chosen["market-interval"]
         == target_experiments.target_experiments(WalkForwardConfig())["market-interval"]
@@ -497,6 +501,22 @@ def test_the_relative_label_needs_a_higher_daily_auc_with_a_fold_gap_t_above_two
     assert target_experiments.verdict(experiment, compared) == chosen
 
 
+def test_comparisons_pair_only_the_days_both_arms_scored() -> None:
+    experiment = target_experiments.target_experiments(CONFIG)["relative-up"]
+    daily = fabricated({("market", "auc"): ABSOLUTE_AUC, ("relative", "auc"): ABSOLUTE_AUC})
+    skipped = daily.loc[daily["fold"] == 0, "date"].iloc[0]
+    on_skipped = daily["date"] == skipped
+    gappy = daily.assign(value=daily["value"].mask(on_skipped, 0.99))[
+        ~(on_skipped & (daily["arm"] == "relative"))
+    ]
+
+    compared = target_experiments.comparisons(experiment, gappy, fake_folds())["auc"]
+
+    kept = daily[(daily["arm"] == "market") & ~on_skipped]
+    assert compared.by_fold.loc[0, "baseline"] == pytest.approx(ABSOLUTE_AUC[0])
+    assert compared.baseline == pytest.approx(kept["value"].mean())
+
+
 def test_the_relative_up_report_states_its_rule_and_the_noisy_gap() -> None:
     experiment = target_experiments.target_experiments(CONFIG)["relative-up"]
     values = {
@@ -514,6 +534,10 @@ def test_the_relative_up_report_states_its_rule_and_the_noisy_gap() -> None:
     assert "（SPEC §7：「日均 AUC 較高就改用」；逐摺差的 NW t 門檻是實驗另加的）" in text
     assert "兩組各對自己的 label 評估" in text
     assert "TAIEX 是價格指數" in text
+    assert (
+        "- 第一組沿用 market-interval 的 market 組；market-interval 判定不加市場特徵時，"
+        "改帶 --no-market 重跑"
+    ) in text
     assert "Brier" not in text
     assert 0 < nw_t < 2
     assert f"- relative 的 AUC 較高，但逐摺差 NW t {nw_t:+.2f} 沒有高於 2：照規則留 market" in text

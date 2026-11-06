@@ -101,7 +101,7 @@ class TargetExperiment(Experiment):
     primary: str
     metrics: tuple[str, ...]
     reason: str
-    caveat: str = ""
+    caveats: tuple[str, ...] = ()
     window: str = "base"
 
 
@@ -142,19 +142,24 @@ def target_experiments(
         )
         for scope in (RETURN, INTERVAL)
     }
+    first = market_arms[1 if market else 0]
     relative = arm(
         "relative" if market else "relative-nomarket",
         TargetVariant(market=market, relative_up=True),
     )
+    follow = "不加市場特徵時，改帶 --no-market" if market else "採用市場特徵時，拿掉 --no-market"
     chosen["relative-up"] = TargetExperiment(
         "relative-up",
         "better",
-        (market_arms[1 if market else 0], relative),
+        (first, relative),
         INTERVAL,
         "auc",
         PROBABILITY_METRICS,
         RELATIVE_REASON,
-        RELATIVE_CAVEAT,
+        (
+            RELATIVE_CAVEAT,
+            f"第一組沿用 market-interval 的 {first.name} 組；market-interval 判定{follow} 重跑",
+        ),
         window,
     )
     return chosen
@@ -283,11 +288,16 @@ def comparisons(
     """Each metric of the second arm against the first, seed-averaged by day and paired by fold."""
     default, alternative = (arm.name for arm in experiment.arms)
     return {
-        metric: paired(
+        metric: _paired_days(
             _seed_mean(daily, alternative, metric), _seed_mean(daily, default, metric), folds
         )
         for metric in experiment.metrics
     }
+
+
+def _paired_days(model: pd.Series, baseline: pd.Series, folds: Sequence[Fold]) -> Comparison:
+    days = model.index.intersection(baseline.index)
+    return paired(model[days], baseline[days], folds)
 
 
 def clears(metric: str, compared: Comparison) -> bool:
@@ -440,7 +450,7 @@ def experiment_report(
         f"而且逐摺差的 NW t 要{'低於 −' if lower else '高於 '}{GATE_T:g} 才採用"
         f"（SPEC §7：「{experiment.reason}」；逐摺差的 NW t 門檻是實驗另加的）；其他欄只列參考。"
         "各 seed 先逐日平均，再看研究期與逐摺差",
-        *([f"- {experiment.caveat}"] if experiment.caveat else []),
+        *(f"- {caveat}" for caveat in experiment.caveats),
         "",
         *_table_lines(experiment, compared),
         "",
