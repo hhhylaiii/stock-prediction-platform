@@ -218,14 +218,15 @@ def test_a_stored_event_without_a_date_gets_one_but_a_given_date_stays(
 ) -> None:
     DividendEvent.objects.create(stock_id="2884", ex_date=date(2013, 8, 15))
     DividendEvent.objects.create(
-        stock_id="2884", ex_date=date(2014, 8, 14), announce_date=date(2014, 7, 1)
+        stock_id="2884", ex_date=date(2014, 8, 21), announce_date=date(2014, 7, 1)
     )
-    span = ("2013-08-01", "2014-08-20")
+    span = ("2013-08-01", "2014-08-25")
     _mock_dividends(mock, span)
     _backfill("dividend_event", "2884", span)
     dates = dict(DividendEvent.objects.values_list("ex_date", "announce_date"))
     assert dates[date(2013, 8, 15)] == date(2013, 7, 31)
-    assert dates[date(2014, 8, 14)] == date(2014, 7, 1)
+    assert dates[date(2014, 4, 18)] == date(2014, 4, 11)
+    assert dates[date(2014, 8, 21)] == date(2014, 7, 1)
 
 
 @responses.activate

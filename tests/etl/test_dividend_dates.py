@@ -128,3 +128,21 @@ def test_the_command_reads_stored_answers_again(
     assert "rejected 2330: SchemaChangedError" in err
     assert DividendEvent.objects.get(stock_id="2884").announce_date == date(2013, 7, 31)
 
+
+@pytest.mark.django_db
+def test_the_command_can_take_only_the_stocks_named(
+    esun: Rows, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for code in ("2884", "2885"):
+        DividendEvent.objects.create(stock_id=code, ex_date=date(2013, 8, 15))
+        RawFinmind.objects.create(
+            dataset="dividend_policy",
+            source_hash=code,
+            request_params={"dataset": "TaiwanStockDividend", "data_id": code},
+            payload={"data": [{**row, "stock_id": code} for row in policy(esun)]},
+        )
+    monkeypatch.setattr(TradingDays, "from_db", classmethod(lambda cls: CALENDAR))
+    call_command("reapply_dividend_dates", "--stock", "2885")
+    assert "1 events dated across 1 stocks" in capsys.readouterr().out
+    dates = dict(DividendEvent.objects.values_list("stock_id", "announce_date"))
+    assert dates == {"2884": None, "2885": date(2013, 7, 31)}
