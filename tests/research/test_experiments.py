@@ -127,7 +127,15 @@ def test_the_other_experiments_build_on_the_chosen_window(window: str) -> None:
 
 
 def test_the_spec_window_keeps_the_arm_names_experiments_already_cached() -> None:
-    assert experiments.experiments(CONFIG, "base") == experiments.experiments(CONFIG)
+    chosen = experiments.experiments(CONFIG, "base")
+
+    assert {name: [arm.name for arm in item.arms] for name, item in chosen.items()} == {
+        "window": ["base", "w60", "expanding"],
+        "sampling": ["base", "every5"],
+        "objective": ["base", "lambdarank"],
+        "stopping": ["base", "floor", "tuned"],
+    }
+    assert chosen == experiments.experiments(CONFIG)
     with pytest.raises(ValueError, match="window must be one of base, w60, expanding"):
         experiments.experiments(CONFIG, "w36")
 
