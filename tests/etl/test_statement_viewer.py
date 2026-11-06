@@ -158,6 +158,25 @@ def test_a_later_quarter_headed_as_the_quarter_alone_is_refused(
         parse_viewer(text, "2847", "2015-Q2")
 
 
+def test_a_second_quarter_flow_may_be_headed_as_the_half_year(
+    page: Callable[[str], str],
+) -> None:
+    found = parse_viewer(page("t164sb01_1469_2018_2_C.html"), "1469", "2018-Q2")
+    assert found is not None
+    assert found[INCOME][REVENUE] == 144_880
+    assert found[CASH_FLOW][CFO] is not None
+
+
+def test_a_third_quarter_headed_as_the_half_year_is_refused(page: Callable[[str], str]) -> None:
+    text = (
+        page("t164sb01_1469_2018_2_C.html")
+        .replace("107年第2季", "107年第3季")
+        .replace("2018年06月30日", "2018年09月30日")
+    )
+    with pytest.raises(SchemaChangedError, match="綜合損益表 has no column for 2018-Q3"):
+        parse_viewer(text, "1469", "2018-Q3")
+
+
 def test_another_company_or_quarter_is_refused(page: Callable[[str], str]) -> None:
     with pytest.raises(SchemaChangedError, match="is not 6212"):
         parse_viewer(page("t164sb01_6211_2013_1_C.html"), "6212", "2013-Q1")

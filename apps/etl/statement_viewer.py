@@ -32,6 +32,7 @@ DAY = re.compile(r"^(\d{4})年(\d{1,2})月(\d{1,2})日")
 YEAR_TO_DATE = re.compile(r"^(\d{4})年0?1月0?1日至(?:\d{4}年)?(\d{1,2})月(\d{1,2})日")
 WHOLE_YEAR = re.compile(r"^(\d{4})年度")
 FIRST_QUARTER = re.compile(r"^(\d{4})年第1季$")
+HALF_YEAR = re.compile(r"^(\d{4})年上半年度$")
 NUMBER = re.compile(r"^-?\d+(\.\d+)?$")
 MISSING = {"", "-", "--"}
 NAMES = {
@@ -138,7 +139,7 @@ def _statement(tables: dict[int, Table], report: str, code: str) -> Table:
 
 
 def _column(headers: list[str], report: str, period: str, code: str) -> int:
-    """The balance at quarter end, or the flows from January 1; a Q1 may head them as a quarter."""
+    """The balance at quarter end, or the flows from January 1; a Q1 or Q2 may name them."""
     end = quarter_end(period)
     for index, text in enumerate(headers):
         if report == BALANCE:
@@ -154,6 +155,9 @@ def _column(headers: list[str], report: str, period: str, code: str) -> int:
             return index
         first = FIRST_QUARTER.match(text)
         if first and end.month == 3 and int(first[1]) == end.year:
+            return index
+        half = HALF_YEAR.match(text)
+        if half and end.month == 6 and int(half[1]) == end.year:
             return index
     raise SchemaChangedError(f"MOPS viewer {code} {TITLES[report]} has no column for {period}")
 
