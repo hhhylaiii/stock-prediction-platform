@@ -13,6 +13,7 @@ from apps.research.baseline_runs import check_run_key
 from apps.research.ensemble import write_report
 from apps.research.experiments import (
     SUGGESTED_SEEDS,
+    WINDOWS,
     arm_key,
     checked_shuffle,
     compared_folds,
@@ -43,6 +44,12 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser: ArgumentParser) -> None:
         parser.add_argument("--name", required=True, choices=sorted(experiments(DEFAULT_CONFIG)))
+        parser.add_argument(
+            "--window",
+            default="base",
+            choices=WINDOWS,
+            help="Training window the experiments other than window build on.",
+        )
         parser.add_argument("--run-key", required=True)
         parser.add_argument("--last-date")
         parser.add_argument("--seeds", default="0", help=f"Distinct seeds, e.g. {SUGGESTED_SEEDS}.")
@@ -50,7 +57,12 @@ class Command(BaseCommand):
         parser.add_argument("--output", help="Markdown file to write; prints when left out.")
 
     def handle(self, *args: Any, **options: Any) -> None:
-        experiment = experiments(DEFAULT_CONFIG)[options["name"]]
+        if options["name"] == "window" and options["window"] != "base":
+            raise CommandError(
+                "--window sets the layout of the other experiments; the window experiment "
+                "compares every window"
+            )
+        experiment = experiments(DEFAULT_CONFIG, options["window"])[options["name"]]
         run_key = options["run_key"]
         if holdout_claimed(HoldoutScope.RANK):
             raise CommandError("a rank holdout run exists, so the rank design is frozen (SPEC §7)")

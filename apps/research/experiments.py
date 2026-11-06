@@ -5,6 +5,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 from django.conf import settings
@@ -27,9 +28,9 @@ LONG_MONTHS = 60
 HALF_LIFE = 24.0
 SAMPLE_EVERY = 5
 MIN_ROUNDS = 200
-VALID_FACTOR = 2
 WINDOW_FROM = date(2015, 1, 1)
 SMALL_GAP = 0.02
+WINDOWS = ("base", "w60", "expanding")
 MIN_SEEDS = 3
 TUNING_SEEDS = tuple(bag_seeds(0, MIN_SEEDS))
 SUGGESTED_SEEDS = ",".join(map(str, TUNING_SEEDS))
@@ -63,27 +64,41 @@ class Experiment:
     arms: tuple[Arm, ...]
 
 
-def experiments(base: WalkForwardConfig) -> dict[str, Experiment]:
-    """The SPEC §7 rank experiments, each on base's layout with a fold every six months."""
+def window_arms(base: WalkForwardConfig) -> dict[str, Arm]:
+    """The SPEC §7 training windows on base's layout with a fold every six months."""
     coarse = replace(base, step_months=COARSE_MONTHS, test_months=COARSE_MONTHS)
-    plain = Arm("base", coarse, SPEC_RECIPE)
-    long = Arm("w60", replace(coarse, train_months=LONG_MONTHS), SPEC_RECIPE)
-    decayed = Arm("expanding", replace(coarse, window="expanding"), Variant(half_life=HALF_LIFE))
-    floor = Arm("floor", coarse, Variant(min_rounds=MIN_ROUNDS))
-    months = VALID_FACTOR * coarse.valid_months
-    longer = Arm(f"valid{months}", replace(coarse, valid_months=months), SPEC_RECIPE)
-    tuned = Arm("tuned", coarse, SPEC_RECIPE, tuned=True)
     return {
-        "window": Experiment("window", "best", (plain, long, decayed)),
+        "base": Arm("base", coarse, SPEC_RECIPE),
+        "w60": Arm("w60", replace(coarse, train_months=LONG_MONTHS), SPEC_RECIPE),
+        "expanding": Arm(
+            "expanding", replace(coarse, window="expanding"), Variant(half_life=HALF_LIFE)
+        ),
+    }
+
+
+def _derived(window: Arm, name: str, **changes: Any) -> Arm:
+    """An arm on a window's layout and variant with changes; names carry a non-SPEC window."""
+    prefix = "" if window.name == "base" else f"{window.name}-"
+    return Arm(f"{prefix}{name}", window.config, replace(window.variant, **changes))
+
+
+def experiments(base: WalkForwardConfig, window: str = "base") -> dict[str, Experiment]:
+    """The SPEC §7 rank experiments; all but the window one build on the chosen window."""
+    windows = window_arms(base)
+    if window not in windows:
+        raise ValueError(f"window must be one of {', '.join(windows)}, not {window!r}")
+    plain = windows[window]
+    floor = _derived(plain, "floor", min_rounds=MIN_ROUNDS)
+    tuned = replace(_derived(plain, "tuned"), tuned=True)
+    return {
+        "window": Experiment("window", "best", tuple(windows.values())),
         "sampling": Experiment(
-            "sampling", "not_worse", (plain, Arm("every5", coarse, Variant(every=SAMPLE_EVERY)))
+            "sampling", "not_worse", (plain, _derived(plain, "every5", every=SAMPLE_EVERY))
         ),
         "objective": Experiment(
-            "objective",
-            "better",
-            (plain, Arm("lambdarank", coarse, Variant(objective="lambdarank"))),
+            "objective", "better", (plain, _derived(plain, "lambdarank", objective="lambdarank"))
         ),
-        "stopping": Experiment("stopping", "best", (plain, floor, longer, tuned)),
+        "stopping": Experiment("stopping", "best", (plain, floor, tuned)),
     }
 
 
@@ -214,7 +229,7 @@ def summary(experiment: Experiment, daily: pd.DataFrame) -> pd.DataFrame:
 
 
 def verdict(experiment: Experiment, table: pd.DataFrame) -> str:
-    """The arm the experiment's rule adopts; the SPEC recipe whenever the rule is not met."""
+    """The arm the experiment's rule adopts; the first arm whenever the rule is not met."""
     default, *others = [arm.name for arm in experiment.arms]
     means = table["mean"]
     chosen = default
