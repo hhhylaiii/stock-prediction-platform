@@ -241,9 +241,12 @@ def test_a_stock_left_out_of_its_market_day_trade_table_was_not_eligible() -> No
     eligible = [100.0] * 9
     eligible[5] = NAN
     left_out = [NAN] * 9
+    halted = rising(9)
+    halted[5] = NAN
     panel = pd.concat(
         [
             listing("2330", rising(9)).assign(**chips(9, day_trade_volume=eligible)),
+            listing("1101", halted).assign(**chips(9, day_trade_volume=left_out)),
             listing("2014", rising(9)).assign(**chips(9, day_trade_volume=left_out)),
             listing("6488", rising(9), market="TPEx").assign(**chips(9, day_trade_volume=left_out)),
         ],
