@@ -6,7 +6,7 @@ import pytest
 from django.test import Client
 from pytest_django import DjangoAssertNumQueries
 
-from apps.api.serving import warn_undated
+from apps.api.serving import warn_undated, warn_unreadable_periods
 from apps.research.models import FeatureDaily, LabelDaily, ModelRun
 from tests.api.conftest import (
     SESSIONS,
@@ -27,6 +27,9 @@ TRAINED_TO = date(2026, 6, 30)
 UNDATED = (
     "degraded run quantile-h20 has no readable params.degraded_on;"
     " its band is set aside on every day"
+)
+UNREADABLE_PERIODS = (
+    "run quantile-h20 has unreadable params.alert_periods entries; they are left out"
 )
 
 
@@ -351,3 +354,85 @@ def test_a_run_restored_to_active_keeps_its_quantile_band(
 
     assert rows
     assert {row["interval_source"] for row in rows} == {"quantile"}
+
+
+NEWEST, SECOND, THIRD, OLDEST = picks(LABELLED, 20)[:4]
+
+
+def sources_with(client: Client, status: str, params: dict[str, Any]) -> list[str]:
+    """Interval sources of the four matured rows, newest first, with the band run set so."""
+    ModelRun.objects.filter(pk="quantile-h20").update(status=status, params=params)
+    vol = serving("vol-h20", "volatility")
+    for day in picks(LABELLED, 20):
+        add_predictions(vol, day, 20, {"2330": {"vol_pred": 0.3}})
+    rows = rows_of(envelope_of(client.get("/api/stocks/2330/history")))
+    return [row["interval_source"] for row in rows[:4]]
+
+
+def period(start: date, end: date) -> dict[str, str]:
+    return {"start": start.isoformat(), "end": end.isoformat()}
+
+
+def test_degraded_restored_and_degraded_again_sets_the_band_aside_in_both_periods(
+    client: Client, history: ModelRun
+) -> None:
+    params = {"alert_periods": [period(OLDEST, THIRD)], "degraded_on": NEWEST.isoformat()}
+
+    sources = sources_with(client, "degraded", params)
+
+    assert sources == ["volatility", "quantile", "quantile", "volatility"]
+
+
+def test_degraded_restored_then_retired_keeps_only_the_closed_period(
+    client: Client, history: ModelRun
+) -> None:
+    params = {"alert_periods": [period(THIRD, SECOND)], "restored_on": SECOND.isoformat()}
+
+    sources = sources_with(client, "retired", params)
+
+    assert sources == ["quantile", "quantile", "volatility", "quantile"]
+
+
+def test_an_active_run_reads_only_its_closed_periods(client: Client, history: ModelRun) -> None:
+    params = {"alert_periods": [period(OLDEST, THIRD)], "degraded_on": SECOND.isoformat()}
+
+    sources = sources_with(client, "active", params)
+
+    assert sources == ["quantile", "quantile", "quantile", "volatility"]
+
+
+@pytest.mark.parametrize(
+    "entries",
+    [
+        "2026-07-01",
+        [{"start": "soon", "end": "2026-09-01"}],
+        [{"start": "2026-07-01"}],
+        [{"start": "2026-09-01", "end": "2026-07-01"}],
+        ["2026-07-01"],
+    ],
+)
+def test_unreadable_alert_periods_are_left_out_with_one_warning(
+    client: Client, history: ModelRun, caplog: pytest.LogCaptureFixture, entries: object
+) -> None:
+    warn_unreadable_periods.cache_clear()
+    readable = period(OLDEST, THIRD)
+    periods = [*entries, readable] if isinstance(entries, list) else entries
+
+    sources = sources_with(client, "active", {"alert_periods": periods})
+    rows_of(envelope_of(client.get("/api/stocks/2330/history")))
+
+    expected = "volatility" if isinstance(entries, list) else "quantile"
+    assert sources == ["quantile", "quantile", "quantile", expected]
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert warnings == [UNREADABLE_PERIODS]
+
+
+def test_a_same_day_restore_is_an_empty_period_without_a_warning(
+    client: Client, history: ModelRun, caplog: pytest.LogCaptureFixture
+) -> None:
+    warn_unreadable_periods.cache_clear()
+
+    sources = sources_with(client, "active", {"alert_periods": [period(THIRD, THIRD)]})
+
+    assert sources == ["quantile"] * 4
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
