@@ -81,6 +81,30 @@ def test_the_relative_up_experiment_compares_the_probability_labels_by_daily_auc
     assert absolute.config.step_months == 6
 
 
+@pytest.mark.parametrize("name", ["market-return", "market-interval", "relative-up"])
+def test_target_experiments_build_on_the_chosen_window(name: str) -> None:
+    plain = target_experiments.target_experiments(WalkForwardConfig())[name]
+    w60 = experiments.window_arms(WalkForwardConfig())["w60"]
+
+    chosen = target_experiments.target_experiments(WalkForwardConfig(), "w60")[name]
+
+    assert [arm.name for arm in chosen.arms] == [f"w60-{arm.name}" for arm in plain.arms]
+    assert {arm.config for arm in chosen.arms} == {w60.config}
+    assert [arm.target for arm in chosen.arms] == [arm.target for arm in plain.arms]
+    assert {arm.variant for arm in chosen.arms} == {SPEC_RECIPE}
+    assert (chosen.window, plain.window) == ("w60", "base")
+    assert {arm.config for arm in plain.arms} == {
+        experiments.window_arms(WalkForwardConfig())["base"].config
+    }
+
+
+def test_target_experiments_refuse_the_expanding_window_and_unknown_ones() -> None:
+    with pytest.raises(ValueError, match="no time-decay weights"):
+        target_experiments.target_experiments(WalkForwardConfig(), "expanding")
+    with pytest.raises(ValueError, match="window must be one of base, w60, expanding"):
+        target_experiments.target_experiments(WalkForwardConfig(), "w36")
+
+
 @pytest.fixture
 def small(run_panel: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """The market experiments on the one-year panel with monthly folds."""
@@ -535,6 +559,37 @@ def test_target_experiment_trains_the_arms_and_writes_the_report(
     assert "return-exp-market-s1: ran folds" in out.getvalue()
     assert f"wrote {output}" in out.getvalue()
     assert "shuffled OOS rank IC" in out.getvalue()
+
+
+@pytest.mark.django_db
+def test_target_experiment_trains_the_chosen_window_under_prefixed_arm_names(
+    command: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(experiments, "LONG_MONTHS", 7)
+    out = StringIO()
+
+    call_command(
+        "target_experiment", name="market-return", run_key="return-exp", window="w60", stdout=out
+    )
+
+    assert "return-exp-w60-nomarket: ran folds" in out.getvalue()
+    assert "return-exp-w60-market: ran folds" in out.getvalue()
+    assert "- w60-nomarket：只用篩選後的個股特徵，不加市場特徵" in out.getvalue()
+    assert "- 訓練窗：rolling 7 個月，驗證段 2 個月" in out.getvalue()
+    assert not ModelRun.objects.filter(run_key="return-exp-nomarket").exists()
+
+
+@pytest.mark.django_db
+def test_target_experiment_refuses_the_expanding_window(command: Path) -> None:
+    with pytest.raises(CommandError, match="no time-decay weights"):
+        call_command(
+            "target_experiment",
+            name="market-return",
+            run_key="return-exp",
+            window="expanding",
+            stdout=StringIO(),
+        )
+    assert not ModelRun.objects.filter(model_type="lightgbm").exists()
 
 
 @pytest.mark.django_db

@@ -2,7 +2,7 @@
 
 import math
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
@@ -39,7 +39,7 @@ from apps.research.target_eval import (
     paired,
     quantile_columns,
 )
-from apps.research.target_models import TargetVariant
+from apps.research.target_models import TARGET_RECIPE, TargetVariant
 from apps.research.training import KEYS, load_labels
 from apps.research.walkforward import Fold, WalkForwardConfig
 
@@ -102,16 +102,33 @@ class TargetExperiment(Experiment):
     metrics: tuple[str, ...]
     reason: str
     caveat: str = ""
+    window: str = "base"
 
 
-def target_experiments(base: WalkForwardConfig) -> dict[str, TargetExperiment]:
-    """The SPEC §7 market-feature and relative-label experiments on six-month folds."""
-    months = experiments.COARSE_MONTHS
-    coarse = replace(base, step_months=months, test_months=months)
-    market = (
-        Arm("nomarket", coarse, SPEC_RECIPE, target=NO_MARKET),
-        Arm("market", coarse, SPEC_RECIPE),
-    )
+def _layout(base: WalkForwardConfig, window: str) -> WalkForwardConfig:
+    """The coarse fold layout of a rank window the target scopes can train on."""
+    windows = experiments.window_arms(base)
+    if window not in windows:
+        raise ValueError(f"window must be one of {', '.join(windows)}, not {window!r}")
+    if windows[window].variant != SPEC_RECIPE:
+        raise ValueError(
+            f"the {window} window weighs rows by age, and the target scopes have no time-decay "
+            "weights yet; use base or w60"
+        )
+    return windows[window].config
+
+
+def target_experiments(
+    base: WalkForwardConfig, window: str = "base"
+) -> dict[str, TargetExperiment]:
+    """The SPEC §7 market-feature and relative-label experiments on a window's six-month folds."""
+    layout = _layout(base, window)
+    prefix = "" if window == "base" else f"{window}-"
+
+    def arm(name: str, target: TargetVariant = TARGET_RECIPE) -> Arm:
+        return Arm(f"{prefix}{name}", layout, SPEC_RECIPE, target=target)
+
+    market = (arm("nomarket", NO_MARKET), arm("market"))
     chosen = {
         f"market-{scope}": TargetExperiment(
             f"market-{scope}",
@@ -121,22 +138,20 @@ def target_experiments(base: WalkForwardConfig) -> dict[str, TargetExperiment]:
             SCOPE_PRIMARY[scope],
             SCOPE_METRICS[scope],
             MARKET_REASON,
+            window=window,
         )
         for scope in (RETURN, INTERVAL)
     }
-    labels = (
-        Arm("absolute", coarse, SPEC_RECIPE),
-        Arm("relative", coarse, SPEC_RECIPE, target=RELATIVE),
-    )
     chosen["relative-up"] = TargetExperiment(
         "relative-up",
         "better",
-        labels,
+        (arm("absolute"), arm("relative", RELATIVE)),
         INTERVAL,
         "auc",
         PROBABILITY_METRICS,
         RELATIVE_REASON,
         RELATIVE_CAVEAT,
+        window,
     )
     return chosen
 
@@ -408,7 +423,11 @@ def experiment_report(
     lines = [f"# 實驗：{experiment.name}（{run_key}）", ""]
     if note:
         lines += [f"> {note}", ""]
-    lines += [f"- {arm.name}：{SETTINGS[arm.name]}" for arm in experiment.arms]
+    prefix = "" if experiment.window == "base" else f"{experiment.window}-"
+    lines += [f"- {arm.name}：{SETTINGS[arm.name.removeprefix(prefix)]}" for arm in experiment.arms]
+    layout = experiment.arms[0].config
+    span = "expanding" if layout.window == "expanding" else f"rolling {layout.train_months} 個月"
+    lines.append(f"- 訓練窗：{span}，驗證段 {layout.valid_months} 個月")
     lines += [
         f"- 比較 {len(indices)} 個研究摺（摺 {indices[0]}–{indices[-1]}），seed "
         f"{', '.join(map(str, seeds))}；每組的快取 run_key 為 `{run_key}-<組名>`，"

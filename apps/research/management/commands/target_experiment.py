@@ -17,6 +17,7 @@ from apps.research.experiments import (
     checked_shuffle,
     compared_folds,
     parse_seeds,
+    window_arms,
 )
 from apps.research.holdout import HoldoutError, holdout_claimed
 from apps.research.labels import latest_price_date
@@ -44,13 +45,22 @@ class Command(BaseCommand):
             "--name", required=True, choices=sorted(target_experiments(DEFAULT_CONFIG))
         )
         parser.add_argument("--run-key", required=True)
+        parser.add_argument(
+            "--window",
+            default="base",
+            choices=list(window_arms(DEFAULT_CONFIG)),
+            help="Training window both arms train on; expanding is not available yet.",
+        )
         parser.add_argument("--last-date")
         parser.add_argument("--seeds", default="0", help=f"Distinct seeds, e.g. {SUGGESTED_SEEDS}.")
         parser.add_argument("--note", help="Caveat printed at the top of the report.")
         parser.add_argument("--output", help="Markdown file to write; prints when left out.")
 
     def handle(self, *args: Any, **options: Any) -> None:
-        experiment = target_experiments(DEFAULT_CONFIG)[options["name"]]
+        try:
+            experiment = target_experiments(DEFAULT_CONFIG, options["window"])[options["name"]]
+        except ValueError as error:
+            raise CommandError(str(error)) from error
         scope, run_key = experiment.scope, options["run_key"]
         if holdout_claimed(scope):
             raise CommandError(
