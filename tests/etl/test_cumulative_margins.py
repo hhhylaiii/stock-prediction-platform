@@ -8,7 +8,7 @@ import pytest
 from django.core.management import call_command
 
 from apps.etl.adapters.mops import STATEMENT_SCAN
-from apps.etl.cumulative_margins import MARGIN_CHECK, clear_cumulative_margins, spans
+from apps.etl.cumulative_margins import MARGIN_CHECK, _judge, clear_cumulative_margins, spans
 from apps.etl.models import DataQualityLog, EtlRun, RawMops
 from apps.etl.mops_history import STATEMENT_HISTORY, STATEMENT_VIEWER
 from apps.etl.statement_summary import GROSS_PROFIT, REPORTS, REVENUE, SEASON_LABELS
@@ -78,7 +78,7 @@ def test_a_year_to_date_margin_is_cleared_and_a_quarter_one_kept(
         }
     ]
     assert logged()["unmatched"] == []
-    assert logged()["unverifiable"] == [
+    assert logged()["untried"] == [
         {"period": "2013-Q2", "fin_type": "consolidated", "field": "op_margin", "value": 0.5}
     ]
     assert DataQualityLog.objects.get(check_name=MARGIN_CHECK).date == date(2013, 6, 30)
@@ -111,9 +111,9 @@ def test_other_report_kinds_first_quarters_and_rows_without_pages_are_not_judged
     fixture_path: Callable[[str], Path],
 ) -> None:
     save_viewer(fixture_path, 1, 2)
-    stored(fin_type="individual", gross_margin=H1_GROSS)
+    stored(fin_type="individual", revenue=1, gross_margin=H1_GROSS)
     stored("2013-Q1", gross_margin=20_390 / 108_424)
-    stored("2013-Q3", gross_margin=0.5)
+    stored("2013-Q3", revenue=1, gross_margin=0.5)
     cleared = clear_cumulative_margins()
     assert (cleared.kinds, cleared.unmatched, cleared.unchecked) == ({}, 0, 2)
     assert FinancialStatement.objects.filter(gross_margin__isnull=True).count() == 0
@@ -195,7 +195,7 @@ def test_only_the_stocks_asked_for_are_judged(fixture_path: Callable[[str], Path
         announce_date=date(2014, 6, 3),
         gross_margin=320_083 / 1_452_830,
     )
-    stored("2013-Q3", gross_margin=0.5)
+    stored("2013-Q3", revenue=1, gross_margin=0.5)
     cleared = clear_cumulative_margins(["4526"])
     assert (cleared.kinds, cleared.unchecked) == ({"cumulative": 1}, 0)
     assert margins()[0] == pytest.approx(H1_GROSS)
@@ -214,9 +214,9 @@ def test_before_ifrs_a_margin_beside_a_left_out_revenue_is_cleared_unverified() 
 def test_a_rerun_drops_notes_the_new_pages_settle(fixture_path: Callable[[str], Path]) -> None:
     save_viewer(fixture_path, 2)
     stored(op_margin=Q2_OPERATING)
-    assert clear_cumulative_margins().unverifiable == 1
+    assert clear_cumulative_margins().untried == 1
     save_viewer(fixture_path, 1)
-    assert clear_cumulative_margins().unverifiable == 0
+    assert clear_cumulative_margins().untried == 0
     assert margins()[1] == pytest.approx(Q2_OPERATING)
     assert not DataQualityLog.objects.filter(check_name=MARGIN_CHECK).exists()
 
@@ -237,3 +237,57 @@ def test_a_span_without_revenue_is_skipped_and_a_tie_keeps_the_quarter() -> None
     assert spans(0.3, 2, empty_first, GROSS_PROFIT) == [1, 2]
     flat = {1: {revenue: 100.0, gross: 30.0}, 2: {revenue: 100.0, gross: 30.0}}
     assert spans(0.3, 2, flat, GROSS_PROFIT) == [2]
+
+
+@pytest.mark.django_db
+def test_a_margin_tried_against_its_own_quarter_and_matching_nothing_is_unmatched(
+    fixture_path: Callable[[str], Path],
+) -> None:
+    save_viewer(fixture_path, 1, 2)
+    stored(gross_margin=0.5)
+    assert clear_cumulative_margins().unmatched == 1
+    assert logged()["unmatched"] == [
+        {"period": "2013-Q2", "fin_type": "consolidated", "field": "gross_margin", "value": 0.5}
+    ]
+    assert logged()["untried"] == []
+
+
+def test_a_margin_matching_its_own_quarter_and_more_is_kept() -> None:
+    revenue, gross = REVENUE[0], GROSS_PROFIT[0]
+    income = {1: {revenue: 0.0, gross: 0.0}, 2: {revenue: 100.0, gross: 30.0}}
+    row = FinancialStatement(stock_id="6211", period="2013-Q2", gross_margin=0.3)
+    assert _judge(row, income).fields == {}
+
+
+@pytest.mark.django_db
+def test_a_field_cleared_again_keeps_the_value_it_had_the_first_time(
+    fixture_path: Callable[[str], Path],
+) -> None:
+    save_viewer(fixture_path, 2)
+    stored(gross_margin=H1_GROSS)
+    clear_cumulative_margins()
+    FinancialStatement.objects.filter(period="2013-Q2").update(gross_margin=H1_GROSS)
+    clear_cumulative_margins()
+    (entry,) = logged()["changes"]
+    assert entry["fields"] == {"gross_margin": [H1_GROSS, None, "cumulative"]}
+
+
+@pytest.mark.django_db
+def test_without_mops_figures_a_margin_beside_a_left_out_revenue_is_cleared_unjudged() -> None:
+    stored("2013-Q3", gross_margin=0.3)
+    stored("2013-Q4", revenue=100, gross_margin=0.3)
+    cleared = clear_cumulative_margins()
+    assert (cleared.kinds, cleared.unchecked) == ({"unjudged": 1}, 1)
+    assert (margins("2013-Q3")[0], margins("2013-Q4")[0]) == (None, 0.3)
+
+
+@pytest.mark.django_db
+def test_a_stock_with_a_viewer_page_that_does_not_parse_is_not_judged(
+    fixture_path: Callable[[str], Path],
+) -> None:
+    save_viewer(fixture_path, 2)
+    RawMops.objects.filter(dataset=STATEMENT_VIEWER).update(payload={"html": "<html>blank</html>"})
+    stored(gross_margin=H1_GROSS)
+    cleared = clear_cumulative_margins()
+    assert (cleared.kinds, cleared.unchecked, cleared.unreadable) == ({}, 1, ["6211"])
+    assert margins()[0] == pytest.approx(H1_GROSS)
