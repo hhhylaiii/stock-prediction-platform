@@ -690,6 +690,17 @@ def test_a_day_since_the_first_kept_quotes_waits_for_its_own(
 
 @responses.activate
 @pytest.mark.django_db
+def test_a_day_before_the_first_kept_quotes_takes_the_priced_codes(
+    adapter: TwseAdapter, serve: Callable[[str], dict[str, Any]], load_fixture: Callable[[str], Any]
+) -> None:
+    serve("day_trade")
+    _kept_quotes(load_fixture, date(2026, 10, 29))
+    _priced("2330", "2317")
+    assert set(_load(adapter, "day_trade")) == {"2330", "2317"}
+
+
+@responses.activate
+@pytest.mark.django_db
 def test_day_trades_priced_only_on_the_other_market_are_not_ready(
     adapter: TwseAdapter, serve: Callable[[str], dict[str, Any]]
 ) -> None:
