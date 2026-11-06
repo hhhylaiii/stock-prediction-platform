@@ -8,6 +8,7 @@ import pandas as pd
 
 from apps.research.features.transforms import STOCK_LEVEL, standardize
 from apps.research.gbdt import MAX_ROUNDS, Boosted, DailyRankIC, Feval, Layout, boost
+from apps.research.labels import HORIZONS
 from apps.research.runs import Screened
 from apps.research.training import training_rows
 from apps.research.walkforward import Fold, time_decay_weights
@@ -33,6 +34,8 @@ class Variant:
     every: int = 1
     half_life: float | None = None
     objective: str = "regression"
+    min_rounds: int = 0
+    fixed_rounds: tuple[tuple[int, int], ...] = ()
 
     def __post_init__(self) -> None:
         if self.every < 1:
@@ -41,6 +44,22 @@ class Variant:
             raise ValueError(f"half_life must be positive, not {self.half_life}")
         if self.objective not in OBJECTIVES:
             raise ValueError(f"objective must be one of {OBJECTIVES}, not {self.objective!r}")
+        if self.min_rounds < 0:
+            raise ValueError(f"min_rounds must not be negative, not {self.min_rounds}")
+        horizons = [horizon for horizon, _ in self.fixed_rounds]
+        unknown = set(horizons) - set(HORIZONS)
+        if (
+            unknown
+            or len(set(horizons)) < len(horizons)
+            or any(n < 1 for _, n in self.fixed_rounds)
+        ):
+            raise ValueError(
+                f"fixed_rounds needs one positive count per horizon: {self.fixed_rounds}"
+            )
+
+    def fixed_for(self, horizon: int) -> int:
+        """The horizon's fixed refit rounds; 0 leaves them to early stopping."""
+        return dict(self.fixed_rounds).get(horizon, 0)
 
 
 SPEC_RECIPE = Variant()
@@ -72,6 +91,7 @@ def fit_rank(
     max_rounds: int = MAX_ROUNDS,
     bags: int = 1,
     variant: Variant = SPEC_RECIPE,
+    fixed_rounds: int = 0,
 ) -> Boosted:
     """Fit on the fold's tradable universe rows, stopping on validation daily rank IC.
 
@@ -95,7 +115,20 @@ def fit_rank(
         return DailyRankIC(dates, pct.loc[dates.index])
 
     layout = Layout(every=variant.every, weight=weight, group=ranking)
-    return boost(rows, fold, names, label, seed, params, feval, max_rounds, bags, layout)
+    return boost(
+        rows,
+        fold,
+        names,
+        label,
+        seed,
+        params,
+        feval,
+        max_rounds,
+        bags,
+        layout,
+        min_rounds=variant.min_rounds,
+        fixed_rounds=fixed_rounds,
+    )
 
 
 def prediction_frame(rows: pd.DataFrame, scores: np.ndarray) -> pd.DataFrame:

@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import date
 from io import StringIO
 from pathlib import Path
@@ -13,12 +14,14 @@ from apps.market.calendar import TradingDays
 from apps.market.models import DailyPrice
 from apps.research import experiments, lgbm_runs
 from apps.research.experiments import (
+    MIN_ROUNDS,
     SAMPLE_EVERY,
     Arm,
     Experiment,
     compared_folds,
     daily_ics,
     experiment_report,
+    stopping_rounds,
     summary,
     verdict,
 )
@@ -28,7 +31,7 @@ from apps.research.models import HoldoutRun, HoldoutScope, LabelDaily, ModelRun
 from apps.research.prediction_cache import load_predictions
 from apps.research.rank_model import LAMBDARANK, SPEC_RECIPE, Variant
 from apps.research.runs import SCREENING_MODEL
-from apps.research.walkforward import WalkForwardConfig
+from apps.research.walkforward import WalkForwardConfig, generate_folds
 from tests.research.conftest import weekday_calendar
 from tests.research.run_panels import CONFIG, weekdays
 
@@ -63,12 +66,57 @@ def test_the_spec_experiments_compare_these_arms_on_six_month_folds() -> None:
         ("base", SPEC_RECIPE),
         ("lambdarank", Variant(objective="lambdarank")),
     ]
+    stopping = chosen["stopping"]
+    assert [(arm.name, arm.variant, arm.tuned) for arm in stopping.arms] == [
+        ("base", SPEC_RECIPE, False),
+        ("floor", Variant(min_rounds=MIN_ROUNDS), False),
+        ("valid12", SPEC_RECIPE, False),
+        ("tuned", SPEC_RECIPE, True),
+    ]
+    assert stopping.arms[3].config == base.config
+    assert MIN_ROUNDS == 200
+    assert stopping.arms[2].config == replace(base.config, valid_months=12)
     assert {name: item.rule for name, item in chosen.items()} == {
         "window": "best",
         "sampling": "not_worse",
         "objective": "better",
+        "stopping": "best",
     }
-    assert len({arm.config for arm in (sampling.arms[0], objective.arms[0], base)}) == 1
+    shared = (sampling.arms[0], objective.arms[0], stopping.arms[0], stopping.arms[1], base)
+    assert len({arm.config for arm in shared}) == 1
+
+
+def test_arm_keys_keep_seed_zero_and_suffix_the_other_seeds() -> None:
+    arm = Arm("every5", CONFIG, Variant(every=5))
+
+    assert experiments.arm_key("rank-exp1", arm) == "rank-exp1-every5"
+    assert experiments.arm_key("rank-exp1", arm, 0) == "rank-exp1-every5"
+    assert experiments.arm_key("rank-exp1", arm, 2) == "rank-exp1-every5-s2"
+
+
+def test_train_arms_fit_every_seed_of_every_arm_under_its_own_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, int, Variant]] = []
+
+    def fake(
+        scope: str, folds: Any, run_key: str, directory: Path, seed: int, **kwargs: Any
+    ) -> Any:
+        calls.append((run_key, seed, kwargs["variant"]))
+        return [seed]
+
+    monkeypatch.setattr(experiments.lgbm_runs, "run_folds", fake)
+    chosen = experiments.experiments(CONFIG)["sampling"]
+
+    ran = experiments.train_arms(chosen, "rank-exp", {"base": [], "every5": []}, Path(), (0, 2))
+
+    assert calls == [
+        ("rank-exp-base", 0, SPEC_RECIPE),
+        ("rank-exp-base-s2", 2, SPEC_RECIPE),
+        ("rank-exp-every5", 0, Variant(every=5)),
+        ("rank-exp-every5-s2", 2, Variant(every=5)),
+    ]
+    assert ran == {key: [seed] for key, seed, _ in calls}
 
 
 def test_compared_folds_share_research_test_periods_from_2015_on() -> None:
@@ -120,10 +168,12 @@ def calendar() -> TradingDays:
     return TradingDays(days, days[0], days[-1])
 
 
-def run(name: str, directory: Path) -> tuple[Experiment, dict[str, Any]]:
+def run(
+    name: str, directory: Path, seeds: tuple[int, ...] = (0,)
+) -> tuple[Experiment, dict[str, Any]]:
     chosen = experiments.experiments(CONFIG)[name]
     folds = compared_folds(chosen, calendar(), weekdays()[-1])
-    experiments.train_arms(chosen, "rank-exp", folds, directory, seed=0)
+    experiments.train_arms(chosen, "rank-exp", folds, directory, seeds)
     return chosen, folds
 
 
@@ -168,7 +218,7 @@ def test_train_arms_fit_each_arm_under_its_own_key_and_share_the_base(
 def test_daily_ics_pool_each_arm_over_its_tradable_test_rows(
     small: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    chosen, folds = run("sampling", small)
+    chosen, folds = run("sampling", small, (0, 1))
     reads: list[tuple[date, date, int]] = []
     load = experiments.load_labels
 
@@ -178,14 +228,16 @@ def test_daily_ics_pool_each_arm_over_its_tradable_test_rows(
 
     monkeypatch.setattr(experiments, "load_labels", counted)
 
-    daily = daily_ics(chosen, "rank-exp", folds)
+    daily = daily_ics(chosen, "rank-exp", folds, (0, 1))
 
     periods = [(fold.test_start, fold.eval_end) for fold in folds["base"]]
     assert sorted(reads) == sorted((*period, horizon) for horizon in (5, 20) for period in periods)
+    assert set(daily["seed"]) == {0, 1}
 
     for arm in chosen.arms:
-        cached = load_predictions(f"rank-exp-{arm.name}", "lightgbm", folds[arm.name])
-        for horizon in (5, 20):
+        for seed, horizon in ((0, 5), (0, 20), (1, 5), (1, 20)):
+            key = experiments.arm_key("rank-exp", arm, seed)
+            cached = load_predictions(key, "lightgbm", folds[arm.name])
             labels = pd.DataFrame(list(LabelDaily.objects.filter(horizon=horizon).values()))
             joined = cached.merge(labels, on=["stock_id", "date"])
             ends = joined["fold"].map({fold.index: fold.eval_end for fold in folds[arm.name]})
@@ -193,7 +245,9 @@ def test_daily_ics_pool_each_arm_over_its_tradable_test_rows(
                 (joined["date"] <= ends) & joined["in_universe"] & ~joined["untradable_t1"]
             ]
             expected = daily_rank_ic(rows, f"lightgbm_h{horizon}")
-            got = daily[(daily["arm"] == arm.name) & (daily["horizon"] == horizon)]
+            got = daily[
+                (daily["arm"] == arm.name) & (daily["seed"] == seed) & (daily["horizon"] == horizon)
+            ]
             np.testing.assert_allclose(
                 got.set_index("date")["ic"].sort_index(), expected.sort_index()
             )
@@ -201,12 +255,62 @@ def test_daily_ics_pool_each_arm_over_its_tradable_test_rows(
     assert list(pooled.index) == ["base", "every5"]
     base = pooled.loc["base"].astype(float)
     assert base["mean"] == pytest.approx((base["h5"] + base["h20"]) / 2)
+    assert base["seeds"] == 2
+    rounds = stopping_rounds(chosen, "rank-exp", folds, (0, 1))
+    fitted = ModelRun.objects.get(
+        run_id=lgbm_runs.run_id("rank-exp-every5-s1", "rank", 20, folds["every5"][0])
+    )
+    picked = rounds[
+        (rounds["arm"] == "every5")
+        & (rounds["seed"] == 1)
+        & (rounds["horizon"] == 20)
+        & (rounds["fold"] == folds["every5"][0].index)
+    ]
+    assert picked["rounds"].tolist() == [fitted.params["rounds"]]
+    assert picked["best"].tolist() == [fitted.params["best_round"]]
+    assert len(rounds) == 2 * 2 * 2 * len(periods)
+
+
+def seeded_daily(values: dict[tuple[str, int], float]) -> pd.DataFrame:
+    """One day and fold per arm and seed, with the same IC for both horizons."""
+    rows = [
+        {"arm": arm, "seed": seed, "fold": 3, "horizon": horizon, "date": date(2016, 10, 3)}
+        | {"ic": value}
+        for (arm, seed), value in values.items()
+        for horizon in (5, 20)
+    ]
+    return pd.DataFrame(rows)
+
+
+def test_summary_averages_the_seeds_and_reports_their_spread() -> None:
+    chosen = experiment("best", "base", "w60")
+    daily = seeded_daily(
+        {
+            ("base", 0): 0.10,
+            ("base", 1): 0.12,
+            ("base", 2): 0.14,
+            ("w60", 0): 0.11,
+            ("w60", 1): 0.11,
+            ("w60", 2): 0.11,
+        }
+    )
+
+    table = summary(chosen, daily)
+
+    assert table.loc["base", "mean"] == pytest.approx(0.12)
+    assert table.loc["base", "sd"] == pytest.approx(0.02)
+    assert table.loc["w60", "sd"] == pytest.approx(0.0)
+    assert table.loc["base", "seeds"] == 3
+    assert verdict(chosen, table) == "base"
+    one = summary(chosen, seeded_daily({("base", 0): 0.1, ("w60", 0): 0.2}))
+    assert np.isnan(float(one["sd"].astype(float)["base"]))
 
 
 def test_experiment_report_shows_the_verdict_small_gaps_and_folds() -> None:
     chosen = experiment("not_worse", "base", "every5")
     daily = pd.DataFrame(
         {
+            "seed": [0] * 8,
             "arm": ["base", "base", "every5", "every5"] * 2,
             "fold": [3, 4] * 4,
             "horizon": [5] * 4 + [20] * 4,
@@ -218,11 +322,51 @@ def test_experiment_report_shows_the_verdict_small_gaps_and_folds() -> None:
     text = experiment_report(chosen, "rank-exp", daily, note="暫定特徵")
 
     assert "暫定特徵" in text
-    assert "- every5：rolling 6 個月，每 1 日一列，半衰期 —，objective regression" in text
-    assert "| every5 | 0.0620 | 0.0500 | 0.0560 | +0.0010 |" in text
-    assert "採用 every5" in text
-    assert "小於 0.01" in text
+    assert (
+        "- every5：rolling 6 個月，驗證段 2 個月，每 1 日一列，半衰期 —，objective regression"
+        in text
+    )
+    assert "| every5 | 0.0620 | 0.0500 | 0.0560 | +0.0010 | — |" in text
+    assert "**判定（暫定）：採用 every5**" in text
+    assert "差距小於 0.02，只跑了 1 個 seed" in text
+    assert "`--seeds 0,3,6`" in text
+    assert "## 各 seed" not in text
+    assert "## 停止輪數" not in text
     assert "| 3 | 0.0500 | 0.0400 | 0.0540 | 0.0400 |" in text
+
+
+def test_experiment_report_judges_close_arms_on_three_seeds_and_lists_rounds() -> None:
+    chosen = experiment("best", "base", "w60")
+    daily = seeded_daily(
+        {
+            ("base", 0): 0.10,
+            ("base", 1): 0.12,
+            ("base", 2): 0.14,
+            ("w60", 0): 0.11,
+            ("w60", 1): 0.11,
+            ("w60", 2): 0.11,
+        }
+    )
+    rounds = pd.DataFrame(
+        {
+            "arm": ["base"] * 3 + ["w60"] * 3,
+            "seed": [0, 1, 2] * 2,
+            "horizon": [20] * 6,
+            "fold": [3] * 6,
+            "best": [21, 446, 1681, 30, 310, 320],
+            "rounds": [21, 446, 1681, 200, 310, 320],
+        }
+    )
+
+    text = experiment_report(chosen, "rank-exp", daily, rounds=rounds)
+
+    assert "| base | 0.1200 | 0.1200 | 0.1200 | — | 0.0200 |" in text
+    assert "**判定：採用 base**" in text
+    assert "差距小於 0.02，判定用 3 個 seed 的平均" in text
+    assert "| base | 0.1000 | 0.1200 | 0.1400 |" in text
+    assert "| base | 20 日 | 21 | 446 | 1681 | 1 | 446 |" in text
+    assert "| w60 | 20 日 | 30 | 310 | 320 | 1 | 310 |" in text
+    assert "（摺 × seed）" in text
 
 
 @pytest.fixture
@@ -247,11 +391,14 @@ def test_rank_experiment_trains_the_arms_and_writes_the_report(
         run_key="rank-exp",
         output=str(output),
         note="暫定",
+        seeds="0,1",
         stdout=out,
     )
 
-    chosen, folds = run("sampling", command)
-    expected = experiment_report(chosen, "rank-exp", daily_ics(chosen, "rank-exp", folds), "暫定")
+    chosen, folds = run("sampling", command, (0, 1))
+    daily = daily_ics(chosen, "rank-exp", folds, (0, 1))
+    rounds = stopping_rounds(chosen, "rank-exp", folds, (0, 1))
+    expected = experiment_report(chosen, "rank-exp", daily, "暫定", rounds)
     assert output.read_text() == expected
     assert f"wrote {output}" in out.getvalue()
 
@@ -288,6 +435,7 @@ def test_an_arm_missing_a_horizon_has_no_mean_and_never_wins() -> None:
     daily = pd.DataFrame(
         {
             "arm": ["base", "base", "every5"],
+            "seed": [0, 0, 0],
             "fold": [3, 3, 3],
             "horizon": [5, 20, 5],
             "date": [date(2016, 10, 3)] * 3,
@@ -344,3 +492,150 @@ def test_the_lambdarank_setting_names_its_truncation_and_gain() -> None:
     assert "objective lambdarank" in line
     assert "前 30 名" in line
     assert "label_gain 2^級−1" in line
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("seeds", ["x", "0,0", "0, 0", "1,01", "", "-1"])
+def test_rank_experiment_refuses_bad_seeds_before_training(command: Path, seeds: str) -> None:
+    with pytest.raises(CommandError, match="--seeds"):
+        call_command(
+            "rank_experiment", name="sampling", run_key="rank-exp", seeds=seeds, stdout=StringIO()
+        )
+    assert not ModelRun.objects.filter(model_type="lightgbm").exists()
+
+
+def test_the_stopping_settings_name_the_round_floor_and_the_validation_length() -> None:
+    _, floor, longer, tuned = experiments.experiments(WalkForwardConfig())["stopping"].arms
+
+    assert experiments._setting(floor).endswith("，至少 200 輪")
+    assert "驗證段 12 個月" in experiments._setting(longer)
+    assert "驗證段 6 個月" in experiments._setting(floor)
+    assert experiments._setting(tuned).endswith("，輪數由調參摺定")
+
+
+@pytest.mark.django_db
+def test_rank_experiment_checks_every_seed_key_before_training(command: Path) -> None:
+    with pytest.raises(CommandError, match="at most"):
+        call_command(
+            "rank_experiment",
+            name="window",
+            run_key="rank-" + "x" * 24,
+            seeds="0,3",
+            stdout=StringIO(),
+        )
+    assert not ModelRun.objects.filter(model_type="lightgbm").exists()
+
+
+@pytest.mark.django_db
+def test_the_tuned_arm_fixes_each_horizon_to_the_tuning_folds_median_best_round(
+    small: Path,
+) -> None:
+    chosen = experiments.experiments(CONFIG)["stopping"]
+
+    rounds = experiments.tuning_rounds(chosen, "rank-exp", calendar(), weekdays()[-1], small)
+
+    base = chosen.arms[0]
+    tuning = [
+        fold for fold in generate_folds(calendar(), weekdays()[-1], base.config) if fold.tuning
+    ]
+    assert tuning
+    assert experiments.TUNING_SEEDS == (0, 3, 6)
+    for horizon in (5, 20):
+        best = [
+            ModelRun.objects.get(
+                run_id=lgbm_runs.run_id(
+                    experiments.arm_key("rank-exp", base, seed), "rank", horizon, fold
+                )
+            ).params["best_round"]
+            for fold in tuning
+            for seed in experiments.TUNING_SEEDS
+        ]
+        assert rounds[horizon] == round(float(np.median(best)))
+    resolved = experiments.with_tuned_rounds(chosen, rounds)
+    tuned = resolved.arms[3]
+    assert tuned.variant == Variant(fixed_rounds=((5, rounds[5]), (20, rounds[20])))
+    assert resolved.arms[:3] == chosen.arms[:3]
+    line = experiments._setting(tuned)
+    assert f"固定 5 日 {rounds[5]} 輪、20 日 {rounds[20]} 輪" in line
+    assert "seed 0, 3, 6" in line
+
+
+def fake_tuning(
+    monkeypatch: pytest.MonkeyPatch, best: dict[tuple[int, int], int]
+) -> list[tuple[str, int]]:
+    """No tuning fits, and stopping rounds read from best keyed by seed and horizon."""
+    monkeypatch.setattr(experiments, "COARSE_MONTHS", 1)
+    trained: list[tuple[str, int]] = []
+
+    def fit(scope: str, folds: Any, run_key: str, directory: Path, seed: int, **kwargs: Any) -> Any:
+        trained.append((run_key, seed))
+        return []
+
+    def read(experiment: Experiment, run_key: str, folds: Any, seeds: Any) -> pd.DataFrame:
+        (tuning,) = folds.values()
+        rows = [
+            ["base", seed, horizon, fold.index, best[(seed, horizon)], best[(seed, horizon)]]
+            for fold in tuning
+            for (seed, horizon) in best
+        ]
+        return pd.DataFrame(rows, columns=experiments.ROUND_COLUMNS)
+
+    monkeypatch.setattr(experiments.lgbm_runs, "run_folds", fit)
+    monkeypatch.setattr(experiments, "stopping_rounds", read)
+    return trained
+
+
+def test_tuning_rounds_take_the_median_over_the_tuning_seeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    best = {(0, 5): 1, (3, 5): 11, (6, 5): 401, (0, 20): 5, (3, 20): 300, (6, 20): 7}
+    trained = fake_tuning(monkeypatch, best)
+    chosen = experiments.experiments(CONFIG)["stopping"]
+
+    rounds = experiments.tuning_rounds(chosen, "rank-exp", calendar(), weekdays()[-1], Path())
+
+    assert rounds == {5: 11, 20: 7}
+    assert trained == [("rank-exp-base", 0), ("rank-exp-base-s3", 3), ("rank-exp-base-s6", 6)]
+
+
+def test_tuning_rounds_refuse_tuning_folds_without_a_recorded_round(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_tuning(monkeypatch, {(0, 5): 1, (3, 5): 11, (6, 5): 401, (0, 20): 5})
+    chosen = experiments.experiments(CONFIG)["stopping"]
+
+    with pytest.raises(ValueError, match="tuning folds lack"):
+        experiments.tuning_rounds(chosen, "rank-exp", calendar(), weekdays()[-1], Path())
+
+
+def test_train_arms_refuse_a_tuned_arm_whose_rounds_are_not_fixed() -> None:
+    chosen = experiments.experiments(CONFIG)["stopping"]
+    half = experiments.with_tuned_rounds(chosen, {5: 7})
+
+    for unresolved in (chosen, half):
+        with pytest.raises(ValueError, match="with_tuned_rounds"):
+            experiments.train_arms(unresolved, "rank-exp", {}, Path(), (0,))
+
+
+@pytest.mark.django_db
+def test_rank_experiment_fixes_the_tuned_rounds_before_training_the_arms(
+    command: Path, tmp_path: Path
+) -> None:
+    output = tmp_path / "stopping.md"
+    out = StringIO()
+
+    call_command(
+        "rank_experiment", name="stopping", run_key="rank-exp", output=str(output), stdout=out
+    )
+
+    chosen = experiments.experiments(CONFIG)["stopping"]
+    rounds = experiments.tuning_rounds(chosen, "rank-exp", calendar(), weekdays()[-1], command)
+    assert f"tuned rounds from the tuning folds: {rounds}" in out.getvalue()
+    text = output.read_text()
+    assert (
+        f"- tuned：{experiments._setting(experiments.with_tuned_rounds(chosen, rounds).arms[3])}"
+        in text
+    )
+    fitted = ModelRun.objects.filter(run_key="rank-exp-tuned")
+    refits = {(run.run_id.split(".")[2], run.params["rounds"]) for run in fitted}
+    assert refits == {("h5", rounds[5]), ("h20", rounds[20])}

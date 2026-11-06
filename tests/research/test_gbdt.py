@@ -326,6 +326,45 @@ def test_boost_with_bags_probes_once_and_refits_each_seed_for_the_same_rounds(
     assert len({tuple(member.predict(test[FEATURES][:5])) for member in members}) == 3
 
 
+def test_boost_refits_for_at_least_min_rounds_but_keeps_the_probe_best(
+    train_calls: list[dict[str, Any]],
+) -> None:
+    window = fold()
+    rows = panel(window.train_start, window.train_end, signal=0.0)
+
+    plain = boost(rows, window, FEATURES, LABEL, seed=1, feval=DailyRankIC, max_rounds=2000)
+    floor = plain.rounds + 50
+    floored = boost(
+        rows, window, FEATURES, LABEL, seed=1, feval=DailyRankIC, max_rounds=2000, min_rounds=floor
+    )
+    below = boost(rows, window, FEATURES, LABEL, seed=1, feval=DailyRankIC, min_rounds=1)
+
+    refits = [call["_rounds"] for call in train_calls if not call["_probe"]]
+    assert refits == [plain.rounds, floor, plain.rounds]
+    assert isinstance(floored.booster, lgb.Booster)
+    assert floored.rounds == floored.booster.num_trees() == floor
+    assert floored.valid_score == plain.valid_score
+    np.testing.assert_array_equal(floored.valid_scores, plain.valid_scores)
+    assert below.rounds == plain.rounds
+    assert floored.best == below.best == plain.best == plain.rounds
+
+
+def test_boost_with_fixed_rounds_refits_exactly_that_many(
+    train_calls: list[dict[str, Any]],
+) -> None:
+    rows, window = training_window(), fold()
+
+    plain = boost(rows, window, FEATURES, LABEL, seed=1, feval=DailyRankIC, max_rounds=400)
+    fixed = boost(
+        rows, window, FEATURES, LABEL, seed=1, feval=DailyRankIC, max_rounds=400, fixed_rounds=7
+    )
+
+    assert [call["_rounds"] for call in train_calls if not call["_probe"]] == [plain.rounds, 7]
+    assert fixed.rounds == 7
+    assert fixed.best == plain.best == plain.rounds
+    assert fixed.valid_score == plain.valid_score
+
+
 def test_boost_with_one_bag_returns_the_booster_lightgbm_trains_directly() -> None:
     rows, window = training_window(), fold()
 

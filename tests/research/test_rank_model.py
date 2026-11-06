@@ -229,11 +229,17 @@ def boosts(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
     seen: list[dict[str, Any]] = []
     original = rank_model.boost
 
-    def spy(rows: pd.DataFrame, fold: Fold, features: Any, label: str, *args: Any) -> Any:
+    def spy(
+        rows: pd.DataFrame, fold: Fold, features: Any, label: str, *args: Any, **kwargs: Any
+    ) -> Any:
         _seed, params, feval, _rounds, _bags, layout = args
         seen.append({"rows": rows, "label": label, "params": params, "feval": feval})
-        seen[-1]["layout"] = layout
-        return original(rows, fold, features, label, *args)
+        seen[-1].update(
+            layout=layout,
+            min_rounds=kwargs.get("min_rounds"),
+            fixed_rounds=kwargs.get("fixed_rounds"),
+        )
+        return original(rows, fold, features, label, *args, **kwargs)
 
     monkeypatch.setattr(rank_model, "boost", spy)
     return seen
@@ -246,9 +252,13 @@ def window_inputs() -> tuple[Fold, pd.DataFrame, pd.DataFrame]:
 
 
 def test_variant_defaults_are_the_spec_recipe() -> None:
-    assert Variant() == Variant(every=1, half_life=None, objective="regression")
+    assert Variant() == Variant(every=1, half_life=None, objective="regression", min_rounds=0)
     for bad, message in (
         ({"every": 0}, "every"),
+        ({"min_rounds": -1}, "min_rounds"),
+        ({"fixed_rounds": ((5, 0),)}, "fixed_rounds"),
+        ({"fixed_rounds": ((5, 3), (5, 4))}, "fixed_rounds"),
+        ({"fixed_rounds": ((10, 3),)}, "fixed_rounds"),
         ({"half_life": 0.0}, "half_life"),
         ({"objective": "xendcg"}, "objective"),
     ):
@@ -265,6 +275,31 @@ def test_fit_rank_samples_every_fifth_day_through_the_layout(boosts: list[Any]) 
     assert call["layout"] == gbdt.Layout(every=5)
     assert call["label"] == RANK_LABEL
     assert call["params"] is None
+    assert call["min_rounds"] == 0
+
+
+def test_fit_rank_passes_the_variant_round_floor_to_boost(boosts: list[Any]) -> None:
+    window, inputs, labels = window_inputs()
+
+    boosted = fit_rank(inputs, labels, window, FEATURES, 3, 400, variant=Variant(min_rounds=120))
+
+    (call,) = boosts
+    assert call["min_rounds"] == 120
+    assert boosted.rounds >= 120
+
+
+def test_fit_rank_refits_the_fixed_rounds_it_is_given(boosts: list[Any]) -> None:
+    window, inputs, labels = window_inputs()
+    variant = Variant(fixed_rounds=((5, 11), (20, 13)))
+
+    boosted = fit_rank(inputs, labels, window, FEATURES, 3, 400, variant=variant, fixed_rounds=11)
+
+    (call,) = boosts
+    assert call["fixed_rounds"] == 11
+    assert boosted.rounds == 11
+    assert variant.fixed_for(5) == 11
+    assert variant.fixed_for(20) == 13
+    assert Variant().fixed_for(5) == 0
 
 
 def test_fit_rank_weights_rows_by_age_with_the_half_life(boosts: list[Any]) -> None:
