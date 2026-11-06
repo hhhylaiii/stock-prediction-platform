@@ -306,6 +306,31 @@ done
 - 兩種篩法的差別（2018 年每月第一個交易日抽查）：`daily_price` 有價的代號全部都在行情表上；行情表多出 32–41 個代號。這些是 FinMind 沒有的 ETF、TDR，加上 5 檔 FinMind 整檔沒有價格的普通股（1589、4207、4804、5355、8176），以及沒成交那天的 4415。這些代號的當沖量會略過；它們沒有價格，本來也進不了研究母體。日後如果補了這些代號的 `daily_price`，要對同一段日期跑 `reprocess --source twse|tpex --dataset day_trade --start … --end …`（只讀 raw、不發請求），否則研究層會把它們的當沖量當成 0。
 - 當沖表會列出量為 0 的標的。同市場當天的表有寫入、某檔不在表上，研究層算 0；同市場當天一列當沖都沒有的，才是空值。所以兩個市場每個交易日都要有成功、而且有列的 run。
 
+## 交易所逐日表補缺（plan K17c）
+
+FinMind 的外資持股、流通股數、本益比在 2010–2020 有缺，下市股缺得特別多（約 21% 對現存股 0.4–0.7%），模型會把「缺值」學成「之後會下市」。交易所的逐日全市場表列出當天所有掛牌的股票，用它把缺的補上。範圍是 2010 年起到每日排程接手的前一天（2026-10-21）：只補到 2020 年的話，2021 年後才有第一筆股數、或完全沒有股數的股票，會把 2020 年最後一個股數一路帶到下市或下一筆。
+
+兩個市場是不同主機，各開一個終端機平行跑；同一個主機一次只跑一個指令（每個程序各有一份限速，兩個同時打同一主機就會快過 3 秒一次）：
+
+```bash
+for fill in holdings valuation; do
+  uv run python manage.py fill_from_exchange --source twse --fill $fill --start 2010-01-01 --end 2026-10-21
+done
+```
+
+櫃買把 `--source` 換成 `tpex`。中斷了用 `--resume <run_id>` 接著跑。
+
+- `holdings`：證交所 MI_QFIIS、櫃買 insti/qfii，一天一個請求，同一頁補外資持股比率（`daily_chip.fi_holding_pct`）和發行股數（`shares_outstanding`）。`valuation`：證交所 BWIBBU_d、櫃買 peQryDate，補 `daily_valuation`。
+- 缺才補，不分股票之後有沒有下市：
+  - `daily_chip`：沒有這一列就新增（只有這一欄）；有這一列、這一欄是空的才補；有值的不動。
+  - `daily_valuation`：當天沒有這一列才新增，三個數字都空的不新增。
+  - `shares_outstanding`：只補每檔第一筆已存股數之前的日子，照「變動才存」寫變動點；跑完時，補的最後一筆和第一筆已存股數相同的，刪掉那筆重複的已存列（生效中的股數不變），刪掉的列記在 log 的 `dropped`（`[代號, 日期, 股數]`），可以照著寫回。界線取第一次 `holdings` 補缺開跑時的第一筆已存股數（記在那個 `etl_run.checkpoint.windows`），之後的補缺、`--resume`、另一個市場都沿用，所以補進去的列不會被當成已存的界線。
+- 只寫當天在 `daily_price` 有價的代號（不用歷史行情頁，K6）；當天交易所表上的代號一個都沒有價時 SourceNotReady，不會記成成功 0 列。
+- 已有的值和交易所差到公布的最後一位（外資持股比、本益比、淨值比 0.01，殖利率 0.0001）、或界線那天的股數不同時，不改，記在 log 的 `differences`：每種表的筆數、分下市股和現存股的筆數，和前 20 筆 `[代號, 日期, 欄位, 已存值, 交易所值]`（SPEC §8.5）。
+- `etl_run` 的 dataset 是 `fill:holdings`／`fill:valuation`，每天和寫入同一個交易記 checkpoint。跑完記一列 `exchange_fill`（info）：`filled` 是每檔補了哪段日期、幾天，`created` 是其中新增整列的部分，`totals` 分下市股和現存股的列數，`span` 是第一次開跑的起點到結尾。
+- 先跑完 FinMind 的 `daily_price`、`shares_outstanding`、`daily_chip`、`daily_valuation` 回補（含 `--retry-rejected`）再跑補缺：`daily_price` 決定補哪些代號、`shares_outstanding` 決定股數的界線（第一次 `holdings` 補缺時就固定）；FinMind 寫 `daily_chip`、`daily_valuation` 時整列已存在就跳過，補缺新增的列會擋掉之後的 FinMind 回補。之後真的要再回補 FinMind，先刪掉補缺新增的列：`daily_chip` 是只有 `fi_holding_pct` 有值、其他欄位都是空的列；`daily_valuation` 的 `created` 只記每檔的日期範圍，範圍內可能夾著 FinMind 的列，要逐日分辨時從兩邊的 raw 重算。
+- 每個請求約 3.5 秒；一個市場一個 fill 2010-01-04 到 2026-10-21 約 4,130 天、約 4 小時，兩個 fill 約 8 小時。可以跑的時段是平日 02:00–15:00 和週末，和每日 ETL（含 02:00 前的重試）錯開；平日 15:00 前沒跑完就停，之後 `--resume`。
+
 ## 告警
 
 warning 與 error 一律寫 log；`.env` 設了 `ALERT_WEBHOOK_URL` 就另外 POST JSON：
