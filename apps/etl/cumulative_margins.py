@@ -32,6 +32,7 @@ MARGIN_CHECK = "statement_margin_cleared"
 MARGINS = {"gross_margin": GROSS_PROFIT, "op_margin": OPERATING_INCOME}
 CUMULATIVE = "cumulative"
 UNVERIFIED = "unverified"
+UNJUDGED = "unjudged"
 TOLERANCE = 1e-4
 Income = Mapping[str, float | None]
 YearToDate = dict[tuple[str, str, str], Income]
@@ -41,8 +42,9 @@ Entry = dict[str, Any]
 class Cleared(NamedTuple):
     kinds: Counter[str]
     unmatched: int
-    unverifiable: int
+    untried: int
     unchecked: int
+    unreadable: list[str]
 
 
 class Verdict(NamedTuple):
@@ -56,22 +58,25 @@ class Verdict(NamedTuple):
 
 def clear_cumulative_margins(stock_ids: Sequence[str] | None = None) -> Cleared:
     """Q2–Q4 margins spanning more than their quarter become NULL, logged per stock."""
-    found = year_to_date(stock_ids)
+    found, unreadable = year_to_date(stock_ids)
     kinds: Counter[str] = Counter()
     counts = Counter[str]()
     notes: dict[str, dict[str, list[Entry]]] = {}
     updated: list[tuple[FinancialStatement, list[str]]] = []
     for row in _judged_rows(stock_ids):
-        verdict = (
-            _unverified(row) if row.period < IFRS_FROM else _judge(row, _same_basis(found, row))
-        )
+        if row.period < IFRS_FROM:
+            verdict = _unverified(row)
+        elif row.stock_id in unreadable:
+            verdict = Verdict({}, [], [], sum(getattr(row, name) is not None for name in MARGINS))
+        else:
+            verdict = _judge(row, _same_basis(found, row))
         counts.update(
             unmatched=len(verdict.missed), untried=len(verdict.untried), blind=verdict.blind
         )
         key = {"period": row.period, "fin_type": row.fin_type}
-        stock = notes.setdefault(row.stock_id, {"changes": [], "unmatched": [], "unverifiable": []})
+        stock = notes.setdefault(row.stock_id, {"changes": [], "unmatched": [], "untried": []})
         stock["unmatched"].extend({**key, **miss} for miss in verdict.missed)
-        stock["unverifiable"].extend({**key, **miss} for miss in verdict.untried)
+        stock["untried"].extend({**key, **miss} for miss in verdict.untried)
         if verdict.fields:
             kinds.update(change[2] for change in verdict.fields.values())
             for name in verdict.fields:
@@ -83,12 +88,18 @@ def clear_cumulative_margins(stock_ids: Sequence[str] | None = None) -> Cleared:
             row.save(update_fields=names)
         for stock_id, stock in sorted(notes.items()):
             _log(stock_id, stock)
-    return Cleared(kinds, counts["unmatched"], counts["untried"], counts["blind"])
+    return Cleared(
+        kinds, counts["unmatched"], counts["untried"], counts["blind"], sorted(unreadable)
+    )
 
 
-def year_to_date(stock_ids: Sequence[str] | None = None) -> YearToDate:
-    """Each company's income from January 1 by report kind, summaries first, then viewer pages."""
+def year_to_date(stock_ids: Sequence[str] | None = None) -> tuple[YearToDate, set[str]]:
+    """Each company's income from January 1 by report kind, summaries first, then viewer pages.
+
+    Companies with a viewer page that does not parse are returned apart and not judged.
+    """
     found: YearToDate = {}
+    unreadable: set[str] = set()
     pages = latest_pages(STATEMENT_HISTORY, ("report", "TYPEK", "year", "season"))
     for period in sorted({summary_period(params) for params in pages}):
         for code, income in kept_summaries(period, pages)[INCOME].items():
@@ -100,10 +111,14 @@ def year_to_date(stock_ids: Sequence[str] | None = None) -> YearToDate:
         if stock_ids and code not in stock_ids:
             continue
         period = f"{year}-Q{season}"
-        figures = _viewer_income(viewer[(code, year, season, report)], code, period)
+        try:
+            figures = _viewer_income(viewer[(code, year, season, report)], code, period)
+        except SchemaChangedError:
+            unreadable.add(code)
+            continue
         if figures is not None:
             found.setdefault((code, period, _kind(figures)), figures)
-    return found
+    return found, unreadable
 
 
 def spans(
@@ -147,7 +162,7 @@ def _unverified(row: FinancialStatement) -> Verdict:
     return Verdict(fields, [], [], 0)
 
 
-def _judge(row: FinancialStatement, income: dict[int, Income]) -> Verdict:
+def _judge(row: FinancialStatement, income: Mapping[int, Income]) -> Verdict:
     season = int(row.period[-1])
     verdict = Verdict({}, [], [], 0)
     for name, names in MARGINS.items():
@@ -155,7 +170,10 @@ def _judge(row: FinancialStatement, income: dict[int, Income]) -> Verdict:
         if value is None:
             continue
         if season not in income or _value(income[season], REVENUE) is None:
-            verdict = verdict._replace(blind=verdict.blind + 1)
+            if row.revenue is None:
+                verdict.fields[name] = [value, None, UNJUDGED]
+            else:
+                verdict = verdict._replace(blind=verdict.blind + 1)
             continue
         matched = spans(value, season, income, names)
         if not matched:
@@ -195,13 +213,9 @@ def _value(income: Income, names: Iterable[str]) -> float | None:
 
 
 def _viewer_income(page: str, code: str, period: str) -> Income | None:
-    """A page that does not parse is left out; the rows it would judge stay unchecked."""
     if page == NOT_KEPT:
         return None
-    try:
-        figures = parse_viewer(page, code, period)
-    except SchemaChangedError:
-        return None
+    figures = parse_viewer(page, code, period)
     return figures[INCOME] if figures is not None else None
 
 
@@ -212,7 +226,7 @@ def _log(stock_id: str, stock: Mapping[str, list[Entry]]) -> None:
         [entry for log in logged for entry in log.detail["changes"]], stock["changes"]
     )
     logged.delete()
-    entries = changes + stock["unmatched"] + stock["unverifiable"]
+    entries = changes + stock["unmatched"] + stock["untried"]
     if not entries:
         return
     DataQualityLog.objects.create(
