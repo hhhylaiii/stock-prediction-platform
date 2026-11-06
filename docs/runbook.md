@@ -331,6 +331,22 @@ done
 - 先跑完 FinMind 的 `daily_price`、`shares_outstanding`、`daily_chip`、`daily_valuation` 回補（含 `--retry-rejected`）再跑補缺：`daily_price` 決定補哪些代號、`shares_outstanding` 決定股數的界線（第一次 `holdings` 補缺時就固定）；FinMind 寫 `daily_chip`、`daily_valuation` 時整列已存在就跳過，補缺新增的列會擋掉之後的 FinMind 回補。之後真的要再回補 FinMind，先刪掉補缺新增的列：`daily_chip` 是只有 `fi_holding_pct` 有值、其他欄位都是空的列；`daily_valuation` 的 `created` 只記每檔的日期範圍，範圍內可能夾著 FinMind 的列，要逐日分辨時從兩邊的 raw 重算。
 - 每個請求約 3.5 秒；一個市場一個 fill 2010-01-04 到 2026-10-21 約 4,130 天、約 4 小時，兩個 fill 約 8 小時。可以跑的時段是平日 02:00–15:00 和週末，和每日 ETL（含 02:00 前的重試）錯開；平日 15:00 前沒跑完就停，之後 `--resume`。
 
+## 交易所產業補缺（plan K17c）
+
+`stock_master.industry` 是空的股票（多半是 FinMind 股票清單沒有的下市股），用交易所「依產業別」的收盤行情補上：
+
+```bash
+uv run python manage.py fill_industry --source twse --start 2010-01-01 --end 2026-09-30
+uv run python manage.py fill_industry --source tpex --start 2010-01-01 --end 2026-09-30
+```
+
+- 每季取最後一個交易日（區間的結尾若在季中，就取結尾前最後一個交易日），一天一個產業別一個請求：證交所 `MI_INDEX`、櫃買 `afterTrading/otc`，產業別代碼 01–38，07、13 是彙總表，不抓。回應先存 raw（`industry_quotes`）。
+- 產業名稱不照頁面標題，照那個代碼底下「產業已知的股票」最多數的產業，所以和 `stock_master` 現有的名稱一致；一個已知股票都沒有的代碼不用。
+- 一檔出現在好幾季時，用最後一次看到的產業。只寫產業是空的股票，已有的不動；之後 `refresh_stock_master` 不更新 `industry`，補上的值會留著。
+- 一次執行一列 `etl_run`（dataset `fill:industry`），每天記 checkpoint；跑完記一列 `industry_fill`（info）：`types` 記每個抽樣日每個代碼對到的產業，`filled` 記每檔 `[產業, 代碼, 第一次看到, 最後一次看到]`。
+- 抽樣頁整頁留在 raw，所有股票都在，不只空的那些：之後要建依時間的產業表（例如 2022–23 年才新增的產業類別不往回套），從 raw 加 `types` 重建，不用重抓。
+- 2026-11-07 的 twp：3,065 檔裡 483 檔是空的，2010 年後下市或還在掛牌的 73 檔（櫃買 62、證交所 11），其餘 410 檔在 2010 年前下市，研究期間用不到。
+
 ## 告警
 
 warning 與 error 一律寫 log；`.env` 設了 `ALERT_WEBHOOK_URL` 就另外 POST JSON：
