@@ -70,6 +70,18 @@ def _two_clean_days() -> None:
     _indices(DAY)
 
 
+NON_COMMON = ["0050", "00632R", "9103", "5999"]
+
+
+def _non_common_days() -> None:
+    """An ETF, a leveraged ETF, a 91 depositary receipt and one filed under 存託憑證."""
+    StockMaster.objects.create(stock_id="5999", name="x", market="TWSE", industry="存託憑證")
+    for day in (PREV, DAY):
+        _prices(day, NON_COMMON)
+        _chips(day, NON_COMMON)
+        _valuations(day, NON_COMMON)
+
+
 def _results(day: date = DAY) -> dict[tuple[str, str], DataQualityLog]:
     return {
         (row.check_name, row.detail.get("table", "")): row
@@ -161,6 +173,33 @@ def test_rows_gone_since_yesterday_count_as_missing_but_delisted_ones_do_not(
     assert row.severity == WARNING
     gap = row.detail["columns"]["row"]
     assert (gap["missing"], gap["population"]) == (2, 99)
+
+
+@pytest.mark.django_db
+def test_only_common_stocks_make_up_the_missing_values_population(calendar: TradingDays) -> None:
+    _two_clean_days()
+    _non_common_days()
+    for model in (DailyPrice, DailyChip, DailyValuation):
+        model.objects.filter(date=DAY, stock_id__in=NON_COMMON).delete()
+    run_checks(DAY, calendar)
+    for table in ("daily_price", "daily_chip", "daily_valuation"):
+        row = _results()[("missing_values", table)]
+        assert row.severity == INFO
+        filled = [gap for gap in row.detail["columns"].values() if gap["population"]]
+        assert filled
+        assert {(gap["missing"], gap["population"]) for gap in filled} == {(0, 100)}
+
+
+@pytest.mark.django_db
+def test_common_stocks_gone_still_count_beside_non_common_ones(calendar: TradingDays) -> None:
+    _two_clean_days()
+    _non_common_days()
+    DailyPrice.objects.filter(date=DAY, stock_id__in=[*NON_COMMON, *CODES[:2]]).delete()
+    run_checks(DAY, calendar)
+    row = _results()[("missing_values", "daily_price")]
+    assert row.severity == WARNING
+    gap = row.detail["columns"]["row"]
+    assert (gap["missing"], gap["population"]) == (2, 100)
 
 
 @pytest.mark.django_db
