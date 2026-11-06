@@ -22,6 +22,7 @@ from apps.research.features.market import (
     load_market_features,
 )
 from apps.research.features.registry import feature_names
+from apps.research.features.residual import apply_residual_rules
 from apps.research.features.size_risk import (
     industry_risk_features,
     second_batch_industry_features,
@@ -55,7 +56,7 @@ def compute_features(panel: pd.DataFrame) -> pd.DataFrame:
     The second batch is stored for later evaluation; screening and training read the first only.
     """
     technical = technical_features(panel)
-    fundamental = fundamental_features(panel)
+    fundamental = apply_residual_rules(fundamental_features(panel))
     groups = [
         technical,
         second_batch_technical_features(panel),

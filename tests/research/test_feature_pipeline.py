@@ -210,6 +210,25 @@ def test_industry_neutral_features_reach_the_frame() -> None:
     assert value("2330", "fund_ep") == pytest.approx(8 / (100 + 0.1 * k))
 
 
+def test_monthly_revenue_growth_falls_back_to_the_quarterly_growth_in_the_frame() -> None:
+    listed("2330", "2015-06-01", "2016-03-31")
+    FinancialStatement.objects.bulk_create(
+        FinancialStatement(stock_id="2330", period=period, revenue=revenue, announce_date=d(day))
+        for period, revenue, day in [
+            ("2014-Q3", 1_000, "2014-11-14"),
+            ("2015-Q3", 1_200, "2015-11-16"),
+        ]
+    )
+
+    frame = build_feature_frame(CALENDAR, d("2016-03-01"), d("2016-03-04"))
+
+    row = frame[frame["date"] == d("2016-03-02")].iloc[0]
+    assert row["fund_rev_yoy_q"] == pytest.approx(0.2)
+    assert row["fund_rev_yoy"] == pytest.approx(0.2)
+    assert row["fund_rev_3m_yoy"] == pytest.approx(0.2)
+    assert math.isnan(row["fund_rev_mom"])
+
+
 def test_a_later_start_gives_the_same_features() -> None:
     listed("2330", "2013-01-02", "2016-03-31")
     listed("1101", "2014-06-02", "2016-03-31", step=-0.05)
