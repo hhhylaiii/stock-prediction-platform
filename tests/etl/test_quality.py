@@ -193,6 +193,8 @@ def test_only_common_stocks_make_up_the_missing_values_population(calendar: Trad
     for model in (DailyPrice, DailyChip, DailyValuation):
         model.objects.filter(date=DAY, stock_id__in=NON_COMMON).delete()
     run_checks(DAY, calendar)
+    rows = _results()[("row_count", "daily_price")].detail
+    assert (rows["count"], rows["previous"]) == (100, 104)
     for table in ("daily_price", "daily_chip", "daily_valuation"):
         row = _results()[("missing_values", table)]
         assert row.severity == INFO
