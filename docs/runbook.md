@@ -104,10 +104,10 @@ uv run python manage.py backfill --source mops --dataset statement_filing --from
 uv run python manage.py backfill --source mops --dataset statement_filing --from 2009-01-01 --resume
 ```
 
-- 每檔只查 `financial_statement` 有資料的年度，每年一次請求，約 3.2 萬次，6 秒間隔約 53 小時。doc.twse 每分鐘大約只接受 12 次，超過就回「查詢過量，請稍後再查詢!」，client 會退避後重試（`MOPS_MIN_INTERVAL` 不能低於 5 秒）。拒收的代號用 `--retry-rejected <run_id>` 重跑。
+- 每檔只查 `financial_statement` 有資料的年度，每年一次請求（金控兩次，見下），約 3.2 萬次，6 秒間隔約 53 小時。doc.twse 每分鐘大約只接受 12 次，超過就回「查詢過量，請稍後再查詢!」，client 會退避後重試（`MOPS_MIN_INTERVAL` 不能低於 5 秒）。拒收的代號用 `--retry-rejected <run_id>` 重跑。
 - 上傳時間在交易日 22:40（`FILING_VISIBLE_BEFORE`，每日財報掃描的最後一次）之前算當天，之後或非交易日算下一個交易日；英文版不算。有重編報表的期別（IFRS 的「(重編)」「(第二次重編)」，舊制的「母公司財報重編」「母公司財報第二次重編」「母子公司合併報表重編」），公告日改成最後一次重編的上傳日，記一列 `statement_restated`（info）：FinMind 存的數字可能是重編後的，原始上傳日就看到會偷看。
 - 會讀的報表（`REPORT_TYPES`）：合併是「IFRSs合併財報」「母子公司合併報表」，個體是「IFRSs個體財報」「IFRSs個別財報」「母公司財報」。資料類型不是「財務報告書」、或細節說明不在這些名稱（含下面的重編與附件寫法）裡的，整檔拒收，要看頁面再決定怎麼收。
-- 不算公告的附件：英文版、「關係企業合併報表」、銀行的「國際金融業務分行財報」。改過會計年度的公司，舊年制那一季的「舊會計年制--母公司財報」照母公司財報算。
+- 不算公告的附件：英文版、「關係企業合併報表」、銀行的「國際金融業務分行財報」。改過會計年度的公司，舊年制那一季的「舊會計年制--<上列任一報表>」照同種報表算（目前只見過 2718 民國 101 年 Q4 的母公司財報）；同一季同種報表新舊年制並存時，分不出 FinMind 存的是哪一份，整檔拒收（`lists old and current fiscal year reports`）。
 - 金控（2880–2892 等）的查詢頁先回子公司清單；client 會帶 `check2858=Y` 再查一次，拿金控自己的報表，raw 存的是第二次的參數與頁面。
 - 規則（plan §8 K14）：沒有更正紀錄的財報，公告日就是實際上傳日，早於或晚於法定截止日都照實際；有更正紀錄的，上傳時間可能是更正後重傳，只拿來提早、不延後。晚於保守值（截止日的下一個交易日）的每檔記一列 `data_quality_log`：沒更正、已延後的是 `statement_filed_late`（info），有更正、沒延後的是 `statement_filed_later`（warning）。
 - 每天 16:00 的 `refresh_master` 只要多一個代號，`--resume` 就會因為股票清單變了而拒絕。這時改用 `--stock` 只跑還沒跑到的代號（`etl_run.checkpoint.last_stock_id` 之後的），並把那次 run 已拒收的代號一起帶上；中斷的 run 沒有結束，不能用 `--retry-rejected`：
