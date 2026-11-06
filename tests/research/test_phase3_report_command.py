@@ -9,8 +9,8 @@ from django.core.management.base import CommandError
 
 from apps.market.models import StockMaster
 from apps.research.features.build import FEATURE_COLUMNS
-from apps.research.features.store import existing_partition
-from apps.research.models import ModelRun
+from apps.research.features.store import existing_partition, export_year
+from apps.research.models import FeatureDaily, ModelRun
 from apps.research.phase3_report import TABLE_COLUMNS
 from tests.research.test_screening import STOCKS, stored
 
@@ -59,6 +59,8 @@ def test_the_report_covers_gaps_fallbacks_and_monthly_ic(stored: Path) -> None:
 
     text = (stored / "data.md").read_text()
     assert "screen1.screening" in text
+    assert "`before.csv`" in text
+    assert "--start/--end differ" in out.getvalue()
     assert "| fund_ep | 50.0%／0.0% |" in text
     assert "### 5 日" in text
     assert "### 20 日" in text
@@ -103,5 +105,48 @@ def test_the_report_refuses_features_rebuilt_after_the_screening(stored: Path) -
             "phase3_report",
             run_key="screen1",
             before=str(before_table(stored / "before.csv")),
+            stdout=StringIO(),
+        )
+
+
+def test_the_report_adds_up_years_and_lists_every_screened_feature(stored: Path) -> None:
+    january = list(FeatureDaily.objects.filter(date__month=1).values())
+    FeatureDaily.objects.bulk_create(
+        FeatureDaily(**(row | {"date": row["date"].replace(year=2015)})) for row in january
+    )
+    export_year(2015, stored / "features")
+    call_command("ic_report", run_key="screen1", output=str(stored / "ic.md"), stdout=StringIO())
+
+    call_command(
+        "phase3_report",
+        run_key="screen1",
+        before=str(before_table(stored / "before.csv")),
+        start="2015-01-01",
+        end="2016-12-31",
+        output=str(stored / "data.md"),
+        appendix=str(stored / "appendix"),
+        stdout=StringIO(),
+    )
+
+    after = pd.read_csv(stored / "appendix" / "missing-after.csv", index_col=0)
+    universe = FeatureDaily.objects.filter(in_universe=True).count()
+    assert (after["rows_current"] + after["rows_delisted"]).eq(universe).all()
+    monthly = pd.read_csv(stored / "appendix" / "monthly-ic.csv")
+    screened = ModelRun.objects.get(run_id="screen1.screening").params["ic"]
+    assert set(monthly["feature"]) == set(screened)
+
+
+def test_the_report_refuses_partitions_built_without_the_fallbacks(stored: Path) -> None:
+    FeatureDaily.objects.filter(date__month=3).update(fund_rev_yoy=None)
+    export_year(2016, stored / "features")
+    call_command("ic_report", run_key="screen1", output=str(stored / "ic.md"), stdout=StringIO())
+
+    with pytest.raises(CommandError, match="without the source-gap rules for fund_rev_yoy"):
+        call_command(
+            "phase3_report",
+            run_key="screen1",
+            before=str(before_table(stored / "before.csv")),
+            start="2016-01-01",
+            end="2016-12-31",
             stdout=StringIO(),
         )

@@ -28,6 +28,7 @@ from apps.research.phase3_report import (
     render,
     statement_coverage,
     strongest,
+    unfilled,
 )
 from apps.research.runs import SCREENING_MODEL, feature_hash
 from apps.research.screening import RANK_LABEL
@@ -73,6 +74,12 @@ def _gaps(start: date, end: date, delisted: pd.Series) -> tuple[pd.DataFrame, pd
     for year in range(start.year, end.year + 1):
         low, high = max(start, date(year, 1, 1)), min(end, date(year, 12, 31))
         rows = read_partitions(low, high, directory, columns=FRAME_COLUMNS)
+        stale = unfilled(rows, FALLBACKS, MASKED_MONTHS)
+        if stale:
+            raise CommandError(
+                f"partitions of {year} were built without the source-gap rules for "
+                f"{', '.join(stale)}; rebuild features"
+            )
         counts = missing_counts(rows, delisted, FEATURE_COLUMNS)
         fills = fill_counts(rows, delisted, FALLBACKS)
         missing = counts if missing is None else missing.add(counts, fill_value=0)
@@ -90,6 +97,7 @@ def _kept(run: ModelRun) -> dict[str, dict[str, float | None]]:
 def _monthly(run: ModelRun, calendar: TradingDays) -> pd.DataFrame:
     names = list(run.params["ic"])
     features = read_partitions(run.train_start, run.train_end, settings.FEATURE_PARQUET_DIR)
+    _unchanged(run)
     parts = []
     for horizon in HORIZONS:
         labels = load_labels(run.train_start, run.train_end, horizon)
@@ -116,6 +124,11 @@ class Command(BaseCommand):
         end = as_date(options["end"], "--end") or DEFAULT_END
         if start > end:
             raise CommandError(f"--start {start} is after --end {end}")
+        if (start, end) != (DEFAULT_START, DEFAULT_END):
+            self.stdout.write(
+                f"warning: --start/--end differ from {DEFAULT_START}..{DEFAULT_END}; "
+                "compare against a before table of the same period"
+            )
         try:
             _unchanged(run)
             after, fills = _gaps(start, end, _delisted())
@@ -137,6 +150,7 @@ class Command(BaseCommand):
             "window_days": run.params["window_days"],
             "kept": len(run.feature_list),
             "dropped": len(run.params["dropped"]),
+            "before": Path(options["before"]).name,
         }
         text = render(
             header=header,
