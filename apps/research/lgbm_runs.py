@@ -12,6 +12,7 @@ import lightgbm as lgb
 import numpy as np
 import pandas as pd
 
+from apps.market.calendar import OutsideCalendarError, TradingDays
 from apps.research import target_models
 from apps.research.baseline_runs import (
     RETURN_HORIZON,
@@ -61,6 +62,7 @@ from apps.research.rank_model import (
     rank_features,
     rank_inputs,
 )
+from apps.research.relative_up import market_digest, relative_up
 from apps.research.runs import (
     RunError,
     feature_hash,
@@ -103,6 +105,7 @@ INTERVAL_TAGS = {
     ModelObjective.VOLATILITY: "vol",
     ModelObjective.CLASSIFICATION: "prob",
 }
+RELATIVE_LABEL = f"{UP_LABEL}_vs_taiex"
 NO_IC: Mapping[str, float | None] = {"ic_mean": None, "icir": None, "ic_nw_t": None}
 
 
@@ -115,6 +118,7 @@ class Job:
     seed: int
     bags: int
     variant: Variant = SPEC_RECIPE
+    target: TargetVariant = TARGET_RECIPE
 
 
 @dataclass(frozen=True)
@@ -153,6 +157,12 @@ def variant_note(variant: Variant) -> dict[str, Any]:
     }
 
 
+def target_note(target: TargetVariant) -> dict[str, Any]:
+    """The target variant's fields that differ from the SPEC recipe."""
+    spec = asdict(TARGET_RECIPE)
+    return {name: value for name, value in asdict(target).items() if value != spec[name]}
+
+
 def recipe(
     scope: str,
     features: list[str],
@@ -174,14 +184,22 @@ def recipe(
         "variant": variant_note(variant),
     }
     if target != TARGET_RECIPE:
-        settings["target_variant"] = asdict(target)
+        settings["target_variant"] = target_note(target)
     listed = json.dumps(settings, sort_keys=True).encode()
     return f"{RECIPE_VERSION}-{hashlib.sha256(listed).hexdigest()[:12]}"
 
 
-def label_digest(scope: str, fold: Fold) -> str:
-    """label_hash of the horizons a scope fits and evaluates on, train_start to eval_end."""
-    return label_hash(fold.train_start, fold.eval_end, SCOPE_HORIZONS[scope])
+def label_digest(scope: str, fold: Fold, target: TargetVariant = TARGET_RECIPE) -> str:
+    """label_hash of a scope's horizons over train_start..eval_end, plus TAIEX for relative_up."""
+    digest = label_hash(fold.train_start, fold.eval_end, SCOPE_HORIZONS[scope])
+    if not target.relative_up:
+        return digest
+    calendar = TradingDays.from_db()
+    try:
+        reach = calendar.shift(fold.eval_end, VOL_DAYS)
+    except OutsideCalendarError:
+        reach = calendar.end
+    return f"{digest}:{market_digest(fold.train_start, reach)}"
 
 
 def scope_features(scope: str, target: TargetVariant = TARGET_RECIPE) -> list[str]:
@@ -196,11 +214,13 @@ def scope_features(scope: str, target: TargetVariant = TARGET_RECIPE) -> list[st
     return features if target.market else [name for name in features if name not in MARKET_LEVEL]
 
 
-def input_notes(scope: str, fold: Fold, directory: Path) -> dict[str, str]:
+def input_notes(
+    scope: str, fold: Fold, directory: Path, target: TargetVariant = TARGET_RECIPE
+) -> dict[str, str]:
     """Fingerprints of the feature partitions and labels a scope's fold reads today."""
     return {
         "feature_hash": feature_hash(fold.train_start, fold.test_end, directory),
-        "label_hash": label_digest(scope, fold),
+        "label_hash": label_digest(scope, fold, target),
     }
 
 
@@ -216,7 +236,7 @@ def _current_notes(
 ) -> dict[str, str]:
     """Notes a fold cached now would carry: its features, labels and recipe."""
     return {
-        **input_notes(scope, fold, directory),
+        **input_notes(scope, fold, directory, target),
         "recipe": recipe(scope, features, seed, bags, variant, target),
     }
 
@@ -462,7 +482,8 @@ def _probability(job: Job, inputs: pd.DataFrame, labels: pd.DataFrame, bins: Mar
         **_calibration(scored, "raw", "_raw"),
         "importance_gain": _gains(booster, features),
     }
-    run = _run(job, ModelObjective.CLASSIFICATION, VOL_DAYS, UP_LABEL, params)
+    label = RELATIVE_LABEL if job.target.relative_up else UP_LABEL
+    run = _run(job, ModelObjective.CLASSIFICATION, VOL_DAYS, label, params)
     model = {"booster": booster, "calibrator": fitted.calibrator, "market_bins": dict(bins.edges)}
     test = inputs[job.read.test]
     columns = {
@@ -475,6 +496,8 @@ def _probability(job: Job, inputs: pd.DataFrame, labels: pd.DataFrame, bins: Mar
 def _interval(job: Job) -> FoldFit:
     inputs, bins = raw_inputs(job.read.raw, job.fold, job.features)
     labels = load_labels(job.fold.train_start, job.fold.eval_end, VOL_DAYS)
+    if job.target.relative_up:
+        labels = labels.assign(**{UP_LABEL: relative_up(labels, TradingDays.from_db())})
     parts = [fit(job, inputs, labels, bins) for fit in (_quantile, _volatility, _probability)]
     columns = {name: values for part in parts for name, values in part.columns.items()}
     return FoldFit(columns, [pair for part in parts for pair in part.trained])
@@ -503,13 +526,13 @@ def run_fold(
         raise HoldoutError(f"fold {fold.index} is holdout; it runs once with the frozen design")
     require_candidates(run_key, fold)
     fold_path(run_key, MODEL, fold.index).unlink(missing_ok=True)
-    labels_digest = label_digest(scope, fold)
+    labels_digest = label_digest(scope, fold, target)
     if scope == HoldoutScope.RANK:
         read = rank_fold_inputs(fold, directory, features)
     else:
         read = fold_inputs(fold, fold.train_start, fold.test_end, directory, features)
-    fitted = FITS[scope](Job(fold, run_key, read, features, seed, bags, variant))
-    if label_digest(scope, fold) != labels_digest:
+    fitted = FITS[scope](Job(fold, run_key, read, features, seed, bags, variant, target))
+    if label_digest(scope, fold, target) != labels_digest:
         raise RuntimeError(f"label_daily changed while fitting fold {fold.index}; run it again")
     for run, model in fitted.trained:
         record_run(run, model, fold=fold)
@@ -555,6 +578,8 @@ def run_folds(
         raise ValueError(f"design variants apply to the rank scope only, not {scope}")
     if scope == HoldoutScope.RANK and target != TARGET_RECIPE:
         raise ValueError("target variants apply to the return and interval scopes, not rank")
+    if scope == HoldoutScope.RETURN and target.relative_up:
+        raise ValueError("relative_up applies to the interval scope, whose probability uses it")
     chosen = list(folds)
     held = [fold.index for fold in chosen if is_holdout(fold)]
     if held:

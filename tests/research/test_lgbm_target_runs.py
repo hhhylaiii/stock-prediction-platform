@@ -1,3 +1,4 @@
+import math
 from io import StringIO
 from pathlib import Path
 from typing import Any
@@ -8,7 +9,8 @@ import pytest
 from django.core.management import call_command
 from django.core.management.base import CommandError
 
-from apps.market.models import DailyPrice, StockMaster
+from apps.market.calendar import TradingDays
+from apps.market.models import DailyPrice, IndexDaily, StockMaster
 from apps.research import lgbm_runs, target_models
 from apps.research.baseline_runs import MAX_RUN_KEY
 from apps.research.features.store import export_year
@@ -28,9 +30,10 @@ from apps.research.prediction_cache import (
     load_fold_predictions,
     missing_folds,
 )
+from apps.research.relative_up import relative_up
 from apps.research.runs import SCREENING_MODEL, label_hash, load_model
 from apps.research.target_models import huber_delta, raw_inputs, sorted_quantiles
-from apps.research.training import training_rows
+from apps.research.training import load_labels, training_rows
 from tests.research.run_panels import (
     CONFIG,
     KEPT,
@@ -507,3 +510,77 @@ def test_rank_folds_refuse_a_target_variant(panel: Path) -> None:
             panel,
             target=target_models.TargetVariant(market=False),
         )
+
+
+def store_taiex() -> None:
+    """TAIEX closes that swing, so the relative label differs from the absolute one."""
+    IndexDaily.objects.bulk_create(
+        IndexDaily(index_id="TAIEX", date=day, close=round(100 * (1 + 0.1 * math.sin(k / 6)), 4))
+        for k, day in enumerate(weekdays())
+    )
+
+
+def test_an_interval_fold_on_the_relative_label_fits_its_probability_on_it(
+    panel: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store_taiex()
+    seen: list[pd.DataFrame] = []
+    original = lgbm_runs.fit_probability
+
+    def spy(inputs: pd.DataFrame, given: pd.DataFrame, *args: Any, **kwargs: Any) -> Any:
+        seen.append(given)
+        return original(inputs, given, *args, **kwargs)
+
+    monkeypatch.setattr(lgbm_runs, "fit_probability", spy)
+    fold = research()[0]
+    relative = target_models.TargetVariant(relative_up=True)
+
+    run_folds("interval", [fold], "interval-wf1", panel, target=relative)
+
+    known = load_labels(fold.train_start, fold.eval_end, 20)
+    expected = relative_up(known, TradingDays.from_db())
+    assert seen[0]["fwd_up_5pct"].tolist() == expected.tolist()
+    assert (expected != known["fwd_up_5pct"]).any()
+    probability = ModelRun.objects.get(run_id=run_id("interval-wf1", "classification", 20, fold))
+    assert probability.params["label"] == "fwd_up_5pct_vs_taiex"
+    quantile = ModelRun.objects.get(run_id=run_id("interval-wf1", "quantile", 20, fold))
+    assert quantile.params["label"] == "fwd_ret_open"
+
+
+def test_relative_label_folds_rerun_when_the_taiex_closes_change(panel: Path) -> None:
+    store_taiex()
+    fold = research()[0]
+    relative = target_models.TargetVariant(relative_up=True)
+    run_folds("interval", [fold], "interval-rel", panel, target=relative)
+    run_folds("interval", [fold], "interval-abs", panel)
+
+    notes = fold_notes("interval-rel", MODEL, fold.index)
+    assert notes["label_hash"] != fold_notes("interval-abs", MODEL, fold.index)["label_hash"]
+    assert notes["label_hash"].startswith(label_hash(fold.train_start, fold.eval_end, (20,)))
+    IndexDaily.objects.filter(index_id="TAIEX", date=fold.test_start).update(close=1)
+
+    assert run_folds("interval", [fold], "interval-abs", panel) == []
+    assert run_folds("interval", [fold], "interval-rel", panel, target=relative) == [fold.index]
+
+
+def test_return_folds_refuse_the_relative_label(panel: Path) -> None:
+    with pytest.raises(ValueError, match="relative_up applies to the interval scope"):
+        run_folds(
+            "return",
+            research()[:1],
+            "return-wf1",
+            panel,
+            target=target_models.TargetVariant(relative_up=True),
+        )
+
+
+def test_target_variants_record_only_the_fields_they_change() -> None:
+    alone = target_models.TargetVariant(market=False)
+    relative = target_models.TargetVariant(relative_up=True)
+
+    assert lgbm_runs.target_note(target_models.TARGET_RECIPE) == {}
+    assert lgbm_runs.target_note(alone) == {"market": False}
+    assert lgbm_runs.target_note(relative) == {"relative_up": True}
+    assert (
+        len({recipe("interval", FEATURES, 0, target=target) for target in (alone, relative)}) == 2
+    )
