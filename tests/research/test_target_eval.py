@@ -12,6 +12,7 @@ from django.conf import settings as django_settings
 from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.db import transaction
+from django.db.models import F
 from django.test import override_settings
 
 from apps.market.models import DailyPrice, StockMaster, TradingCalendar
@@ -257,12 +258,11 @@ def test_interval_scores_pinball_coverage_volatility_and_probability(runs: Path)
         daily_brier(both, "fwd_up_5pct", "logistic_h20"),
         chosen,
     )
-    both = in_research(both, chosen)
-    assert evaluated.auc == pytest.approx(
-        daily_auc(both, "fwd_up_5pct", "lightgbm_prob_h20").mean()
-    )
-    assert evaluated.logistic_auc == pytest.approx(
-        daily_auc(both, "fwd_up_5pct", "logistic_h20").mean()
+    check_paired(
+        evaluated.auc,
+        daily_auc(both, "fwd_up_5pct", "lightgbm_prob_h20"),
+        daily_auc(both, "fwd_up_5pct", "logistic_h20"),
+        chosen,
     )
     research_up = in_research(up, chosen)
     pd.testing.assert_frame_equal(
@@ -334,12 +334,40 @@ def test_interval_pairs_history_auc_and_qlike_on_their_shared_rows(runs: Path) -
         (gapped.history, dropped.history),
         (gapped.qlike, dropped.qlike),
         (gapped.brier, dropped.brier),
+        (gapped.auc, dropped.auc),
         (gapped.pinball, original.pinball),
     ):
         assert numbers(compared) == pytest.approx(numbers(expected))
-    assert gapped.auc == pytest.approx(dropped.auc)
-    assert gapped.logistic_auc == pytest.approx(dropped.logistic_auc)
-    assert gapped.auc != pytest.approx(original.auc)
+    assert gapped.auc.model != pytest.approx(original.auc.model)
+
+
+def test_crossed_quantiles_count_tradable_research_rows_only(runs: Path) -> None:
+    chosen = research()
+    frame = target_eval.target_frame(INTERVAL_KEY, chosen, runs)
+    counted, untradable = picked(frame, chosen, 6)[:5], picked(frame, chosen, 6)[5:]
+    tuning = frame.index[frame["fold"].isin([fold.index for fold in chosen if fold.tuning])][:3]
+    crossed = frame.index.isin(counted.union(untradable).union(tuning))
+    broken = frame.assign(
+        lightgbm_q10_h20=frame["lightgbm_q10_h20"].mask(crossed, frame["lightgbm_q50_h20"] + 0.01),
+        untradable_t1=frame["untradable_t1"].mask(frame.index.isin(untradable), True),
+    )
+
+    assert target_eval.evaluate_interval(frame, chosen).crossed == 0
+    assert target_eval.evaluate_interval(broken, chosen).crossed == len(counted) == 5
+
+
+def test_return_reads_five_day_labels_and_refuses_them_once_changed(runs: Path) -> None:
+    chosen = research()
+    LabelDaily.objects.filter(horizon=5).update(fwd_ret_open=F("fwd_ret_open") + 0.1)
+
+    frame = target_eval.target_frame(RETURN_KEY, chosen, runs)
+
+    keys = ["stock_id", "date"]
+    five = pd.DataFrame(list(LabelDaily.objects.filter(horizon=5).values(*keys, "fwd_ret_open")))
+    expected = frame[keys].merge(five, on=keys, how="left")["fwd_ret_open"]
+    np.testing.assert_allclose(frame["fwd_ret_open"], expected.astype(float))
+    with pytest.raises(ValueError, match=r"return-wf1 .* stale"):
+        target_eval.evaluate_run(RETURN_KEY, chosen, runs)
 
 
 def comparison(model: float, baseline: float, nw_t: float) -> target_eval.Comparison:
@@ -391,6 +419,18 @@ def test_coverage_needs_the_total_and_every_fold_inside_their_bands(
     assert target_eval.coverage_passes(total, folds_coverage) is passed
 
 
+def table(name: str, model: float, baseline: float) -> str:
+    """A fold table's header, its tuning fold 1 and research fold 5, as made() fills them."""
+    return "\n".join(
+        [
+            f"| 摺 | 模型 {name} | baseline {name} |",
+            "| --- | --- | --- |",
+            "| 1（調參） | 0.90000 | 0.10000 |",
+            f"| 5 | {model:.5f} | {baseline:.5f} |",
+        ]
+    )
+
+
 def made(model: float, baseline: float, nw_t: float) -> target_eval.Comparison:
     """A comparison over a tuning fold 1 and research folds 5 and 6."""
     by_fold = pd.DataFrame(
@@ -417,8 +457,8 @@ def test_the_return_report_states_each_gate_with_its_numbers() -> None:
     assert "（需 < −2）：未過" in text
     assert "RMSE 對零預測（同列）：模型 0.02000、baseline 0.03000" in text
     assert "方向準確率 0.5300，對 50% 的 NW t 2.40" in text
-    assert "| 1（調參） | 0.90000 | 0.10000 |" in text
-    assert "| 5 | 0.01000 | 0.02000 |" in text
+    assert table("MAE（對零預測）", 0.01, 0.02) in text
+    assert table("MAE（對過去 60 日平均）", 0.01, 0.011) in text
     assert "調參摺列在每摺表並標註，不計入總體指標與關卡" in text
 
 
@@ -444,8 +484,7 @@ def interval_evaluation(**changes: Any) -> target_eval.IntervalEvaluation:
         ),
         "vol_mae": made(0.010, 0.010, 0.5),
         "qlike": made(0.20, 0.19, -4.0),
-        "auc": 0.56,
-        "logistic_auc": 0.55,
+        "auc": made(0.56, 0.55, 1.2),
         "brier": made(0.09, 0.10, -1.0),
         "reliability": pd.DataFrame(
             {
@@ -477,10 +516,9 @@ def test_the_interval_report_states_each_gate_with_its_numbers() -> None:
         in text
     )
     assert "| 1（調參） | 0.9500 |" in text
-    assert (
-        "MAE 不高於 tech_vol_20d：模型 0.01000、baseline 0.01000，逐摺差 NW t 0.50（參考）：通過"
-        in text
-    )
+    assert "MAE 對 tech_vol_20d（參考）：模型 0.01000、baseline 0.01000，逐摺差 NW t 0.50" in text
+    assert "MAE 不高於" not in text
+    assert "日均 AUC 對 logistic（參考）：模型 0.56000、baseline 0.55000，逐摺差 NW t 1.20" in text
     assert (
         "QLIKE 不高於 tech_vol_20d：模型 0.20000、baseline 0.19000，逐摺差 NW t -4.00（參考）：未過"
         in text
@@ -494,6 +532,15 @@ def test_the_interval_report_states_each_gate_with_its_numbers() -> None:
     assert "universe 內全部列（含 t+1 不可交易的列），研究摺。" in text
     for heading in ("## 區間 20 日", "## 波動率", "## 上漲機率", "## 輸出一致性"):
         assert heading in text, heading
+    for name, model, baseline in (
+        ("pinball（對波動率區間）", 0.10, 0.12),
+        ("pinball（對歷史分位數）", 0.10, 0.11),
+        ("MAE", 0.01, 0.01),
+        ("QLIKE", 0.20, 0.19),
+        ("AUC", 0.56, 0.55),
+        ("Brier", 0.09, 0.10),
+    ):
+        assert table(name, model, baseline) in text, name
 
 
 def test_the_interval_report_fails_coverage_crossing_and_ece_on_research_folds() -> None:
@@ -532,6 +579,13 @@ def test_evaluate_targets_writes_the_report(command: Path, tmp_path: Path, run_k
     assert output.read_text() == target_eval.report(run_key, evaluation)
     assert f"wrote {output}" in out.getvalue()
     assert not BacktestMetric.objects.exists()
+
+
+def test_evaluate_targets_reports_an_output_it_cannot_write(command: Path, tmp_path: Path) -> None:
+    with pytest.raises(CommandError, match="Is a directory"):
+        call_command(
+            "evaluate_targets", run_key=RETURN_KEY, output=str(tmp_path), stdout=StringIO()
+        )
 
 
 def test_evaluate_targets_refuses_other_scopes_missing_and_stale_caches(command: Path) -> None:

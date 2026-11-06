@@ -28,6 +28,7 @@ from apps.research.metrics.forecast import (
     research_rows,
     shared_rows,
 )
+from apps.research.metrics.ic import research_ic
 from apps.research.metrics.stats import newey_west_t, paired_nw_t
 from apps.research.models import HoldoutScope
 from apps.research.prediction_cache import (
@@ -97,8 +98,7 @@ class IntervalEvaluation:
     consistency: pd.DataFrame
     vol_mae: Comparison
     qlike: Comparison
-    auc: float
-    logistic_auc: float
+    auc: Comparison
     brier: Comparison
     reliability: pd.DataFrame
     ece: float
@@ -148,16 +148,6 @@ def target_frame(run_key: str, folds: Sequence[Fold], directory: Path) -> pd.Dat
     return frame[ordered].reset_index(drop=True)
 
 
-def research_days(daily: pd.Series, folds: Sequence[Fold]) -> pd.Series:
-    """A daily metric on the research folds' test_start..eval_end days only."""
-    days = pd.Index(daily.index)
-    keep = pd.Series(False, index=days).to_numpy()
-    for fold in folds:
-        if fold.research:
-            keep |= (days >= fold.test_start) & (days <= fold.eval_end)
-    return daily[keep]
-
-
 def paired(first: pd.Series, second: pd.Series, folds: Sequence[Fold]) -> Comparison:
     """Research means of two daily metrics, every fold's means and the research fold-gap NW t."""
     model, baseline = mean_by_fold(first, folds), mean_by_fold(second, folds)
@@ -167,8 +157,8 @@ def paired(first: pd.Series, second: pd.Series, folds: Sequence[Fold]) -> Compar
     research = by_fold[~by_fold["tuning"].astype(bool)]
     nw_t = paired_nw_t(research["model"], research["baseline"], FOLD_LAG)
     return Comparison(
-        float(research_days(first, folds).mean()),
-        float(research_days(second, folds).mean()),
+        float(research_ic(first, folds).mean()),
+        float(research_ic(second, folds).mean()),
         nw_t,
         by_fold,
     )
@@ -259,22 +249,19 @@ def evaluate_interval(frame: pd.DataFrame, folds: Sequence[Fold]) -> IntervalEva
     vol, prob = f"{MODEL}_vol_h{VOL_DAYS}", f"{MODEL}_prob_h{VOL_DAYS}"
     logistic = f"logistic_h{VOL_DAYS}"
     positive = rows[(rows[[VOL_LABEL, vol, VOLATILITY]] > 0).all(axis=1)]
-    scored = _up_rows(research, [prob, logistic])
+    scored = _up_rows(rows, [prob, logistic])
     return IntervalEvaluation(
         pinball=_pinball(rows, model, band, folds),
         history=_pinball(rows, model, history, folds),
         crossed=int(((q10 > q50) | (q50 > q90)).sum()),
-        coverage=float(research_days(covered, folds).mean()),
+        coverage=float(research_ic(covered, folds).mean()),
         coverage_by_fold=by_fold,
         coverage_table=coverage_report(frame, LABEL, model[0.1], model[0.9], folds),
         consistency=consistency_report(frame, model[0.1], model[0.5], model[0.9], vol, prob, folds),
         vol_mae=compare(rows, folds, daily_absolute_error, VOL_LABEL, vol, VOLATILITY),
         qlike=compare(positive, folds, daily_qlike, VOL_LABEL, vol, VOLATILITY),
-        auc=float(daily_auc(scored, UP_LABEL, prob).mean()),
-        logistic_auc=float(daily_auc(scored, UP_LABEL, logistic).mean()),
-        brier=compare(
-            _up_rows(rows, [prob, logistic]), folds, daily_brier, UP_LABEL, prob, logistic
-        ),
+        auc=compare(scored, folds, daily_auc, UP_LABEL, prob, logistic),
+        brier=compare(scored, folds, daily_brier, UP_LABEL, prob, logistic),
         reliability=reliability_table(_up_rows(research, [prob]), UP_LABEL, prob),
         ece=_ece(research, prob),
         ece_raw=_ece(research, f"{MODEL}_prob_raw_h{VOL_DAYS}"),
@@ -327,6 +314,14 @@ def _bound(text: str, compared: Comparison) -> str:
     return (
         f"- {text}：模型 {_number(compared.model, 5)}、baseline {_number(compared.baseline, 5)}，"
         f"逐摺差 NW t {_number(compared.nw_t, 2)}（參考）：{_verdict(no_worse(compared))}"
+    )
+
+
+def _reference(text: str, compared: Comparison) -> str:
+    """A line for a comparison SPEC §7 reports without a gate."""
+    return (
+        f"- {text}（參考）：模型 {_number(compared.model, 5)}、"
+        f"baseline {_number(compared.baseline, 5)}，逐摺差 NW t {_number(compared.nw_t, 2)}"
     )
 
 
@@ -388,11 +383,11 @@ def _probability_lines(evaluated: IntervalEvaluation) -> list[str]:
     lines = [
         "## 上漲機率",
         "",
-        f"- 日均 AUC（同列）：模型 {_number(evaluated.auc)}、logistic "
-        f"{_number(evaluated.logistic_auc)}",
+        _reference("日均 AUC 對 logistic", evaluated.auc),
         _bound("Brier 不高於 logistic", evaluated.brier),
         f"- ECE 低於 {ECE_LIMIT:g}：校準後 {_number(evaluated.ece)}（校準前 "
         f"{_number(evaluated.ece_raw)}）：{_verdict(evaluated.ece < ECE_LIMIT)}",
+        *_fold_table(evaluated.auc, "AUC"),
         *_fold_table(evaluated.brier, "Brier"),
         "",
         "| 機率區間 | 平均機率 | 實際比例 | 列數 |",
@@ -417,11 +412,12 @@ def _interval_lines(evaluated: IntervalEvaluation) -> list[str]:
         f"- 分位數交叉（q10 > q50 或 q50 > q90）的研究列數 {evaluated.crossed}："
         f"{_verdict(evaluated.crossed == 0)}",
         *_coverage_lines(evaluated),
-        *_fold_table(evaluated.pinball, "pinball"),
+        *_fold_table(evaluated.pinball, "pinball（對波動率區間）"),
+        *_fold_table(history, "pinball（對歷史分位數）"),
         "",
         "## 波動率",
         "",
-        _bound("MAE 不高於 tech_vol_20d", evaluated.vol_mae),
+        _reference("MAE 對 tech_vol_20d", evaluated.vol_mae),
         _bound("QLIKE 不高於 tech_vol_20d", evaluated.qlike),
         *_fold_table(evaluated.vol_mae, "MAE"),
         *_fold_table(evaluated.qlike, "QLIKE"),
