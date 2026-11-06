@@ -180,11 +180,11 @@ def ex_date_announcements(
     keys = (*POLICY_KEYS, "AnnouncementDate")
     for row in checked_rows(policy, keys, "TaiwanStockDividend", stock_id):
         day = _optional_day(row.get("AnnouncementDate"), "TaiwanStockDividend")
-        if day is None:
+        ex_dates = [_optional_day(row[key], "TaiwanStockDividend") for _, key, _ in DIVIDEND_PARTS]
+        if day is None or not any(ex_dates):
             continue
         moment = session(datetime.combine(day, _clock(row.get("AnnouncementTime")), TAIPEI))
-        for _, ex_key, _ in DIVIDEND_PARTS:
-            ex_date = _optional_day(row[ex_key], "TaiwanStockDividend")
+        for ex_date in ex_dates:
             if ex_date is not None:
                 seen[ex_date] = min(seen.get(ex_date, moment), moment)
     late = sorted(ex for ex, moment in seen.items() if moment > ex)

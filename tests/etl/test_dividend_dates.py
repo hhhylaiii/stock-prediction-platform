@@ -70,6 +70,17 @@ def test_an_announcement_after_the_ex_date_gives_no_date(esun: Rows) -> None:
     assert found == {date(2013, 8, 15): None}
 
 
+def test_a_row_without_ex_dates_needs_no_session(esun: Rows) -> None:
+    rows = policy(esun, AnnouncementDate="2028-01-03", CashExDividendTradingDate="")
+    rows = [{**row, "StockExDividendTradingDate": ""} for row in rows]
+    assert ex_date_announcements(rows, "2884", SESSION) == {}
+
+
+def test_an_announcement_after_the_ex_date_gives_no_date(esun: Rows) -> None:
+    found = ex_date_announcements(policy(esun, AnnouncementDate="2013-08-20"), "2884", SESSION)
+    assert found == {date(2013, 8, 15): None}
+
+
 def test_a_bad_announcement_time_is_refused(esun: Rows) -> None:
     with pytest.raises(SchemaChangedError, match="bad time"):
         ex_date_announcements(policy(esun, AnnouncementTime="8pm"), "2884", SESSION)
