@@ -23,11 +23,15 @@ def load_ex_dates(start: date, end: date, stock_ids: Sequence[str] | None = None
 
 
 def _active_days(events: pd.DataFrame, calendar: TradingDays) -> pd.DataFrame:
-    """One row per event and trading day from its announcement to the day before it goes ex."""
+    """One row per event and trading day from its announcement to the day before it goes ex.
+
+    An ex-date after the calendar's last trading day has no known trading-day count.
+    """
     days = np.array(calendar.between(calendar.start, calendar.end), dtype="datetime64[D]")
-    inside = events[events["ex_date"] <= calendar.end]
+    exits = np.searchsorted(days, events["ex_date"].to_numpy(dtype="datetime64[D]"))
+    inside = events[exits < len(days)]
     first = np.searchsorted(days, inside["announce_date"].to_numpy(dtype="datetime64[D]"))
-    ex = np.searchsorted(days, inside["ex_date"].to_numpy(dtype="datetime64[D]"))
+    ex = exits[exits < len(days)]
     spans = np.clip(ex - first, 0, None)
     positions = np.repeat(first, spans) + _offsets(spans)
     return pd.DataFrame(

@@ -51,8 +51,14 @@ def test_trading_days_to_the_nearest_ex_date_announced_by_the_day() -> None:
 
 
 def test_an_ex_date_past_the_calendar_or_announced_after_it_is_not_counted() -> None:
-    rows = panel([("2330", "2016-12-28"), ("1101", "2016-06-08")])
-    found = events([("2330", "2016-12-20", "2017-01-05"), ("1101", "2016-06-15", "2016-06-10")])
+    rows = panel([("2330", "2016-12-28"), ("1101", "2016-06-08"), ("2317", "2016-12-29")])
+    found = events(
+        [
+            ("2330", "2016-12-20", "2017-01-05"),
+            ("1101", "2016-06-15", "2016-06-10"),
+            ("2317", "2016-12-20", "2016-12-31"),
+        ]
+    )
 
     counted = days_to_ex_date(rows, found, CALENDAR)
 
