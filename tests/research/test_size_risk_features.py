@@ -262,13 +262,15 @@ def test_neutral_features_subtract_the_day_median_of_universe_stocks_in_the_indu
     def column(k: int) -> list[float]:
         return [float(row[k]) for row in rows for _ in range(2)]
 
-    technical = pd.DataFrame({"tech_ret_1d": 9.0, "tech_mom_250_20": column(3)}, index=panel.index)
+    rising_mom = [float(row[3]) + 0.1 * day for row in rows for day in range(2)]
+    technical = pd.DataFrame({"tech_ret_1d": 9.0, "tech_mom_250_20": rising_mom}, index=panel.index)
     fundamental = pd.DataFrame({"fund_bp": 9.0, "fund_ep": column(4)}, index=panel.index)
 
     features = second_batch_industry_features(panel, technical, fundamental)
 
-    neutral = [at(features, s, 1, "ind_mom_neutral") for s, *_ in rows]
-    assert neutral == pytest.approx([-0.2, 0.0, 0.5, 0.6, -0.2, 0.1])
+    for day in range(2):
+        neutral = [at(features, s, day, "ind_mom_neutral") for s, *_ in rows]
+        assert neutral == pytest.approx([-0.2, 0.0, 0.5, 0.6, -0.2, 0.1])
     assert at(features, "2330", 1, "ind_ep_neutral") == pytest.approx(0.0)
     assert at(features, "2454", 1, "ind_ep_neutral") == pytest.approx(0.02 - 0.05)
     assert at(features, "1101", 1, "ind_ep_neutral") == pytest.approx(0.04 - 0.05)
