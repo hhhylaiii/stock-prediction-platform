@@ -89,8 +89,9 @@ CODE, YEAR, KIND, DETAIL, UPLOADED, CORRECTION = (
 HEADER = (CODE, YEAR, KIND, DETAIL, UPLOADED, CORRECTION)
 FINANCIAL_REPORT = "財務報告書"
 ENGLISH = "英文版"
-SUPPLEMENTS = frozenset({"關係企業合併報表"})
-RESTATED_MARKS = ("(重編)", "重編")
+SUPPLEMENTS = frozenset({"關係企業合併報表", "國際金融業務分行財報"})
+RESTATED = re.compile(r"(?:\((?:第.次)?重編\)|(?:第.次)?重編)$")
+OLD_FISCAL_YEAR = "舊會計年制--"
 HOLDING_CHOOSER = "name='check2858'"
 HOLDING_OWN = {"check2858": "Y"}
 REPORT_TYPES = {
@@ -243,8 +244,9 @@ def parse_listing(page: str, code: str, roc_year: int) -> list[Filing]:
 
 def _report(detail: str) -> tuple[str, bool]:
     """The report named by a detail, and whether that upload restates it."""
-    mark = next((mark for mark in RESTATED_MARKS if detail.endswith(mark)), "")
-    return detail.removesuffix(mark), bool(mark)
+    report = detail.removeprefix(OLD_FISCAL_YEAR)
+    mark = RESTATED.search(report)
+    return (report, False) if mark is None else (report[: mark.start()], True)
 
 
 def _filing(cells: dict[str, str], code: str, roc_year: int) -> Filing:

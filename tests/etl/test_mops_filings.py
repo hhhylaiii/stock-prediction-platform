@@ -193,8 +193,12 @@ def test_restated_reports_are_marked_with_their_own_upload(page: Callable[[str],
     assert not any(f.restated for f in found if f.period != "2018-Q4")
 
 
-def test_old_restatements_named_without_brackets_are_restated(page: Callable[[str], bytes]) -> None:
-    found = parse_listing(text(page("1310_98")), "1310", 98)
+@pytest.mark.parametrize("mark", ["重編", "第二次重編"])
+def test_old_restatements_named_without_brackets_are_restated(
+    page: Callable[[str], bytes], mark: str
+) -> None:
+    listing = text(page("1310_98")).replace("重編", mark)
+    found = parse_listing(listing, "1310", 98)
     q1 = [(f.fin_type, f.uploaded_at, f.restated) for f in found if f.period == "2009-Q1"]
     assert q1 == [
         (INDIVIDUAL, at("2012-01-04 21:36:43"), False),
@@ -203,6 +207,42 @@ def test_old_restatements_named_without_brackets_are_restated(page: Callable[[st
         (CONSOLIDATED, at("2012-01-07 14:43:06"), True),
     ]
     assert {f.period for f in found if f.restated} == {"2009-Q1", "2009-Q2"}
+
+
+def test_a_second_restatement_is_a_restatement_and_dates_the_period(
+    adapter: MopsAdapter, page: Callable[[str], bytes]
+) -> None:
+    found = parse_listing(text(page("2305_105")), "2305", 105)
+    q1 = [(f.fin_type, f.uploaded_at, f.restated) for f in found if f.period == "2016-Q1"]
+    assert q1 == [
+        (CONSOLIDATED, at("2017-02-15 19:59:51"), False),
+        (CONSOLIDATED, at("2017-02-20 18:33:21"), True),
+        (CONSOLIDATED, at("2017-03-07 16:21:33"), True),
+    ]
+    normalized = adapter.normalize(STATEMENT_FILING, pd.DataFrame(found))
+    first = normalized[normalized["period"] == "2016-Q1"]
+    assert first[["uploaded_at", "restated"]].values.tolist() == [[at("2017-03-07 16:21:33"), True]]
+
+
+def test_a_bank_branch_report_is_not_an_announcement(page: Callable[[str], bytes]) -> None:
+    found = parse_listing(text(page("2837_107")), "2837", 107)
+    q4 = {(f.fin_type, f.uploaded_at) for f in found if f.period == "2018-Q4"}
+    assert q4 == {
+        (CONSOLIDATED, at("2019-03-29 15:41:02")),
+        (INDIVIDUAL, at("2019-03-29 15:39:59")),
+    }
+
+
+def test_an_old_fiscal_year_report_is_its_quarter_parent_report(
+    page: Callable[[str], bytes],
+) -> None:
+    found = parse_listing(text(page("2718_101")), "2718", 101)
+    assert [(f.period, f.fin_type, f.uploaded_at) for f in found] == [
+        ("2012-Q1", INDIVIDUAL, at("2012-04-30 11:35:43")),
+        ("2012-Q2", INDIVIDUAL, at("2012-08-28 09:09:49")),
+        ("2012-Q3", INDIVIDUAL, at("2012-10-31 09:54:26")),
+        ("2012-Q4", INDIVIDUAL, at("2013-03-26 16:52:18")),
+    ]
 
 
 @pytest.mark.django_db
