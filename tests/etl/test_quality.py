@@ -162,6 +162,17 @@ def test_big_moves_without_a_dividend_are_noted_for_review(calendar: TradingDays
 
 
 @pytest.mark.django_db
+def test_big_moves_count_common_stocks_only(calendar: TradingDays) -> None:
+    _two_clean_days()
+    _non_common_days()
+    moved = [*NON_COMMON, CODES[0]]
+    DailyPrice.objects.filter(date=DAY, stock_id__in=moved).update(close=Decimal("12"))
+    run_checks(DAY, calendar)
+    row = _results()[("big_move", "daily_price")]
+    assert (row.detail["count"], row.detail["stocks"]) == (1, {CODES[0]: 0.2})
+
+
+@pytest.mark.django_db
 def test_rows_gone_since_yesterday_count_as_missing_but_delisted_ones_do_not(
     calendar: TradingDays,
 ) -> None:

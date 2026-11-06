@@ -11,7 +11,7 @@
   const RUN_STATUS = { success: ['完成', 'in'], failed: ['失敗', 'warn'], running: ['執行中', 'idle'] };
   const CHECKS = {
     row_count: '各表當日列數',
-    big_move: '漲跌幅超過 10% 且無除權息紀錄',
+    big_move: '普通股漲跌幅超過 10% 且無除權息紀錄',
     missing_values: 'standard 表普通股當日缺值',
     trading_calendar: '所有日期都在交易日曆內',
     index_freshness: '市場指數的最新收盤',

@@ -116,7 +116,7 @@ def row_count_results(day: date, previous: date | None) -> list[DataQualityLog]:
 
 
 def big_move_result(day: date, previous: date | None) -> DataQualityLog:
-    """Closes more than 10% off the previous session's with no ex-dividend that day, for review."""
+    """Common stocks over 10% off the previous close with no ex-dividend that day, for review."""
     stocks: dict[str, float] = {}
     if previous is not None:
         before = _closes(previous)
@@ -199,7 +199,7 @@ def _previous_session(calendar: TradingDays, day: date) -> date | None:
 
 
 def _closes(day: date) -> dict[str, Decimal]:
-    rows = DailyPrice.objects.filter(date=day).values_list("stock_id", "close")
+    rows = _common(DailyPrice.objects.filter(date=day)).values_list("stock_id", "close")
     return {code: close for code, close in rows if close}
 
 
