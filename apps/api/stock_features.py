@@ -28,7 +28,7 @@ def serving_rank_run(day: date | None, horizon: int) -> ServingRun | None:
 
 
 def feature_values(stock_id: str, day: date, names: list[str]) -> dict[str, Any]:
-    """Raw first-batch values from feature_daily; later batches live outside the database."""
+    """Raw values from feature_daily for the named features it stores."""
     columns = [name for name in names if name in STORED]
     if not columns:
         return {}
