@@ -63,11 +63,11 @@ Oct 29, 2026 · @Owen Lai
 
 | 來源 | 提供資料 | 存取方式 | 限制 | 授權 | 在系統中的角色 |
 | --- | --- | --- | --- | --- | --- |
-| [FinMind](https://pypi.org/project/FinMind/) | 日價量、PER/PBR、加權指數、三大法人、融資券、借券、外資持股、股權分散表、月營收、三大財報、股利與除權息、美股、匯率、利率 | Python SDK `FinMind`，或 REST `api.finmindtrade.com/api/v4/data` | 300 次/小時，註冊並驗證信箱後 600 次/小時；超限封鎖約 1 小時；週日 00:00–07:00 維護 | 教育與非商業用途 | 歷史回補（2010 起，一次性）；集保與除權息歷史補洞 |
+| [FinMind](https://pypi.org/project/FinMind/) | 日價量、PER/PBR、加權指數、三大法人、融資券、借券、外資持股、股權分散表、月營收、三大財報、股利與除權息、美股、匯率、利率 | Python SDK `FinMind`，或 REST `api.finmindtrade.com/api/v4/data` | 300 次/小時，註冊並驗證信箱後 600 次/小時；超限封鎖約 1 小時；週日 00:00–07:00 維護 | 教育與非商業用途 | 歷史回補（2010 起，一次性）；除權息歷史補洞；股權分散表限付費會員，不用 |
 | [證交所 TWSE OpenAPI](https://glama.ai/mcp/servers/taux-io/twse-mcp) | 上市日成交、三大法人買賣超、融資融券、借券、處置與注意股、當沖交易統計（第二批） | REST `openapi.twse.com.tw/v1`，端點多為當日快照；歷史用 `exchangeReport/STOCK_DAY?date=&stockNo=`，一次回傳整月 | 無公開配額，頻繁請求會封 IP；請求間隔至少 3 秒 | 政府資料開放授權；對外再提供行情須另取得資訊使用授權 | 上市股票每日增量 |
 | [櫃買中心 TPEx OpenAPI](https://scidm.nchc.org.tw/en/dataset/best_wish11391) | 上櫃日成交、三大法人、融資融券、櫃買指數、當沖交易統計（第二批） | REST，Swagger 文件 `tpex.org.tw/openapi/swagger.json` | 同證交所 | 政府資料開放授權 | 上櫃股票每日增量 |
 | 公開資訊觀測站 MOPS | 財報（XBRL）、月營收、董監與內部人持股、重大訊息 | 網頁表單與檔案下載 `mops.twse.com.tw`，無正式 API | 需爬蟲，頁面格式會變；要記錄公告日 | 公開資料 | 月營收與財報每日掃描；取得 announce\_date |
-| [集保 TDCC 股權分散表](https://scidm.nchc.org.tw/en/dataset/best_wish11452) | 每週各持股級距的人數、股數、占集保庫存比例 | 開放資料 CSV，每週最後一個營業日結算後發布 | CSV 只有最新一週，歷史要自己累積 | 政府資料開放授權 | 每週六增量累積；歷史用 FinMind 補 |
+| [集保 TDCC 股權分散表](https://scidm.nchc.org.tw/en/dataset/best_wish11452) | 每週各持股級距的人數、股數、占集保庫存比例 | 開放資料 CSV，每週最後一個營業日結算後發布 | CSV 只有最新一週，歷史要自己累積 | 政府資料開放授權 | 每週六增量累積；不回補歷史，`chip_*_1w` 在開始累積之前為空 |
 | [TEJ Tool API](https://pypi.org/project/tej-tool-api) | PIT 資料庫 600 多個指標；財務數據依公告日對應 | Python `tej-tool-api`，需 API key | 付費；預設起始日 2013-01-01；僅台灣市場 | 商業授權；學校圖書館可能有 | 財報 PIT 對齊的對照組（可選） |
 | [富果 Fugle Marketdata](https://developer.fugle.tw/docs/data/http-api/historical/candles) | 日 K、分 K、即時行情、技術指標 | REST + Python SDK，需 API key | 歷史每次最多 1 年，個股回溯到 2010、指數到 2015；分 K 只有近 30 日；速率依方案 | 免費方案有上限 | 即時報價（Phase 6） |
 | [永豐 Shioaji](https://ithelp.ithome.com.tw/articles/10270639) | 分 K、tick、即時行情、下單 | Python SDK，需永豐帳號與憑證 | 官方不建議撈歷史；每 5 秒 500 次；濫用可能鎖帳號 | 券商條款 | 下單（Phase 6 之後，可選） |
@@ -79,6 +79,7 @@ Oct 29, 2026 · @Owen Lai
 - 每類資料指定一個 primary source；其他來源只做比對驗證，不混用。
 - 價量 primary：證交所與櫃買中心；籌碼 primary：證交所與櫃買中心；財報與月營收 primary：MOPS；股權分散 primary：集保。
 - FinMind 是回補與驗證來源，每日增量不依賴它，避免非商業授權與維護時間影響正式流程。
+- FinMind 對 2016 到 2020 年下市的股票缺財報、月營收、股本與部分籌碼，這些缺口只補缺的列：財報與月營收用 MOPS 歷史彙總頁（下市公司不在彙總頁上，財報改讀 XBRL 檢視頁），股本與籌碼用證交所、櫃買每日表。下市公司的月營收沒有免費官方來源，維持缺值，由第 6 節的季營收年增率提供營收訊號。
 
 ## 4. 資料模型與儲存
 
