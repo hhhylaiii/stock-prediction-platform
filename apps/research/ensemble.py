@@ -62,7 +62,7 @@ def _fingerprint(run_key: str, model: str, fold: Fold) -> dict[str, str | None]:
     return {key: notes.get(key) for key in ("feature_hash", "label_hash")}
 
 
-def _scores(run_key: str, folds: Sequence[Fold], horizon: int) -> pd.DataFrame:
+def cached_scores(run_key: str, folds: Sequence[Fold], horizon: int) -> pd.DataFrame:
     """Both models' cached scores, refused unless fit on the same features, labels and rows."""
     keys = [*ROW_KEYS, "fold"]
     ridge = load_predictions(run_key, BASELINE, folds)[[*keys, f"ridge_h{horizon}"]]
@@ -86,7 +86,7 @@ def _scores(run_key: str, folds: Sequence[Fold], horizon: int) -> pd.DataFrame:
 def ensemble_daily_ics(run_key: str, folds: Sequence[Fold], horizon: int) -> pd.DataFrame:
     """Each fold's daily OOS rank IC of Ridge, LightGBM and their rank average."""
     ridge, boosted = f"ridge_h{horizon}", f"{MODEL}_h{horizon}"
-    frame = _scores(run_key, folds, horizon)
+    frame = cached_scores(run_key, folds, horizon)
     frame = frame.assign(**{ENSEMBLE: rank_average(frame, [ridge, boosted])})
     columns = dict(zip(SCORES, [ridge, boosted, ENSEMBLE], strict=True))
     parts = []
