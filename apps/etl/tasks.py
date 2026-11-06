@@ -21,12 +21,13 @@ from apps.etl.alerts import dispatch
 from apps.etl.catchup import catch_up
 from apps.etl.errors import SourceError, SourceNotReadyError
 from apps.etl.master_refresh import DAILY_DATASET, refresh_stock_master
-from apps.etl.models import DataQualityLog
+from apps.etl.models import DataQualityLog, EtlRun
 from apps.etl.quality import CHECKS, alerting, run_checks, should_run_prediction
 from apps.etl.ratelimit import RetryableError, ThrottledError
 from apps.etl.revenue_scan import open_months
 from apps.etl.runs import covered_days
 from apps.etl.statement_summary import open_periods
+from apps.etl.trading_calendar import REFRESH_DATASET, REFRESH_SOURCE
 from apps.market.calendar import OutsideCalendarError, TradingDays
 from apps.market.models import IndexDaily, IndexId
 
@@ -62,7 +63,7 @@ BATCH_SLOTS = {
 }
 EXCHANGES = ("twse", "tpex")
 LAST_THREE = (0, 1, 2)
-CALENDAR_REFRESH = ("trading_calendar", "trading_calendar_refresh")
+CARRIED_FORWARD = frozenset({("stock_master", DAILY_DATASET), ("datagov", "business_signal")})
 
 
 class Due(NamedTuple):
@@ -119,16 +120,22 @@ def _session_today(slot: str | None = None) -> tuple[TradingDays, date] | None:
 def _landed(day: date, owned: frozenset[Due] = frozenset()) -> DataQualityLog:
     """The daily datasets and owned runs without a run covering them; a gate one is an error."""
     wanted = {Due(source, dataset, day) for source, dataset in _daily_jobs()} | owned
-    missing = sorted(
-        {
-            f"{due.source}/{due.dataset}"
-            for due in wanted
-            if due.day not in covered_days(due.source, due.dataset, [due.day])
-        }
-    )
+    missing = sorted({f"{due.source}/{due.dataset}" for due in wanted if not _covered(due)})
     blocking = [key for key in missing if key.split("/")[1] in GATE_DATASETS]
     severity = Severity.ERROR if blocking else Severity.WARNING if missing else Severity.INFO
     return _replace_log(day, ETL_RUNS_CHECK, severity, {"missing": missing, "blocking": blocking})
+
+
+def _covered(due: Due) -> bool:
+    """A run covers the day; for the master and the signal, any later success carries it too."""
+    if due.day in covered_days(due.source, due.dataset, [due.day]):
+        return True
+    return (due.source, due.dataset) in CARRIED_FORWARD and EtlRun.objects.filter(
+        source=due.source,
+        dataset=due.dataset,
+        status=EtlRun.Status.SUCCESS,
+        start_date__gt=due.day,
+    ).exists()
 
 
 def _audit(
@@ -382,7 +389,7 @@ def _periodic_due(day: date, calendar: TradingDays) -> frozenset[Due]:
     """Master and calendar refreshes, and weekly and monthly files due since the last session."""
     due = {
         Due("stock_master", DAILY_DATASET, day),
-        Due(*CALENDAR_REFRESH, day - timedelta(days=1)),
+        Due(REFRESH_SOURCE, REFRESH_DATASET, day - timedelta(days=1)),
     }
     try:
         previous = calendar.shift(day, -1)

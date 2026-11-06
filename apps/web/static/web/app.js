@@ -751,7 +751,7 @@
       case 'us_close': return Object.keys(d.stale || {}).length ? '未更新：' + Object.keys(d.stale).join('、') : '全部已更新';
       case 'etl_runs': {
         const blocking = d.blocking || [], rest = (d.missing || []).filter(key => !blocking.includes(key));
-        if (!blocking.length && !rest.length) return '全部資料集都已更新';
+        if (!blocking.length && !rest.length) return '全部資料集與排程工作都已更新';
         return [blocking.length ? '缺閘門資料集：' + blocking.join('、') : '', rest.length ? '尚未更新：' + rest.join('、') : ''].filter(Boolean).join('；');
       }
       case 'stock_master': {

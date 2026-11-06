@@ -40,7 +40,7 @@ docker compose logs -f worker
 
 | 時間 | 工作 | 內容 | 與規格 §5 的差異 |
 | --- | --- | --- | --- |
-| 15:10 | `etl.prepare_day` | `refresh_calendar` 更正交易日曆（失敗只寫 log），再 `catch_up` 補抓前 14 天到前一交易日漏掉的日子；排程開始後沒跑過品質檢查的交易日（至少前一交易日）補跑，跑過但還有告警的重新判斷 | 規格「先補抓再跑當日」 |
+| 15:10 | `etl.prepare_day` | `refresh_calendar` 更正交易日曆（失敗寫 log，當晚 22:50 的 `etl_runs` 列出），再 `catch_up` 補抓前 14 天到前一交易日漏掉的日子；排程開始後沒跑過品質檢查的交易日（至少前一交易日）補跑，跑過但還有告警的重新判斷 | 規格「先補抓再跑當日」 |
 | 15:30 | `etl.run_batch prices` | 證交所、櫃買日價量與指數 | — |
 | 16:00 | `etl.refresh_master` | 用當天行情更新 `stock_master` | 新增（PR 2.5c） |
 | 16:30 | `etl.run_batch afternoon` | 三大法人、本益比與淨值比、注意、處置、全額交割；證交所外資持股與發行股數 | 借券、當沖移到 21:30；櫃買外資持股與發行股數移到 18:30 |
@@ -51,10 +51,10 @@ docker compose logs -f worker
 | 22:40 | `etl.run_batch notices` | 注意、處置再抓一次 | 名單可能晚於 16:30 公布，23:00 研究任務前補齊 |
 | 22:40 | `etl.statement_scan STATEMENTS_LATE` | 財報彙總表再掃一次；時間固定等於 `FILING_VISIBLE_BEFORE` | 新增 |
 | 22:40 | `etl.revenue_scan REVENUE_LATE` | 月營收彙總頁再掃一次，時間和財報的最後一次相同 | 新增 |
-| 22:50 | `etl.check_quality` | 五項品質檢查，另寫一列 `etl_runs` 列出當天沒完成的 dataset，一起送告警（見下方研究閘門） | — |
+| 22:50 | `etl.check_quality` | 五項品質檢查，另寫一列 `etl_runs`，列出當天沒完成的 dataset，以及這晚負責的排程工作哪些沒有成功的 run，一起送告警（見下方研究閘門） | — |
 | 05:30 | `etl.us_close` | 前一個台股交易日的費半、TSM ADR、美元台幣，每個交易日只跑一次，寫一列 `data_quality_log`（`us_close`）：費半、TSM 早於那天、或美元台幣早於再前一個交易日，就是 warning | 美元台幣在倫敦 23:59 才收盤，05:30 本來就只有前一天 |
-| 週六 10:00 | `etl.weekly_holding` | 集保股權分散表，抓最近一個已結束的週（週一才醒來也是抓上週），日期用那週最後一個交易日 | — |
-| 每月 15 日 10:00 | `etl.business_signal` | data.gov.tw 景氣燈號 | 規格寫每月 1 日；資料在次次月 15 日才公布 |
+| 週六 10:00 | `etl.weekly_holding` | 集保股權分散表，抓最近一個已結束的週（週一才醒來也是抓上週），日期用那週最後一個交易日；漏跑時由週六之後第一個交易日（週六本身是交易日就是當天）的 `etl_runs` 列出 | — |
+| 每月 15 日 10:00 | `etl.business_signal` | data.gov.tw 景氣燈號；晚跑時 run 記在當月的排程日；漏跑時由排程日當天或之後第一個交易日的 `etl_runs` 列出 | 規格寫每月 1 日；資料在次次月 15 日才公布 |
 
 ### 研究閘門
 
@@ -64,6 +64,10 @@ docker compose logs -f worker
 - 注意、處置、全額交割、股數變動、當沖不擋：前四個是事件或變動紀錄，漏一天只是晚一天反映，隔天 catchup 補；當沖是規格的第二批特徵，T+2 才定案。
 - `etl_runs` 那一列跟閘門一致：缺快照是 error（規格「error 不執行當日預測」），只缺其他 dataset 是 warning，都到了是 info；`detail` 的 `missing` 列出全部缺的，`blocking` 列出擋閘門的。
 - 品質檢查之後才補進來的資料：那天的 `etl_runs` 不是 info 就重算；五項檢查有 error 就重跑。重算只送之前沒送過的告警（同一個檢查、同一個 severity 不重送）。
+- 排程工作（交易日曆更新、`refresh_master`、週持股、景氣燈號）只由負責那晚的 22:50 檢查列入：交易日曆更新與 `refresh_master` 是每個交易日，週持股與景氣燈號是到期日之後第一個交易日。補審沒審過的交易日時不列；已經列出的，之後重算時會保留，直到補上：
+  - 交易日曆更新、週持股：要有 run 涵蓋那一天。週持股的檔案只放最新一週，下一週出來後就補不回來，那一列會一直是 warning，只能接受。
+  - `refresh_master`、景氣燈號：之後任何一次成功的 run 都算補上，因為它們會把之前的變動一起帶進來。
+  - MOPS 掃描照舊只在當晚列，重算時不列（掃描補不回來）。
 
 ## 重試與失敗
 

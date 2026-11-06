@@ -13,7 +13,7 @@ from apps.etl.adapters.twse import TwseClient
 from apps.etl.errors import SourceError
 from apps.etl.ratelimit import RetryableError
 from apps.etl.runs import tracked_run
-from apps.etl.trading_calendar import corrections, traded_days
+from apps.etl.trading_calendar import REFRESH_DATASET, REFRESH_SOURCE, corrections, traded_days
 from apps.market.models import DailyPrice, TradingCalendar
 
 logger = logging.getLogger(__name__)
@@ -35,7 +35,7 @@ class Command(BaseCommand):
             raise CommandError(f"trading_calendar has no days in {start}..{through}")
         first = min(stored)
         try:
-            with tracked_run("trading_calendar", "trading_calendar_refresh", first, through) as run:
+            with tracked_run(REFRESH_SOURCE, REFRESH_DATASET, first, through) as run:
                 priced = frozenset(
                     DailyPrice.objects.filter(date__range=(first, through))
                     .values_list("date", flat=True)

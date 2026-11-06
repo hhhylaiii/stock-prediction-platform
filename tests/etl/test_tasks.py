@@ -15,6 +15,7 @@ from apps.etl.errors import SchemaChangedError, SourceNotReadyError
 from apps.etl.models import DataQualityLog, EtlRun
 from apps.etl.quality import CHECKS
 from apps.etl.ratelimit import RetryableError, ThrottledError
+from apps.etl.trading_calendar import REFRESH_DATASET, REFRESH_SOURCE
 from apps.market.calendar import TradingDays
 from apps.market.models import IndexDaily, TradingCalendar
 from config.celery import app
@@ -26,7 +27,7 @@ SCANS = {("mops", "statement_scan"), ("mops", "revenue_scan")}
 MASTER = ("stock_master", "stock_master_daily")
 WEEKLY = ("tdcc", "weekly_holding")
 SIGNAL = ("datagov", "business_signal")
-CALENDAR = ("trading_calendar", "trading_calendar_refresh")
+CALENDAR = (REFRESH_SOURCE, REFRESH_DATASET)
 
 pytestmark = pytest.mark.usefixtures("october_2026_in_db")
 
@@ -568,7 +569,7 @@ def test_a_due_day_off_the_calendar_belongs_to_the_next_session(
     beat["etl-business-signal"] = {"schedule": crontab(hour=10, minute=0, day_of_month="10")}
     monkeypatch.setattr(settings, "CELERY_BEAT_SCHEDULE", beat)
     session = date(2026, 10, 12)
-    landed(session, DAILY_JOBS | SCANS | {MASTER, SIGNAL})
+    landed(session, DAILY_JOBS | SCANS | {MASTER, WEEKLY})
     refreshed(session)
     assert missing_on(session, today) == ["datagov/business_signal", "tdcc/weekly_holding"]
     landed(date(2026, 10, 10), {SIGNAL})
@@ -688,6 +689,38 @@ def test_a_week_without_sessions_has_no_holding_to_fetch(
     today(date(2026, 10, 12))
     assert tasks.weekly_holding.apply().get() == "no session this week"
     assert fake.runs == []
+
+
+@pytest.mark.usefixtures("catch_ups", "sent")
+def test_a_later_master_refresh_clears_a_missed_one_but_a_later_week_does_not(
+    today: Callable[..., None], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("apps.etl.tasks.call_command", lambda name, **kwargs: None)
+    session = date(2026, 10, 27)
+    landed(session, DAILY_JOBS | SCANS)
+    refreshed(session)
+    assert missing_on(session, today) == ["stock_master/stock_master_daily", "tdcc/weekly_holding"]
+    landed(date(2026, 10, 28), {MASTER})
+    landed(date(2026, 10, 30), {WEEKLY})
+    today(date(2026, 10, 29), time(15, 10))
+    tasks.prepare_day()
+    row = DataQualityLog.objects.get(date=session, check_name="etl_runs")
+    assert (row.severity, row.detail["missing"]) == ("warning", ["tdcc/weekly_holding"])
+
+
+def test_a_week_without_sessions_owes_no_holding_file() -> None:
+    TradingCalendar.objects.filter(date__range=(date(2026, 10, 19), date(2026, 10, 22))).update(
+        is_trading_day=False
+    )
+    calendar = TradingDays.from_db()
+    weekly = [due for due in tasks._periodic_due(date(2026, 10, 27), calendar) if due[:2] == WEEKLY]
+    assert weekly == [tasks.Due(*WEEKLY, date(2026, 10, 16))]
+
+
+def test_the_first_session_of_the_calendar_owes_only_the_daily_refreshes() -> None:
+    first = date(2026, 10, 1)
+    due = tasks._periodic_due(first, TradingDays.from_db())
+    assert {item[:2] for item in due} == {MASTER, CALENDAR}
 
 
 @pytest.mark.parametrize(
