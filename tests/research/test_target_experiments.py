@@ -281,21 +281,27 @@ def test_comparisons_pair_the_market_arm_with_the_stock_only_arm_over_folds() ->
     assert list(pinball.by_fold.index) == [0, 1, 2, 3]
 
 
+NOMARKET_PINBALL = [0.10, 0.12, 0.11, 0.13]
+CLEAR_PINBALL = [0.08, 0.101, 0.089, 0.112]
+NOISY_PINBALL = [0.09, 0.125, 0.10, 0.137]
+
+
 @pytest.mark.parametrize(
-    ("alone", "market", "chosen"),
+    ("market", "chosen"),
     [
-        ([0.10] * 4, [0.09] * 4, "market"),
-        ([0.10] * 4, [0.10] * 4, "nomarket"),
-        ([0.10] * 4, [0.11] * 4, "nomarket"),
-        ([0.10] * 4, [math.nan] * 4, "nomarket"),
+        (CLEAR_PINBALL, "market"),
+        (NOISY_PINBALL, "nomarket"),
+        (NOMARKET_PINBALL, "nomarket"),
+        ([0.11, 0.135, 0.125, 0.14], "nomarket"),
+        ([math.nan] * 4, "nomarket"),
     ],
 )
-def test_the_market_arm_needs_a_strictly_lower_primary_metric(
-    alone: list[float], market: list[float], chosen: str
+def test_the_market_arm_needs_a_lower_primary_metric_with_a_fold_gap_t_below_minus_two(
+    market: list[float], chosen: str
 ) -> None:
     daily = fabricated(
         {
-            ("nomarket", "pinball"): alone,
+            ("nomarket", "pinball"): NOMARKET_PINBALL,
             ("market", "pinball"): market,
             ("nomarket", "auc"): [0.5] * 4,
             ("market", "auc"): [0.6] * 4,
@@ -316,8 +322,8 @@ def report(values: dict[tuple[str, str], list[float]], seeds: tuple[int, ...] = 
 
 
 INTERVAL_VALUES: dict[tuple[str, str], list[float]] = {
-    ("nomarket", "pinball"): [0.10, 0.12, 0.11, 0.13],
-    ("market", "pinball"): [0.09, 0.125, 0.10, 0.137],
+    ("nomarket", "pinball"): NOMARKET_PINBALL,
+    ("market", "pinball"): NOISY_PINBALL,
     ("nomarket", "coverage"): [0.80] * 4,
     ("market", "coverage"): [0.78] * 4,
     ("nomarket", "vol_mae"): [0.05] * 4,
@@ -331,45 +337,71 @@ INTERVAL_VALUES: dict[tuple[str, str], list[float]] = {
 }
 
 
-def test_the_report_marks_a_close_call_on_one_seed_as_provisional() -> None:
+def test_the_report_keeps_the_stock_only_arm_on_a_noisy_gap_and_one_seed() -> None:
     text = report(INTERVAL_VALUES)
+    compared = target_experiments.comparisons(
+        interval_experiment(), fabricated(INTERVAL_VALUES), fake_folds()
+    )
 
     assert text.startswith("# 實驗：market-interval（interval-exp）\n\n> 暫定特徵\n")
     assert "- nomarket：只用篩選後的個股特徵" in text
     assert "- market：個股特徵加上市場特徵（SPEC 配方）" in text
-    assert "| 組 | pinball | 覆蓋率 | 波動率 MAE | QLIKE | AUC | Brier |" in text
+    assert (
+        "| 組 | pinball ↓ | 覆蓋率（目標 80%） | 波動率 MAE ↓ | QLIKE ↓ | AUC ↑ | Brier ↓ |" in text
+    )
     assert "| nomarket | 0.1150 | 0.8000 | 0.0500 | 0.3000 | 0.5500 | 0.1000 |" in text
     assert "| market | 0.1130 | 0.7800 | 0.0600 | 0.2900 | 0.5600 | 0.0900 |" in text
     assert (
         "| 差（market − nomarket） | -0.0020 | -0.0200 | +0.0100 | -0.0100 | +0.0100 | -0.0100 |"
         in text
     )
-    assert "**判定（暫定）：採用 market**" in text
-    assert "`--seeds 0,3,6`" in text
+    assert "**判定（暫定）：採用 nomarket**" in text
+    nw_t = compared["pinball"].nw_t
+    assert -2 < nw_t < 0
+    assert (
+        f"- market 的 pinball 較低，但逐摺差 NW t {nw_t:+.2f} 沒有低於 −2：照規則留 nomarket"
+        in text
+    )
+    assert "- 只跑了 1 個 seed：要用 3 個 seed（`--seeds 0,3,6`）重跑再定案" in text
+    assert "- 參考欄（market 對 nomarket）：較好 QLIKE、AUC、Brier；較差 覆蓋率、波動率 MAE" in text
     assert "| 摺 | nomarket | market |" in text
     assert "| 1 | 0.1200 | 0.1250 |" in text
     assert "## 各 seed" not in text
 
 
-def test_the_report_settles_on_three_seeds_or_a_clear_fold_gap() -> None:
+def test_the_report_settles_on_three_seeds_and_adopts_a_clear_gap() -> None:
     three = report(INTERVAL_VALUES, seeds=(0, 3, 6))
-    clear = report(
-        {
-            **INTERVAL_VALUES,
-            ("nomarket", "pinball"): [0.10, 0.12, 0.11, 0.13],
-            ("market", "pinball"): [0.08, 0.101, 0.089, 0.112],
-        }
-    )
+    clear = report({**INTERVAL_VALUES, ("market", "pinball"): CLEAR_PINBALL})
+    settled = report({**INTERVAL_VALUES, ("market", "pinball"): CLEAR_PINBALL}, seeds=(0, 3, 6))
     losing = report({**INTERVAL_VALUES, ("market", "pinball"): [0.11, 0.135, 0.125, 0.14]})
 
-    assert "**判定：採用 market**" in three
-    assert "- pinball 的逐摺差 NW t 未達 2，差距在雜訊內；判定用 3 個 seed 的平均" in three
-    assert "差距在雜訊內" not in clear + losing
+    assert "**判定：採用 nomarket**" in three
+    assert "沒有低於 −2：照規則留 nomarket" in three
+    assert "只跑了" not in three
     assert "## 各 seed（pinball）" in three
     assert "| market | 0.1130 | 3.1130 | 6.1130 |" in three
-    assert "**判定：採用 market**" in clear
-    assert "**判定：採用 nomarket**" in losing
-    assert "判定（暫定）" not in clear + losing
+    assert "**判定（暫定）：採用 market**" in clear
+    assert "**判定：採用 market**" in settled
+    assert "沒有低於 −2" not in clear + settled + losing
+    assert "**判定（暫定）：採用 nomarket**" in losing
+
+
+def test_the_return_report_marks_the_direction_metric_as_higher_is_better() -> None:
+    experiment = target_experiments.target_experiments(CONFIG)["market-return"]
+    daily = fabricated(
+        {
+            ("nomarket", "mae"): NOMARKET_PINBALL,
+            ("market", "mae"): CLEAR_PINBALL,
+            ("nomarket", "direction"): [0.52] * 4,
+            ("market", "direction"): [0.51] * 4,
+        }
+    )
+
+    text = target_experiments.experiment_report(experiment, "return-exp", daily, fake_folds())
+
+    assert "| 組 | MAE ↓ | 方向準確率 ↑ |" in text
+    assert "- 參考欄（market 對 nomarket）：較好 無；較差 方向準確率" in text
+    assert "**判定（暫定）：採用 market**" in text
 
 
 @pytest.fixture

@@ -24,6 +24,7 @@ from apps.research.models import HoldoutScope
 from apps.research.prediction_cache import load_predictions
 from apps.research.rank_model import SPEC_RECIPE
 from apps.research.target_eval import (
+    COVERAGE_TOTAL,
     GATE_T,
     HORIZON,
     LABEL,
@@ -32,6 +33,7 @@ from apps.research.target_eval import (
     UP_LABEL,
     VOL_LABEL,
     Comparison,
+    beats,
     paired,
     quantile_columns,
 )
@@ -50,6 +52,8 @@ METRICS: dict[str, tuple[str, ...]] = {
     INTERVAL: ("pinball", "coverage", "vol_mae", "qlike", "auc", "brier"),
 }
 PRIMARY: dict[str, str] = {RETURN: "mae", INTERVAL: "pinball"}
+LOWER_BETTER = {"mae", "pinball", "vol_mae", "qlike", "brier"}
+COVERAGE_AIM = sum(COVERAGE_TOTAL) / 2
 NEEDS: dict[str, tuple[str, tuple[str, ...]]] = {
     "mae": (LABEL, (RETURN_COLUMN,)),
     "direction": (LABEL, (RETURN_COLUMN,)),
@@ -219,20 +223,21 @@ def comparisons(
 
 
 def verdict(experiment: TargetExperiment, compared: Mapping[str, Comparison]) -> str:
-    """The second arm when it is strictly better on the scope's primary metric, else the first."""
+    """The second arm when its primary metric is lower with a fold-gap NW t below −GATE_T."""
     default, alternative = (arm.name for arm in experiment.arms)
-    primary = compared[PRIMARY[experiment.scope]]
-    return alternative if primary.model < primary.baseline else default
+    return alternative if beats(compared[PRIMARY[experiment.scope]]) else default
 
 
-def clear_gap(compared: Mapping[str, Comparison], scope: str) -> bool:
-    """Whether the primary metric's fold-paired gap has an NW t of GATE_T or more."""
-    return abs(compared[PRIMARY[scope]].nw_t) >= GATE_T
-
-
-def settled(compared: Mapping[str, Comparison], scope: str, seeds: int) -> bool:
-    """A verdict on MIN_SEEDS seeds, or on a fold-paired gap whose NW t reaches GATE_T."""
-    return seeds >= MIN_SEEDS or clear_gap(compared, scope)
+def side(metric: str, compared: Comparison) -> int:
+    """+1 when the second arm is better on a metric, −1 when worse, 0 on a tie or no value."""
+    model, baseline = compared.model, compared.baseline
+    if math.isnan(model) or math.isnan(baseline):
+        return 0
+    if metric == "coverage":
+        model, baseline = -abs(model - COVERAGE_AIM), -abs(baseline - COVERAGE_AIM)
+    elif metric in LOWER_BETTER:
+        model, baseline = -model, -baseline
+    return (model > baseline) - (model < baseline)
 
 
 def _cell(value: float) -> str:
@@ -256,30 +261,45 @@ def _table_lines(experiment: TargetExperiment, compared: Mapping[str, Comparison
         ("逐摺差 NW t", [_gap(compared[metric].nw_t) for metric in metrics]),
     ]
     lines = [
-        "| 組 | " + " | ".join(TITLES[metric] for metric in metrics) + " |",
+        "| 組 | " + " | ".join(_header(metric) for metric in metrics) + " |",
         "| --- |" + " --- |" * len(metrics),
     ]
     return lines + [f"| {name} | " + " | ".join(cells) + " |" for name, cells in rows]
+
+
+def _header(metric: str) -> str:
+    if metric == "coverage":
+        return f"{TITLES[metric]}（目標 {COVERAGE_AIM:.0%}）"
+    return f"{TITLES[metric]} {'↓' if metric in LOWER_BETTER else '↑'}"
 
 
 def _verdict_lines(
     experiment: TargetExperiment, compared: Mapping[str, Comparison], seeds: int
 ) -> list[str]:
     chosen = verdict(experiment, compared)
+    default, alternative = (arm.name for arm in experiment.arms)
     primary = PRIMARY[experiment.scope]
-    if clear_gap(compared, experiment.scope):
-        return [f"**判定：採用 {chosen}**"]
-    if settled(compared, experiment.scope, seeds):
-        return [
-            f"**判定：採用 {chosen}**",
-            f"- {TITLES[primary]} 的逐摺差 NW t 未達 {GATE_T:g}，差距在雜訊內；"
-            f"判定用 {seeds} 個 seed 的平均",
-        ]
-    return [
-        f"**判定（暫定）：採用 {chosen}**",
-        f"- ⚠️ {TITLES[primary]} 的逐摺差 NW t 未達 {GATE_T:g}，只跑了 {seeds} 個 seed："
-        f"要用 {MIN_SEEDS} 個 seed（`--seeds {SUGGESTED_SEEDS}`）重跑再判定",
-    ]
+    gap = compared[primary]
+    title = "判定" if seeds >= MIN_SEEDS else "判定（暫定）"
+    lines = [f"**{title}：採用 {chosen}**"]
+    if gap.model < gap.baseline and chosen == default:
+        lines.append(
+            f"- {alternative} 的 {TITLES[primary]} 較低，但逐摺差 NW t {gap.nw_t:+.2f} 沒有低於 "
+            f"−{GATE_T:g}：照規則留 {default}"
+        )
+    if seeds < MIN_SEEDS:
+        lines.append(
+            f"- 只跑了 {seeds} 個 seed：要用 {MIN_SEEDS} 個 seed（`--seeds {SUGGESTED_SEEDS}`）"
+            "重跑再定案"
+        )
+    others = [metric for metric in METRICS[experiment.scope] if metric != primary]
+    better = [TITLES[metric] for metric in others if side(metric, compared[metric]) > 0]
+    worse = [TITLES[metric] for metric in others if side(metric, compared[metric]) < 0]
+    lines.append(
+        f"- 參考欄（{alternative} 對 {default}）：較好 {'、'.join(better) or '無'}；"
+        f"較差 {'、'.join(worse) or '無'}"
+    )
+    return lines
 
 
 def _seed_lines(experiment: TargetExperiment, daily: pd.DataFrame) -> list[str]:
@@ -335,8 +355,9 @@ def experiment_report(
         f"- 比較 {len(indices)} 個研究摺（摺 {indices[0]}–{indices[-1]}），seed "
         f"{', '.join(map(str, seeds))}；每組的快取 run_key 為 `{run_key}-<組名>`，"
         "seed 不是 0 時再加 `-s<seed>`",
-        f"- 判定規則：{alternative} 的 {primary} 要嚴格低於 {default} 才採用（SPEC §7：OOS 指標"
-        "沒有提高就不用）；其他欄只列參考。各 seed 先逐日平均，再看研究期與逐摺差",
+        f"- 判定規則：{alternative} 的 {primary} 要低於 {default}，而且逐摺差的 NW t 要低於 "
+        f"−{GATE_T:g} 才採用（SPEC §7：OOS 指標沒有提高就不用）；其他欄只列參考。"
+        "各 seed 先逐日平均，再看研究期與逐摺差",
         "",
         *_table_lines(experiment, compared),
         "",
