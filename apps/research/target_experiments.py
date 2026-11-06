@@ -47,7 +47,7 @@ VOL_COLUMN = f"{MODEL}_vol_h{VOL_DAYS}"
 PROB_COLUMN = f"{MODEL}_prob_h{VOL_DAYS}"
 METRICS: dict[str, tuple[str, ...]] = {
     RETURN: ("mae", "direction"),
-    INTERVAL: ("pinball", "coverage", "qlike", "auc", "brier"),
+    INTERVAL: ("pinball", "coverage", "vol_mae", "qlike", "auc", "brier"),
 }
 PRIMARY: dict[str, str] = {RETURN: "mae", INTERVAL: "pinball"}
 NEEDS: dict[str, tuple[str, tuple[str, ...]]] = {
@@ -55,6 +55,7 @@ NEEDS: dict[str, tuple[str, tuple[str, ...]]] = {
     "direction": (LABEL, (RETURN_COLUMN,)),
     "pinball": (LABEL, tuple(QUANTILE_COLUMNS.values())),
     "coverage": (LABEL, (QUANTILE_COLUMNS[0.1], QUANTILE_COLUMNS[0.9])),
+    "vol_mae": (VOL_LABEL, (VOL_COLUMN,)),
     "qlike": (VOL_LABEL, (VOL_COLUMN,)),
     "auc": (UP_LABEL, (PROB_COLUMN,)),
     "brier": (UP_LABEL, (PROB_COLUMN,)),
@@ -64,6 +65,7 @@ TITLES = {
     "direction": "方向準確率",
     "pinball": "pinball",
     "coverage": "覆蓋率",
+    "vol_mae": "波動率 MAE",
     "qlike": "QLIKE",
     "auc": "AUC",
     "brier": "Brier",
@@ -77,7 +79,7 @@ DAILY_COLUMNS = ["arm", "seed", "fold", "metric", "date", "value"]
 
 @dataclass(frozen=True)
 class TargetExperiment(Experiment):
-    """Arms of one target scope; the first is kept unless the second is strictly better."""
+    """Arms of one target scope; the verdict reads its primary metric, not the rank rule."""
 
     scope: str
 
@@ -127,6 +129,8 @@ def _score(metric: str, rows: pd.DataFrame) -> pd.Series:
         return daily_pinball(rows, LABEL, QUANTILE_COLUMNS)
     if metric == "coverage":
         return daily_coverage(rows, LABEL, QUANTILE_COLUMNS[0.1], QUANTILE_COLUMNS[0.9])
+    if metric == "vol_mae":
+        return daily_absolute_error(rows, VOL_LABEL, VOL_COLUMN)
     if metric == "qlike":
         return daily_qlike(rows, VOL_LABEL, VOL_COLUMN)
     up = rows.assign(**{UP_LABEL: rows[UP_LABEL].astype(int)})
@@ -221,9 +225,14 @@ def verdict(experiment: TargetExperiment, compared: Mapping[str, Comparison]) ->
     return alternative if primary.model < primary.baseline else default
 
 
+def clear_gap(compared: Mapping[str, Comparison], scope: str) -> bool:
+    """Whether the primary metric's fold-paired gap has an NW t of GATE_T or more."""
+    return abs(compared[PRIMARY[scope]].nw_t) >= GATE_T
+
+
 def settled(compared: Mapping[str, Comparison], scope: str, seeds: int) -> bool:
     """A verdict on MIN_SEEDS seeds, or on a fold-paired gap whose NW t reaches GATE_T."""
-    return seeds >= MIN_SEEDS or abs(compared[PRIMARY[scope]].nw_t) >= GATE_T
+    return seeds >= MIN_SEEDS or clear_gap(compared, scope)
 
 
 def _cell(value: float) -> str:
@@ -258,8 +267,14 @@ def _verdict_lines(
 ) -> list[str]:
     chosen = verdict(experiment, compared)
     primary = PRIMARY[experiment.scope]
-    if settled(compared, experiment.scope, seeds):
+    if clear_gap(compared, experiment.scope):
         return [f"**判定：採用 {chosen}**"]
+    if settled(compared, experiment.scope, seeds):
+        return [
+            f"**判定：採用 {chosen}**",
+            f"- {TITLES[primary]} 的逐摺差 NW t 未達 {GATE_T:g}，差距在雜訊內；"
+            f"判定用 {seeds} 個 seed 的平均",
+        ]
     return [
         f"**判定（暫定）：採用 {chosen}**",
         f"- ⚠️ {TITLES[primary]} 的逐摺差 NW t 未達 {GATE_T:g}，只跑了 {seeds} 個 seed："

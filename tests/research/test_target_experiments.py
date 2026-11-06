@@ -150,6 +150,8 @@ def interval_daily(metric: str, rows: pd.DataFrame) -> pd.Series:
         return daily_auc(up, "fwd_up_5pct", "lightgbm_prob_h20")
     if metric == "brier":
         return daily_brier(up, "fwd_up_5pct", "lightgbm_prob_h20")
+    if metric == "vol_mae":
+        return daily_absolute_error(rows, "fwd_vol_20d", "lightgbm_vol_h20")
     return daily_qlike(rows, "fwd_vol_20d", "lightgbm_vol_h20")
 
 
@@ -157,7 +159,7 @@ def interval_daily(metric: str, rows: pd.DataFrame) -> pd.Series:
 def test_daily_metrics_score_both_interval_arms_on_their_shared_tradable_rows(
     small: Path,
 ) -> None:
-    chosen, folds = run("market-interval", small)
+    chosen, folds = run("market-interval", small, (0, 3))
     fold = folds["market"][0]
     key = arm_key("interval-exp", chosen.arms[1], 0)
     cached = load_fold_predictions(key, "lightgbm", fold)
@@ -171,25 +173,30 @@ def test_daily_metrics_score_both_interval_arms_on_their_shared_tradable_rows(
         key, "lightgbm", fold, holed, notes=fold_notes(key, "lightgbm", fold.index)
     )
 
-    daily = target_experiments.daily_metrics(chosen, "interval-exp", folds, (0,))
+    daily = target_experiments.daily_metrics(chosen, "interval-exp", folds, (0, 3))
 
     assert list(daily.columns) == target_experiments.DAILY_COLUMNS
-    assert set(daily["metric"]) == {"pinball", "coverage", "qlike", "auc", "brier"}
+    assert set(daily["metric"]) == {"pinball", "coverage", "vol_mae", "qlike", "auc", "brier"}
+    for seed in (0, 3):
+        alone, market = shared_frames(chosen, "interval-exp", fold, seed)
+        for column, metric in (
+            ("lightgbm_q90_h20", "pinball"),
+            ("lightgbm_q90_h20", "coverage"),
+            ("lightgbm_prob_h20", "auc"),
+            ("lightgbm_prob_h20", "brier"),
+            ("lightgbm_vol_h20", "vol_mae"),
+            ("lightgbm_vol_h20", "qlike"),
+        ):
+            kept = market[column].notna() & (market[column] > 0 if metric == "qlike" else True)
+            for arm, frame in (("nomarket", alone), ("market", market)):
+                np.testing.assert_allclose(
+                    picked_daily(daily, arm, seed, fold.index, metric).to_numpy(),
+                    interval_daily(metric, frame[kept.to_numpy()]).to_numpy(),
+                    err_msg=f"{arm} seed {seed} {metric}",
+                )
+    first, third = (shared_frames(chosen, "interval-exp", fold, seed)[0] for seed in (0, 3))
+    assert not np.allclose(first["lightgbm_q50_h20"], third["lightgbm_q50_h20"])
     alone, market = shared_frames(chosen, "interval-exp", fold, 0)
-    for column, metric in (
-        ("lightgbm_q90_h20", "pinball"),
-        ("lightgbm_q90_h20", "coverage"),
-        ("lightgbm_prob_h20", "auc"),
-        ("lightgbm_prob_h20", "brier"),
-        ("lightgbm_vol_h20", "qlike"),
-    ):
-        kept = market[column].notna() & (market[column] > 0 if metric == "qlike" else True)
-        for arm, frame in (("nomarket", alone), ("market", market)):
-            np.testing.assert_allclose(
-                picked_daily(daily, arm, 0, fold.index, metric).to_numpy(),
-                interval_daily(metric, frame[kept.to_numpy()]).to_numpy(),
-                err_msg=f"{arm} {metric}",
-            )
     assert len(alone) > len(alone[market["lightgbm_q90_h20"].notna().to_numpy()])
 
 
@@ -313,6 +320,8 @@ INTERVAL_VALUES: dict[tuple[str, str], list[float]] = {
     ("market", "pinball"): [0.09, 0.125, 0.10, 0.137],
     ("nomarket", "coverage"): [0.80] * 4,
     ("market", "coverage"): [0.78] * 4,
+    ("nomarket", "vol_mae"): [0.05] * 4,
+    ("market", "vol_mae"): [0.06] * 4,
     ("nomarket", "qlike"): [0.30] * 4,
     ("market", "qlike"): [0.29] * 4,
     ("nomarket", "auc"): [0.55] * 4,
@@ -328,10 +337,13 @@ def test_the_report_marks_a_close_call_on_one_seed_as_provisional() -> None:
     assert text.startswith("# 實驗：market-interval（interval-exp）\n\n> 暫定特徵\n")
     assert "- nomarket：只用篩選後的個股特徵" in text
     assert "- market：個股特徵加上市場特徵（SPEC 配方）" in text
-    assert "| 組 | pinball | 覆蓋率 | QLIKE | AUC | Brier |" in text
-    assert "| nomarket | 0.1150 | 0.8000 | 0.3000 | 0.5500 | 0.1000 |" in text
-    assert "| market | 0.1130 | 0.7800 | 0.2900 | 0.5600 | 0.0900 |" in text
-    assert "| 差（market − nomarket） | -0.0020 | -0.0200 | -0.0100 | +0.0100 | -0.0100 |" in text
+    assert "| 組 | pinball | 覆蓋率 | 波動率 MAE | QLIKE | AUC | Brier |" in text
+    assert "| nomarket | 0.1150 | 0.8000 | 0.0500 | 0.3000 | 0.5500 | 0.1000 |" in text
+    assert "| market | 0.1130 | 0.7800 | 0.0600 | 0.2900 | 0.5600 | 0.0900 |" in text
+    assert (
+        "| 差（market − nomarket） | -0.0020 | -0.0200 | +0.0100 | -0.0100 | +0.0100 | -0.0100 |"
+        in text
+    )
     assert "**判定（暫定）：採用 market**" in text
     assert "`--seeds 0,3,6`" in text
     assert "| 摺 | nomarket | market |" in text
@@ -351,6 +363,8 @@ def test_the_report_settles_on_three_seeds_or_a_clear_fold_gap() -> None:
     losing = report({**INTERVAL_VALUES, ("market", "pinball"): [0.11, 0.135, 0.125, 0.14]})
 
     assert "**判定：採用 market**" in three
+    assert "- pinball 的逐摺差 NW t 未達 2，差距在雜訊內；判定用 3 個 seed 的平均" in three
+    assert "差距在雜訊內" not in clear + losing
     assert "## 各 seed（pinball）" in three
     assert "| market | 0.1130 | 3.1130 | 6.1130 |" in three
     assert "**判定：採用 market**" in clear
@@ -420,7 +434,7 @@ def test_target_experiment_refuses_bad_keys_and_seeds_before_training(command: P
 
 
 @pytest.mark.django_db
-def test_target_experiment_waits_while_its_scope_holdout_is_unclaimed(command: Path) -> None:
+def test_target_experiment_refuses_to_run_once_its_scope_holdout_is_claimed(command: Path) -> None:
     HoldoutRun.objects.create(
         scope=HoldoutScope.INTERVAL, attempt=1, run_key="interval-final", last_date=weekdays()[-1]
     )

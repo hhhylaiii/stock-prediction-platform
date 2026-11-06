@@ -185,7 +185,7 @@ def label_digest(scope: str, fold: Fold) -> str:
 
 
 def scope_features(scope: str, target: TargetVariant = TARGET_RECIPE) -> list[str]:
-    """Features a scope's boosters read: stock-level for rank, plus market features otherwise."""
+    """Features a scope's boosters read: stock-level, plus market ones unless rank or left out."""
     try:
         screened = screened_features()
     except RunError as error:

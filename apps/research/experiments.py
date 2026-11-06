@@ -56,7 +56,7 @@ class Arm:
 
 @dataclass(frozen=True)
 class Experiment:
-    """Arms compared under a rule; the first arm is the SPEC recipe."""
+    """Arms compared under a rule; the first arm stays when the rule is not met."""
 
     name: str
     rule: str
