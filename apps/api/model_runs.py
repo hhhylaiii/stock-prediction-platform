@@ -6,7 +6,7 @@ from statistics import fmean, stdev
 from typing import Any
 
 from django.conf import settings
-from django.db.models import Max, Q
+from django.db.models import Q
 from django.utils import timezone
 from rest_framework.request import Request
 from rest_framework.response import Response
@@ -15,12 +15,12 @@ from apps.api.envelope import envelope
 from apps.api.params import MonthlyIcQuery, parse
 from apps.api.serving import (
     MONITOR_FIELDS,
-    SERVING,
     SERVING_FIELDS,
     ServingRun,
     Slot,
     best_runs,
     eligible,
+    latest_days,
     latest_served_date,
     months_before,
     runs_on,
@@ -57,17 +57,7 @@ TOTAL_FIELDS = ("run_key", "model_type", "metric", "segment", "value", "period_s
 
 def serving_models() -> list[tuple[ServingRun, date]]:
     """Per page slot its active or degraded run on the slot's own latest served day."""
-    latest = (
-        eligible()
-        .filter(run__status__in=SERVING)
-        .values("run__objective", "horizon")
-        .annotate(day=Max("date"))
-    )
-    days = {
-        slot: row["day"]
-        for row in latest
-        if (slot := Slot(row["run__objective"], row["horizon"])) in PAGE_ORDER
-    }
+    days = latest_days(PAGE_ORDER)
     if not days:
         return []
     condition = Q()
