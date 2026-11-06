@@ -26,10 +26,14 @@ class Command(BaseCommand):
         summaries = summary_frame()
         if stocks:
             summaries = summaries[summaries["stock_id"].isin(stocks)]
-        found = pd.concat([summaries, viewer_frame_from_raw(stocks)], ignore_index=True)
+        viewers = viewer_frame_from_raw(stocks)
+        found = pd.concat([summaries, viewers], ignore_index=True)
         with transaction.atomic():
             changed = overwrite_statements(found) if not found.empty else 0
             if options["dry_run"]:
                 transaction.set_rollback(True)
         verb = "would change" if options["dry_run"] else "changed"
         self.stdout.write(f"{changed} statements {verb} from {len(found)} MOPS rows")
+        if viewers.attrs["unreadable"]:
+            codes = ", ".join(viewers.attrs["unreadable"])
+            self.stdout.write(f"set aside {codes}: their kept viewer pages do not parse")

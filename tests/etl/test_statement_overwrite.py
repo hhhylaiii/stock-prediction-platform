@@ -9,7 +9,8 @@ import pandas as pd
 import pytest
 from django.core.management import call_command
 
-from apps.etl.models import DataQualityLog, RawMops
+from apps.etl.adapters.mops import STATEMENT_SCAN
+from apps.etl.models import DataQualityLog, EtlRun, RawMops
 from apps.etl.mops_history import STATEMENT_HISTORY, STATEMENT_VIEWER
 from apps.etl.statement_overwrite import (
     OVERWRITE_CHECK,
@@ -34,12 +35,14 @@ STORED = {
 }
 
 
-def stored(code: str = "1101", period: str = "2013-Q2", **values: Any) -> FinancialStatement:
+def stored(
+    code: str = "1101", period: str = "2013-Q2", announced: date = date(2014, 6, 3), **values: Any
+) -> FinancialStatement:
     return FinancialStatement.objects.create(
         stock_id=code,
         period=period,
         fin_type=CONSOLIDATED,
-        announce_date=date(2014, 6, 3),
+        announce_date=announced,
         **{**STORED, **values},
     )
 
@@ -104,11 +107,50 @@ def test_a_stored_eps_and_both_margins_stay_as_finmind_has_them() -> None:
 
 
 @pytest.mark.django_db
-def test_a_debt_ratio_and_a_blank_figure_are_overwritten_and_filled() -> None:
-    stored(debt_ratio=0.40, net_income=None)
-    overwrite_statements(frame(mops(debt_ratio=0.45, net_income=7_000_000)))
+def test_a_blank_margin_is_not_filled() -> None:
+    stored(eps=Decimal("0.4000"), gross_margin=None, op_margin=None)
+    assert overwrite_statements(frame(mops(gross_margin=0.5, op_margin=0.2))) == 0
     row = FinancialStatement.objects.get()
-    assert (row.debt_ratio, row.net_income) == (0.45, 7_000_000)
+    assert (row.gross_margin, row.op_margin) == (None, None)
+
+
+@pytest.mark.django_db
+def test_a_debt_ratio_and_blank_figures_are_overwritten_and_filled() -> None:
+    stored(debt_ratio=0.40, net_income=None, revenue=None)
+    overwrite_statements(frame(mops(debt_ratio=0.45, net_income=7_000_000, revenue=90_000_000)))
+    row = FinancialStatement.objects.get()
+    assert (row.debt_ratio, row.net_income, row.revenue) == (0.45, 7_000_000, 90_000_000)
+
+
+@pytest.mark.django_db
+def test_a_statement_listed_twice_counts_once() -> None:
+    stored()
+    assert overwrite_statements(frame(mops(roe=0.03), mops(roe=0.03, debt_ratio=0.5))) == 1
+    row = FinancialStatement.objects.get()
+    assert (row.roe, row.debt_ratio) == (0.03, 0.5)
+    assert logged()["1101"][0]["fields"] == {
+        "eps": [None, "0.5000"],
+        "roe": [0.02, 0.03],
+        "debt_ratio": [0.40, 0.5],
+    }
+
+
+@pytest.mark.django_db
+def test_quarters_from_the_first_one_the_daily_scan_read_are_left_alone() -> None:
+    EtlRun.objects.create(
+        source="mops",
+        dataset=STATEMENT_SCAN,
+        start_date=date(2026, 11, 5),
+        end_date=date(2026, 11, 5),
+    )
+    stored(period="2026-Q2", announced=date(2026, 8, 14))
+    stored(period="2026-Q3", announced=date(2026, 11, 5))
+    changed = overwrite_statements(
+        frame({**mops(roe=0.03), "period": "2026-Q2"}, {**mops(roe=0.03), "period": "2026-Q3"})
+    )
+    assert changed == 1
+    roe = dict(FinancialStatement.objects.values_list("period", "roe"))
+    assert roe == {"2026-Q2": 0.03, "2026-Q3": 0.02}
 
 
 @pytest.mark.django_db
@@ -164,11 +206,11 @@ def test_the_summaries_are_read_again_from_raw(fixture_path: Callable[[str], Pat
 
 
 @pytest.mark.django_db
-def test_a_quarter_without_its_quarter_before_is_not_read(
-    fixture_path: Callable[[str], Path],
-) -> None:
+def test_a_first_quarter_needs_no_quarter_before(fixture_path: Callable[[str], Path]) -> None:
     save_history(fixture_path, year="103")
-    assert summary_frame().empty
+    found = summary_frame().set_index("stock_id")
+    assert set(found["period"]) == {"2014-Q1"}
+    assert found.loc["4526", "operating_cf"] == -92_392_000
 
 
 def viewer_page(fixture_path: Callable[[str], Path], season: int) -> str:
@@ -176,21 +218,48 @@ def viewer_page(fixture_path: Callable[[str], Path], season: int) -> str:
     return path.read_bytes().decode("cp950")
 
 
+def save_viewer(page: str, code: str = "6211", season: int = 1) -> None:
+    RawMops.objects.create(
+        dataset=STATEMENT_VIEWER,
+        request_params={
+            "step": "1",
+            "CO_ID": code,
+            "SYEAR": "2013",
+            "SSEASON": str(season),
+            "REPORT_ID": "C",
+        },
+        payload={"html": page},
+        source_hash=f"{code}{season}",
+    )
+
+
+@pytest.mark.django_db
+def test_a_later_quarter_without_its_quarter_before_keeps_only_its_balances(
+    fixture_path: Callable[[str], Path],
+) -> None:
+    save_viewer(viewer_page(fixture_path, 2), season=2)
+    found = viewer_frame_from_raw().set_index("period")
+    assert list(found.index) == ["2013-Q2"]
+    assert found.loc["2013-Q2", "debt_ratio"] is not None
+    flows = ["revenue", "net_income", "eps", "roe", "operating_cf", "gross_margin", "op_margin"]
+    assert found.loc["2013-Q2", flows].isna().all()
+
+
+@pytest.mark.django_db
+def test_a_stock_whose_kept_page_does_not_parse_is_set_aside(
+    fixture_path: Callable[[str], Path],
+) -> None:
+    save_viewer(viewer_page(fixture_path, 1))
+    save_viewer(viewer_page(fixture_path, 1), code="1333")
+    found = viewer_frame_from_raw()
+    assert set(found["stock_id"]) == {"6211"}
+    assert list(found.attrs["unreadable"]) == ["1333"]
+
+
 @pytest.mark.django_db
 def test_the_viewer_pages_are_read_again_from_raw(fixture_path: Callable[[str], Path]) -> None:
     for season in (1, 2):
-        RawMops.objects.create(
-            dataset=STATEMENT_VIEWER,
-            request_params={
-                "step": "1",
-                "CO_ID": "6211",
-                "SYEAR": "2013",
-                "SSEASON": str(season),
-                "REPORT_ID": "C",
-            },
-            payload={"html": viewer_page(fixture_path, season)},
-            source_hash=f"6211{season}",
-        )
+        save_viewer(viewer_page(fixture_path, season), season=season)
     found = viewer_frame_from_raw().set_index("period")
     assert list(found.index) == ["2013-Q1", "2013-Q2"]
     assert (found.loc["2013-Q2", "revenue"], found.loc["2013-Q2", "net_income"]) == (
@@ -199,15 +268,38 @@ def test_the_viewer_pages_are_read_again_from_raw(fixture_path: Callable[[str], 
     )
 
 
+def save_both(fixture_path: Callable[[str], Path]) -> None:
+    save_history(fixture_path)
+    for season in (1, 2):
+        save_viewer(viewer_page(fixture_path, season), season=season)
+    save_viewer(viewer_page(fixture_path, 1), code="1333")
+    stored("4526", "2013-Q1", operating_cf=1)
+    stored("6211", "2013-Q2", revenue=1)
+
+
 @pytest.mark.django_db
 def test_the_command_overwrites_from_both_kinds_of_raw(
     fixture_path: Callable[[str], Path],
 ) -> None:
-    save_history(fixture_path)
-    stored("4526", "2013-Q1", operating_cf=1)
+    save_both(fixture_path)
     out = io.StringIO()
     call_command("overwrite_statements", stdout=out)
-    assert FinancialStatement.objects.get().operating_cf == -92_392_000
+    figures = dict(FinancialStatement.objects.values_list("stock_id", "operating_cf"))
+    assert figures["4526"] == -92_392_000
+    assert FinancialStatement.objects.get(stock_id="6211").revenue == 107_602_000
+    assert "2 statements changed" in out.getvalue()
+    assert "set aside 1333: their kept viewer pages do not parse" in out.getvalue()
+
+
+@pytest.mark.django_db
+def test_the_command_reads_only_the_stocks_asked_for(
+    fixture_path: Callable[[str], Path],
+) -> None:
+    save_both(fixture_path)
+    out = io.StringIO()
+    call_command("overwrite_statements", "--stock", "6211", stdout=out)
+    assert FinancialStatement.objects.get(stock_id="4526").operating_cf == 1
+    assert FinancialStatement.objects.get(stock_id="6211").revenue == 107_602_000
     assert "1 statements changed" in out.getvalue()
 
 
