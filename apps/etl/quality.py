@@ -9,6 +9,7 @@ from django.db import models, transaction
 
 from apps.etl.models import DataQualityLog
 from apps.market.calendar import NotATradingDayError, OutsideCalendarError, TradingDays
+from apps.market.common_stock import COMMON_STOCK_PATTERN, DEPOSITARY_INDUSTRY, DEPOSITARY_PREFIX
 from apps.market.models import (
     DailyChip,
     DailyPrice,
@@ -115,7 +116,7 @@ def row_count_results(day: date, previous: date | None) -> list[DataQualityLog]:
 
 
 def big_move_result(day: date, previous: date | None) -> DataQualityLog:
-    """Closes more than 10% off the previous session's with no ex-dividend that day, for review."""
+    """Common stocks over 10% off the previous close with no ex-dividend that day, for review."""
     stocks: dict[str, float] = {}
     if previous is not None:
         before = _closes(previous)
@@ -132,7 +133,7 @@ def big_move_result(day: date, previous: date | None) -> DataQualityLog:
 
 
 def missing_results(day: date) -> list[DataQualityLog]:
-    """Per column, stocks valued on its fullest recent day but not today, by market too."""
+    """Per column, common stocks valued on its fullest recent day but not today, by market too."""
     delisted = set(
         StockMaster.objects.filter(delist_date__lte=day).values_list("stock_id", flat=True)
     )
@@ -198,7 +199,7 @@ def _previous_session(calendar: TradingDays, day: date) -> date | None:
 
 
 def _closes(day: date) -> dict[str, Decimal]:
-    rows = DailyPrice.objects.filter(date=day).values_list("stock_id", "close")
+    rows = _common(DailyPrice.objects.filter(date=day)).values_list("stock_id", "close")
     return {code: close for code, close in rows if close}
 
 
@@ -222,6 +223,16 @@ def _gap(
     return {"missing": len(missing), "population": len(before), "markets": by_market}
 
 
+def _common(rows: models.QuerySet[Any]) -> models.QuerySet[Any]:
+    """Rows of common stocks per `apps.market.common_stock`; codes off stock_master stay."""
+    depositary = StockMaster.objects.filter(industry=DEPOSITARY_INDUSTRY).values("stock_id")
+    return (
+        rows.filter(stock_id__regex=COMMON_STOCK_PATTERN)
+        .exclude(stock_id__startswith=DEPOSITARY_PREFIX.removesuffix("%"))
+        .exclude(stock_id__in=depositary)
+    )
+
+
 def _share(gap: dict[str, Any]) -> float:
     return int(gap["missing"]) / int(gap["population"]) if gap["population"] else 0.0
 
@@ -237,7 +248,7 @@ def _market_failed(gap: dict[str, Any]) -> bool:
 
 def _baseline(model: type[models.Model], column: str, day: date) -> date | None:
     """The day within the past month with the most values in the column, the latest on ties."""
-    rows = model._default_manager.filter(date__lt=day, date__gte=day - BASELINE_DAYS)
+    rows = _common(model._default_manager.filter(date__lt=day, date__gte=day - BASELINE_DAYS))
     if column != ROW:
         rows = rows.filter(**{f"{column}__isnull": False})
     fullest = rows.values("date").annotate(n=models.Count("pk")).order_by("-n", "-date").first()
@@ -245,7 +256,7 @@ def _baseline(model: type[models.Model], column: str, day: date) -> date | None:
 
 
 def _codes_with(model: type[models.Model], column: str, day: date) -> set[str]:
-    rows = model._default_manager.filter(date=day)
+    rows = _common(model._default_manager.filter(date=day))
     if column != ROW:
         rows = rows.filter(**{f"{column}__isnull": False})
     return set(rows.values_list("stock_id", flat=True))

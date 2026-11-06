@@ -70,6 +70,18 @@ def _two_clean_days() -> None:
     _indices(DAY)
 
 
+NON_COMMON = ["0050", "00632R", "9103", "5999"]
+
+
+def _non_common_days() -> None:
+    """An ETF, a leveraged ETF, a 91 depositary receipt and one filed under 存託憑證."""
+    StockMaster.objects.create(stock_id="5999", name="x", market="TWSE", industry="存託憑證")
+    for day in (PREV, DAY):
+        _prices(day, NON_COMMON)
+        _chips(day, NON_COMMON)
+        _valuations(day, NON_COMMON)
+
+
 def _results(day: date = DAY) -> dict[tuple[str, str], DataQualityLog]:
     return {
         (row.check_name, row.detail.get("table", "")): row
@@ -150,6 +162,17 @@ def test_big_moves_without_a_dividend_are_noted_for_review(calendar: TradingDays
 
 
 @pytest.mark.django_db
+def test_big_moves_count_common_stocks_only(calendar: TradingDays) -> None:
+    _two_clean_days()
+    _non_common_days()
+    moved = [*NON_COMMON, CODES[0]]
+    DailyPrice.objects.filter(date=DAY, stock_id__in=moved).update(close=Decimal("12"))
+    run_checks(DAY, calendar)
+    row = _results()[("big_move", "daily_price")]
+    assert (row.detail["count"], row.detail["stocks"]) == (1, {CODES[0]: 0.2})
+
+
+@pytest.mark.django_db
 def test_rows_gone_since_yesterday_count_as_missing_but_delisted_ones_do_not(
     calendar: TradingDays,
 ) -> None:
@@ -161,6 +184,45 @@ def test_rows_gone_since_yesterday_count_as_missing_but_delisted_ones_do_not(
     assert row.severity == WARNING
     gap = row.detail["columns"]["row"]
     assert (gap["missing"], gap["population"]) == (2, 99)
+
+
+@pytest.mark.django_db
+def test_only_common_stocks_make_up_the_missing_values_population(calendar: TradingDays) -> None:
+    _two_clean_days()
+    _non_common_days()
+    for model in (DailyPrice, DailyChip, DailyValuation):
+        model.objects.filter(date=DAY, stock_id__in=NON_COMMON).delete()
+    run_checks(DAY, calendar)
+    rows = _results()[("row_count", "daily_price")].detail
+    assert (rows["count"], rows["previous"]) == (100, 104)
+    for table in ("daily_price", "daily_chip", "daily_valuation"):
+        row = _results()[("missing_values", table)]
+        assert row.severity == INFO
+        filled = [gap for gap in row.detail["columns"].values() if gap["population"]]
+        assert filled
+        assert {(gap["missing"], gap["population"]) for gap in filled} == {(0, 100)}
+
+
+@pytest.mark.django_db
+def test_common_stocks_gone_still_count_beside_non_common_ones(calendar: TradingDays) -> None:
+    _two_clean_days()
+    _non_common_days()
+    DailyPrice.objects.filter(date=DAY, stock_id__in=[*NON_COMMON, *CODES[:2]]).delete()
+    run_checks(DAY, calendar)
+    row = _results()[("missing_values", "daily_price")]
+    assert row.severity == WARNING
+    gap = row.detail["columns"]["row"]
+    assert (gap["missing"], gap["population"]) == (2, 100)
+
+
+@pytest.mark.django_db
+def test_the_baseline_day_is_the_one_fullest_in_common_stocks(calendar: TradingDays) -> None:
+    _prices(EARLIER, CODES)
+    _prices(PREV, [*CODES[:95], *(f"00{n}" for n in range(50, 60))])
+    _prices(DAY, CODES)
+    run_checks(DAY, calendar)
+    gap = _results()[("missing_values", "daily_price")].detail["columns"]["row"]
+    assert (gap["missing"], gap["population"]) == (0, 100)
 
 
 @pytest.mark.django_db
