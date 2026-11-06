@@ -51,6 +51,7 @@ from apps.research.prediction_cache import (
 from apps.research.ranges import years
 from apps.research.rank_model import (
     GRADE,
+    LAMBDARANK,
     LEVELS,
     MODEL_TYPE,
     RANK_LABEL,
@@ -311,7 +312,12 @@ def _rank(job: Job) -> FoldFit:
             "valid_ic": _plain(boosted.valid_score),
             "feval_every": FEVAL_EVERY,
             "variant": asdict(job.variant),
-            "lightgbm": {**BASE_PARAMS, "objective": job.variant.objective, **seeded(job.seed)},
+            "lightgbm": {
+                **BASE_PARAMS,
+                "objective": job.variant.objective,
+                **(LAMBDARANK if ranking else {}),
+                **seeded(job.seed),
+            },
             **({"graded_from": RANK_LABEL, "levels": LEVELS} if ranking else {}),
             "ic_nw_t": oos["ic_nw_t"],
             "importance_gain": _gains(boosted.booster, features),

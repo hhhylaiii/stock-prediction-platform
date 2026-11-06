@@ -10,12 +10,12 @@ import pandas as pd
 
 from apps.market.calendar import TradingDays
 from apps.research import lgbm_runs
-from apps.research.ensemble import evaluated_rows
 from apps.research.labels import HORIZONS
 from apps.research.metrics.ic import daily_rank_ic
 from apps.research.models import HoldoutScope
 from apps.research.prediction_cache import load_predictions
-from apps.research.rank_model import SPEC_RECIPE, Variant
+from apps.research.rank_model import LAMBDARANK, RANK_LABEL, SPEC_RECIPE, Variant
+from apps.research.training import load_labels, training_rows
 from apps.research.walkforward import Fold, WalkForwardConfig, generate_folds
 
 COARSE_MONTHS = 6
@@ -121,13 +121,20 @@ def train_arms(
 def daily_ics(
     experiment: Experiment, run_key: str, folds: Mapping[str, list[Fold]]
 ) -> pd.DataFrame:
-    """Every arm's daily OOS rank IC on tradable rows of each fold's test_start..eval_end."""
+    """Every arm's daily OOS rank IC on tradable test rows; each period's labels are read once."""
+    cached = {
+        arm.name: load_predictions(arm_key(run_key, arm), MODEL, folds[arm.name])
+        for arm in experiment.arms
+    }
     parts = []
-    for arm in experiment.arms:
-        cached = load_predictions(arm_key(run_key, arm), MODEL, folds[arm.name])
-        for horizon in HORIZONS:
-            for fold in folds[arm.name]:
-                rows = evaluated_rows(cached, fold, horizon)
+    for horizon in HORIZONS:
+        for shared in zip(*(folds[arm.name] for arm in experiment.arms), strict=True):
+            first = shared[0]
+            labels = load_labels(first.test_start, first.eval_end, horizon, lgbm_runs.RANK_FIELDS)
+            for arm, fold in zip(experiment.arms, shared, strict=True):
+                frame = cached[arm.name]
+                inside = frame[(frame["fold"] == fold.index) & (frame["date"] <= fold.eval_end)]
+                rows = training_rows(inside, labels, RANK_LABEL)
                 ic = daily_rank_ic(rows, f"{MODEL}_h{horizon}").rename("ic").reset_index()
                 parts.append(ic.assign(arm=arm.name, fold=fold.index, horizon=horizon))
     return pd.concat(parts, ignore_index=True)[DAILY_COLUMNS]
@@ -161,7 +168,11 @@ def _setting(arm: Arm) -> str:
     config, variant = arm.config, arm.variant
     window = "expanding" if config.window == "expanding" else f"rolling {config.train_months} 個月"
     decay = "—" if variant.half_life is None else f"{variant.half_life:g} 個月"
-    return f"{window}，每 {variant.every} 日一列，半衰期 {decay}，objective {variant.objective}"
+    line = f"{window}，每 {variant.every} 日一列，半衰期 {decay}，objective {variant.objective}"
+    if variant.objective != "lambdarank":
+        return line
+    top = LAMBDARANK["lambdarank_truncation_level"]
+    return f"{line}（只排每天前 {top} 名的配對，label_gain 2^級−1）"
 
 
 def _cell(value: float) -> str:

@@ -9,6 +9,7 @@ from django.core.management.base import BaseCommand, CommandError
 
 from apps.etl.management.options import as_date
 from apps.market.calendar import CalendarError, TradingDays
+from apps.research import lgbm_runs
 from apps.research.baseline_runs import check_run_key, shuffle_check
 from apps.research.ensemble import write_report
 from apps.research.experiments import (
@@ -19,7 +20,7 @@ from apps.research.experiments import (
     experiments,
     train_arms,
 )
-from apps.research.holdout import HoldoutError
+from apps.research.holdout import HoldoutError, holdout_claimed
 from apps.research.labels import latest_price_date
 from apps.research.models import HoldoutScope
 from apps.research.prediction_cache import FoldMismatchError, MissingFoldsError
@@ -56,9 +57,12 @@ class Command(BaseCommand):
     def handle(self, *args: Any, **options: Any) -> None:
         experiment = experiments(DEFAULT_CONFIG)[options["name"]]
         run_key = options["run_key"]
+        if holdout_claimed(HoldoutScope.RANK):
+            raise CommandError("a rank holdout run exists, so the rank design is frozen (SPEC §7)")
         try:
             for arm in experiment.arms:
                 check_run_key(HoldoutScope.RANK, arm_key(run_key, arm))
+            lgbm_runs.scope_features(HoldoutScope.RANK)
             last = as_date(options["last_date"], "--last-date") or latest_price_date()
             if last is None:
                 raise ValueError("daily_price is empty")

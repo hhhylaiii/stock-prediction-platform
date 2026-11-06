@@ -13,6 +13,8 @@ from apps.research.features.transforms import standardize
 from apps.research.metrics.ic import daily_rank_ic
 from apps.research.models import ModelRun, Prediction
 from apps.research.rank_model import (
+    LAMBDARANK,
+    LEVELS,
     RANK_LABEL,
     Variant,
     fit_rank,
@@ -288,7 +290,9 @@ def test_fit_rank_lambdarank_grades_ten_levels_and_stops_on_the_rank_pct(
 
     (call,) = boosts
     rows = call["rows"]
-    assert call["params"] == {"objective": "lambdarank"}
+    assert call["params"] == LAMBDARANK
+    assert LAMBDARANK["lambdarank_truncation_level"] == 30
+    assert LAMBDARANK["label_gain"] == [2.0**level - 1 for level in range(LEVELS)]
     assert call["layout"] == gbdt.Layout(group=True)
     grades = np.minimum(np.floor(rows[RANK_LABEL] * 10), 9).astype(int)
     np.testing.assert_array_equal(rows[call["label"]].to_numpy(), grades.to_numpy())

@@ -19,6 +19,11 @@ OBJECTIVES = ("regression", "lambdarank")
 LEVELS = 10
 GRADE = "fwd_rank_level"
 WEIGHT = "decay_weight"
+LAMBDARANK = {
+    "objective": "lambdarank",
+    "lambdarank_truncation_level": 30,
+    "label_gain": [2.0**level - 1 for level in range(LEVELS)],
+}
 
 
 @dataclass(frozen=True)
@@ -83,7 +88,7 @@ def fit_rank(
     ranking = variant.objective == "lambdarank"
     if ranking:
         grades = np.minimum(np.floor(rows[RANK_LABEL] * LEVELS), LEVELS - 1).astype(np.int64)
-        rows, label, params = rows.assign(**{GRADE: grades}), GRADE, {"objective": "lambdarank"}
+        rows, label, params = rows.assign(**{GRADE: grades}), GRADE, LAMBDARANK
     pct = rows[RANK_LABEL]
 
     def feval(dates: pd.Series, _: pd.Series) -> Feval:

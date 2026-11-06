@@ -24,9 +24,10 @@ from apps.research.experiments import (
 )
 from apps.research.management.commands import rank_experiment
 from apps.research.metrics.ic import daily_rank_ic
-from apps.research.models import LabelDaily, ModelRun
+from apps.research.models import HoldoutRun, HoldoutScope, LabelDaily, ModelRun
 from apps.research.prediction_cache import load_predictions
-from apps.research.rank_model import SPEC_RECIPE, Variant
+from apps.research.rank_model import LAMBDARANK, SPEC_RECIPE, Variant
+from apps.research.runs import SCREENING_MODEL
 from apps.research.walkforward import WalkForwardConfig
 from tests.research.conftest import weekday_calendar
 from tests.research.run_panels import CONFIG, weekdays
@@ -154,6 +155,8 @@ def test_train_arms_fit_each_arm_under_its_own_key_and_share_the_base(
     graded = ModelRun.objects.filter(run_key="rank-exp-lambdarank")
     assert {run.params["variant"]["objective"] for run in graded} == {"lambdarank"}
     assert {run.params["lightgbm"]["objective"] for run in graded} == {"lambdarank"}
+    for fitted in graded:
+        assert fitted.params["lightgbm"].items() >= LAMBDARANK.items()
     assert {run.params["label"] for run in graded} == {"fwd_rank_level"}
     assert {run.params["graded_from"] for run in graded} == {"fwd_rank_pct"}
     plain = ModelRun.objects.filter(run_key="rank-exp-base")
@@ -162,10 +165,23 @@ def test_train_arms_fit_each_arm_under_its_own_key_and_share_the_base(
 
 
 @pytest.mark.django_db
-def test_daily_ics_pool_each_arm_over_its_tradable_test_rows(small: Path) -> None:
+def test_daily_ics_pool_each_arm_over_its_tradable_test_rows(
+    small: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     chosen, folds = run("sampling", small)
+    reads: list[tuple[date, date, int]] = []
+    load = experiments.load_labels
+
+    def counted(start: date, end: date, horizon: int, *args: Any) -> pd.DataFrame:
+        reads.append((start, end, horizon))
+        return load(start, end, horizon, *args)
+
+    monkeypatch.setattr(experiments, "load_labels", counted)
 
     daily = daily_ics(chosen, "rank-exp", folds)
+
+    periods = [(fold.test_start, fold.eval_end) for fold in folds["base"]]
+    assert sorted(reads) == sorted((*period, horizon) for horizon in (5, 20) for period in periods)
 
     for arm in chosen.arms:
         cached = load_predictions(f"rank-exp-{arm.name}", "lightgbm", folds[arm.name])
@@ -294,3 +310,37 @@ def test_rank_experiment_stops_when_the_shuffle_check_fails(
     with pytest.raises(CommandError, match="shuffle check on fold"):
         call_command("rank_experiment", name="sampling", run_key="rank-exp", stdout=StringIO())
     assert not ModelRun.objects.filter(model_type="lightgbm").exists()
+
+
+@pytest.mark.django_db
+def test_rank_experiment_refuses_to_run_once_the_rank_holdout_is_claimed(command: Path) -> None:
+    HoldoutRun.objects.create(
+        scope=HoldoutScope.RANK, attempt=1, run_key="rank-final", last_date=weekdays()[-1]
+    )
+
+    with pytest.raises(CommandError, match=r"rank holdout .* frozen"):
+        call_command("rank_experiment", name="sampling", run_key="rank-exp", stdout=StringIO())
+    assert not ModelRun.objects.filter(model_type="lightgbm").exists()
+
+
+@pytest.mark.django_db
+def test_rank_experiment_needs_a_screening_before_the_shuffle_check(
+    command: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    shuffled: list[Any] = []
+    monkeypatch.setattr(rank_experiment, "shuffle_check", lambda *args: shuffled.append(args))
+    ModelRun.objects.filter(model_type=SCREENING_MODEL).delete()
+
+    with pytest.raises(CommandError, match="screened features"):
+        call_command("rank_experiment", name="sampling", run_key="rank-exp", stdout=StringIO())
+    assert shuffled == []
+
+
+def test_the_lambdarank_setting_names_its_truncation_and_gain() -> None:
+    graded = experiments.experiments(CONFIG)["objective"].arms[-1]
+
+    line = experiments._setting(graded)
+
+    assert "objective lambdarank" in line
+    assert "前 30 名" in line
+    assert "label_gain 2^級−1" in line
