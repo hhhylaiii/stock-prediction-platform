@@ -249,17 +249,17 @@ Oct 29, 2026 · @Owen Lai
 1. 定義 universe：特徵與預測對全部上市、上櫃普通股計算；訓練 universe 排除停牌、上市未滿 60 個交易日、處置期間、全額交割、當日無成交、20 日成交金額中位數低於 1,000 萬元的股票；注意股不排除，以 `tech_attention_t` 當特徵；處置與全額交割期間來自 `disposition_event`。以下所有橫截面統計與 label 的百分位都只在當日訓練 universe 內計算；universe 外的股票套用同一天的轉換參數照常推論，`feature_daily` 與 `prediction` 都帶 `in_universe` 旗標，API 回傳時標示，事後評估不計入。
 2. 可用時點對齊：每個特徵依表中「可用時點」以 merge\_asof 對齊到 t；基本面與總經用 announce\_date，weekly\_holding 用 publish\_date，美股用美國日曆日 ≤ t 的最近一個收盤，美國休市日自動取前一日；美元兌台幣用倫敦日 ≤ t−1 的最近一個收盤，週五與連假前也一樣。財報的 announce\_date：沒有更正紀錄的照實際上傳日，晚於法定截止日也延後；有更正紀錄的只拿來提早、不延後；有重編報表的期別用最後一次重編的上傳日；交易日 22:40 以後或非交易日上傳的算下一個交易日。財報數字一律用該期報表當時公布的原值，不用之後報表重分類過的比較期數字。前後期報表種類（個體、合併）不同時，revenue、gross\_margin、op\_margin、operating\_cf 不跨種類取前期，相關的年增與 TTM 為 NaN；月營收訊號讀到 2013-01 兩側的月份時為 NaN（2013 年起改為 IFRS 合併營收）。
 3. 極值處理：個股層級特徵以當日 universe 內 1% / 99% 分位 winsorize；某一側的截斷界會讓 universe 全部變成同值時（稀疏的 0/1 與計數特徵），那一側改用 universe 的極值當界；市場層級特徵與 `ind_sector_id` 不做。
-4. 標準化：個股層級特徵做當日橫截面 z-score，均值與標準差只用 universe 內的股票算。Ridge 與 logistic baseline 一律用 z-score 值；排名模型的 LightGBM 也用 z-score 值，原值跨年度有漂移，樹模型看不出相對當日市場的高低；絕對報酬、區間、波動、機率模型的 LightGBM 用原值並加入市場層級特徵，市場層級特徵進模型前先在訓練窗內依分位切成 5 級，見第 7 節模型表。市場層級特徵與 `ind_sector_id` 不做橫截面 z-score，市場層級特徵排名模型不使用。
+4. 標準化：個股層級特徵做當日橫截面 z-score，均值與標準差只用 universe 內的股票算。Ridge 與 logistic baseline 一律用 z-score 值；排名模型的 LightGBM 也用 z-score 值，原值跨年度有漂移，樹模型看不出相對當日市場的高低；絕對報酬、區間、波動、機率模型的 LightGBM 用原值並加入市場層級特徵，市場層級特徵進模型前先在訓練窗內依分位切成 5 級，見第 7 節模型表。市場層級特徵與 `ind_sector_id` 不做橫截面 z-score，市場層級特徵排名模型不使用。當日 universe 沒有離散度時 z 為 0，不是 NaN。
 5. 缺值：Ridge 與 logistic 填當日中位數並加 `_missing` 旗標；LightGBM 保留 NaN。
 6. 寫入 `feature_daily`，只存 winsorize 前的原值與 `in_universe`，同時輸出 Parquet 分區檔（依年份）。步驟 3 到 5 的 winsorize、z-score、填值與 `_missing` 旗標在訓練與推論管線按日重算，不落表，參數一律由同一天的訓練 universe 算出。每日重算最近 60 個交易日的特徵與已可結算的 label，以 upsert 覆蓋，處理除權息與財報延遲入庫造成的歷史錯值。
-7. 特徵驗收：Phase 3 產出每個特徵的單因子 rank IC，只用前 4 摺的訓練窗計算（測試期落在 2014 到 2015 年，與第 7 節調參同一組摺），之後不再用新資料重篩；單因子 rank IC 對 5 日與 20 日的 `fwd_rank_pct` 各算一次；成對相關取日橫截面 Spearman 的平均，特徵依兩個 horizon 中較大的單因子 IC 絕對值由高到低保留，與已保留特徵的相關絕對值高於 0.95 的剔除；訊號型特徵在兩個 horizon 的 rank IC 絕對值都低於 0.005 才剔除，任一 horizon 的 IC 有值天數不到篩選窗一半時不判定、保留並記錄；條件型特徵（`size_*`、`liq_*`、`tech_vol_*`、`risk_*`、`fund_days_since_fs`、`ind_sector_id`、`*_days_to_*`）不受 IC 門檻約束。保留清單寫入 `model_run.feature_list`；剔除清單在 Phase 4 定案後不得依 2025 年起的 holdout 結果再改。第二批特徵每加一組重跑同一套篩選與 walk-forward，總體 OOS rank IC 沒有提高就不留。
+7. 特徵驗收：Phase 3 產出每個特徵的單因子 rank IC，只用前 4 摺的訓練窗計算（測試期落在 2014 到 2015 年，與第 7 節調參同一組摺），之後不再用新資料重篩；單因子 rank IC 對 5 日與 20 日的 `fwd_rank_pct` 各算一次；成對相關取日橫截面 Spearman 的平均，特徵依兩個 horizon 中較大的單因子 IC 絕對值由高到低保留，與已保留特徵的相關絕對值高於 0.95 的剔除；訊號型特徵在兩個 horizon 的 rank IC 絕對值都低於 0.005 才剔除，任一 horizon 的 IC 有值天數不到篩選窗一半時不判定、保留並記錄；條件型特徵（`size_*`、`liq_*`、`tech_vol_*`、`risk_*`、`fund_days_since_fs`、`ind_sector_id`、`*_days_to_*`）不受 IC 門檻約束。市場層級特徵不篩選，記在同一列 `model_run` 的 params.unscreened，非排名模型照第 4 步加回。保留清單寫入 `model_run.feature_list`；剔除清單在 Phase 4 定案後不得依 2025 年起的 holdout 結果再改。第二批特徵每加一組重跑同一套篩選與 walk-forward，總體 OOS rank IC 沒有提高就不留。
 
 **Label 定義**
 
 - 所有 t+N 都是 `trading_calendar` 上的交易日，不是日曆日。
-- `fwd_ret_5d_open`、`fwd_ret_20d_open` = 還原收盤價(t+N) / 還原開盤價(t+1) − 1，是訓練、評估與回測一律使用的版本；t+1 開盤即漲停（漲停判定同特徵表）的列標記 `untradable_t1 = 1`，訓練與回測都跳過。5 日由絕對報酬模型直接回歸，20 日取分位數模型的 q50。
+- `fwd_ret_5d_open`、`fwd_ret_20d_open` = 還原收盤價(t+N) / 還原開盤價(t+1) − 1，是訓練、評估與回測一律使用的版本；t+1 無法以開盤價進場的列標記 `untradable_t1 = 1`，包括 t+1 開盤即漲停（漲停判定同特徵表）、t+1 停牌或無成交、上市已在 t 結束，訓練與回測都跳過。5 日由絕對報酬模型直接回歸，20 日取分位數模型的 q50。
 - `fwd_ret_5d`、`fwd_ret_20d` = 還原收盤價(t+N) / 還原收盤價(t) − 1，收盤對收盤版本，只存 `label_daily` 供對照與事後分析，不進訓練。
-- `fwd_rank_pct` = 當日訓練 universe 內、`untradable_t1 = 0` 的列的 `fwd_ret_open` 橫截面百分位（0 到 1）；排名模型預測這個。
+- `fwd_rank_pct` = 當日訓練 universe 內、`untradable_t1 = 0` 的列的 `fwd_ret_open` 橫截面百分位（0 到 1），等當日的 t+horizon 進到資料內、全部列都到期後才計算；排名模型預測這個。
 - `fwd_vol_20d` = t+1 到 t+20 共 20 個交易日還原日報酬的標準差，年化 ×√252；波動率模型的目標。
 - `fwd_up_5pct` = `fwd_ret_20d_open` 是否大於 5%（0 或 1）；分類模型的目標。
 - horizon 內下市的股票：以最後一個成交日的還原收盤價當作 t+N 的價格計算，該列保留，不得設為 NaN 丟棄。
