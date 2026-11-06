@@ -10,6 +10,7 @@ import responses
 from django.core.management import call_command
 from django.utils import timezone
 
+from apps.etl.adapters.exchange_tables import priced_codes
 from apps.etl.adapters.twse import TwseAdapter
 from apps.etl.adapters.twse_tables import TABLES
 from apps.etl.errors import SchemaChangedError, SourceNotReadyError
@@ -644,6 +645,12 @@ def test_a_day_without_kept_quotes_takes_its_day_trades_for_the_stocks_priced(
     rows = _load(adapter, "day_trade")
     assert set(rows) == {"2330", "2317"}
     assert rows["2330"]["day_trade_volume"] == 4_142_000
+
+
+@pytest.mark.django_db
+def test_foreign_currency_etfs_are_not_among_the_priced_codes() -> None:
+    _priced("2330", "00636K")
+    assert priced_codes(DAY) == {"2330"}
 
 
 @responses.activate
