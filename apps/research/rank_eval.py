@@ -37,6 +37,7 @@ from apps.research.walkforward import Fold
 MODEL = lgbm_runs.MODEL
 RIDGE = "ridge"
 EXPOSURES = [LIQUIDITY, *NEUTRAL_EXPOSURES]
+GATE_SHARE = 0.6
 
 
 @dataclass(frozen=True)
@@ -100,14 +101,15 @@ def evaluate(
     prices: pd.DataFrame,
     calendar: TradingDays,
 ) -> RankEvaluation:
-    """One horizon of a rank run: LightGBM against Ridge fold by fold, Ridge alone, deciles."""
+    """One horizon: LightGBM against Ridge fold by fold, Ridge alone, deciles, research gains."""
     frame = evaluation_frame(run_key, folds, horizon, directory)
     boosted, ridge = f"{MODEL}_h{horizon}", f"{RIDGE}_h{horizon}"
+    research = [fold for fold in folds if fold.research]
     return RankEvaluation(
         model=rank_report(frame, boosted, horizon, folds, baseline=ridge),
         baseline=rank_report(frame, ridge, horizon, folds),
         deciles=decile_report(frame, boosted, horizon, folds, prices, calendar),
-        importance=importance_drift(fold_gains(run_key, folds, horizon)),
+        importance=importance_drift(fold_gains(run_key, research, horizon)),
     )
 
 
@@ -158,8 +160,31 @@ def write_metrics(run_key: str, evaluations: Mapping[int, RankEvaluation]) -> in
         )
 
 
+def _verdict(passed: bool) -> str:
+    return "通過" if passed else "未過"
+
+
+def _gates(horizon: int, evaluated: RankEvaluation) -> str:
+    """SPEC §7 rank gates of one horizon, with Ridge's own research totals."""
+    model, ridge, share = (
+        evaluated.model.total,
+        evaluated.baseline.total,
+        evaluated.model.beat_share,
+    )
+    significant = model.mean > 0 and model.nw_t > 2
+    lines = [
+        f"## 關卡：排名 {horizon} 日",
+        "",
+        f"- 研究期 IC 均值 {model.mean:.4f} 大於 0 且 NW t {model.nw_t:.2f} 大於 2："
+        f"{_verdict(significant)}",
+        f"- 贏 Ridge 的研究摺比例 {share:.0%} 達 {GATE_SHARE:.0%}：{_verdict(share >= GATE_SHARE)}",
+        f"- Ridge 研究期 IC 均值 {ridge.mean:.4f}，NW t {ridge.nw_t:.2f}，{ridge.n_days} 天",
+    ]
+    return "\n".join(lines)
+
+
 def report(run_key: str, evaluations: Mapping[int, RankEvaluation]) -> str:
-    """Markdown of each horizon's LightGBM section with its deciles and importance drift."""
+    """Markdown of each horizon's gates, then its LightGBM section, deciles and importance."""
     sections = [
         render_report(
             f"{run_key}（{horizon} 日）",
@@ -167,6 +192,8 @@ def report(run_key: str, evaluations: Mapping[int, RankEvaluation]) -> str:
             {horizon: evaluated.deciles},
             evaluated.importance,
         )
+        + "\n"
+        + _gates(horizon, evaluated)
         for horizon, evaluated in sorted(evaluations.items())
     ]
-    return "\n".join(sections) + "\n"
+    return "\n\n".join(sections) + "\n"

@@ -23,7 +23,8 @@ DEFAULT_CONFIG = WalkForwardConfig()
 class Command(BaseCommand):
     help = (
         "Report a rank run's tuning and research folds against Ridge and store its "
-        "backtest_metric rows; holdout folds stay out."
+        "backtest_metric rows; holdout folds stay out. train does not touch these rows, "
+        "so run this again after refitting any fold of the run_key."
     )
 
     def add_arguments(self, parser: ArgumentParser) -> None:
@@ -45,10 +46,12 @@ class Command(BaseCommand):
                 if not is_holdout(fold)
             ]
             evaluations = evaluate_run(run_key, folds, settings.FEATURE_PARQUET_DIR, calendar)
+            text = report(run_key, evaluations)
+            written = write_report(text, options["output"])
         except (
             ValueError,
             LookupError,
-            FileNotFoundError,
+            OSError,
             CalendarError,
             WalkForwardError,
             FoldMismatchError,
@@ -56,7 +59,5 @@ class Command(BaseCommand):
         ) as error:
             raise CommandError(str(error)) from error
         stored = write_metrics(run_key, evaluations)
-        text = report(run_key, evaluations)
-        written = write_report(text, options["output"])
         self.stdout.write(text if written is None else f"wrote {written}")
         self.stdout.write(f"{run_key}: {stored} backtest_metric rows")

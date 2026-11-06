@@ -9,6 +9,7 @@ import pandas as pd
 import pytest
 from django.core.management import call_command
 from django.core.management.base import CommandError
+from django.db.models import F
 
 from apps.market.calendar import TradingDays
 from apps.market.models import DailyPrice, StockMaster
@@ -27,6 +28,15 @@ from tests.research.run_panels import CONFIG, STOCKS, folds, research, weekdays
 pytestmark = pytest.mark.django_db
 
 INDUSTRIES = ["水泥工業", "食品工業", "塑膠工業", "電子工業"]
+RAW_INDUSTRY = {STOCKS[0]: "金融業", STOCKS[1]: "  "}
+CANONICAL = {STOCKS[0]: "金融保險", STOCKS[1]: None}
+
+
+def industry_of(stock: str) -> str | None:
+    """The industry evaluation sees: TPEx aliases mapped to TWSE names, blanks missing."""
+    return CANONICAL.get(stock, INDUSTRIES[STOCKS.index(stock) % len(INDUSTRIES)])
+
+
 RUN_KEY = "rank-wf1"
 
 
@@ -57,7 +67,7 @@ def add_prices() -> None:
                 stock_id=stock,
                 name=stock,
                 market="TWSE",
-                industry=INDUSTRIES[k % len(INDUSTRIES)],
+                industry=RAW_INDUSTRY.get(stock, INDUSTRIES[k % len(INDUSTRIES)]),
                 list_date=date(2000, 1, 1),
             )
         )
@@ -86,6 +96,8 @@ def caches(run_panel: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Ridge and LightGBM rank caches of tuning and research folds, with exposures and prices."""
     add_exposures(run_panel)
     add_prices()
+    flipped = 1 + 1 / len(STOCKS) - F("fwd_rank_pct")
+    LabelDaily.objects.filter(horizon=5).update(fwd_rank_pct=flipped)
     monkeypatch.setattr(lgbm_runs, "MAX_ROUNDS", 120)
     baseline_runs.run_folds("rank", research(), RUN_KEY, run_panel)
     lgbm_runs.run_folds("rank", research(), RUN_KEY, run_panel)
@@ -121,25 +133,36 @@ def test_read_columns_reads_keys_and_the_named_features_only(caches: Path) -> No
         read_columns(start, end, caches, ["fwd_rank_pct"])
 
 
-def test_evaluation_frame_joins_caches_labels_exposures_and_industry(caches: Path) -> None:
+@pytest.mark.parametrize("horizon", [5, 20])
+def test_evaluation_frame_joins_caches_labels_exposures_and_industry(
+    caches: Path, horizon: int
+) -> None:
     chosen = research()
 
-    frame = rank_eval.evaluation_frame(RUN_KEY, chosen, 20, caches)
+    frame = rank_eval.evaluation_frame(RUN_KEY, chosen, horizon, caches)
 
     cached = load_predictions(RUN_KEY, "baseline", chosen)
     ends = {fold.index: fold.eval_end for fold in chosen}
     kept = cached[cached["date"] <= cached["fold"].map(ends)]
     assert len(frame) == len(kept)
     assert frame["date"].max() <= max(fold.eval_end for fold in chosen)
-    row = frame.iloc[len(frame) // 2]
-    label = LabelDaily.objects.get(stock_id=row["stock_id"], date=row["date"], horizon=20)
-    feature = FeatureDaily.objects.get(stock_id=row["stock_id"], date=row["date"])
-    assert row["fwd_rank_pct"] == pytest.approx(label.fwd_rank_pct)
-    assert row["untradable_t1"] == label.untradable_t1
-    assert row["size_log_mcap"] == pytest.approx(feature.size_log_mcap)
-    assert row["liq_dollar_vol_med_20d"] == pytest.approx(feature.liq_dollar_vol_med_20d)
-    assert row["industry"] == INDUSTRIES[STOCKS.index(row["stock_id"]) % len(INDUSTRIES)]
-    assert {"ridge_h20", "lightgbm_h20"} <= set(frame.columns)
+    keys = ["stock_id", "date"]
+    labels = pd.DataFrame(
+        list(
+            LabelDaily.objects.filter(horizon=horizon).values(
+                *keys, "fwd_rank_pct", "untradable_t1"
+            )
+        )
+    )
+    exposures = pd.DataFrame(list(FeatureDaily.objects.values(*keys, *rank_eval.EXPOSURES)))
+    expected = frame[keys].merge(labels, on=keys, how="left").merge(exposures, on=keys, how="left")
+    np.testing.assert_allclose(frame["fwd_rank_pct"], expected["fwd_rank_pct"])
+    assert frame["untradable_t1"].tolist() == expected["untradable_t1"].tolist()
+    for name in rank_eval.EXPOSURES:
+        np.testing.assert_allclose(frame[name], expected[name].astype(float), err_msg=name)
+    assert frame["industry"].tolist() == [industry_of(stock) for stock in frame["stock_id"]]
+    assert {"金融保險", None} <= set(frame["industry"])
+    assert {f"ridge_h{horizon}", f"lightgbm_h{horizon}"} <= set(frame.columns)
 
 
 def test_evaluate_scores_lightgbm_against_ridge_on_the_frame(caches: Path) -> None:
@@ -162,7 +185,7 @@ def test_evaluate_scores_lightgbm_against_ridge_on_the_frame(caches: Path) -> No
     )
 
 
-def test_evaluate_reads_each_fold_importance_from_its_model_run(caches: Path) -> None:
+def test_evaluate_reads_each_research_fold_importance_from_its_model_run(caches: Path) -> None:
     chosen = research()
 
     evaluated = rank_eval.evaluate(RUN_KEY, chosen, 5, caches, prices(chosen), calendar())
@@ -172,9 +195,14 @@ def test_evaluate_reads_each_fold_importance_from_its_model_run(caches: Path) ->
             "importance_gain"
         ]
         for fold in chosen
+        if fold.research
     }
     expected = importance_drift(gains)
     pd.testing.assert_frame_equal(evaluated.importance.by_fold, expected.by_fold)
+    tuning = next(fold for fold in chosen if fold.tuning)
+    assert tuning.index not in evaluated.importance.by_fold.index
+    ModelRun.objects.filter(run_id=lgbm_runs.run_id(RUN_KEY, "rank", 5, tuning)).delete()
+    rank_eval.evaluate(RUN_KEY, chosen, 5, caches, prices(chosen), calendar())
     ModelRun.objects.filter(run_id=lgbm_runs.run_id(RUN_KEY, "rank", 5, chosen[1])).delete()
     with pytest.raises(LookupError, match=rf"folds \[{chosen[1].index}\]"):
         rank_eval.evaluate(RUN_KEY, chosen, 5, caches, prices(chosen), calendar())
@@ -262,6 +290,12 @@ def test_report_renders_each_horizon_with_deciles_and_importance(caches: Path) -
             evaluated.importance,
         )
         assert section in text
+        model, ridge = evaluated.model.total, evaluated.baseline.total
+        passed = "通過" if model.mean > 0 and model.nw_t > 2 else "未過"
+        assert f"IC 均值 {model.mean:.4f} 大於 0 且 NW t {model.nw_t:.2f} 大於 2：{passed}" in text
+        beaten = "通過" if evaluated.model.beat_share >= 0.6 else "未過"
+        assert f"達 60%：{beaten}" in text
+        assert f"Ridge 研究期 IC 均值 {ridge.mean:.4f}，NW t {ridge.nw_t:.2f}" in text
     assert text.index("（5 日）") < text.index("（20 日）")
 
 
@@ -281,6 +315,14 @@ def test_evaluate_rank_writes_the_report_and_metrics(command: Path, tmp_path: Pa
     assert output.read_text() == rank_eval.report(RUN_KEY, evaluations)
     assert f"wrote {output}" in out.getvalue()
     assert BacktestMetric.objects.filter(run_key=RUN_KEY, model_type="ridge").exists()
+
+
+def test_evaluate_rank_writes_nothing_when_the_report_cannot_be_written(
+    command: Path, tmp_path: Path
+) -> None:
+    with pytest.raises(CommandError, match="Is a directory"):
+        call_command("evaluate_rank", run_key=RUN_KEY, output=str(tmp_path), stdout=StringIO())
+    assert not BacktestMetric.objects.exists()
 
 
 def test_evaluate_rank_refuses_other_scopes_and_missing_caches(command: Path) -> None:
