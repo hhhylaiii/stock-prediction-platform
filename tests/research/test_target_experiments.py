@@ -11,7 +11,7 @@ from django.core.management import call_command
 from django.core.management.base import CommandError
 
 from apps.market.calendar import TradingDays
-from apps.market.models import DailyPrice
+from apps.market.models import DailyPrice, IndexDaily
 from apps.research import experiments, lgbm_runs, target_eval, target_experiments
 from apps.research.evaluation import tradable_rows
 from apps.research.experiments import Arm, arm_key, compared_folds
@@ -69,16 +69,31 @@ def test_the_market_experiments_compare_stock_features_alone_with_market_feature
 
 
 def test_the_relative_up_experiment_compares_the_probability_labels_by_daily_auc() -> None:
-    experiment = target_experiments.target_experiments(WalkForwardConfig())["relative-up"]
+    chosen = target_experiments.target_experiments(WalkForwardConfig())
+    experiment = chosen["relative-up"]
 
     assert experiment.scope == "interval"
-    assert (experiment.primary, experiment.metrics) == ("auc", ("auc", "brier"))
+    assert (experiment.primary, experiment.metrics) == ("auc", ("auc",))
     absolute, relative = experiment.arms
-    assert (absolute.name, relative.name) == ("absolute", "relative")
-    assert absolute.target == TARGET_RECIPE
+    assert absolute == chosen["market-interval"].arms[1]
+    assert (absolute.name, relative.name) == ("market", "relative")
     assert relative.target == TargetVariant(relative_up=True)
     assert absolute.config == relative.config
     assert absolute.config.step_months == 6
+
+
+def test_the_relative_up_experiment_follows_a_market_verdict_against_market_features() -> None:
+    chosen = target_experiments.target_experiments(WalkForwardConfig(), market=False)
+
+    absolute, relative = chosen["relative-up"].arms
+
+    assert absolute == chosen["market-interval"].arms[0]
+    assert (absolute.name, relative.name) == ("nomarket", "relative-nomarket")
+    assert relative.target == TargetVariant(market=False, relative_up=True)
+    assert (
+        chosen["market-interval"]
+        == target_experiments.target_experiments(WalkForwardConfig())["market-interval"]
+    )
 
 
 @pytest.mark.parametrize("name", ["market-return", "market-interval", "relative-up"])
@@ -274,18 +289,21 @@ def test_daily_metrics_score_each_probability_arm_on_its_own_label(small: Path) 
     store_taiex()
     chosen = target_experiments.target_experiments(CONFIG)["relative-up"]
     folds = compared_folds(chosen, calendar(), weekdays()[-1])
+    gap = folds["relative"][0].test_start
+    IndexDaily.objects.filter(index_id="TAIEX", date=gap).delete()
     target_experiments.train_arms(chosen, "interval-exp", folds, small, (0,))
 
     daily = target_experiments.daily_metrics(chosen, "interval-exp", folds, (0,))
 
-    assert set(daily["metric"]) == {"auc", "brier"}
-    for fold in folds["absolute"]:
+    assert set(daily["metric"]) == {"auc"}
+    assert gap not in set(daily["date"])
+    for fold in folds["market"]:
         absolute, relative = shared_frames(chosen, "interval-exp", fold, 0)
         relative = relative.assign(fwd_up_5pct=relative_up(relative, TradingDays.from_db()))
         assert (relative["fwd_up_5pct"] != absolute["fwd_up_5pct"]).any()
         kept = (absolute["fwd_up_5pct"].notna() & relative["fwd_up_5pct"].notna()).to_numpy()
-        for arm, frame in (("absolute", absolute), ("relative", relative)):
-            for metric in ("auc", "brier"):
+        for arm, frame in (("market", absolute), ("relative", relative)):
+            for metric in ("auc",):
                 np.testing.assert_allclose(
                     picked_daily(daily, arm, 0, fold.index, metric).to_numpy(),
                     interval_daily(metric, frame[kept]).to_numpy(),
@@ -464,15 +482,15 @@ ABSOLUTE_AUC = [0.55, 0.56, 0.54, 0.57]
     ("relative", "chosen"),
     [
         ([0.57, 0.581, 0.559, 0.592], "relative"),
-        ([0.56, 0.545, 0.565, 0.565], "absolute"),
-        ([0.54, 0.55, 0.53, 0.56], "absolute"),
+        ([0.56, 0.545, 0.565, 0.565], "market"),
+        ([0.54, 0.55, 0.53, 0.56], "market"),
     ],
 )
 def test_the_relative_label_needs_a_higher_daily_auc_with_a_fold_gap_t_above_two(
     relative: list[float], chosen: str
 ) -> None:
     experiment = target_experiments.target_experiments(CONFIG)["relative-up"]
-    daily = fabricated({("absolute", "auc"): ABSOLUTE_AUC, ("relative", "auc"): relative})
+    daily = fabricated({("market", "auc"): ABSOLUTE_AUC, ("relative", "auc"): relative})
 
     compared = target_experiments.comparisons(experiment, daily, fake_folds())
 
@@ -482,27 +500,25 @@ def test_the_relative_label_needs_a_higher_daily_auc_with_a_fold_gap_t_above_two
 def test_the_relative_up_report_states_its_rule_and_the_noisy_gap() -> None:
     experiment = target_experiments.target_experiments(CONFIG)["relative-up"]
     values = {
-        ("absolute", "auc"): ABSOLUTE_AUC,
+        ("market", "auc"): ABSOLUTE_AUC,
         ("relative", "auc"): [0.56, 0.545, 0.565, 0.565],
-        ("absolute", "brier"): [0.10] * 4,
-        ("relative", "brier"): [0.11] * 4,
     }
     daily = fabricated(values)
     nw_t = target_experiments.comparisons(experiment, daily, fake_folds())["auc"].nw_t
 
     text = target_experiments.experiment_report(experiment, "interval-exp", daily, fake_folds())
 
-    assert "- absolute：機率模型用 20 日報酬是否大於 5%（SPEC 配方）" in text
+    assert "- market：個股特徵加上市場特徵（SPEC 配方）" in text
     assert "- relative：機率模型改用 20 日報酬減 TAIEX 同期報酬是否大於 5%" in text
-    assert "| 組 | AUC ↑ | Brier ↓ |" in text
-    assert "SPEC §7：日均 AUC 較高就改用" in text
+    assert "| 組 | AUC ↑ |" in text
+    assert "（SPEC §7：「日均 AUC 較高就改用」；逐摺差的 NW t 門檻是實驗另加的）" in text
     assert "兩組各對自己的 label 評估" in text
+    assert "TAIEX 是價格指數" in text
+    assert "Brier" not in text
     assert 0 < nw_t < 2
-    assert (
-        f"- relative 的 AUC 較高，但逐摺差 NW t {nw_t:+.2f} 沒有高於 2：照規則留 absolute" in text
-    )
-    assert "**判定（暫定）：採用 absolute**" in text
-    assert "- 參考欄（relative 對 absolute）：較好 無；較差 Brier" in text
+    assert f"- relative 的 AUC 較高，但逐摺差 NW t {nw_t:+.2f} 沒有高於 2：照規則留 market" in text
+    assert "**判定（暫定）：採用 market**" in text
+    assert "- 參考欄（relative 對 market）：較好 無；較差 無" in text
 
 
 def test_the_return_report_marks_the_direction_metric_as_higher_is_better() -> None:
@@ -599,11 +615,40 @@ def test_target_experiment_runs_the_relative_up_arms(command: Path) -> None:
 
     call_command("target_experiment", name="relative-up", run_key="interval-exp", stdout=out)
 
-    assert "interval-exp-absolute: ran folds" in out.getvalue()
+    assert "interval-exp-market: ran folds" in out.getvalue()
     assert "interval-exp-relative: ran folds" in out.getvalue()
     assert "## 每摺（AUC）" in out.getvalue()
     fitted = ModelRun.objects.filter(run_key="interval-exp-relative", objective="classification")
     assert {run.params["label"] for run in fitted} == {"fwd_up_5pct_vs_taiex"}
+
+
+@pytest.mark.django_db
+def test_target_experiment_reuses_the_market_arm_and_follows_no_market(command: Path) -> None:
+    store_taiex()
+    call_command(
+        "target_experiment", name="market-interval", run_key="interval-exp", stdout=StringIO()
+    )
+    out = StringIO()
+
+    call_command(
+        "target_experiment",
+        name="relative-up",
+        run_key="interval-exp",
+        no_market=True,
+        stdout=out,
+    )
+
+    assert "interval-exp-nomarket: ran folds []" in out.getvalue()
+    assert "interval-exp-relative-nomarket: ran folds" in out.getvalue()
+    assert "interval-exp-relative-nomarket: ran folds []" not in out.getvalue()
+    with pytest.raises(CommandError, match="--no-market applies to relative-up"):
+        call_command(
+            "target_experiment",
+            name="market-return",
+            run_key="return-exp",
+            no_market=True,
+            stdout=StringIO(),
+        )
 
 
 @pytest.mark.django_db

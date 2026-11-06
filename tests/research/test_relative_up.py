@@ -43,6 +43,14 @@ def test_market_returns_run_from_the_close_of_t_to_the_close_twenty_sessions_lat
     assert list(returns.index) == days[:12]
 
 
+def test_market_returns_of_no_days_are_empty() -> None:
+    days = sessions(30)
+
+    returns = market_returns(calendar(days), [])
+
+    assert returns.empty
+
+
 def test_market_returns_need_both_closes() -> None:
     days = sessions(30)
     store([day for k, day in enumerate(days) if k not in (1, 22)], [100.0] * 28)

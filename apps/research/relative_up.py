@@ -25,6 +25,8 @@ def _later(calendar: TradingDays, day: date) -> date | None:
 def market_returns(calendar: TradingDays, days: Iterable[date]) -> pd.Series:
     """TAIEX close VOL_DAYS sessions after each day over its close that day; NaN without both."""
     chosen = sorted(set(days))
+    if not chosen:
+        return pd.Series(dtype="float64")
     ends = {day: _later(calendar, day) for day in chosen}
     reach = max([day for day in ends.values() if day is not None], default=chosen[-1])
     rows = IndexDaily.objects.filter(index_id=MARKET, date__range=(chosen[0], reach))

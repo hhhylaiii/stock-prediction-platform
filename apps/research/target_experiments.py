@@ -46,7 +46,6 @@ from apps.research.walkforward import Fold, WalkForwardConfig
 RETURN, INTERVAL = HoldoutScope.RETURN, HoldoutScope.INTERVAL
 MODEL = lgbm_runs.MODEL
 NO_MARKET = TargetVariant(market=False)
-RELATIVE = TargetVariant(relative_up=True)
 QUANTILE_COLUMNS = quantile_columns(MODEL)
 VOL_COLUMN = f"{MODEL}_vol_h{VOL_DAYS}"
 PROB_COLUMN = f"{MODEL}_prob_h{VOL_DAYS}"
@@ -54,7 +53,7 @@ SCOPE_METRICS: dict[str, tuple[str, ...]] = {
     RETURN: ("mae", "direction"),
     INTERVAL: ("pinball", "coverage", "vol_mae", "qlike", "auc", "brier"),
 }
-PROBABILITY_METRICS = ("auc", "brier")
+PROBABILITY_METRICS = ("auc",)
 SCOPE_PRIMARY: dict[str, str] = {RETURN: "mae", INTERVAL: "pinball"}
 LOWER_BETTER = {"mae", "pinball", "vol_mae", "qlike", "brier"}
 COVERAGE_AIM = sum(COVERAGE_TOTAL) / 2
@@ -81,14 +80,15 @@ TITLES = {
 SETTINGS = {
     "nomarket": "只用篩選後的個股特徵，不加市場特徵",
     "market": "個股特徵加上市場特徵（SPEC 配方）",
-    "absolute": "機率模型用 20 日報酬是否大於 5%（SPEC 配方）",
     "relative": "機率模型改用 20 日報酬減 TAIEX 同期報酬是否大於 5%；分位數與波動率模型不變",
+    "relative-nomarket": "同 relative，但兩組都不加市場特徵",
 }
 MARKET_REASON = "OOS 指標沒有提高就不用"
 RELATIVE_REASON = "日均 AUC 較高就改用"
 RELATIVE_CAVEAT = (
-    "AUC 與 Brier 兩組各對自己的 label 評估：absolute 看 20 日報酬是否大於 5%，"
-    "relative 看減掉 TAIEX 同期報酬後是否大於 5%"
+    "日均 AUC 兩組各對自己的 label 評估：第一組看 20 日報酬是否大於 5%，第二組看減掉 TAIEX "
+    "同期報酬（收盤 t 到收盤 t+20）後是否大於 5%。TAIEX 是價格指數、個股是含息的還原報酬，"
+    "除息旺季的 TAIEX 報酬偏低，第二組的正例會偏多"
 )
 DAILY_COLUMNS = ["arm", "seed", "fold", "metric", "date", "value"]
 
@@ -119,21 +119,21 @@ def _layout(base: WalkForwardConfig, window: str) -> WalkForwardConfig:
 
 
 def target_experiments(
-    base: WalkForwardConfig, window: str = "base"
+    base: WalkForwardConfig, window: str = "base", market: bool = True
 ) -> dict[str, TargetExperiment]:
-    """The SPEC §7 market-feature and relative-label experiments on a window's six-month folds."""
+    """The SPEC §7 experiments on a window's folds; relative-up builds on the market verdict."""
     layout = _layout(base, window)
     prefix = "" if window == "base" else f"{window}-"
 
     def arm(name: str, target: TargetVariant = TARGET_RECIPE) -> Arm:
         return Arm(f"{prefix}{name}", layout, SPEC_RECIPE, target=target)
 
-    market = (arm("nomarket", NO_MARKET), arm("market"))
+    market_arms = (arm("nomarket", NO_MARKET), arm("market"))
     chosen = {
         f"market-{scope}": TargetExperiment(
             f"market-{scope}",
             "better",
-            market,
+            market_arms,
             scope,
             SCOPE_PRIMARY[scope],
             SCOPE_METRICS[scope],
@@ -142,10 +142,14 @@ def target_experiments(
         )
         for scope in (RETURN, INTERVAL)
     }
+    relative = arm(
+        "relative" if market else "relative-nomarket",
+        TargetVariant(market=market, relative_up=True),
+    )
     chosen["relative-up"] = TargetExperiment(
         "relative-up",
         "better",
-        (arm("absolute"), arm("relative", RELATIVE)),
+        (market_arms[1 if market else 0], relative),
         INTERVAL,
         "auc",
         PROBABILITY_METRICS,
@@ -434,7 +438,8 @@ def experiment_report(
         "seed 不是 0 時再加 `-s<seed>`",
         f"- 判定規則：{alternative} 的 {primary} 要{'低' if lower else '高'}於 {default}，"
         f"而且逐摺差的 NW t 要{'低於 −' if lower else '高於 '}{GATE_T:g} 才採用"
-        f"（SPEC §7：{experiment.reason}）；其他欄只列參考。各 seed 先逐日平均，再看研究期與逐摺差",
+        f"（SPEC §7：「{experiment.reason}」；逐摺差的 NW t 門檻是實驗另加的）；其他欄只列參考。"
+        "各 seed 先逐日平均，再看研究期與逐摺差",
         *([f"- {experiment.caveat}"] if experiment.caveat else []),
         "",
         *_table_lines(experiment, compared),

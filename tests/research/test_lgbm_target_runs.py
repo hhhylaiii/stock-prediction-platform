@@ -576,3 +576,4 @@ def test_target_variants_record_only_the_fields_they_change() -> None:
     assert (
         len({recipe("interval", FEATURES, 0, target=target) for target in (alone, relative)}) == 2
     )
+    assert recipe("interval", FEATURES, 0, target=alone) == "4-c3466c96a0fb"
