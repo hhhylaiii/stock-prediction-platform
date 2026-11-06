@@ -248,6 +248,30 @@ def test_each_stock_keeps_its_own_log_for_the_same_span() -> None:
     assert sorted(log.detail["stock_id"] for log in logs) == ["6211", "6212"]
 
 
+@pytest.mark.django_db
+def test_a_rerun_that_reads_no_page_keeps_what_the_last_one_compared() -> None:
+    FinancialStatement.objects.create(
+        stock_id="6211",
+        period="2013-Q1",
+        fin_type="consolidated",
+        revenue=5_000,
+        announce_date=date(2013, 6, 3),
+    )
+    record = {**dict.fromkeys(SCAN_COLUMNS), "stock_id": "6211", "period": "2013-Q1"}
+    found = {**record, "fin_type": "consolidated", "revenue": 1_000_000}
+
+    def run(*rows: dict) -> list:
+        frame = pd.DataFrame(list(rows), columns=SCAN_COLUMNS, dtype=object)
+        notes = {"stock_id": "6211", "absent": []}
+        insert_missing_history(STATEMENT_VIEWER, frame, lambda _: date(2013, 6, 3), SPAN, notes)
+        logs = DataQualityLog.objects.filter(check_name=MISMATCH_CHECKS[STATEMENT_VIEWER])
+        return [entry["period"] for log in logs for entry in log.detail["rows"]]
+
+    assert run(found) == ["2013-Q1"]
+    assert run() == ["2013-Q1"]
+    assert run({**found, "revenue": 5_000}) == []
+
+
 def next_year(page: str) -> str:
     """The 2013-Q1 page restated as if it were 2014-Q1, to pair it with a real 2013-Q4."""
     return (

@@ -23,6 +23,7 @@ MISMATCH_CHECKS = {
     STATEMENT_VIEWER: "statement_viewer_mismatch",
 }
 SCOPE = ("span", "stock_id")
+COMPARED = ("rows", "types")
 IFRS_FROM = "2013-Q1"
 REVENUE_FROM = "2013-01"
 MONEY_TOLERANCE = 1000
@@ -73,6 +74,7 @@ def insert_missing_history(
     model: type[models.Model] = MonthlyRevenue if dataset == REVENUE_HISTORY else FinancialStatement
     stored = _stored(model, frame)
     new: list[models.Model] = []
+    seen: set[tuple[str, str]] = set()
     detail: dict[str, Any] = {
         "span": [span[0].isoformat(), span[1].isoformat()],
         "added": [],
@@ -83,6 +85,7 @@ def insert_missing_history(
     for raw in frame.to_dict("records"):
         record = {str(name): value for name, value in raw.items()}
         key = {"stock_id": record["stock_id"], "period": record["period"]}
+        seen.add((record["stock_id"], record["period"]))
         rows = stored.get((record["stock_id"], record["period"]))
         row = None if rows is None else rows.get(record.get("fin_type", ""))
         if rows is None:
@@ -92,12 +95,18 @@ def insert_missing_history(
             detail["types"].append({**key, "stored": sorted(rows), "found": record["fin_type"]})
         elif fields := _differences(dataset, row, record):
             detail["rows"].append({**key, "fields": fields})
-    _record(model, new, MISMATCH_CHECKS[dataset], detail)
+    _record(model, new, MISMATCH_CHECKS[dataset], detail, seen)
     return len(new)
 
 
-def _record(model: type[models.Model], new: list[models.Model], check: str, found: Any) -> None:
-    """Rows and the span's log together; a rerun replaces the log but keeps every row it added."""
+def _record(
+    model: type[models.Model],
+    new: list[models.Model],
+    check: str,
+    found: Any,
+    seen: set[tuple[str, str]],
+) -> None:
+    """Rows and the span's log together; a rerun keeps what it added and what it did not reread."""
     scope = {f"detail__{key}": found[key] for key in SCOPE if key in found}
     with transaction.atomic():
         model._default_manager.bulk_create(new)
@@ -105,6 +114,14 @@ def _record(model: type[models.Model], new: list[models.Model], check: str, foun
         kept = [entry for log in earlier for entry in log.detail.get("added", [])]
         added = sorted({(entry["stock_id"], entry["period"]) for entry in [*kept, *found["added"]]})
         detail = {**found, "added": [{"stock_id": code, "period": p} for code, p in added]}
+        for key in COMPARED:
+            unread = [
+                entry
+                for log in earlier
+                for entry in log.detail.get(key, [])
+                if (entry["stock_id"], entry["period"]) not in seen
+            ]
+            detail[key] = [*unread, *found[key]]
         earlier.delete()
         if any(value for key, value in detail.items() if key not in SCOPE):
             DataQualityLog.objects.create(
