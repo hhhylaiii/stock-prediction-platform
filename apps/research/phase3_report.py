@@ -6,6 +6,7 @@ from typing import Any
 import pandas as pd
 
 from apps.market.calendar import TradingDays
+from apps.research.features.registry import feature
 from apps.research.metrics.ic import daily_rank_ic
 
 FLAG_RATIO = 3.0
@@ -31,7 +32,8 @@ def _split(counts: pd.DataFrame, fate: pd.Series, prefix: str) -> pd.DataFrame:
             f"{prefix}_delisted": counts.get(True, 0),
             "rows_current": int(sizes.get(False, 0)),
             "rows_delisted": int(sizes.get(True, 0)),
-        }
+        },
+        index=counts.index,
     ).astype("int64")
 
 
@@ -90,12 +92,11 @@ def fill_counts(
 
 
 def fill_table(counts: pd.DataFrame) -> pd.DataFrame:
-    """Filled shares per group and their ratio, flagged past FLAG_RATIO."""
+    """Filled shares per group and their ratio; flagged past FLAG_RATIO or if only delisted fill."""
     current, delisted = _rates(counts, "filled")
     ratio = delisted / current.where(current > 0)
-    return pd.DataFrame(
-        {"current": current, "delisted": delisted, "ratio": ratio, "flag": ratio > FLAG_RATIO}
-    )
+    flag = (ratio > FLAG_RATIO) | (current.eq(0) & delisted.gt(0))
+    return pd.DataFrame({"current": current, "delisted": delisted, "ratio": ratio, "flag": flag})
 
 
 def month_ranges(months: Iterable[str]) -> str:
@@ -117,7 +118,9 @@ def monthly_ic(
 ) -> pd.DataFrame:
     """Monthly mean of each feature's daily rank IC, its IC days and the month's trading days."""
     first, last = min(frame["date"]), max(frame["date"])
-    trading_days = pd.Series(pd.to_datetime(calendar.between(first.replace(day=1), last)))
+    month_end = (pd.Timestamp(last) + pd.offsets.MonthEnd(0)).date()
+    low, high = max(calendar.start, first.replace(day=1)), min(calendar.end, month_end)
+    trading_days = pd.Series(pd.to_datetime(calendar.between(low, high)))
     trading = trading_days.groupby(trading_days.dt.strftime("%Y-%m")).size()
     parts = []
     for name in names:
@@ -148,7 +151,7 @@ def strongest(ic: Mapping[str, Mapping[str, float | None]], count: int) -> list[
 
 
 def statement_coverage(params: Mapping[str, Any]) -> pd.DataFrame:
-    """IC days of each fundamental feature in the screening and whether the floor judged it."""
+    """IC days of each fundamental feature and whether the low-IC rule judged it."""
     window, floor = int(params["window_days"]), float(params["min_coverage"])
     rows = {
         name: {"days_h5": int(days["5"]), "days_h20": int(days["20"])}
@@ -157,7 +160,10 @@ def statement_coverage(params: Mapping[str, Any]) -> pd.DataFrame:
     }
     table = pd.DataFrame.from_dict(rows, orient="index")
     coverage = table[["days_h5", "days_h20"]].min(axis=1) / window
-    return table.assign(coverage=coverage, judged=coverage >= floor)
+    conditional = pd.Series([feature(str(name)).conditional for name in table.index], table.index)
+    return table.assign(
+        coverage=coverage, conditional=conditional, judged=(coverage >= floor) & ~conditional
+    )
 
 
 def _pct(value: float) -> str:
@@ -170,6 +176,12 @@ def _num(value: float, digits: int) -> str:
 
 def _yes(flag: bool) -> str:
     return "是" if flag else "否"
+
+
+def _verdict(row: pd.Series) -> str:
+    if row["conditional"]:
+        return "豁免（條件型）"
+    return "判定" if row["judged"] else "不判定"
 
 
 def _gap_rows(before: pd.DataFrame, after: pd.DataFrame) -> list[str]:
@@ -259,7 +271,7 @@ def render(
         "| --- | --- | --- | --- |",
         *(
             f"| {name} | {row['days_h5']}／{row['days_h20']} | {_pct(row['coverage'])} "
-            f"| {'判定' if row['judged'] else '不判定'} |"
+            f"| {_verdict(row)} |"
             for name, row in coverage.iterrows()
         ),
         "",
@@ -278,8 +290,9 @@ def render(
         "",
         "## 殘餘缺口的處理",
         "",
-        "C：主來源缺值時，對所有股票一律改用第二來源。補值比例的比值 > "
-        f"{FLAG_RATIO:g} 表示「被補過」仍分得出下市與否。",
+        "C 全期套用：主來源缺值時，對所有股票一律改用第二來源，沒有受影響期間。"
+        f"補值比例的比值 > {FLAG_RATIO:g}，或只有下市組被補過，表示「被補過」仍分得出下市與否。"
+        "主來源剛好等於第二來源的列也算補過，所以補值比例偏高。",
         "",
         "| 特徵 | 第二來源 | 補值比例 下市／現存 | 比值 | 超標 |",
         "| --- | --- | --- | --- | --- |",
