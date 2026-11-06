@@ -144,7 +144,7 @@ def volatility(boosted: Boosted, frame: pd.DataFrame, features: Sequence[str]) -
 
 @dataclass(frozen=True)
 class ProbabilityFit:
-    """The binary booster, its bag's validation probabilities and ECE, and an isotonic map."""
+    """The binary booster, its bag's validation probabilities and ECE, isotonic if ECE was high."""
 
     boosted: Boosted
     valid_probs: np.ndarray
@@ -185,7 +185,7 @@ def fit_probability(
     max_rounds: int = MAX_ROUNDS,
     bags: int = 1,
 ) -> ProbabilityFit:
-    """Binary booster of a 20-day gain above 5%, calibrated on its bag's validation tail."""
+    """Binary booster of a 20-day gain above 5%, calibrated on its bag's validation if needed."""
     rows = _rows(inputs, labels, fold, UP_LABEL)
     rows = rows.assign(**{UP: rows[UP_LABEL].astype(np.float64)})
     params = {"objective": "binary", "metric": "binary_logloss"}
