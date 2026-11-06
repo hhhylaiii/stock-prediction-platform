@@ -1,5 +1,6 @@
 """Size, liquidity, risk and industry features of SPEC §6 from the universe panel."""
 
+import logging
 from collections.abc import Mapping
 from types import MappingProxyType
 
@@ -17,6 +18,8 @@ from apps.research.features.common import (
 )
 from apps.research.features.registry import Group, feature_names
 from apps.research.panel import require_sorted
+
+logger = logging.getLogger(__name__)
 
 AMIHUD_DAYS = 20
 BETA_DAYS, MIN_BETA_PAIRS = 250, 60
@@ -156,6 +159,9 @@ def second_batch_industry_features(
     """TWSE industry code and industry-neutral 250-20 momentum and earnings yield."""
     require_sorted(panel)
     industry = canonical_industry(panel["industry"])
+    unknown = sorted(set(industry.dropna()) - set(SECTOR_CODES))
+    if unknown:
+        logger.warning("industries without a TWSE code: %s", ", ".join(unknown))
     columns = {
         "ind_sector_id": industry.map(dict(SECTOR_CODES)).astype("float64"),
         "ind_mom_neutral": _neutral(technical["tech_mom_250_20"], panel, industry),

@@ -219,7 +219,9 @@ def test_industry_features_ignore_a_load_start_inside_a_long_halt() -> None:
     )
 
 
-def test_sector_ids_are_twse_industry_codes_of_the_unified_names() -> None:
+def test_sector_ids_are_twse_industry_codes_of_the_unified_names(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     names = ["半導體業", " 金融業", "水泥工業", "其他電子類", "新產業", "", None]
     panel = pd.concat(
         [listing(str(1000 + k), rising(3), industry=name) for k, name in enumerate(names)],
@@ -238,6 +240,9 @@ def test_sector_ids_are_twse_industry_codes_of_the_unified_names() -> None:
     ids = [at(features, str(1000 + k), 2, "ind_sector_id") for k in range(len(names))]
     assert ids[:4] == [24.0, 17.0, 1.0, 31.0]
     assert all(math.isnan(value) for value in ids[4:])
+    assert [record.getMessage() for record in caplog.records] == [
+        "industries without a TWSE code: 新產業"
+    ]
 
 
 def test_neutral_features_subtract_the_day_median_of_universe_stocks_in_the_industry() -> None:
