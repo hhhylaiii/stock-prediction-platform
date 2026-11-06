@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from apps.etl.errors import SchemaChangedError
-from apps.etl.statement_summary import BALANCE, CASH_FLOW, INCOME, statement_rows
+from apps.etl.statement_summary import BALANCE, CASH_FLOW, INCOME, parse_summary, statement_rows
 from apps.etl.statement_viewer import parse_viewer
 
 REVENUE, PARENT, EPS = "營業收入", "淨利（淨損）歸屬於母公司業主", "基本每股盈餘（元）"
@@ -77,10 +77,25 @@ def test_banks_and_brokers_name_revenue_and_profit_their_own_way(
     assert bank_row["op_margin"] is None
 
 
-def test_the_viewer_gives_the_figures_the_summaries_give(page: Callable[[str], str]) -> None:
+def test_the_viewer_gives_the_figures_the_summaries_give(
+    page: Callable[[str], str], fixture_path: Callable[[str], Path]
+) -> None:
     current = summary(page, "4526", 2013, 1)
     empty: dict[str, dict[str, dict[str, float | None]]] = {report: {} for report in current}
     (row,) = statement_rows(current, empty, 1)
+    summaries = {
+        report: parse_summary(
+            fixture_path(f"mops/history/{report}_sii_102_01.html").read_text("utf-8"),
+            "sii",
+            1,
+            report,
+        )
+        for report in current
+    }
+    published = {report: {"4526": summaries[report]["4526"]} for report in current}
+    assert row == statement_rows(published, empty, 1)[0]
+    assert row["gross_margin"] is not None
+    assert row["op_margin"] is not None
     assert row["fin_type"] == "consolidated"
     assert (row["eps"], row["revenue"], row["net_income"]) == (
         Decimal("0.1200"),
