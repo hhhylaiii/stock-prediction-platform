@@ -1,6 +1,5 @@
 """Run one SPEC §7 rank experiment on coarse research folds and report its verdict."""
 
-import math
 from argparse import ArgumentParser
 from typing import Any
 
@@ -10,15 +9,17 @@ from django.core.management.base import BaseCommand, CommandError
 from apps.etl.management.options import as_date
 from apps.market.calendar import CalendarError, TradingDays
 from apps.research import lgbm_runs
-from apps.research.baseline_runs import check_run_key, shuffle_check
+from apps.research.baseline_runs import check_run_key
 from apps.research.ensemble import write_report
 from apps.research.experiments import (
     SUGGESTED_SEEDS,
     arm_key,
+    checked_shuffle,
     compared_folds,
     daily_ics,
     experiment_report,
     experiments,
+    parse_seeds,
     stopping_rounds,
     train_arms,
     tuning_rounds,
@@ -29,7 +30,7 @@ from apps.research.labels import latest_price_date
 from apps.research.models import HoldoutScope
 from apps.research.prediction_cache import FoldMismatchError, MissingFoldsError
 from apps.research.runs import RunError
-from apps.research.walkforward import Fold, WalkForwardConfig, WalkForwardError
+from apps.research.walkforward import WalkForwardConfig, WalkForwardError
 
 DEFAULT_CONFIG = WalkForwardConfig()
 
@@ -48,34 +49,13 @@ class Command(BaseCommand):
         parser.add_argument("--note", help="Caveat printed at the top of the report.")
         parser.add_argument("--output", help="Markdown file to write; prints when left out.")
 
-    @staticmethod
-    def _seeds(text: str) -> tuple[int, ...]:
-        """Distinct non-negative seeds from a comma list."""
-        parts = [part.strip() for part in text.split(",")]
-        values = tuple(int(part) for part in parts if part.isdigit())
-        if len(values) < len(parts) or len(set(values)) < len(values):
-            raise ValueError(
-                f"--seeds takes distinct non-negative integers like 0,3,6, not {text!r}"
-            )
-        return values
-
-    def _shuffle(self, fold: Fold, seed: int) -> None:
-        """SPEC §8 shuffle check on the first compared fold before any arm trains."""
-        ic = shuffle_check(fold, settings.FEATURE_PARQUET_DIR, seed)
-        self.stdout.write(f"fold {fold.index}: shuffled OOS rank IC {ic:.4f}")
-        if math.isnan(ic) or abs(ic) >= settings.SHUFFLE_IC_LIMIT:
-            raise ValueError(
-                f"shuffle check on fold {fold.index} gave IC {ic:.4f}, not below "
-                f"{settings.SHUFFLE_IC_LIMIT}; a label column may be among the features"
-            )
-
     def handle(self, *args: Any, **options: Any) -> None:
         experiment = experiments(DEFAULT_CONFIG)[options["name"]]
         run_key = options["run_key"]
         if holdout_claimed(HoldoutScope.RANK):
             raise CommandError("a rank holdout run exists, so the rank design is frozen (SPEC §7)")
         try:
-            seeds = self._seeds(options["seeds"])
+            seeds = parse_seeds(options["seeds"])
             for arm in experiment.arms:
                 for seed in seeds:
                     check_run_key(HoldoutScope.RANK, arm_key(run_key, arm, seed))
@@ -86,7 +66,9 @@ class Command(BaseCommand):
             calendar = TradingDays.from_db()
             folds = compared_folds(experiment, calendar, last)
             directory = settings.FEATURE_PARQUET_DIR
-            self._shuffle(folds[experiment.arms[0].name][0], seeds[0])
+            first = folds[experiment.arms[0].name][0]
+            shuffled = checked_shuffle(first, directory, seeds[0])
+            self.stdout.write(f"fold {first.index}: shuffled OOS rank IC {shuffled:.4f}")
             if any(arm.tuned for arm in experiment.arms):
                 rounds = tuning_rounds(experiment, run_key, calendar, last, directory)
                 self.stdout.write(f"tuned rounds from the tuning folds: {rounds}")

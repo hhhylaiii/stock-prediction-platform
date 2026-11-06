@@ -453,7 +453,7 @@ def test_an_arm_missing_a_horizon_has_no_mean_and_never_wins() -> None:
 def test_rank_experiment_stops_when_the_shuffle_check_fails(
     command: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(rank_experiment, "shuffle_check", lambda *args: 0.5)
+    monkeypatch.setattr(experiments, "shuffle_check", lambda *args: 0.5)
 
     with pytest.raises(CommandError, match="shuffle check on fold"):
         call_command("rank_experiment", name="sampling", run_key="rank-exp", stdout=StringIO())
@@ -476,7 +476,7 @@ def test_rank_experiment_needs_a_screening_before_the_shuffle_check(
     command: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     shuffled: list[Any] = []
-    monkeypatch.setattr(rank_experiment, "shuffle_check", lambda *args: shuffled.append(args))
+    monkeypatch.setattr(experiments, "shuffle_check", lambda *args: shuffled.append(args))
     ModelRun.objects.filter(model_type=SCREENING_MODEL).delete()
 
     with pytest.raises(CommandError, match="screened features"):

@@ -7,9 +7,11 @@ from datetime import date
 from pathlib import Path
 
 import pandas as pd
+from django.conf import settings
 
 from apps.market.calendar import TradingDays
 from apps.research import lgbm_runs
+from apps.research.baseline_runs import shuffle_check
 from apps.research.gbdt import EARLY_STOPPING_ROUNDS, bag_seeds
 from apps.research.labels import HORIZONS
 from apps.research.metrics.ic import daily_rank_ic
@@ -86,6 +88,26 @@ def experiments(base: WalkForwardConfig) -> dict[str, Experiment]:
 def arm_key(run_key: str, arm: Arm, seed: int = 0) -> str:
     """The arm's cache run_key; seed 0 keeps the key experiments used before seeds existed."""
     return f"{run_key}-{arm.name}" if seed == 0 else f"{run_key}-{arm.name}-s{seed}"
+
+
+def parse_seeds(text: str) -> tuple[int, ...]:
+    """Distinct non-negative seeds from a comma list."""
+    parts = [part.strip() for part in text.split(",")]
+    values = tuple(int(part) for part in parts if part.isdigit())
+    if len(values) < len(parts) or len(set(values)) < len(values):
+        raise ValueError(f"--seeds takes distinct non-negative integers like 0,3,6, not {text!r}")
+    return values
+
+
+def checked_shuffle(fold: Fold, directory: Path, seed: int) -> float:
+    """SPEC §8 shuffled-label IC of a fold; one at SHUFFLE_IC_LIMIT or past it stops the run."""
+    ic = shuffle_check(fold, directory, seed)
+    if math.isnan(ic) or abs(ic) >= settings.SHUFFLE_IC_LIMIT:
+        raise ValueError(
+            f"shuffle check on fold {fold.index} gave IC {ic:.4f}, not below "
+            f"{settings.SHUFFLE_IC_LIMIT}; a label column may be among the features"
+        )
+    return ic
 
 
 def compared_folds(
