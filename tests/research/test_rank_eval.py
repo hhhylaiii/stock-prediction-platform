@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import date
 from decimal import Decimal
 from io import StringIO
@@ -15,10 +16,10 @@ from apps.market.calendar import TradingDays
 from apps.market.models import DailyPrice, StockMaster
 from apps.research import baseline_runs, lgbm_runs, rank_eval
 from apps.research.eval_report import render_report
-from apps.research.evaluation import decile_report, importance_drift, rank_report
+from apps.research.evaluation import RankReport, decile_report, importance_drift, rank_report
 from apps.research.features.store import export_year, read_columns, read_partitions
 from apps.research.management.commands import evaluate_rank
-from apps.research.metrics.ic import daily_rank_ic
+from apps.research.metrics.ic import ICSummary, daily_rank_ic
 from apps.research.models import BacktestMetric, FeatureDaily, LabelDaily, ModelRun
 from apps.research.panel import load_price_panel
 from apps.research.prediction_cache import MissingFoldsError, fold_path, load_predictions
@@ -290,12 +291,7 @@ def test_report_renders_each_horizon_with_deciles_and_importance(caches: Path) -
             evaluated.importance,
         )
         assert section in text
-        model, ridge = evaluated.model.total, evaluated.baseline.total
-        passed = "通過" if model.mean > 0 and model.nw_t > 2 else "未過"
-        assert f"IC 均值 {model.mean:.4f} 大於 0 且 NW t {model.nw_t:.2f} 大於 2：{passed}" in text
-        beaten = "通過" if evaluated.model.beat_share >= 0.6 else "未過"
-        assert f"達 60%：{beaten}" in text
-        assert f"Ridge 研究期 IC 均值 {ridge.mean:.4f}，NW t {ridge.nw_t:.2f}" in text
+        assert rank_eval._gates(horizon, evaluated) in text
     assert text.index("（5 日）") < text.index("（20 日）")
 
 
@@ -349,3 +345,58 @@ def test_evaluate_rank_leaves_holdout_folds_out(command: Path, monkeypatch: Any)
 
     assert [fold.index for fold in seen[0]] == [fold.index for fold in research()]
     assert not any(fold.holdout for fold in seen[0])
+
+
+def summary(mean: float, nw_t: float, days: int = 100) -> ICSummary:
+    return ICSummary(mean, 0.1, mean / 0.1, nw_t, 0.6, days)
+
+
+def gated(mean: float, nw_t: float, share: float, compared: int) -> rank_eval.RankEvaluation:
+    """A hand-made evaluation holding only what the gates read."""
+    empty = pd.DataFrame()
+    model = RankReport(
+        horizon=20,
+        folds=(),
+        by_fold=empty,
+        by_year=empty,
+        total=summary(mean, nw_t),
+        positive_share=1.0,
+        beat_share=share,
+        compared_folds=compared,
+        by_liquidity=empty,
+        neutralized=summary(0.0, 0.0),
+        monthly=pd.Series(dtype=float),
+        monthly_days=pd.Series(dtype=int),
+    )
+    ridge = replace(model, total=summary(0.02, 1.5, 90))
+    return rank_eval.RankEvaluation(model, ridge, empty, importance_drift({}))
+
+
+@pytest.mark.parametrize(
+    ("mean", "nw_t", "verdict"),
+    [(0.05, 2.0, "未過"), (-0.01, 3.0, "未過"), (0.05, 2.01, "通過"), (float("nan"), 3.0, "未過")],
+)
+def test_gates_need_a_positive_mean_and_a_newey_west_t_above_two(
+    mean: float, nw_t: float, verdict: str
+) -> None:
+    text = rank_eval._gates(20, gated(mean, nw_t, 0.6, 10))
+
+    assert f"大於 2：{verdict}" in text
+    assert "Ridge 研究期 IC 均值 0.0200，NW t 1.50，90 天" in text
+
+
+@pytest.mark.parametrize(
+    ("share", "compared", "shown", "verdict"),
+    [
+        (0.6, 10, "6／10 摺", "通過"),
+        (25 / 42, 42, "25／42 摺", "未過"),
+        (float("nan"), 0, "—", "未過"),
+    ],
+)
+def test_gates_need_ridge_beaten_in_sixty_percent_of_compared_folds(
+    share: float, compared: int, shown: str, verdict: str
+) -> None:
+    text = rank_eval._gates(5, gated(0.05, 3.0, share, compared))
+
+    assert f"贏 Ridge 的研究摺 {shown} 達 60%：{verdict}" in text
+    assert "## 關卡：排名 5 日" in text

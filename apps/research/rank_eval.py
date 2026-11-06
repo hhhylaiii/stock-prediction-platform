@@ -1,5 +1,6 @@
 """A rank run's cached folds scored against its Ridge baseline: report and metrics (SPEC §7)."""
 
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
@@ -30,7 +31,6 @@ from apps.research.models import HoldoutScope, ModelObjective, ModelRun
 from apps.research.panel import load_price_panel
 from apps.research.prediction_cache import MissingFoldsError, fold_notes, missing_folds
 from apps.research.rank_model import RANK_LABEL
-from apps.research.runs import feature_hash
 from apps.research.training import KEYS, load_labels
 from apps.research.walkforward import Fold
 
@@ -118,10 +118,7 @@ def stale_folds(run_key: str, folds: Sequence[Fold], directory: Path) -> list[in
     stale = []
     for fold in folds:
         notes = fold_notes(run_key, MODEL, fold.index)
-        current = {
-            "feature_hash": feature_hash(fold.train_start, fold.test_end, directory),
-            "label_hash": lgbm_runs.label_digest(HoldoutScope.RANK, fold),
-        }
+        current = lgbm_runs.input_notes(HoldoutScope.RANK, fold, directory)
         if {key: notes.get(key) for key in current} != current:
             stale.append(fold.index)
     return stale
@@ -164,27 +161,30 @@ def _verdict(passed: bool) -> str:
     return "通過" if passed else "未過"
 
 
+def _number(value: float, digits: int) -> str:
+    return "—" if math.isnan(value) else f"{value:.{digits}f}"
+
+
 def _gates(horizon: int, evaluated: RankEvaluation) -> str:
     """SPEC §7 rank gates of one horizon, with Ridge's own research totals."""
-    model, ridge, share = (
-        evaluated.model.total,
-        evaluated.baseline.total,
-        evaluated.model.beat_share,
-    )
-    significant = model.mean > 0 and model.nw_t > 2
+    model, ridge = evaluated.model.total, evaluated.baseline.total
+    share, compared = evaluated.model.beat_share, evaluated.model.compared_folds
+    won = "—" if math.isnan(share) else f"{round(share * compared)}／{compared} 摺"
     lines = [
         f"## 關卡：排名 {horizon} 日",
         "",
-        f"- 研究期 IC 均值 {model.mean:.4f} 大於 0 且 NW t {model.nw_t:.2f} 大於 2："
-        f"{_verdict(significant)}",
-        f"- 贏 Ridge 的研究摺比例 {share:.0%} 達 {GATE_SHARE:.0%}：{_verdict(share >= GATE_SHARE)}",
-        f"- Ridge 研究期 IC 均值 {ridge.mean:.4f}，NW t {ridge.nw_t:.2f}，{ridge.n_days} 天",
+        f"- 研究期 IC 均值 {_number(model.mean, 4)} 大於 0 且 NW t {_number(model.nw_t, 2)} "
+        f"大於 2：{_verdict(model.mean > 0 and model.nw_t > 2)}",
+        f"- 贏 Ridge 的研究摺 {won} 達 {GATE_SHARE:.0%}：{_verdict(share >= GATE_SHARE)}",
+        f"- Ridge 研究期 IC 均值 {_number(ridge.mean, 4)}，NW t {_number(ridge.nw_t, 2)}，"
+        f"{ridge.n_days} 天",
+        "- 重要度變動只列研究摺，調參摺不計",
     ]
     return "\n".join(lines)
 
 
 def report(run_key: str, evaluations: Mapping[int, RankEvaluation]) -> str:
-    """Markdown of each horizon's gates, then its LightGBM section, deciles and importance."""
+    """Markdown of each horizon's LightGBM section, deciles and importance, then its gates."""
     sections = [
         render_report(
             f"{run_key}（{horizon} 日）",
