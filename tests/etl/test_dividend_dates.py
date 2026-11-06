@@ -60,14 +60,16 @@ def test_a_weekend_announcement_counts_the_next_session(esun: Rows) -> None:
     assert found == {date(2013, 8, 15): date(2013, 8, 5)}
 
 
-def test_the_earliest_announcement_of_an_ex_date_counts(esun: Rows) -> None:
-    rows = policy(esun, AnnouncementDate="2013-07-20") + policy(esun)
+@pytest.mark.parametrize("earliest_first", [True, False])
+def test_the_earliest_announcement_of_an_ex_date_counts(esun: Rows, earliest_first: bool) -> None:
+    early, late = policy(esun, AnnouncementDate="2013-07-20"), policy(esun)
+    rows = early + late if earliest_first else late + early
     assert ex_date_announcements(rows, "2884", SESSION) == {date(2013, 8, 15): date(2013, 7, 22)}
 
 
-def test_an_announcement_after_the_ex_date_gives_no_date(esun: Rows) -> None:
-    found = ex_date_announcements(policy(esun, AnnouncementDate="2013-08-20"), "2884", SESSION)
-    assert found == {date(2013, 8, 15): None}
+def test_an_announcement_in_the_ex_date_session_still_dates_it(esun: Rows) -> None:
+    rows = policy(esun, AnnouncementDate="2013-08-15", AnnouncementTime="09:00:00")
+    assert ex_date_announcements(rows, "2884", SESSION) == {date(2013, 8, 15): date(2013, 8, 15)}
 
 
 def test_a_row_without_ex_dates_needs_no_session(esun: Rows) -> None:
