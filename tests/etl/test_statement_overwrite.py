@@ -1,6 +1,6 @@
 import io
 from collections.abc import Callable
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -10,6 +10,7 @@ import pytest
 from django.core.management import call_command
 
 from apps.etl.adapters.mops import STATEMENT_SCAN
+from apps.etl.errors import SchemaChangedError
 from apps.etl.models import DataQualityLog, EtlRun, RawMops
 from apps.etl.mops_history import STATEMENT_HISTORY, STATEMENT_VIEWER
 from apps.etl.statement_overwrite import (
@@ -19,7 +20,7 @@ from apps.etl.statement_overwrite import (
     viewer_frame_from_raw,
 )
 from apps.etl.statement_scan import SCAN_COLUMNS
-from apps.etl.statement_summary import REPORTS
+from apps.etl.statement_summary import REPORTS, SEASON_LABELS
 from apps.market.models import FinancialStatement
 
 CONSOLIDATED = "consolidated"
@@ -174,25 +175,47 @@ def test_a_rerun_keeps_finmind_first_value_and_the_changes_it_did_not_redo() -> 
     assert overwrite_statements(frame()) == 0
     changes = {entry["period"]: entry["fields"]["operating_cf"] for entry in logged()["1101"]}
     assert changes == {"2013-Q2": [5_000_000, 4_500_000], "2013-Q3": [5_000_000, 3_000_000]}
+    (row,) = DataQualityLog.objects.filter(check_name=OVERWRITE_CHECK)
+    assert row.date == date(2013, 9, 30)
+
+
+@pytest.mark.django_db
+def test_only_the_first_scan_sets_where_the_scanned_quarters_begin() -> None:
+    for day in (date(2026, 4, 10), date(2026, 11, 5)):
+        EtlRun.objects.create(source="mops", dataset=STATEMENT_SCAN, start_date=day, end_date=day)
+    stored(period="2025-Q3", announced=date(2025, 11, 14))
+    stored(period="2025-Q4", announced=date(2026, 3, 31))
+    changed = overwrite_statements(
+        frame({**mops(roe=0.03), "period": "2025-Q3"}, {**mops(roe=0.03), "period": "2025-Q4"})
+    )
+    assert changed == 1
+    roe = dict(FinancialStatement.objects.values_list("period", "roe"))
+    assert roe == {"2025-Q3": 0.03, "2025-Q4": 0.02}
 
 
 def history_page(fixture_path: Callable[[str], Path], report: str, market: str) -> str:
     return fixture_path(f"mops/history/{report}_{market}_102_01.html").read_text("utf-8")
 
 
-def save_history(fixture_path: Callable[[str], Path], year: str = "102") -> None:
+def save_history(
+    fixture_path: Callable[[str], Path], year: str = "102", season: int = 1, **pages: str
+) -> None:
     for report in REPORTS:
         for market in ("sii", "otc"):
+            page = history_page(fixture_path, report, market)
             RawMops.objects.create(
                 dataset=STATEMENT_HISTORY,
                 request_params={
                     "report": report,
                     "TYPEK": market,
                     "year": year,
-                    "season": "01",
+                    "season": f"{season:02d}",
                 },
-                payload={"html": history_page(fixture_path, report, market)},
-                source_hash=f"{report}{market}{year}",
+                payload={
+                    "html": pages.get(f"{report}_{market}")
+                    or page.replace(SEASON_LABELS[1], SEASON_LABELS[season])
+                },
+                source_hash=f"{report}{market}{year}{season}",
             )
 
 
@@ -203,6 +226,27 @@ def test_the_summaries_are_read_again_from_raw(fixture_path: Callable[[str], Pat
     assert set(found["period"]) == {"2013-Q1"}
     assert found.loc["4526", "revenue"] == 1_452_830_000
     assert found.loc["4526", "operating_cf"] == -92_392_000
+    assert found.loc["3105", "revenue"] == 2_848_050_000
+
+
+@pytest.mark.django_db
+def test_a_later_quarter_takes_its_year_to_date_less_the_one_before(
+    fixture_path: Callable[[str], Path],
+) -> None:
+    save_history(fixture_path)
+    save_history(fixture_path, season=2)
+    rows = {(row["stock_id"], row["period"]): row for row in summary_frame().to_dict("records")}
+    q2 = rows[("4526", "2013-Q2")]
+    assert (q2["revenue"], q2["operating_cf"]) == (0, 0)
+    assert q2["roe"] is not None
+
+
+@pytest.mark.django_db
+def test_a_kept_summary_without_companies_is_refused(fixture_path: Callable[[str], Path]) -> None:
+    unfiled = fixture_path("mops/history/t163sb20_otc_102_01_unfiled.html").read_text("utf-8")
+    save_history(fixture_path, t163sb20_otc=unfiled)
+    with pytest.raises(SchemaChangedError, match="t163sb20 otc 2013-Q1 kept no companies"):
+        summary_frame()
 
 
 @pytest.mark.django_db
@@ -257,6 +301,27 @@ def test_a_stock_whose_kept_page_does_not_parse_is_set_aside(
 
 
 @pytest.mark.django_db
+def test_the_page_stored_last_is_the_one_read(fixture_path: Callable[[str], Path]) -> None:
+    RawMops.objects.create(
+        dataset=STATEMENT_VIEWER,
+        request_params={
+            "step": "1",
+            "CO_ID": "6211",
+            "SYEAR": "2013",
+            "SSEASON": "1",
+            "REPORT_ID": "C",
+        },
+        payload={"html": viewer_page(fixture_path, 2)},
+        source_hash="old",
+        fetched_at=datetime(2026, 11, 6, tzinfo=UTC),
+    )
+    save_viewer(viewer_page(fixture_path, 1))
+    found = viewer_frame_from_raw()
+    assert found.attrs["unreadable"] == []
+    assert list(found["period"]) == ["2013-Q1"]
+
+
+@pytest.mark.django_db
 def test_the_viewer_pages_are_read_again_from_raw(fixture_path: Callable[[str], Path]) -> None:
     for season in (1, 2):
         save_viewer(viewer_page(fixture_path, season), season=season)
@@ -301,6 +366,7 @@ def test_the_command_reads_only_the_stocks_asked_for(
     assert FinancialStatement.objects.get(stock_id="4526").operating_cf == 1
     assert FinancialStatement.objects.get(stock_id="6211").revenue == 107_602_000
     assert "1 statements changed" in out.getvalue()
+    assert "set aside" not in out.getvalue()
 
 
 @pytest.mark.django_db
