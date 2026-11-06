@@ -304,6 +304,27 @@ done
 - 兩種篩法的差別（2018 年每月第一個交易日抽查）：`daily_price` 有價的代號全部都在行情表上；行情表多出 32–41 個代號。這些是 FinMind 沒有的 ETF、TDR，加上 5 檔 FinMind 整檔沒有價格的普通股（1589、4207、4804、5355、8176），以及沒成交那天的 4415。這些代號的當沖量會略過；它們沒有價格，本來也進不了研究母體。日後如果補了這些代號的 `daily_price`，要對同一段日期跑 `reprocess --source twse|tpex --dataset day_trade --start … --end …`（只讀 raw、不發請求），否則研究層會把它們的當沖量當成 0。
 - 當沖表會列出量為 0 的標的。同市場當天的表有寫入、某檔不在表上，研究層算 0；同市場當天一列當沖都沒有的，才是空值。所以兩個市場每個交易日都要有成功、而且有列的 run。
 
+## 交易所逐日表補缺（plan K17c）
+
+FinMind 的外資持股、流通股數、本益比在 2010–2020 有缺，下市股缺得特別多（約 21% 對現存股 0.4–0.7%），模型會把「缺值」學成「之後會下市」。交易所的逐日全市場表列出當天所有掛牌的股票，用它把缺的補上：
+
+```bash
+for source in twse tpex; do
+  uv run python manage.py fill_from_exchange --source $source --fill holdings --start 2010-01-01 --end 2020-12-31
+  uv run python manage.py fill_from_exchange --source $source --fill valuation --start 2010-01-01 --end 2020-12-31
+done
+uv run python manage.py fill_from_exchange --source twse --fill holdings --resume <run_id>
+```
+
+- `holdings`：證交所 MI_QFIIS、櫃買 insti/qfii，一天一個請求，同一頁補外資持股比率（`daily_chip.fi_holding_pct`）和發行股數（`shares_outstanding`）。`valuation`：證交所 BWIBBU_d、櫃買 peQryDate，補 `daily_valuation`。
+- 缺才補，不分股票之後有沒有下市：
+  - `daily_chip`：沒有這一列就新增（只有這一欄）；有這一列、這一欄是空的才補；有值的不動。
+  - `daily_valuation`：當天沒有這一列才新增，三個數字都空的不新增。
+  - `shares_outstanding`：只補每檔第一筆已存股數之前的日子，照「變動才存」寫變動點；第一筆之後由已存的列決定。這個界線在開跑時記進 `etl_run.checkpoint.windows`，`--resume` 沿用。
+- 只寫當天在 `daily_price` 有價的代號（不用歷史行情頁，K6）。
+- `etl_run` 的 dataset 是 `fill:holdings`／`fill:valuation`，每天一個 checkpoint；中斷了用 `--resume <run_id>` 從下一個交易日接著跑。跑完記一列 `exchange_fill`（info），`detail.filled` 是每檔補了哪段日期、幾天，`detail.totals` 分下市股和現存股的列數。
+- 證交所、櫃買是不同主機，可以平行；每個請求約 3.5 秒，一個 fill 一個市場 2,725 天約 2.7 小時。週一到週五 15:00 前要停，和每日 ETL 錯開。
+
 ## 告警
 
 warning 與 error 一律寫 log；`.env` 設了 `ALERT_WEBHOOK_URL` 就另外 POST JSON：
