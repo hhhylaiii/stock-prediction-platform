@@ -177,6 +177,22 @@ def test_a_third_quarter_headed_as_the_half_year_is_refused(page: Callable[[str]
         parse_viewer(text, "1469", "2018-Q3")
 
 
+@pytest.mark.parametrize(
+    ("fixture", "code", "period", "heading", "wrong"),
+    [
+        ("t164sb01_2847_2015_1_C.html", "2847", "2015-Q1", "2015年第1季", "2014年第1季"),
+        ("t164sb01_1469_2018_2_C.html", "1469", "2018-Q2", "2018年上半年度", "2017年上半年度"),
+        ("t164sb01_1469_2018_2_C.html", "1469", "2018-Q2", "2018年上半年度", "2018年第1季"),
+    ],
+)
+def test_a_named_heading_of_another_year_or_quarter_is_refused(
+    page: Callable[[str], str], fixture: str, code: str, period: str, heading: str, wrong: str
+) -> None:
+    text = page(fixture).replace(heading, wrong)
+    with pytest.raises(SchemaChangedError, match=f"綜合損益表 has no column for {period}"):
+        parse_viewer(text, code, period)
+
+
 def test_another_company_or_quarter_is_refused(page: Callable[[str], str]) -> None:
     with pytest.raises(SchemaChangedError, match="is not 6212"):
         parse_viewer(page("t164sb01_6211_2013_1_C.html"), "6212", "2013-Q1")
