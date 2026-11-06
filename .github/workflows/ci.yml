@@ -75,7 +75,7 @@ jobs:
       - run: uv run python manage.py makemigrations --check --dry-run
         env:
           DJANGO_SETTINGS_MODULE: config.settings.test
-      - run: uv run pytest -m "not slow and not e2e and not live" -n auto --cov=apps --cov=config --cov-report=term --cov-fail-under=80
+      - run: uv run pytest -m "not slow and not e2e and not live" -n auto --durations=15 --cov=apps --cov=config --cov-report=term --cov-fail-under=80
         env:
           COVERAGE_CORE: sysmon
           OMP_NUM_THREADS: "1"
