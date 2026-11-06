@@ -1,3 +1,4 @@
+import io
 from collections.abc import Callable
 from datetime import date
 from decimal import Decimal
@@ -6,6 +7,7 @@ from typing import Any
 
 import pandas as pd
 import pytest
+from django.core.management import call_command
 
 from apps.etl.models import DataQualityLog, RawMops
 from apps.etl.mops_history import STATEMENT_HISTORY, STATEMENT_VIEWER
@@ -195,3 +197,26 @@ def test_the_viewer_pages_are_read_again_from_raw(fixture_path: Callable[[str], 
         107_602_000,
         -50_158_000,
     )
+
+
+@pytest.mark.django_db
+def test_the_command_overwrites_from_both_kinds_of_raw(
+    fixture_path: Callable[[str], Path],
+) -> None:
+    save_history(fixture_path)
+    stored("4526", "2013-Q1", operating_cf=1)
+    out = io.StringIO()
+    call_command("overwrite_statements", stdout=out)
+    assert FinancialStatement.objects.get().operating_cf == -92_392_000
+    assert "1 statements changed" in out.getvalue()
+
+
+@pytest.mark.django_db
+def test_a_dry_run_counts_without_writing(fixture_path: Callable[[str], Path]) -> None:
+    save_history(fixture_path)
+    stored("4526", "2013-Q1", operating_cf=1)
+    out = io.StringIO()
+    call_command("overwrite_statements", "--dry-run", stdout=out)
+    assert FinancialStatement.objects.get().operating_cf == 1
+    assert not DataQualityLog.objects.filter(check_name=OVERWRITE_CHECK).exists()
+    assert "1 statements would change" in out.getvalue()
