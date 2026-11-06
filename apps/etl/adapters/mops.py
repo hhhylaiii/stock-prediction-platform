@@ -514,7 +514,7 @@ class MopsAdapter(BaseAdapter):
         return found
 
     def _viewer(self, stock_id: str, start: date, end: date) -> pd.DataFrame:
-        """Settled quarters the stock filed while listed; stored ones only feed the conversion."""
+        """Settled quarters the stock filed while listed; stored ones are read to compare."""
         listed = StockMaster.objects.filter(stock_id=stock_id).values_list("delist_date", flat=True)
         days_after = int(settings.STATEMENT_SCAN_DAYS_AFTER)
         periods = viewer_periods(start, end, timezone.localdate(), days_after, listed.first())

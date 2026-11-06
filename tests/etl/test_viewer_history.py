@@ -86,12 +86,25 @@ def test_every_missing_quarter_is_its_year_to_date_less_the_one_before(
     assert frame.attrs["absent"] == []
 
 
-def test_a_stored_quarter_is_read_only_to_convert_the_next(pages: dict[str, str]) -> None:
+def test_stored_quarters_are_read_and_compared_too(pages: dict[str, str]) -> None:
     page, asked = served(pages)
-    frame = viewer_frame("6211", YEAR, {"2013-Q1", "2013-Q2"}, page, COLUMNS)
-    assert list(frame["period"]) == ["2013-Q3", "2013-Q4"]
-    assert frame.iloc[0]["revenue"] == 96_580_000
-    assert [period for period, _ in asked] == ["2013-Q2", "2013-Q3", "2013-Q4"]
+    frame = viewer_frame("6211", YEAR, set(YEAR), page, COLUMNS)
+    assert list(frame["period"]) == YEAR
+    assert frame.set_index("period").loc["2013-Q3", "revenue"] == 96_580_000
+    assert [period for period, _ in asked] == YEAR
+    assert frame.attrs["absent"] == []
+
+
+def test_a_stored_quarter_after_one_never_filed_keeps_only_its_balances(
+    pages: dict[str, str],
+) -> None:
+    answers = {(p, "C"): pages[p] for p in ("2013-Q1", "2013-Q3", "2013-Q4")}
+    page, _ = served(pages, answers)
+    frame = viewer_frame("6211", YEAR, set(YEAR), page, [*COLUMNS, "debt_ratio"])
+    q3 = frame.set_index("period").loc["2013-Q3"]
+    assert (q3["revenue"], q3["operating_cf"]) == (None, None)
+    assert q3["debt_ratio"] is not None
+    assert frame.attrs["absent"] == []
 
 
 def test_a_quarter_never_filed_is_noted_and_its_successor_has_no_flows(
@@ -287,13 +300,12 @@ def test_a_first_quarter_takes_its_roe_against_the_last_year_end(pages: dict[str
 
     def page(period: str, kind: str) -> str:
         asked.append(period)
-        return served[period] if kind == "C" else NOT_FILED
+        return served.get(period, NOT_FILED) if kind == "C" else NOT_FILED
 
     frame = viewer_frame("6211", ["2013-Q4", "2014-Q1"], {"2013-Q4"}, page, SCAN_COLUMNS)
-    (row,) = frame.to_dict("records")
-    assert row["period"] == "2014-Q1"
+    row = frame.set_index("period").loc["2014-Q1"].to_dict()
     assert row["roe"] == pytest.approx(48_155 / ((700_768 + 704_935) / 2))
-    assert asked == ["2013-Q4", "2014-Q1"]
+    assert asked == ["2013-Q3", "2013-Q3", "2013-Q4", "2014-Q1"]
 
 
 def test_a_quarter_without_revenue_is_noted(pages: dict[str, str]) -> None:
