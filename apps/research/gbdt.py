@@ -99,10 +99,43 @@ class Boosted:
     valid_scores: np.ndarray
 
 
+@dataclass(frozen=True)
+class Layout:
+    """How a fit reads its rows: every n-th day, a weight column, and day groups for ranking."""
+
+    every: int = 1
+    weight: str | None = None
+    group: bool = False
+
+
+EVERY_ROW = Layout()
+
+
+def sampled(rows: pd.DataFrame, every: int) -> pd.DataFrame:
+    """Rows of every n-th day counted back from the last day; rows itself when every is 1."""
+    if every < 1:
+        raise ValueError(f"every must be at least 1, not {every}")
+    if every == 1:
+        return rows
+    days = pd.Index(sorted(rows["date"].unique()))
+    return rows[rows["date"].isin(days[::-1][::every])]
+
+
 def _dataset(
-    rows: pd.DataFrame, features: Sequence[str], label: str, reference: lgb.Dataset | None = None
+    rows: pd.DataFrame,
+    features: Sequence[str],
+    label: str,
+    reference: lgb.Dataset | None = None,
+    layout: Layout = EVERY_ROW,
+    weighted: bool = True,
 ) -> lgb.Dataset:
-    return lgb.Dataset(rows[list(features)], label=rows[label], reference=reference)
+    return lgb.Dataset(
+        rows[list(features)],
+        label=rows[label],
+        reference=reference,
+        weight=rows[layout.weight] if weighted and layout.weight else None,
+        group=rows.groupby("date", sort=False).size().to_numpy() if layout.group else None,
+    )
 
 
 def refit(
@@ -112,10 +145,12 @@ def refit(
     seed: int,
     rounds: int,
     params: Mapping[str, Any] | None = None,
+    layout: Layout = EVERY_ROW,
 ) -> lgb.Booster:
     """A booster trained on every row for exactly the given rounds."""
     settings = {**BASE_PARAMS, **(params or {}), **seeded(seed)}
-    return lgb.train(settings, _dataset(rows, features, label), num_boost_round=rounds)
+    data = _dataset(rows, features, label, layout=layout)
+    return lgb.train(settings, data, num_boost_round=rounds)
 
 
 def boost(
@@ -128,18 +163,24 @@ def boost(
     feval: FevalFactory | None = None,
     max_rounds: int = MAX_ROUNDS,
     bags: int = 1,
+    layout: Layout = EVERY_ROW,
 ) -> Boosted:
-    """Find the best round on the validation tail, then refit every row per bag seed."""
+    """Find the best round on the validation tail, then refit every row per bag seed.
+
+    A sampling layout thins the fit and refit rows; the validation tail keeps every day.
+    """
     fit, valid = split_validation(rows, fold)
+    kept = sampled(rows, layout.every)
+    fit = kept[kept["date"] <= fold.fit_end]
     settings = {**BASE_PARAMS, **(params or {}), **seeded(seed)}
     if feval is not None:
         settings["metric"] = "None"
-    fit_set = _dataset(fit, features, label)
+    fit_set = _dataset(fit, features, label, layout=layout)
     probe = lgb.train(
         settings,
         fit_set,
         num_boost_round=max_rounds,
-        valid_sets=[_dataset(valid, features, label, reference=fit_set)],
+        valid_sets=[_dataset(valid, features, label, fit_set, layout, weighted=False)],
         valid_names=["valid"],
         feval=None if feval is None else feval(valid["date"], valid[label]),
         callbacks=[lgb.early_stopping(EARLY_STOPPING_ROUNDS, verbose=False)],
@@ -148,7 +189,8 @@ def boost(
     score = next(iter(probe.best_score["valid"].values()))
     scores = np.asarray(probe.predict(valid[list(features)], num_iteration=rounds))
     members = [
-        refit(rows, features, label, member, rounds, params) for member in bag_seeds(seed, bags)
+        refit(kept, features, label, member, rounds, params, layout)
+        for member in bag_seeds(seed, bags)
     ]
     final = members[0] if bags == 1 else Bagged(tuple(members))
     return Boosted(final, rounds, float(score), scores)

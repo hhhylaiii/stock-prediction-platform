@@ -1,4 +1,5 @@
 from dataclasses import replace
+from datetime import date
 from io import StringIO
 from pathlib import Path
 from typing import Any
@@ -12,7 +13,7 @@ from django.core.management.base import CommandError
 from apps.market.models import DailyPrice, StockMaster
 from apps.research import baseline_runs, gbdt, lgbm_runs
 from apps.research.baseline_runs import BASELINE
-from apps.research.features.store import export_year
+from apps.research.features.store import export_year, read_partitions
 from apps.research.gbdt import BASE_PARAMS, Bagged, seeded
 from apps.research.holdout import HoldoutError
 from apps.research.lgbm_runs import MODEL, recipe, run_folds
@@ -25,7 +26,7 @@ from apps.research.prediction_cache import (
     load_fold_predictions,
     missing_folds,
 )
-from apps.research.rank_model import rank_inputs
+from apps.research.rank_model import Variant, rank_inputs
 from apps.research.runs import (
     SCREENING_MODEL,
     RunError,
@@ -338,3 +339,58 @@ def test_a_full_run_refuses_an_empty_bag_before_the_shuffle_check(
 
     with pytest.raises(CommandError, match="at least one"):
         call_command("train", model="lightgbm", scope="rank", run_key="rank-wf1", bags=0)
+
+
+def test_rank_variants_record_themselves_and_rerun_when_they_change(panel: Path) -> None:
+    fold = research()[0]
+    sampled = Variant(every=5)
+
+    assert run_folds("rank", [fold], "rank-wf1", panel, variant=sampled) == [fold.index]
+
+    notes = fold_notes("rank-wf1", MODEL, fold.index)
+    assert notes["recipe"] == recipe("rank", KEPT, 0, variant=sampled)
+    run = ModelRun.objects.get(run_id=lgbm_runs.run_id("rank-wf1", "rank", 5, fold))
+    assert run.params["variant"] == {"every": 5, "half_life": None, "objective": "regression"}
+    assert run_folds("rank", [fold], "rank-wf1", panel, variant=sampled) == []
+    assert run_folds("rank", [fold], "rank-wf1", panel) == [fold.index]
+    plain = ModelRun.objects.get(run_id=lgbm_runs.run_id("rank-wf1", "rank", 5, fold))
+    assert plain.params["variant"] == {"every": 1, "half_life": None, "objective": "regression"}
+
+
+def test_recipe_changes_with_the_rank_variant() -> None:
+    first = recipe("rank", KEPT, 0)
+
+    assert recipe("rank", KEPT, 0, variant=Variant()) == first
+    variants = [Variant(every=5), Variant(half_life=24.0), Variant(objective="lambdarank")]
+    recipes = {recipe("rank", KEPT, 0, variant=variant) for variant in variants}
+    assert len(recipes) == 3
+    assert first not in recipes
+
+
+def test_variants_are_refused_outside_the_rank_scope(panel: Path) -> None:
+    with pytest.raises(ValueError, match="rank scope only"):
+        run_folds("interval", research(), "interval-wf1", panel, variant=Variant(every=5))
+    assert not ModelRun.objects.filter(model_type="lightgbm").exists()
+
+
+def test_rank_fold_inputs_are_the_rank_inputs_of_the_window_as_float32(panel: Path) -> None:
+    december = [day for day in pd.date_range("2015-12-01", "2015-12-31").date if day.weekday() < 5]
+    january = FeatureDaily.objects.filter(date__lt=date(2016, 2, 1)).order_by("date", "stock_id")
+    shifted = list(january)[: len(december) * len(STOCKS)]
+    for position, row in enumerate(shifted):
+        row.date = december[position // len(STOCKS)]
+        row.tech_ret_1d = float(row.tech_ret_1d or 0.0) * (1 + position % 3)
+    FeatureDaily.objects.bulk_create(shifted)
+    export_year(2015, panel)
+    fold = replace(research()[0], train_start=december[0])
+
+    read = lgbm_runs.rank_fold_inputs(fold, panel, KEPT)
+
+    whole = rank_inputs(read_partitions(fold.train_start, fold.test_end, panel), KEPT)
+    expected = whole[["date", "stock_id", "in_universe", *KEPT]].astype(
+        dict.fromkeys(KEPT, "float32")
+    )
+    pd.testing.assert_frame_equal(read.raw, expected.reset_index(drop=True))
+    assert read.raw["date"].min() == december[0]
+    assert read.feature_hash == feature_hash(fold.train_start, fold.test_end, panel)
+    assert (read.raw[KEPT].dtypes == "float32").all()
