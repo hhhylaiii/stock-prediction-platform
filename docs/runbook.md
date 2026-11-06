@@ -255,6 +255,24 @@ test -s delisted.txt && sed 's/^/--stock /' delisted.txt | xargs uv run python m
 - 91 開頭的存託憑證是外國發行人，不用這張表申報，所以排除。
 - 每家公司每季約 1 個請求，6 秒一次；全部下市公司約 1,500 個請求，約 2.5 小時。和每日掃描是同一台 mopsov，在 23:00 之後或早上跑，避開 19:00 和 22:40 前後。
 
+## FinMind 財報改用 MOPS 原始數字（plan K18）
+
+FinMind 的財報有些不是當季原始申報的數字。最明顯的是現金流：奇數年的季別很多是用隔年財報的比較數，2013–2025 年共 7,029 筆不同，偶數年只有 48 筆，這會偷看。所以已存的列，改用 MOPS 當季申報的數字（K17a 的彙總表、K17b 的檢視頁），從 raw 重套，不重抓：
+
+```bash
+uv run python manage.py overwrite_statements --dry-run
+uv run python manage.py overwrite_statements
+uv run python manage.py overwrite_statements --stock 2330
+```
+
+- 比對範圍是同一檔、同一季、同一種報表（合併或個體）。MOPS 的列和 K17a、K17b 一樣，用 `statement_rows` 換成單季值；前一季的頁面不在 raw 裡（2013-Q1 除外），那一季就不比。
+- `revenue`、`net_income`、`operating_cf`、`debt_ratio`、`roe`：超過門檻就覆寫（金額差超過 1,000 元，比率照 `figure_differences`），FinMind 是空的就補上。
+- `eps` 只補空的，不覆寫：MOPS 的單季 EPS 是累計數相減，股數加權和財報上的單季數字不同。
+- `gross_margin`、`op_margin` 不動；MOPS 是空的，FinMind 的值照留。
+- 每檔股票一列 `statement_overwritten`（info），記 `[原值, 新值]`。重跑時同一欄位再改一次，原值仍是 FinMind 最早的那個；這次沒動到的紀錄照留。要還原就照這列把原值寫回。
+- 2026-11-07 在 twp 的 dry run：92,658 個 MOPS 列裡，9,986 列會改。
+- 公告日不動。覆寫後要重建財報類特徵（Phase 3）。
+
 ## 告警
 
 warning 與 error 一律寫 log；`.env` 設了 `ALERT_WEBHOOK_URL` 就另外 POST JSON：
