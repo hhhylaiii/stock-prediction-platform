@@ -41,6 +41,12 @@ def is_foreign_currency_etf(code: str) -> bool:
     return len(code) == 6 and code.startswith("00") and code[5] in FOREIGN_CURRENCY_CODE_SUFFIXES
 
 
+def priced_codes(day: date) -> set[str]:
+    """Local-currency codes with a daily_price bar, for days whose quote page was never kept."""
+    codes = DailyPrice.objects.filter(date=day).values_list("stock_id", flat=True)
+    return {code for code in codes if not is_foreign_currency_etf(code)}
+
+
 def find_table(payload: dict[str, Any], title_part: str) -> dict[str, Any]:
     for table in payload.get("tables", []):
         if title_part in (table.get("title") or ""):

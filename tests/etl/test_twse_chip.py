@@ -16,7 +16,7 @@ from apps.etl.errors import SchemaChangedError, SourceNotReadyError
 from apps.etl.models import EtlRun, RawTwse
 from apps.etl.ratelimit import RateLimiter
 from apps.market.calendar import NotATradingDayError, TradingDays
-from apps.market.models import DailyChip
+from apps.market.models import DailyChip, DailyPrice
 
 BASE = "https://www.twse.com.tw/rwd/zh"
 DAY = date(2026, 10, 28)
@@ -626,3 +626,34 @@ def test_fetch_command_after_daily_price_zeroes_quiet_stocks(
     assert DailyChip.objects.get(stock_id="2330", date=DAY).fi_net == -3_175_021
     run = EtlRun.objects.get(dataset="institutional")
     assert (run.status, run.rows) == ("success", 6)
+
+
+def _priced(*codes: str) -> None:
+    DailyPrice.objects.bulk_create(
+        DailyPrice(stock_id=code, date=DAY, close=10, volume=1, turnover=10) for code in codes
+    )
+
+
+@responses.activate
+@pytest.mark.django_db
+def test_a_day_without_kept_quotes_takes_its_day_trades_for_the_stocks_priced(
+    adapter: TwseAdapter, serve: Callable[[str], dict[str, Any]]
+) -> None:
+    serve("day_trade")
+    _priced("2330", "2317")
+    rows = _load(adapter, "day_trade")
+    assert set(rows) == {"2330", "2317"}
+    assert rows["2330"]["day_trade_volume"] == 4_142_000
+
+
+@responses.activate
+@pytest.mark.django_db
+@pytest.mark.parametrize("dataset", ["day_trade", "institutional"])
+def test_a_day_without_quotes_or_prices_is_not_ready(
+    adapter: TwseAdapter, serve: Callable[[str], dict[str, Any]], dataset: str
+) -> None:
+    serve(dataset)
+    if dataset == "institutional":
+        _priced("2330")
+    with pytest.raises(SourceNotReadyError, match="chip rows need its quotes"):
+        _load(adapter, dataset)

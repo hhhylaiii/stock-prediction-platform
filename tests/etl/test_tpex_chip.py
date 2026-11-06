@@ -509,3 +509,29 @@ def test_an_earlier_day_uses_its_own_ew_quotes_not_the_latest(
     )
     _serve(load_fixture, "institutional")
     assert _load(adapter, "institutional")["1240"]["fi_net"] == 0
+
+
+@responses.activate
+@pytest.mark.django_db
+def test_a_day_without_kept_quotes_takes_its_day_trades_for_the_stocks_priced(
+    adapter: TpexAdapter, load_fixture: Callable[[str], Any]
+) -> None:
+    _serve(load_fixture, "day_trade")
+    DailyPrice.objects.bulk_create(
+        DailyPrice(stock_id=code, date=DAY, close=10, volume=1, turnover=10)
+        for code in ("6488", "1240")
+    )
+    rows = _load(adapter, "day_trade")
+    assert set(rows) == {"6488", "1240"}
+    assert rows["1240"]["day_trade_volume"] == 0
+
+
+@responses.activate
+@pytest.mark.django_db
+def test_other_chip_tables_still_wait_for_the_quotes(
+    adapter: TpexAdapter, load_fixture: Callable[[str], Any]
+) -> None:
+    _serve(load_fixture, "institutional")
+    DailyPrice.objects.create(stock_id="6488", date=DAY, close=10, volume=1, turnover=10)
+    with pytest.raises(SourceNotReadyError, match="chip rows need its quotes"):
+        _load(adapter, "institutional")
