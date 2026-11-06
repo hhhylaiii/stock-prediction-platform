@@ -401,6 +401,6 @@ def test_a_dry_run_lists_the_missing_days_and_fetches_nothing(
         dataset="daily_price",
         dry_run=True,
     )
-    assert capsys.readouterr().out.strip() == "missing twse/daily_price: 2026-10-28, 2026-10-29"
+    assert capsys.readouterr().out.strip() == "to fetch twse/daily_price: 2026-10-28, 2026-10-29"
     assert len(responses.calls) == 0
     assert not EtlRun.objects.exists()

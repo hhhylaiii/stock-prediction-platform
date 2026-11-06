@@ -18,7 +18,7 @@ from django.utils import timezone
 from apps.etl.adapters import build_adapter
 from apps.etl.adapters.mops import REVENUE_SCAN, STATEMENT_SCAN
 from apps.etl.alerts import dispatch
-from apps.etl.catchup import catch_up
+from apps.etl.catchup import REDONE, catch_up
 from apps.etl.errors import SourceError, SourceNotReadyError
 from apps.etl.master_refresh import DAILY_DATASET, refresh_stock_master
 from apps.etl.models import DataQualityLog, EtlRun
@@ -62,7 +62,6 @@ BATCH_SLOTS = {
     "notices": "NOTICES_AGAIN",
 }
 EXCHANGES = ("twse", "tpex")
-LAST_THREE = (0, 1, 2)
 CARRIED_FORWARD = frozenset({("stock_master", DAILY_DATASET), ("datagov", "business_signal")})
 
 
@@ -94,7 +93,10 @@ BATCHES: dict[str, list[Fetch]] = {
         Fetch("twse", "shares_outstanding"),
     ],
     "qfii": [Fetch("tpex", "foreign_holding"), Fetch("tpex", "shares_outstanding")],
-    "night": [*_both("margin", "sbl"), *_both("day_trade", sessions_back=LAST_THREE)],
+    "night": [
+        *_both("margin", "sbl"),
+        *_both("day_trade", sessions_back=tuple(range(REDONE["day_trade"] + 1))),
+    ],
     "notices": _both("attention", "disposition"),
 }
 
