@@ -48,7 +48,12 @@ def priced_codes(day: date, quotes_kept_from: str | None) -> set[str]:
     codes = DailyPrice.objects.filter(date=day).values_list("stock_id", flat=True)
     found = {code for code in codes if not is_foreign_currency_etf(code)}
     if found:
-        logger.info("%s: no quote page was ever kept, %d priced codes stand in", day, len(found))
+        logger.info(
+            "%s: before the first kept quote page %s, %d priced codes stand in",
+            day,
+            quotes_kept_from,
+            len(found),
+        )
     return found
 
 
