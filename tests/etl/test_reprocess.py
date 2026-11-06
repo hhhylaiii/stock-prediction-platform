@@ -13,7 +13,7 @@ from apps.etl.adapters.twse import TwseAdapter
 from apps.etl.errors import SourceNotReadyError
 from apps.etl.models import EtlRun, RawTwse
 from apps.etl.ratelimit import RateLimiter
-from apps.etl.replay import reprocess
+from apps.etl.replay import ReplaySession, reprocess
 from apps.market.calendar import TradingDays
 from apps.market.models import DailyPrice, DispositionEvent, SharesOutstanding, StockMaster
 
@@ -323,3 +323,23 @@ def test_a_failed_later_rebuild_is_reported_after_the_range(
             end="2026-10-28",
         )
     assert "success" in capsys.readouterr().out
+
+
+@pytest.mark.django_db
+def test_a_dataset_read_from_several_pages_replays_each_from_its_own_raw() -> None:
+    params = {"startDate": "20261028", "endDate": "20261029", "response": "json"}
+    RawTwse.objects.create(
+        dataset="ex_rights", request_params=params, payload={"page": "ex"}, source_hash="a"
+    )
+    RawTwse.objects.create(
+        dataset="capital_reduction", request_params=params, payload={"page": "cut"}, source_hash="b"
+    )
+    session = ReplaySession(
+        RawTwse,
+        "dividend_event",
+        {"/exRight/TWT49U": "ex_rights", "/reducation/TWTAUU": "capital_reduction"},
+    )
+    assert session.get(f"{TWSE}/exRight/TWT49U", params=params).json() == {"page": "ex"}
+    assert session.get(f"{TWSE}/reducation/TWTAUU", params=params).json() == {"page": "cut"}
+    with pytest.raises(SourceNotReadyError, match="no stored raw for dividend_event"):
+        session.get(f"{TWSE}/change/TWTB8U", params=params)

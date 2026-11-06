@@ -5,6 +5,7 @@ from collections.abc import Iterator, Mapping
 from datetime import date
 from itertools import groupby
 from typing import Any, NamedTuple
+from urllib.parse import urlsplit
 
 import pandas as pd
 import requests
@@ -34,26 +35,34 @@ class MissingRawError(SourceNotReadyError):
 
 
 class ReplaySession(requests.Session):
-    """Answers each request with the latest raw stored for the same dataset and parameters."""
+    """Answers each request with the latest raw stored for the same dataset and parameters.
 
-    def __init__(self, raw_model: type[RawRecord], dataset: str) -> None:
+    pages maps a path to the raw dataset its answers are kept under, when it is not the dataset.
+    """
+
+    def __init__(
+        self, raw_model: type[RawRecord], dataset: str, pages: Mapping[str, str] | None = None
+    ) -> None:
         super().__init__()
         self.raw_model = raw_model
         self.dataset = dataset
+        self.pages = dict(pages or {})
 
     def request(  # type: ignore[override]
         self, method: str, url: str, **kwargs: Any
     ) -> requests.Response:
         params: Mapping[str, Any] = kwargs.get("params") or kwargs.get("data") or {}
+        path = urlsplit(url).path
+        kept = next(
+            (name for page, name in self.pages.items() if path.endswith(page)), self.dataset
+        )
         stored = (
-            self.raw_model._default_manager.filter(
-                dataset=self.dataset, request_params=dict(params)
-            )
+            self.raw_model._default_manager.filter(dataset=kept, request_params=dict(params))
             .order_by("-fetched_at")
             .first()
         )
         if stored is None:
-            raise MissingRawError(f"no stored raw for {self.dataset} {dict(params)}")
+            raise MissingRawError(f"no stored raw for {kept} {dict(params)}")
         response = requests.Response()
         response.status_code = 200
         response.url = url
@@ -71,7 +80,7 @@ def replay_adapter(source: str, dataset: str, calendar: TradingDays) -> BaseAdap
     adapter_class = ADAPTERS[source]
     limit = RateLimit.from_settings(settings.ETL_RATE_LIMITS[source])
     limiter = RateLimiter(limit, sleep=lambda seconds: None)
-    session = ReplaySession(adapter_class.raw_model, dataset)
+    session = ReplaySession(adapter_class.raw_model, dataset, adapter_class.raw_pages.get(dataset))
     return adapter_class(calendar, limiter, session)  # type: ignore[call-arg]
 
 
