@@ -88,6 +88,7 @@ from apps.research.walkforward import Fold
 MODEL = MODEL_TYPE
 RANK_FIELDS = (RANK_LABEL, "untradable_t1")
 RECIPE_VERSION = "4"
+LATER_DEFAULTS: dict[str, Any] = {"min_rounds": 0}
 MAX_ROUNDS = DEFAULT_MAX_ROUNDS
 SCOPE_HORIZONS: dict[str, tuple[int, ...]] = {
     HoldoutScope.RANK: HORIZONS,
@@ -140,6 +141,15 @@ def _targets(scope: str) -> dict[str, object]:
     }
 
 
+def variant_note(variant: Variant) -> dict[str, Any]:
+    """The variant as recipes and params record it; later fields are left out at their defaults."""
+    return {
+        name: value
+        for name, value in asdict(variant).items()
+        if not (name in LATER_DEFAULTS and value == LATER_DEFAULTS[name])
+    }
+
+
 def recipe(
     scope: str, features: list[str], seed: int, bags: int = 1, variant: Variant = SPEC_RECIPE
 ) -> str:
@@ -153,7 +163,7 @@ def recipe(
         "max_rounds": MAX_ROUNDS,
         "seed": seed,
         "bag_seeds": bag_seeds(seed, bags),
-        "variant": asdict(variant),
+        "variant": variant_note(variant),
     }
     listed = json.dumps(settings, sort_keys=True).encode()
     return f"{RECIPE_VERSION}-{hashlib.sha256(listed).hexdigest()[:12]}"
@@ -311,7 +321,7 @@ def _rank(job: Job) -> FoldFit:
             "rounds": boosted.rounds,
             "valid_ic": _plain(boosted.valid_score),
             "feval_every": FEVAL_EVERY,
-            "variant": asdict(job.variant),
+            "variant": variant_note(job.variant),
             "lightgbm": {
                 **BASE_PARAMS,
                 "objective": job.variant.objective,

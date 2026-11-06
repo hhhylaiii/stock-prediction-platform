@@ -361,10 +361,23 @@ def test_recipe_changes_with_the_rank_variant() -> None:
     first = recipe("rank", KEPT, 0)
 
     assert recipe("rank", KEPT, 0, variant=Variant()) == first
-    variants = [Variant(every=5), Variant(half_life=24.0), Variant(objective="lambdarank")]
+    variants = [
+        Variant(every=5),
+        Variant(half_life=24.0),
+        Variant(objective="lambdarank"),
+        Variant(min_rounds=200),
+    ]
     recipes = {recipe("rank", KEPT, 0, variant=variant) for variant in variants}
-    assert len(recipes) == 3
+    assert len(recipes) == 4
     assert first not in recipes
+
+
+def test_the_round_floor_leaves_recipes_cached_before_it_unchanged() -> None:
+    """Caches fitted before min_rounds existed stay current while the floor is unset."""
+    for variant in (Variant(), Variant(every=5), Variant(half_life=24.0)):
+        before = {"every": variant.every, "half_life": variant.half_life, "objective": "regression"}
+        assert lgbm_runs.variant_note(variant) == before
+    assert lgbm_runs.variant_note(Variant(min_rounds=200))["min_rounds"] == 200
 
 
 def test_variants_are_refused_outside_the_rank_scope(panel: Path) -> None:

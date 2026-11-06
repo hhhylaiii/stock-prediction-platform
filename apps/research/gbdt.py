@@ -164,10 +164,11 @@ def boost(
     max_rounds: int = MAX_ROUNDS,
     bags: int = 1,
     layout: Layout = EVERY_ROW,
+    min_rounds: int = 0,
 ) -> Boosted:
     """Find the best round on the validation tail, then refit every row per bag seed.
 
-    A sampling layout thins the fit and refit rows; the validation tail keeps every day.
+    Sampling thins the fit and refit rows, not the validation tail; min_rounds floors the refit.
     """
     fit, valid = split_validation(rows, fold)
     kept = sampled(rows, layout.every)
@@ -185,9 +186,10 @@ def boost(
         feval=None if feval is None else feval(valid["date"], valid[label]),
         callbacks=[lgb.early_stopping(EARLY_STOPPING_ROUNDS, verbose=False)],
     )
-    rounds = probe.best_iteration or probe.current_iteration()
+    best = probe.best_iteration or probe.current_iteration()
     score = next(iter(probe.best_score["valid"].values()))
-    scores = np.asarray(probe.predict(valid[list(features)], num_iteration=rounds))
+    scores = np.asarray(probe.predict(valid[list(features)], num_iteration=best))
+    rounds = max(best, min_rounds)
     members = [
         refit(kept, features, label, member, rounds, params, layout)
         for member in bag_seeds(seed, bags)

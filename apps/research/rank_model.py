@@ -33,6 +33,7 @@ class Variant:
     every: int = 1
     half_life: float | None = None
     objective: str = "regression"
+    min_rounds: int = 0
 
     def __post_init__(self) -> None:
         if self.every < 1:
@@ -41,6 +42,8 @@ class Variant:
             raise ValueError(f"half_life must be positive, not {self.half_life}")
         if self.objective not in OBJECTIVES:
             raise ValueError(f"objective must be one of {OBJECTIVES}, not {self.objective!r}")
+        if self.min_rounds < 0:
+            raise ValueError(f"min_rounds must not be negative, not {self.min_rounds}")
 
 
 SPEC_RECIPE = Variant()
@@ -95,7 +98,19 @@ def fit_rank(
         return DailyRankIC(dates, pct.loc[dates.index])
 
     layout = Layout(every=variant.every, weight=weight, group=ranking)
-    return boost(rows, fold, names, label, seed, params, feval, max_rounds, bags, layout)
+    return boost(
+        rows,
+        fold,
+        names,
+        label,
+        seed,
+        params,
+        feval,
+        max_rounds,
+        bags,
+        layout,
+        min_rounds=variant.min_rounds,
+    )
 
 
 def prediction_frame(rows: pd.DataFrame, scores: np.ndarray) -> pd.DataFrame:
