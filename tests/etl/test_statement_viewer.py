@@ -11,6 +11,7 @@ from apps.etl.statement_viewer import parse_viewer
 
 REVENUE, PARENT, EPS = "營業收入", "淨利（淨損）歸屬於母公司業主", "基本每股盈餘（元）"
 ASSETS, CFO = "資產總計", "營業活動之淨現金流入（流出）"
+BALANCE_FIRST = (INCOME, BALANCE, CASH_FLOW)
 
 
 @pytest.fixture
@@ -69,7 +70,11 @@ def test_banks_and_brokers_name_revenue_and_profit_their_own_way(
         0.45,
     )
     broker = summary(page, "6022", 2016, 4)[INCOME]["6022"]
-    assert (broker["收入"], broker[PARENT]) == (585_791, 949)
+    assert broker[PARENT] == 949
+    assert "收入" not in broker
+    empty: dict[str, dict[str, dict[str, float | None]]] = {report: {} for report in BALANCE_FIRST}
+    (bank_row,) = statement_rows(summary(page, "2847", 2015, 3), empty, 1)
+    assert bank_row["op_margin"] is None
 
 
 def test_the_viewer_gives_the_figures_the_summaries_give(page: Callable[[str], str]) -> None:
