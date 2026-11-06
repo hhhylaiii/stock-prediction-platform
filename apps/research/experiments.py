@@ -18,6 +18,7 @@ from apps.research.metrics.ic import daily_rank_ic
 from apps.research.models import HoldoutScope, ModelRun
 from apps.research.prediction_cache import load_predictions
 from apps.research.rank_model import LAMBDARANK, RANK_LABEL, SPEC_RECIPE, Variant
+from apps.research.target_models import TARGET_RECIPE, TargetVariant
 from apps.research.training import load_labels, training_rows
 from apps.research.walkforward import Fold, WalkForwardConfig, generate_folds
 
@@ -44,12 +45,13 @@ MODEL = lgbm_runs.MODEL
 
 @dataclass(frozen=True)
 class Arm:
-    """One side of an experiment: its fold layout and rank variant."""
+    """One side of an experiment: its fold layout, rank variant and target variant."""
 
     name: str
     config: WalkForwardConfig
     variant: Variant
     tuned: bool = False
+    target: TargetVariant = TARGET_RECIPE
 
 
 @dataclass(frozen=True)

@@ -1,0 +1,333 @@
+"""Return and interval experiments on coarse research folds: market features on or off (SPEC §7)."""
+
+import math
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, replace
+from pathlib import Path
+
+import pandas as pd
+
+from apps.research import experiments, lgbm_runs
+from apps.research.evaluation import tradable_rows
+from apps.research.experiments import MIN_SEEDS, SUGGESTED_SEEDS, Arm, Experiment, arm_key
+from apps.research.labels import VOL_DAYS
+from apps.research.metrics.forecast import (
+    daily_absolute_error,
+    daily_auc,
+    daily_brier,
+    daily_coverage,
+    daily_direction_hits,
+    daily_pinball,
+    daily_qlike,
+)
+from apps.research.models import HoldoutScope
+from apps.research.prediction_cache import load_predictions
+from apps.research.rank_model import SPEC_RECIPE
+from apps.research.target_eval import (
+    GATE_T,
+    HORIZON,
+    LABEL,
+    LABEL_FIELDS,
+    RETURN_COLUMN,
+    UP_LABEL,
+    VOL_LABEL,
+    Comparison,
+    paired,
+    quantile_columns,
+)
+from apps.research.target_models import TARGET_RECIPE, TargetVariant
+from apps.research.training import KEYS, load_labels
+from apps.research.walkforward import Fold, WalkForwardConfig
+
+RETURN, INTERVAL = HoldoutScope.RETURN, HoldoutScope.INTERVAL
+MODEL = lgbm_runs.MODEL
+NO_MARKET = TargetVariant(market=False)
+QUANTILE_COLUMNS = quantile_columns(MODEL)
+VOL_COLUMN = f"{MODEL}_vol_h{VOL_DAYS}"
+PROB_COLUMN = f"{MODEL}_prob_h{VOL_DAYS}"
+METRICS: dict[str, tuple[str, ...]] = {
+    RETURN: ("mae", "direction"),
+    INTERVAL: ("pinball", "coverage", "qlike", "auc", "brier"),
+}
+PRIMARY: dict[str, str] = {RETURN: "mae", INTERVAL: "pinball"}
+NEEDS: dict[str, tuple[str, tuple[str, ...]]] = {
+    "mae": (LABEL, (RETURN_COLUMN,)),
+    "direction": (LABEL, (RETURN_COLUMN,)),
+    "pinball": (LABEL, tuple(QUANTILE_COLUMNS.values())),
+    "coverage": (LABEL, (QUANTILE_COLUMNS[0.1], QUANTILE_COLUMNS[0.9])),
+    "qlike": (VOL_LABEL, (VOL_COLUMN,)),
+    "auc": (UP_LABEL, (PROB_COLUMN,)),
+    "brier": (UP_LABEL, (PROB_COLUMN,)),
+}
+TITLES = {
+    "mae": "MAE",
+    "direction": "方向準確率",
+    "pinball": "pinball",
+    "coverage": "覆蓋率",
+    "qlike": "QLIKE",
+    "auc": "AUC",
+    "brier": "Brier",
+}
+SETTINGS = {
+    NO_MARKET: "只用篩選後的個股特徵，不加市場特徵",
+    TARGET_RECIPE: "個股特徵加上市場特徵（SPEC 配方）",
+}
+DAILY_COLUMNS = ["arm", "seed", "fold", "metric", "date", "value"]
+
+
+@dataclass(frozen=True)
+class TargetExperiment(Experiment):
+    """Arms of one target scope; the first is kept unless the second is strictly better."""
+
+    scope: str
+
+
+def target_experiments(base: WalkForwardConfig) -> dict[str, TargetExperiment]:
+    """The SPEC §7 market-feature experiments of both target scopes on six-month folds."""
+    months = experiments.COARSE_MONTHS
+    coarse = replace(base, step_months=months, test_months=months)
+    arms = (
+        Arm("nomarket", coarse, SPEC_RECIPE, target=NO_MARKET),
+        Arm("market", coarse, SPEC_RECIPE),
+    )
+    return {
+        f"market-{scope}": TargetExperiment(f"market-{scope}", "better", arms, scope)
+        for scope in (RETURN, INTERVAL)
+    }
+
+
+def train_arms(
+    experiment: TargetExperiment,
+    run_key: str,
+    folds: Mapping[str, list[Fold]],
+    directory: Path,
+    seeds: Sequence[int],
+) -> dict[str, list[int]]:
+    """Fit each arm's folds once per seed under its own run_key; current caches are kept."""
+    return {
+        arm_key(run_key, arm, seed): lgbm_runs.run_folds(
+            experiment.scope,
+            folds[arm.name],
+            arm_key(run_key, arm, seed),
+            directory,
+            seed,
+            target=arm.target,
+        )
+        for arm in experiment.arms
+        for seed in seeds
+    }
+
+
+def _score(metric: str, rows: pd.DataFrame) -> pd.Series:
+    if metric == "mae":
+        return daily_absolute_error(rows, LABEL, RETURN_COLUMN)
+    if metric == "direction":
+        return daily_direction_hits(rows, LABEL, RETURN_COLUMN)
+    if metric == "pinball":
+        return daily_pinball(rows, LABEL, QUANTILE_COLUMNS)
+    if metric == "coverage":
+        return daily_coverage(rows, LABEL, QUANTILE_COLUMNS[0.1], QUANTILE_COLUMNS[0.9])
+    if metric == "qlike":
+        return daily_qlike(rows, VOL_LABEL, VOL_COLUMN)
+    up = rows.assign(**{UP_LABEL: rows[UP_LABEL].astype(int)})
+    if metric == "auc":
+        return daily_auc(up, UP_LABEL, PROB_COLUMN)
+    return daily_brier(up, UP_LABEL, PROB_COLUMN)
+
+
+def _shared(metric: str, frames: Sequence[pd.DataFrame]) -> pd.Series:
+    """Rows where the label and every arm's columns of a metric are set; QLIKE also needs > 0."""
+    label, columns = NEEDS[metric]
+    keep = frames[0][label].notna()
+    for frame in frames:
+        keep &= frame[list(columns)].notna().all(axis=1)
+        if metric == "qlike":
+            keep &= (frame[label] > 0) & (frame[VOL_COLUMN] > 0)
+    return keep
+
+
+def _arm_frames(
+    experiment: TargetExperiment,
+    run_key: str,
+    period: Sequence[Fold],
+    seed: int,
+    labels: pd.DataFrame,
+) -> list[pd.DataFrame]:
+    """Each arm's tradable cached rows of one test period with labels, on the rows all arms hold."""
+    frames = []
+    for arm, fold in zip(experiment.arms, period, strict=True):
+        cached = load_predictions(arm_key(run_key, arm, seed), MODEL, [fold])
+        joined = cached[cached["date"] <= fold.eval_end].merge(
+            labels, on=KEYS, how="left", validate="one_to_one"
+        )
+        frames.append(tradable_rows(joined).set_index(KEYS))
+    common = frames[0].index
+    for frame in frames[1:]:
+        common = common.intersection(frame.index)
+    return [frame.loc[common].reset_index() for frame in frames]
+
+
+def daily_metrics(
+    experiment: TargetExperiment,
+    run_key: str,
+    folds: Mapping[str, list[Fold]],
+    seeds: Sequence[int] = (0,),
+) -> pd.DataFrame:
+    """Daily OOS metrics of each arm and seed on shared tradable rows; labels read once a period."""
+    scope, parts = experiment.scope, []
+    for period in zip(*(folds[arm.name] for arm in experiment.arms), strict=True):
+        first = period[0]
+        labels = load_labels(first.test_start, first.eval_end, HORIZON[scope], LABEL_FIELDS[scope])
+        for seed in seeds:
+            frames = _arm_frames(experiment, run_key, period, seed, labels)
+            for metric in METRICS[scope]:
+                keep = _shared(metric, frames).to_numpy()
+                for arm, frame, fold in zip(experiment.arms, frames, period, strict=True):
+                    daily = _score(metric, frame[keep]).rename("value").reset_index()
+                    parts.append(
+                        daily.assign(arm=arm.name, seed=seed, fold=fold.index, metric=metric)
+                    )
+    return pd.concat(parts, ignore_index=True)[DAILY_COLUMNS]
+
+
+def per_seed(daily: pd.DataFrame, metric: str) -> pd.DataFrame:
+    """A metric's research-period mean per arm and seed."""
+    picked = daily[daily["metric"] == metric]
+    return picked.groupby(["arm", "seed"])["value"].mean().unstack("seed")
+
+
+def _seed_mean(daily: pd.DataFrame, arm: str, metric: str) -> pd.Series:
+    picked = daily[(daily["arm"] == arm) & (daily["metric"] == metric)]
+    return picked.groupby("date")["value"].mean()
+
+
+def comparisons(
+    experiment: TargetExperiment, daily: pd.DataFrame, folds: Sequence[Fold]
+) -> dict[str, Comparison]:
+    """Each metric of the second arm against the first, seed-averaged by day and paired by fold."""
+    default, alternative = (arm.name for arm in experiment.arms)
+    return {
+        metric: paired(
+            _seed_mean(daily, alternative, metric), _seed_mean(daily, default, metric), folds
+        )
+        for metric in METRICS[experiment.scope]
+    }
+
+
+def verdict(experiment: TargetExperiment, compared: Mapping[str, Comparison]) -> str:
+    """The second arm when it is strictly better on the scope's primary metric, else the first."""
+    default, alternative = (arm.name for arm in experiment.arms)
+    primary = compared[PRIMARY[experiment.scope]]
+    return alternative if primary.model < primary.baseline else default
+
+
+def settled(compared: Mapping[str, Comparison], scope: str, seeds: int) -> bool:
+    """A verdict on MIN_SEEDS seeds, or on a fold-paired gap whose NW t reaches GATE_T."""
+    return seeds >= MIN_SEEDS or abs(compared[PRIMARY[scope]].nw_t) >= GATE_T
+
+
+def _cell(value: float) -> str:
+    return "—" if math.isnan(value) else f"{value:.4f}"
+
+
+def _gap(value: float) -> str:
+    return "—" if math.isnan(value) else f"{value:+.4f}"
+
+
+def _table_lines(experiment: TargetExperiment, compared: Mapping[str, Comparison]) -> list[str]:
+    metrics = METRICS[experiment.scope]
+    default, alternative = (arm.name for arm in experiment.arms)
+    rows = [
+        (default, [_cell(compared[metric].baseline) for metric in metrics]),
+        (alternative, [_cell(compared[metric].model) for metric in metrics]),
+        (
+            f"差（{alternative} − {default}）",
+            [_gap(compared[metric].model - compared[metric].baseline) for metric in metrics],
+        ),
+        ("逐摺差 NW t", [_gap(compared[metric].nw_t) for metric in metrics]),
+    ]
+    lines = [
+        "| 組 | " + " | ".join(TITLES[metric] for metric in metrics) + " |",
+        "| --- |" + " --- |" * len(metrics),
+    ]
+    return lines + [f"| {name} | " + " | ".join(cells) + " |" for name, cells in rows]
+
+
+def _verdict_lines(
+    experiment: TargetExperiment, compared: Mapping[str, Comparison], seeds: int
+) -> list[str]:
+    chosen = verdict(experiment, compared)
+    primary = PRIMARY[experiment.scope]
+    if settled(compared, experiment.scope, seeds):
+        return [f"**判定：採用 {chosen}**"]
+    return [
+        f"**判定（暫定）：採用 {chosen}**",
+        f"- ⚠️ {TITLES[primary]} 的逐摺差 NW t 未達 {GATE_T:g}，只跑了 {seeds} 個 seed："
+        f"要用 {MIN_SEEDS} 個 seed（`--seeds {SUGGESTED_SEEDS}`）重跑再判定",
+    ]
+
+
+def _seed_lines(experiment: TargetExperiment, daily: pd.DataFrame) -> list[str]:
+    primary = PRIMARY[experiment.scope]
+    means = per_seed(daily, primary)
+    seeds = list(means.columns)
+    lines = [
+        "",
+        f"## 各 seed（{TITLES[primary]}）",
+        "",
+        "| 組 | " + " | ".join(f"seed {seed}" for seed in seeds) + " |",
+        "| --- |" + " --- |" * len(seeds),
+    ]
+    for arm in experiment.arms:
+        cells = [_cell(float(value)) for value in means.loc[arm.name].to_numpy(dtype=float)]
+        lines.append(f"| {arm.name} | " + " | ".join(cells) + " |")
+    return lines
+
+
+def _fold_lines(experiment: TargetExperiment, compared: Mapping[str, Comparison]) -> list[str]:
+    primary = PRIMARY[experiment.scope]
+    default, alternative = (arm.name for arm in experiment.arms)
+    lines = [
+        "",
+        f"## 每摺（{TITLES[primary]}）",
+        "",
+        f"| 摺 | {default} | {alternative} |",
+        "| --- | --- | --- |",
+    ]
+    for fold, row in compared[primary].by_fold.iterrows():
+        lines.append(f"| {fold} | {_cell(row['baseline'])} | {_cell(row['model'])} |")
+    return lines
+
+
+def experiment_report(
+    experiment: TargetExperiment,
+    run_key: str,
+    daily: pd.DataFrame,
+    folds: Sequence[Fold],
+    note: str | None = None,
+) -> str:
+    """Markdown of each arm's seed-averaged metrics, the gaps, the verdict, seeds and folds."""
+    compared = comparisons(experiment, daily, folds)
+    seeds = sorted(daily["seed"].unique())
+    default, alternative = (arm.name for arm in experiment.arms)
+    primary = TITLES[PRIMARY[experiment.scope]]
+    indices = [fold.index for fold in folds]
+    lines = [f"# 實驗：{experiment.name}（{run_key}）", ""]
+    if note:
+        lines += [f"> {note}", ""]
+    lines += [f"- {arm.name}：{SETTINGS[arm.target]}" for arm in experiment.arms]
+    lines += [
+        f"- 比較 {len(indices)} 個研究摺（摺 {indices[0]}–{indices[-1]}），seed "
+        f"{', '.join(map(str, seeds))}；每組的快取 run_key 為 `{run_key}-<組名>`，"
+        "seed 不是 0 時再加 `-s<seed>`",
+        f"- 判定規則：{alternative} 的 {primary} 要嚴格低於 {default} 才採用（SPEC §7：OOS 指標"
+        "沒有提高就不用）；其他欄只列參考。各 seed 先逐日平均，再看研究期與逐摺差",
+        "",
+        *_table_lines(experiment, compared),
+        "",
+        *_verdict_lines(experiment, compared, len(seeds)),
+    ]
+    if len(seeds) > 1:
+        lines += _seed_lines(experiment, daily)
+    lines += _fold_lines(experiment, compared)
+    return "\n".join(lines) + "\n"
