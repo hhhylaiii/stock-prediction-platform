@@ -70,9 +70,12 @@ from apps.research.runs import (
     screened_features,
 )
 from apps.research.target_models import (
+    MARKET_LEVEL,
     RETURN_LABEL,
+    TARGET_RECIPE,
     UP_LABEL,
     VOL_LABEL,
+    TargetVariant,
     fit_probability,
     fit_quantiles,
     fit_return,
@@ -151,10 +154,15 @@ def variant_note(variant: Variant) -> dict[str, Any]:
 
 
 def recipe(
-    scope: str, features: list[str], seed: int, bags: int = 1, variant: Variant = SPEC_RECIPE
+    scope: str,
+    features: list[str],
+    seed: int,
+    bags: int = 1,
+    variant: Variant = SPEC_RECIPE,
+    target: TargetVariant = TARGET_RECIPE,
 ) -> str:
     """RECIPE_VERSION with a digest of a scope's features, targets, LightGBM settings and seeds."""
-    settings = {
+    settings: dict[str, Any] = {
         "scope": scope,
         "targets": _targets(scope),
         "features": features,
@@ -165,6 +173,8 @@ def recipe(
         "bag_seeds": bag_seeds(seed, bags),
         "variant": variant_note(variant),
     }
+    if target != TARGET_RECIPE:
+        settings["target_variant"] = asdict(target)
     listed = json.dumps(settings, sort_keys=True).encode()
     return f"{RECIPE_VERSION}-{hashlib.sha256(listed).hexdigest()[:12]}"
 
@@ -174,13 +184,16 @@ def label_digest(scope: str, fold: Fold) -> str:
     return label_hash(fold.train_start, fold.eval_end, SCOPE_HORIZONS[scope])
 
 
-def scope_features(scope: str) -> list[str]:
+def scope_features(scope: str, target: TargetVariant = TARGET_RECIPE) -> list[str]:
     """Features a scope's boosters read: stock-level for rank, plus market features otherwise."""
     try:
         screened = screened_features()
     except RunError as error:
         raise RunError(f"the {scope} scope fits on the screened features: {error}") from error
-    return rank_features(screened) if scope == HoldoutScope.RANK else raw_features(screened)
+    if scope == HoldoutScope.RANK:
+        return rank_features(screened)
+    features = raw_features(screened)
+    return features if target.market else [name for name in features if name not in MARKET_LEVEL]
 
 
 def input_notes(scope: str, fold: Fold, directory: Path) -> dict[str, str]:
@@ -199,11 +212,12 @@ def _current_notes(
     seed: int,
     bags: int,
     variant: Variant,
+    target: TargetVariant,
 ) -> dict[str, str]:
     """Notes a fold cached now would carry: its features, labels and recipe."""
     return {
         **input_notes(scope, fold, directory),
-        "recipe": recipe(scope, features, seed, bags, variant),
+        "recipe": recipe(scope, features, seed, bags, variant, target),
     }
 
 
@@ -482,6 +496,7 @@ def run_fold(
     seed: int,
     bags: int = 1,
     variant: Variant = SPEC_RECIPE,
+    target: TargetVariant = TARGET_RECIPE,
 ) -> Path:
     """Fit one fold of a scope's boosters; the old cache goes first, the new one last."""
     if is_holdout(fold):
@@ -502,7 +517,7 @@ def run_fold(
     notes = {
         "feature_hash": read.feature_hash,
         "label_hash": labels_digest,
-        "recipe": recipe(scope, features, seed, bags, variant),
+        "recipe": recipe(scope, features, seed, bags, variant, target),
     }
     return save_fold_predictions(run_key, MODEL, fold, rows.assign(**fitted.columns), notes=notes)
 
@@ -516,9 +531,10 @@ def _stale(
     seed: int,
     bags: int,
     variant: Variant,
+    target: TargetVariant,
 ) -> bool:
     """Whether a cached fold's features, labels or recipe have changed since it was fitted."""
-    current = _current_notes(scope, fold, directory, features, seed, bags, variant)
+    current = _current_notes(scope, fold, directory, features, seed, bags, variant, target)
     return fold_notes(run_key, MODEL, fold.index) != current
 
 
@@ -531,25 +547,28 @@ def run_folds(
     rerun: bool = False,
     bags: int = 1,
     variant: Variant = SPEC_RECIPE,
+    target: TargetVariant = TARGET_RECIPE,
 ) -> list[int]:
     """Run a scope's folds without a current cache, or all with rerun; holdout is refused."""
     check_run_key(scope, run_key)
     if scope != HoldoutScope.RANK and variant != SPEC_RECIPE:
         raise ValueError(f"design variants apply to the rank scope only, not {scope}")
+    if scope == HoldoutScope.RANK and target != TARGET_RECIPE:
+        raise ValueError("target variants apply to the return and interval scopes, not rank")
     chosen = list(folds)
     held = [fold.index for fold in chosen if is_holdout(fold)]
     if held:
         raise HoldoutError(f"folds {held} are holdout; they run once with the frozen design")
     bag_seeds(seed, bags)
-    features = scope_features(scope)
+    features = scope_features(scope, target)
     missing = set(missing_folds(run_key, MODEL, chosen))
     ran = []
     for fold in chosen:
         if (
             rerun
             or fold.index in missing
-            or _stale(scope, run_key, fold, directory, features, seed, bags, variant)
+            or _stale(scope, run_key, fold, directory, features, seed, bags, variant, target)
         ):
-            run_fold(scope, fold, run_key, directory, features, seed, bags, variant)
+            run_fold(scope, fold, run_key, directory, features, seed, bags, variant, target)
             ran.append(fold.index)
     return ran
