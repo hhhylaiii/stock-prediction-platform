@@ -256,13 +256,15 @@ def test_second_batch_columns_follow_the_registry() -> None:
     assert list(features.columns) == ["stock_id", "date", *feature_names(Group.TECHNICAL, batch=2)]
 
 
-def test_parkinson_volatility_averages_squared_log_ranges_with_halted_days_flat() -> None:
+@pytest.mark.parametrize("bar", [False, True], ids=["halted", "bar without trades"])
+def test_parkinson_volatility_averages_squared_log_ranges_with_idle_days_flat(bar: bool) -> None:
     closes = wavy(30)
     closes[25] = NAN
     highs = [c * 1.02 if not math.isnan(c) else NAN for c in closes]
     lows = [c * 0.99 if not math.isnan(c) else NAN for c in closes]
+    has_bar = [bar or not math.isnan(c) for c in closes]
     features = second_batch_technical_features(
-        listing("2330", closes, adj_high=highs, adj_low=lows, adj_open=closes)
+        listing("2330", closes, adj_high=highs, adj_low=lows, adj_open=closes, has_bar=has_bar)
     )
     squared = [0.0 if k == 25 else math.log(1.02 / 0.99) ** 2 for k in range(30)]
 

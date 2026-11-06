@@ -119,9 +119,9 @@ def technical_features(panel: pd.DataFrame) -> pd.DataFrame:
 
 
 def _parkinson(panel: pd.DataFrame) -> pd.Series:
-    """Annualized Parkinson volatility; a halted day has no range."""
+    """Annualized Parkinson volatility; a halted day or a bar without trades has no range."""
     squared = pd.Series(np.log(panel["adj_high"] / panel["adj_low"]) ** 2, index=panel.index)
-    ranges = squared.where(panel["has_bar"].astype(bool), 0.0)
+    ranges = squared.where(panel["has_bar"].astype(bool), 0.0).fillna(0.0)
     mean = rolling(ranges, panel, PARKINSON_DAYS, "mean", PARKINSON_DAYS)
     return (mean / (4 * math.log(2))).pow(0.5) * ANNUAL_ROOT
 
