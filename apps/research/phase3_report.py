@@ -6,7 +6,7 @@ from typing import Any
 import pandas as pd
 
 from apps.market.calendar import TradingDays
-from apps.research.features.registry import feature
+from apps.research.features.registry import Availability, Group, feature
 from apps.research.metrics.ic import daily_rank_ic
 
 FLAG_RATIO = 3.0
@@ -14,7 +14,6 @@ FLAG_GAP = 0.20
 ACCEPT_RATIO = 1.5
 ACCEPT_GAP = 0.05
 MONTHLY_TOP = 10
-FUNDAMENTAL_PREFIX = "fund_"
 TABLE_COLUMNS = ["current", "delisted", "rows_current", "rows_delisted", "ratio", "gap_pp", "flag"]
 
 
@@ -74,6 +73,22 @@ def missing_table(counts: pd.DataFrame) -> pd.DataFrame:
 def accepted(table: pd.DataFrame) -> pd.Series:
     """Features meeting the 11/07 bar: ratio at most ACCEPT_RATIO or gap at most ACCEPT_GAP."""
     return (table["ratio"] <= ACCEPT_RATIO) | (table["gap_pp"] <= ACCEPT_GAP * 100)
+
+
+def unfilled(
+    rows: pd.DataFrame, fallbacks: Mapping[str, str], masked: Mapping[str, frozenset[str]]
+) -> list[str]:
+    """Fallback features left empty where their source has a value, outside their masked months."""
+    months = pd.to_datetime(pd.Series(rows["date"], index=rows.index)).dt.strftime("%Y-%m")
+    return [
+        name
+        for name, source in fallbacks.items()
+        if (
+            rows[name].isna()
+            & rows[source].notna()
+            & ~months.isin(list(masked.get(name, frozenset())))
+        ).any()
+    ]
 
 
 def fill_counts(
@@ -150,13 +165,18 @@ def strongest(ic: Mapping[str, Mapping[str, float | None]], count: int) -> list[
     return sorted(strength, key=lambda name: -strength[name])[:count]
 
 
+def _statement(name: str) -> bool:
+    spec = feature(name)
+    return spec.group is Group.FUNDAMENTAL and spec.availability is Availability.ANNOUNCE_DATE
+
+
 def statement_coverage(params: Mapping[str, Any]) -> pd.DataFrame:
     """IC days of each fundamental feature and whether the low-IC rule judged it."""
     window, floor = int(params["window_days"]), float(params["min_coverage"])
     rows = {
         name: {"days_h5": int(days["5"]), "days_h20": int(days["20"])}
         for name, days in params["days"].items()
-        if name.startswith(FUNDAMENTAL_PREFIX)
+        if _statement(name)
     }
     table = pd.DataFrame.from_dict(rows, orient="index")
     coverage = table[["days_h5", "days_h20"]].min(axis=1) / window
@@ -259,7 +279,8 @@ def render(
         f"{header['window_days']} 個交易日；保留 {header['kept']} 個，剔除 {header['dropped']} 個。"
         "單因子 IC 表見 `phase3-ic-report.md`。",
         f"- 缺值對照：{start} 到 {end} 的 universe 內列，依 `stock_master.delist_date` 分組；"
-        f"之後下市 {rows_delisted:,} 列、現存 {rows_current:,} 列。",
+        f"之後下市 {rows_delisted:,} 列、現存 {rows_current:,} 列。"
+        f"補前表是 `{header['before']}`，要和補後表同一段期間才能直接比。",
         "",
         "## 財報類特徵的 IC 覆蓋率（K14、K16）",
         "",

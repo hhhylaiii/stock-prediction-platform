@@ -16,6 +16,7 @@ from apps.research.phase3_report import (
     render,
     statement_coverage,
     strongest,
+    unfilled,
 )
 from tests.research.conftest import weekday_calendar
 
@@ -199,6 +200,7 @@ def test_statement_coverage_lists_fundamental_features_left_unjudged() -> None:
             "fund_roe_ttm": {"5": 40, "20": 30},
             "fund_debt_ratio": {"5": 50, "20": 60},
             "fund_days_since_fs": {"5": 100, "20": 100},
+            "fund_bp": {"5": 100, "20": 100},
             "tech_ret_1d": {"5": 10, "20": 10},
         },
     }
@@ -265,7 +267,7 @@ def test_render_lists_only_flagged_gaps_and_marks_incomplete_months() -> None:
 
     text = render(
         header={"run_id": "k.screening", "start": "2010-12-06", "end": "2015-08-31"}
-        | {"window_days": 1170, "kept": 56, "dropped": 2},
+        | {"window_days": 1170, "kept": 56, "dropped": 2, "before": "before.csv"},
         coverage=statement_coverage(
             {
                 "window_days": 100,
@@ -327,3 +329,19 @@ def test_accepted_takes_a_small_ratio_or_a_small_gap() -> None:
         "only_delisted": False,
         "both_over": False,
     }
+
+
+def test_unfilled_names_fallbacks_left_empty_outside_masked_months() -> None:
+    frame = pd.DataFrame(
+        {
+            "date": [d("2016-01-04"), d("2016-02-01"), d("2016-02-02")],
+            "fund_rev_yoy": [NAN, NAN, 0.3],
+            "fund_rev_yoy_q": [0.1, 0.2, 0.3],
+        }
+    )
+    fallbacks = {"fund_rev_yoy": "fund_rev_yoy_q"}
+
+    assert unfilled(frame, fallbacks, {}) == ["fund_rev_yoy"]
+    assert unfilled(frame, fallbacks, {"fund_rev_yoy": frozenset({"2016-01"})}) == ["fund_rev_yoy"]
+    assert unfilled(frame, fallbacks, {"fund_rev_yoy": frozenset({"2016-01", "2016-02"})}) == []
+    assert unfilled(rows(), fallbacks, {}) == []
