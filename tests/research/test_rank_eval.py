@@ -1,3 +1,5 @@
+import shutil
+from collections.abc import Iterator
 from dataclasses import replace
 from datetime import date
 from decimal import Decimal
@@ -8,12 +10,15 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import pytest
+from django.conf import settings as django_settings
 from django.core.management import call_command
 from django.core.management.base import CommandError
+from django.db import transaction
 from django.db.models import F
+from django.test import override_settings
 
 from apps.market.calendar import TradingDays
-from apps.market.models import DailyPrice, StockMaster
+from apps.market.models import DailyPrice, StockMaster, TradingCalendar
 from apps.research import baseline_runs, lgbm_runs, rank_eval
 from apps.research.eval_report import render_report
 from apps.research.evaluation import RankReport, decile_report, importance_drift, rank_report
@@ -24,7 +29,7 @@ from apps.research.models import BacktestMetric, FeatureDaily, LabelDaily, Model
 from apps.research.panel import load_price_panel
 from apps.research.prediction_cache import MissingFoldsError, fold_path, load_predictions
 from apps.research.walkforward import Fold
-from tests.research.run_panels import CONFIG, STOCKS, folds, research, weekdays
+from tests.research.run_panels import CONFIG, STOCKS, build_panel, folds, research, weekdays
 
 pytestmark = pytest.mark.django_db
 
@@ -92,17 +97,47 @@ def add_prices() -> None:
     DailyPrice.objects.bulk_create(bars, batch_size=5000)
 
 
-@pytest.fixture
-def caches(run_panel: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+BUILT_TABLES = [DailyPrice, StockMaster, ModelRun, LabelDaily, FeatureDaily, TradingCalendar]
+
+
+def build_caches(root: Path) -> None:
     """Ridge and LightGBM rank caches of tuning and research folds, with exposures and prices."""
-    add_exposures(run_panel)
-    add_prices()
-    flipped = 1 + 1 / len(STOCKS) - F("fwd_rank_pct")
-    LabelDaily.objects.filter(horizon=5).update(fwd_rank_pct=flipped)
-    monkeypatch.setattr(lgbm_runs, "MAX_ROUNDS", 120)
-    baseline_runs.run_folds("rank", research(), RUN_KEY, run_panel)
-    lgbm_runs.run_folds("rank", research(), RUN_KEY, run_panel)
-    return run_panel
+    with override_settings():
+        with transaction.atomic():
+            panel = build_panel(django_settings, root)
+            add_exposures(panel)
+            add_prices()
+            flipped = 1 + 1 / len(STOCKS) - F("fwd_rank_pct")
+            LabelDaily.objects.filter(horizon=5).update(fwd_rank_pct=flipped)
+        baseline_runs.run_folds("rank", research(), RUN_KEY, panel)
+        lgbm_runs.run_folds("rank", research(), RUN_KEY, panel)
+
+
+@pytest.fixture(scope="module")
+def built(
+    tmp_path_factory: pytest.TempPathFactory, django_db_setup: None, django_db_blocker: Any
+) -> Iterator[Path]:
+    """The caches built and committed once for the module, deleted after its last test."""
+    root = tmp_path_factory.mktemp("rank_eval")
+    with django_db_blocker.unblock(), pytest.MonkeyPatch.context() as patch:
+        patch.setattr(lgbm_runs, "MAX_ROUNDS", 120)
+        try:
+            build_caches(root)
+            yield root
+        finally:
+            for table in BUILT_TABLES:
+                table._default_manager.all().delete()
+
+
+@pytest.fixture
+def caches(built: Path, settings: Any, tmp_path: Path) -> Path:
+    """A copy of the built files for each test; database changes roll back with the test."""
+    root = tmp_path / "built"
+    shutil.copytree(built, root)
+    settings.RESEARCH_CACHE_DIR = root / "predictions"
+    settings.MODEL_DIR = root / "models"
+    settings.FEATURE_PARQUET_DIR = root / "features"
+    return root / "features"
 
 
 def prices(chosen: list[Fold]) -> pd.DataFrame:
