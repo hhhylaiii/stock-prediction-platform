@@ -10,7 +10,7 @@ import pandas as pd
 
 from apps.market.calendar import TradingDays
 from apps.research import lgbm_runs
-from apps.research.gbdt import EARLY_STOPPING_ROUNDS
+from apps.research.gbdt import EARLY_STOPPING_ROUNDS, bag_seeds
 from apps.research.labels import HORIZONS
 from apps.research.metrics.ic import daily_rank_ic
 from apps.research.models import HoldoutScope, ModelRun
@@ -28,13 +28,14 @@ VALID_FACTOR = 2
 WINDOW_FROM = date(2015, 1, 1)
 SMALL_GAP = 0.02
 MIN_SEEDS = 3
+SUGGESTED_SEEDS = ",".join(map(str, bag_seeds(0, MIN_SEEDS)))
 RULES = {
     "best": "總體 rank IC（5 日與 20 日平均）最高的一組；同分留 base",
     "not_worse": "總體 rank IC 不低於 base 就採用",
     "better": "總體 rank IC 嚴格高於 base 才採用",
 }
 DAILY_COLUMNS = ["arm", "seed", "fold", "horizon", "date", "ic"]
-ROUND_COLUMNS = ["arm", "seed", "horizon", "fold", "rounds"]
+ROUND_COLUMNS = ["arm", "seed", "horizon", "fold", "best", "rounds"]
 MODEL = lgbm_runs.MODEL
 
 
@@ -45,6 +46,7 @@ class Arm:
     name: str
     config: WalkForwardConfig
     variant: Variant
+    tuned: bool = False
 
 
 @dataclass(frozen=True)
@@ -65,6 +67,7 @@ def experiments(base: WalkForwardConfig) -> dict[str, Experiment]:
     floor = Arm("floor", coarse, Variant(min_rounds=MIN_ROUNDS))
     months = VALID_FACTOR * coarse.valid_months
     longer = Arm(f"valid{months}", replace(coarse, valid_months=months), SPEC_RECIPE)
+    tuned = Arm("tuned", coarse, SPEC_RECIPE, tuned=True)
     return {
         "window": Experiment("window", "best", (plain, long, decayed)),
         "sampling": Experiment(
@@ -75,7 +78,7 @@ def experiments(base: WalkForwardConfig) -> dict[str, Experiment]:
             "better",
             (plain, Arm("lambdarank", coarse, Variant(objective="lambdarank"))),
         ),
-        "stopping": Experiment("stopping", "best", (plain, floor, longer)),
+        "stopping": Experiment("stopping", "best", (plain, floor, longer, tuned)),
     }
 
 
@@ -115,6 +118,9 @@ def train_arms(
     seeds: Sequence[int],
 ) -> dict[str, list[int]]:
     """Fit each arm's folds once per seed under its own run_key; current caches are kept."""
+    unresolved = [arm.name for arm in experiment.arms if arm.tuned and not arm.variant.fixed_rounds]
+    if unresolved:
+        raise ValueError(f"fix the rounds of {unresolved} with with_tuned_rounds before training")
     return {
         arm_key(run_key, arm, seed): lgbm_runs.run_folds(
             HoldoutScope.RANK,
@@ -209,8 +215,41 @@ def stopping_rounds(
             fitted = ModelRun.objects.filter(run_id__in=ids).values_list("run_id", "params")
             for run_id, params in fitted:
                 horizon, index = ids[run_id]
-                rows.append([arm.name, seed, horizon, index, params["rounds"]])
+                best = params.get("best_round", params["rounds"])
+                rows.append([arm.name, seed, horizon, index, best, params["rounds"]])
     return pd.DataFrame(rows, columns=ROUND_COLUMNS)
+
+
+def tuning_rounds(
+    experiment: Experiment,
+    run_key: str,
+    calendar: TradingDays,
+    last: date,
+    directory: Path,
+    seeds: Sequence[int],
+) -> dict[int, int]:
+    """Median best round per horizon of the base arm on its tuning folds, fitted when missing."""
+    base = experiment.arms[0]
+    tuning = [fold for fold in generate_folds(calendar, last, base.config) if fold.tuning]
+    if not tuning:
+        raise ValueError(f"{experiment.name} has no tuning folds to fix its rounds on")
+    for seed in seeds:
+        key = arm_key(run_key, base, seed)
+        lgbm_runs.run_folds(HoldoutScope.RANK, tuning, key, directory, seed, variant=base.variant)
+    alone = replace(experiment, arms=(base,))
+    rounds = stopping_rounds(alone, run_key, {base.name: tuning}, seeds)
+    medians = rounds.groupby("horizon")["best"].median()
+    return {horizon: round(float(medians[horizon])) for horizon in HORIZONS if horizon in medians}
+
+
+def with_tuned_rounds(experiment: Experiment, rounds: Mapping[int, int]) -> Experiment:
+    """The experiment with each tuned arm refitting every fold for the given rounds."""
+    fixed = tuple(sorted(rounds.items()))
+    arms = tuple(
+        replace(arm, variant=replace(arm.variant, fixed_rounds=fixed)) if arm.tuned else arm
+        for arm in experiment.arms
+    )
+    return replace(experiment, arms=arms)
 
 
 def _setting(arm: Arm) -> str:
@@ -227,6 +266,11 @@ def _setting(arm: Arm) -> str:
         line += f"（只排每天前 {top} 名的配對，label_gain 2^級−1）"
     if variant.min_rounds:
         line += f"，至少 {variant.min_rounds} 輪"
+    if variant.fixed_rounds:
+        counts = "、".join(f"{horizon} 日 {count} 輪" for horizon, count in variant.fixed_rounds)
+        line += f"，固定 {counts}（調參摺最佳輪數的中位數）"
+    elif arm.tuned:
+        line += "，輪數由調參摺定"
     return line
 
 
@@ -266,7 +310,7 @@ def _verdict_lines(table: pd.DataFrame, chosen: str, seeds: int) -> list[str]:
     return [
         f"**判定（暫定）：採用 {chosen}**",
         f"- ⚠️ {names} 與 {chosen} 差距小於 {SMALL_GAP}，只跑了 {seeds} 個 seed："
-        f"要用 {MIN_SEEDS} 個 seed（`--seeds 0,1,2`）重跑再判定",
+        f"要用 {MIN_SEEDS} 個 seed（`--seeds {SUGGESTED_SEEDS}`）重跑再判定",
     ]
 
 
@@ -286,18 +330,20 @@ def _round_lines(experiment: Experiment, rounds: pd.DataFrame) -> list[str]:
         "",
         "## 停止輪數",
         "",
-        f"| 組 | horizon | 最少 | 中位數 | 最多 | 少於 {EARLY_STOPPING_ROUNDS} 輪 |",
-        "| --- | --- | --- | --- | --- | --- |",
+        "| 組 | horizon | 最佳輪數最少 | 中位數 | 最多 | "
+        f"少於 {EARLY_STOPPING_ROUNDS} 輪（摺 × seed） | 重訓輪數中位數 |",
+        "| --- | --- | --- | --- | --- | --- | --- |",
     ]
     for arm in experiment.arms:
         for horizon in HORIZONS:
-            picked = rounds[(rounds["arm"] == arm.name) & (rounds["horizon"] == horizon)]["rounds"]
+            picked = rounds[(rounds["arm"] == arm.name) & (rounds["horizon"] == horizon)]
             if picked.empty:
                 continue
-            short = int((picked < EARLY_STOPPING_ROUNDS).sum())
+            best = picked["best"]
+            short = int((best < EARLY_STOPPING_ROUNDS).sum())
             lines.append(
-                f"| {arm.name} | {horizon} 日 | {picked.min()} | {picked.median():g} | "
-                f"{picked.max()} | {short} |"
+                f"| {arm.name} | {horizon} 日 | {best.min()} | {best.median():g} | "
+                f"{best.max()} | {short} | {picked['rounds'].median():g} |"
             )
     return lines
 

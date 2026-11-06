@@ -20,6 +20,8 @@ from apps.research.experiments import (
     experiments,
     stopping_rounds,
     train_arms,
+    tuning_rounds,
+    with_tuned_rounds,
 )
 from apps.research.holdout import HoldoutError, holdout_claimed
 from apps.research.labels import latest_price_date
@@ -48,12 +50,13 @@ class Command(BaseCommand):
     @staticmethod
     def _seeds(text: str) -> tuple[int, ...]:
         """Distinct non-negative seeds from a comma list."""
-        parts = text.split(",")
-        if not all(part.strip().isdigit() for part in parts) or len(set(parts)) < len(parts):
+        parts = [part.strip() for part in text.split(",")]
+        values = tuple(int(part) for part in parts if part.isdigit())
+        if len(values) < len(parts) or len(set(values)) < len(values):
             raise ValueError(
-                f"--seeds takes distinct non-negative integers like 0,1,2, not {text!r}"
+                f"--seeds takes distinct non-negative integers like 0,3,6, not {text!r}"
             )
-        return tuple(int(part) for part in parts)
+        return values
 
     def _shuffle(self, fold: Fold, seed: int) -> None:
         """SPEC §8 shuffle check on the first compared fold before any arm trains."""
@@ -79,12 +82,17 @@ class Command(BaseCommand):
             last = as_date(options["last_date"], "--last-date") or latest_price_date()
             if last is None:
                 raise ValueError("daily_price is empty")
-            folds = compared_folds(experiment, TradingDays.from_db(), last)
+            calendar = TradingDays.from_db()
+            folds = compared_folds(experiment, calendar, last)
             directory = settings.FEATURE_PARQUET_DIR
             self._shuffle(folds[experiment.arms[0].name][0], seeds[0])
+            if any(arm.tuned for arm in experiment.arms):
+                rounds = tuning_rounds(experiment, run_key, calendar, last, directory, seeds)
+                self.stdout.write(f"tuned rounds from the tuning folds: {rounds}")
+                experiment = with_tuned_rounds(experiment, rounds)
             ran = train_arms(experiment, run_key, folds, directory, seeds)
             daily = daily_ics(experiment, run_key, folds, seeds)
-            rounds = stopping_rounds(experiment, run_key, folds, seeds)
+            stopped = stopping_rounds(experiment, run_key, folds, seeds)
         except (
             ValueError,
             RunError,
@@ -99,6 +107,6 @@ class Command(BaseCommand):
             raise CommandError(str(error)) from error
         for name, indices in ran.items():
             self.stdout.write(f"{name}: ran folds {indices}")
-        text = experiment_report(experiment, run_key, daily, options["note"], rounds)
+        text = experiment_report(experiment, run_key, daily, options["note"], stopped)
         written = write_report(text, options["output"])
         self.stdout.write(text if written is None else f"wrote {written}")

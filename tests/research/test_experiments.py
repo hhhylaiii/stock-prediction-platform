@@ -31,7 +31,7 @@ from apps.research.models import HoldoutRun, HoldoutScope, LabelDaily, ModelRun
 from apps.research.prediction_cache import load_predictions
 from apps.research.rank_model import LAMBDARANK, SPEC_RECIPE, Variant
 from apps.research.runs import SCREENING_MODEL
-from apps.research.walkforward import WalkForwardConfig
+from apps.research.walkforward import WalkForwardConfig, generate_folds
 from tests.research.conftest import weekday_calendar
 from tests.research.run_panels import CONFIG, weekdays
 
@@ -67,11 +67,13 @@ def test_the_spec_experiments_compare_these_arms_on_six_month_folds() -> None:
         ("lambdarank", Variant(objective="lambdarank")),
     ]
     stopping = chosen["stopping"]
-    assert [(arm.name, arm.variant) for arm in stopping.arms] == [
-        ("base", SPEC_RECIPE),
-        ("floor", Variant(min_rounds=MIN_ROUNDS)),
-        ("valid12", SPEC_RECIPE),
+    assert [(arm.name, arm.variant, arm.tuned) for arm in stopping.arms] == [
+        ("base", SPEC_RECIPE, False),
+        ("floor", Variant(min_rounds=MIN_ROUNDS), False),
+        ("valid12", SPEC_RECIPE, False),
+        ("tuned", SPEC_RECIPE, True),
     ]
+    assert stopping.arms[3].config == base.config
     assert MIN_ROUNDS == 200
     assert stopping.arms[2].config == replace(base.config, valid_months=12)
     assert {name: item.rule for name, item in chosen.items()} == {
@@ -265,6 +267,7 @@ def test_daily_ics_pool_each_arm_over_its_tradable_test_rows(
         & (rounds["fold"] == folds["every5"][0].index)
     ]
     assert picked["rounds"].tolist() == [fitted.params["rounds"]]
+    assert picked["best"].tolist() == [fitted.params["best_round"]]
     assert len(rounds) == 2 * 2 * 2 * len(periods)
 
 
@@ -326,6 +329,7 @@ def test_experiment_report_shows_the_verdict_small_gaps_and_folds() -> None:
     assert "| every5 | 0.0620 | 0.0500 | 0.0560 | +0.0010 | — |" in text
     assert "**判定（暫定）：採用 every5**" in text
     assert "差距小於 0.02，只跑了 1 個 seed" in text
+    assert "`--seeds 0,3,6`" in text
     assert "## 各 seed" not in text
     assert "## 停止輪數" not in text
     assert "| 3 | 0.0500 | 0.0400 | 0.0540 | 0.0400 |" in text
@@ -349,7 +353,8 @@ def test_experiment_report_judges_close_arms_on_three_seeds_and_lists_rounds() -
             "seed": [0, 1, 2] * 2,
             "horizon": [20] * 6,
             "fold": [3] * 6,
-            "rounds": [21, 446, 1681, 300, 310, 320],
+            "best": [21, 446, 1681, 30, 310, 320],
+            "rounds": [21, 446, 1681, 200, 310, 320],
         }
     )
 
@@ -359,8 +364,9 @@ def test_experiment_report_judges_close_arms_on_three_seeds_and_lists_rounds() -
     assert "**判定：採用 base**" in text
     assert "差距小於 0.02，判定用 3 個 seed 的平均" in text
     assert "| base | 0.1000 | 0.1200 | 0.1400 |" in text
-    assert "| base | 20 日 | 21 | 446 | 1681 | 1 |" in text
-    assert "| w60 | 20 日 | 300 | 310 | 320 | 0 |" in text
+    assert "| base | 20 日 | 21 | 446 | 1681 | 1 | 446 |" in text
+    assert "| w60 | 20 日 | 30 | 310 | 320 | 1 | 310 |" in text
+    assert "（摺 × seed）" in text
 
 
 @pytest.fixture
@@ -489,7 +495,7 @@ def test_the_lambdarank_setting_names_its_truncation_and_gain() -> None:
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize("seeds", ["x", "0,0", "", "-1"])
+@pytest.mark.parametrize("seeds", ["x", "0,0", "0, 0", "1,01", "", "-1"])
 def test_rank_experiment_refuses_bad_seeds_before_training(command: Path, seeds: str) -> None:
     with pytest.raises(CommandError, match="--seeds"):
         call_command(
@@ -499,8 +505,84 @@ def test_rank_experiment_refuses_bad_seeds_before_training(command: Path, seeds:
 
 
 def test_the_stopping_settings_name_the_round_floor_and_the_validation_length() -> None:
-    _, floor, longer = experiments.experiments(WalkForwardConfig())["stopping"].arms
+    _, floor, longer, tuned = experiments.experiments(WalkForwardConfig())["stopping"].arms
 
     assert experiments._setting(floor).endswith("，至少 200 輪")
     assert "驗證段 12 個月" in experiments._setting(longer)
     assert "驗證段 6 個月" in experiments._setting(floor)
+    assert experiments._setting(tuned).endswith("，輪數由調參摺定")
+
+
+@pytest.mark.django_db
+def test_rank_experiment_checks_every_seed_key_before_training(command: Path) -> None:
+    with pytest.raises(CommandError, match="at most"):
+        call_command(
+            "rank_experiment",
+            name="window",
+            run_key="rank-" + "x" * 24,
+            seeds="0,3",
+            stdout=StringIO(),
+        )
+    assert not ModelRun.objects.filter(model_type="lightgbm").exists()
+
+
+@pytest.mark.django_db
+def test_the_tuned_arm_fixes_each_horizon_to_the_tuning_folds_median_best_round(
+    small: Path,
+) -> None:
+    chosen = experiments.experiments(CONFIG)["stopping"]
+
+    rounds = experiments.tuning_rounds(chosen, "rank-exp", calendar(), weekdays()[-1], small, (0,))
+
+    base = chosen.arms[0]
+    tuning = [
+        fold for fold in generate_folds(calendar(), weekdays()[-1], base.config) if fold.tuning
+    ]
+    assert tuning
+    for horizon in (5, 20):
+        best = [
+            ModelRun.objects.get(
+                run_id=lgbm_runs.run_id("rank-exp-base", "rank", horizon, fold)
+            ).params["best_round"]
+            for fold in tuning
+        ]
+        assert rounds[horizon] == round(float(np.median(best)))
+    resolved = experiments.with_tuned_rounds(chosen, rounds)
+    tuned = resolved.arms[3]
+    assert tuned.variant == Variant(fixed_rounds=((5, rounds[5]), (20, rounds[20])))
+    assert resolved.arms[:3] == chosen.arms[:3]
+    line = experiments._setting(tuned)
+    assert f"固定 5 日 {rounds[5]} 輪、20 日 {rounds[20]} 輪" in line
+
+
+def test_train_arms_refuse_a_tuned_arm_whose_rounds_are_not_fixed() -> None:
+    chosen = experiments.experiments(CONFIG)["stopping"]
+
+    with pytest.raises(ValueError, match="with_tuned_rounds"):
+        experiments.train_arms(chosen, "rank-exp", {}, Path(), (0,))
+
+
+@pytest.mark.django_db
+def test_rank_experiment_fixes_the_tuned_rounds_before_training_the_arms(
+    command: Path, tmp_path: Path
+) -> None:
+    output = tmp_path / "stopping.md"
+    out = StringIO()
+
+    call_command(
+        "rank_experiment", name="stopping", run_key="rank-exp", output=str(output), stdout=out
+    )
+
+    chosen = experiments.experiments(CONFIG)["stopping"]
+    rounds = experiments.tuning_rounds(
+        chosen, "rank-exp", calendar(), weekdays()[-1], command, (0,)
+    )
+    assert f"tuned rounds from the tuning folds: {rounds}" in out.getvalue()
+    text = output.read_text()
+    assert (
+        f"- tuned：{experiments._setting(experiments.with_tuned_rounds(chosen, rounds).arms[3])}"
+        in text
+    )
+    fitted = ModelRun.objects.filter(run_key="rank-exp-tuned")
+    refits = {(run.run_id.split(".")[2], run.params["rounds"]) for run in fitted}
+    assert refits == {("h5", rounds[5]), ("h20", rounds[20])}
