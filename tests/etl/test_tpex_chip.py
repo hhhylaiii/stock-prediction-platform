@@ -535,3 +535,48 @@ def test_other_chip_tables_still_wait_for_the_quotes(
     DailyPrice.objects.create(stock_id="6488", date=DAY, close=10, volume=1, turnover=10)
     with pytest.raises(SourceNotReadyError, match="chip rows need its quotes"):
         _load(adapter, "institutional")
+
+
+def _priced(*codes: str) -> None:
+    DailyPrice.objects.bulk_create(
+        DailyPrice(stock_id=code, date=DAY, close=10, volume=1, turnover=10) for code in codes
+    )
+
+
+@responses.activate
+@pytest.mark.django_db
+def test_a_day_since_the_first_kept_quotes_waits_for_its_own(
+    adapter: TpexAdapter, load_fixture: Callable[[str], Any]
+) -> None:
+    _serve(load_fixture, "day_trade")
+    RawTpex.objects.create(
+        dataset="daily_price",
+        source_hash="otc-20261027",
+        request_params={"date": "2026/10/27", "type": "EW", "response": "json"},
+        payload={**load_fixture(QUOTE_FIXTURES[0]), "date": "20261027"},
+    )
+    _priced("6488", "1240")
+    with pytest.raises(SourceNotReadyError, match="chip rows need its quotes"):
+        _load(adapter, "day_trade")
+
+
+@responses.activate
+@pytest.mark.django_db
+def test_day_trades_priced_only_on_the_other_market_are_not_ready(
+    adapter: TpexAdapter, load_fixture: Callable[[str], Any]
+) -> None:
+    _serve(load_fixture, "day_trade")
+    _priced("2330")
+    with pytest.raises(SourceNotReadyError, match="none of its codes is quoted or priced"):
+        _load(adapter, "day_trade")
+
+
+@responses.activate
+@pytest.mark.django_db
+@pytest.mark.usefixtures("quotes_loaded")
+def test_a_kept_quote_page_wins_over_the_priced_codes(
+    adapter: TpexAdapter, load_fixture: Callable[[str], Any]
+) -> None:
+    _serve(load_fixture, "day_trade")
+    _priced("6488")
+    assert set(_load(adapter, "day_trade")) == {"006201", "1240", "2064", "3293", "6488"}

@@ -41,10 +41,22 @@ def is_foreign_currency_etf(code: str) -> bool:
     return len(code) == 6 and code.startswith("00") and code[5] in FOREIGN_CURRENCY_CODE_SUFFIXES
 
 
-def priced_codes(day: date) -> set[str]:
-    """Local-currency codes with a daily_price bar, for days whose quote page was never kept."""
+def priced_codes(day: date, quotes_kept_from: str | None) -> set[str]:
+    """Local-currency codes with a daily_price bar, for days before any quote page was kept."""
+    if quotes_kept_from is not None and f"{day:%Y%m%d}" >= quotes_kept_from:
+        return set()
     codes = DailyPrice.objects.filter(date=day).values_list("stock_id", flat=True)
-    return {code for code in codes if not is_foreign_currency_etf(code)}
+    found = {code for code in codes if not is_foreign_currency_etf(code)}
+    if found:
+        logger.info("%s: no quote page was ever kept, %d priced codes stand in", day, len(found))
+    return found
+
+
+def require_kept(frame: pd.DataFrame, kept: pd.DataFrame, label: str) -> None:
+    """A day whose table lists codes but keeps none has not had this market's quotes or prices."""
+    empty = sorted(set(frame["date"]) - set(kept["date"]))
+    if empty:
+        raise SourceNotReadyError(f"{label} {empty[0]}: none of its codes is quoted or priced")
 
 
 def find_table(payload: dict[str, Any], title_part: str) -> dict[str, Any]:

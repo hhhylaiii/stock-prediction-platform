@@ -650,7 +650,7 @@ def test_a_day_without_kept_quotes_takes_its_day_trades_for_the_stocks_priced(
 @pytest.mark.django_db
 def test_foreign_currency_etfs_are_not_among_the_priced_codes() -> None:
     _priced("2330", "00636K")
-    assert priced_codes(DAY) == {"2330"}
+    assert priced_codes(DAY, None) == {"2330"}
 
 
 @responses.activate
@@ -664,3 +664,47 @@ def test_a_day_without_quotes_or_prices_is_not_ready(
         _priced("2330")
     with pytest.raises(SourceNotReadyError, match="chip rows need its quotes"):
         _load(adapter, dataset)
+
+
+def _kept_quotes(load_fixture: Callable[[str], Any], day: date) -> None:
+    payload = {**load_fixture(QUOTES_FIXTURE), "date": f"{day:%Y%m%d}"}
+    RawTwse.objects.create(
+        dataset="daily_price",
+        source_hash=f"quotes-{day:%Y%m%d}",
+        request_params={"date": f"{day:%Y%m%d}", "type": "ALLBUT0999", "response": "json"},
+        payload=payload,
+    )
+
+
+@responses.activate
+@pytest.mark.django_db
+def test_a_day_since_the_first_kept_quotes_waits_for_its_own(
+    adapter: TwseAdapter, serve: Callable[[str], dict[str, Any]], load_fixture: Callable[[str], Any]
+) -> None:
+    serve("day_trade")
+    _kept_quotes(load_fixture, date(2026, 10, 27))
+    _priced("2330", "2317")
+    with pytest.raises(SourceNotReadyError, match="chip rows need its quotes"):
+        _load(adapter, "day_trade")
+
+
+@responses.activate
+@pytest.mark.django_db
+def test_day_trades_priced_only_on_the_other_market_are_not_ready(
+    adapter: TwseAdapter, serve: Callable[[str], dict[str, Any]]
+) -> None:
+    serve("day_trade")
+    _priced("6488")
+    with pytest.raises(SourceNotReadyError, match="none of its codes is quoted or priced"):
+        _load(adapter, "day_trade")
+
+
+@responses.activate
+@pytest.mark.django_db
+@pytest.mark.usefixtures("quotes_loaded")
+def test_a_kept_quote_page_wins_over_the_priced_codes(
+    adapter: TwseAdapter, serve: Callable[[str], dict[str, Any]]
+) -> None:
+    serve("day_trade")
+    _priced("2330")
+    assert set(_load(adapter, "day_trade")) == {"0050", "1101", "2317", "2330"}
