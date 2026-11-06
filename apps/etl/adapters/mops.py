@@ -230,7 +230,8 @@ def parse_listing(page: str, code: str, roc_year: int) -> list[Filing]:
         raise SchemaChangedError(f"doc.twse {code} {roc_year} fiscal year is {shown}")
     table, header = parser.rows[starts[0]]
     position = {name: header.index(name) for name in HEADER}
-    filings = []
+    filings: list[Filing] = []
+    old: set[int] = set()
     for where, row in parser.rows[starts[0] + 1 :]:
         if where != table:
             continue
@@ -239,7 +240,23 @@ def parse_listing(page: str, code: str, roc_year: int) -> list[Filing]:
         cells = {name: row[index] for name, index in position.items()}
         if ENGLISH not in cells[DETAIL] and _report(cells[DETAIL])[0] not in SUPPLEMENTS:
             filings.append(_filing(cells, code, roc_year))
+            if cells[DETAIL].startswith(OLD_FISCAL_YEAR):
+                old.add(len(filings) - 1)
+    _refuse_mixed_fiscal_years(filings, old, code, roc_year)
     return filings
+
+
+def _refuse_mixed_fiscal_years(
+    filings: list[Filing], old: set[int], code: str, roc_year: int
+) -> None:
+    """Which of two fiscal years' reports FinMind holds is unknowable, so neither dates it."""
+    kinds = [(f.period, f.fin_type) for f in filings]
+    current = {kind for index, kind in enumerate(kinds) if index not in old}
+    mixed = sorted(current & {kinds[index] for index in old})
+    if mixed:
+        raise SchemaChangedError(
+            f"doc.twse {code} {roc_year} lists old and current fiscal year reports for {mixed}"
+        )
 
 
 def _report(detail: str) -> tuple[str, bool]:

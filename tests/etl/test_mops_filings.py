@@ -245,6 +245,14 @@ def test_an_old_fiscal_year_report_is_its_quarter_parent_report(
     ]
 
 
+def test_an_old_fiscal_year_report_beside_a_current_one_of_its_quarter_fails(
+    page: Callable[[str], bytes],
+) -> None:
+    listing = text(page("2718_101")).replace("101 年 第四季", "101 年 第三季")
+    with pytest.raises(SchemaChangedError, match="old and current fiscal year"):
+        parse_listing(listing, "2718", 101)
+
+
 @pytest.mark.django_db
 @responses.activate
 def test_a_holding_company_is_asked_again_for_its_own_reports(
