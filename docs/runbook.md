@@ -141,7 +141,7 @@ uv run python manage.py reapply_dividend_dates --stock 2884 --stock 2885
 ```
 
 - 第二行只重套指定的股票，例如修過某檔的 raw 之後。輸出 `N events dated across M stocks`；被拒收的股票逐行寫在 stderr（`rejected <代號>: <原因>`），例如 FinMind 少了 `AnnouncementDate` 欄位，或公告日落在交易日曆之外。拒收只影響那一檔。
-- 要用 FinMind 重填某檔已經有的日期（例如 FinMind 事後更正了公告日），先把那檔清空再重套；2.7 上線後清掉的也包含預告表給的日期，要一起重跑預告表：
+- 重套會把同一檔存過的每一份 FinMind 回應合起來，同一個除權息日取最早的公告。所以清空再重套只能補回同樣的日期，或採用新回應裡更早的日期；FinMind 事後把公告日改晚，這樣是改不過來的，要人工更新那一列。要重填某檔（例如修過 raw 之後），先把那檔清空再重套；2.7 上線後清掉的也包含預告表給的日期，要一起重跑預告表：
 
   ```bash
   uv run python manage.py shell -v 0 -c "from apps.market.models import DividendEvent as D; print(D.objects.filter(stock_id='2884').update(announce_date=None))"
