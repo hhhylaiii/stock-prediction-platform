@@ -148,7 +148,13 @@ def _stored(
 
 
 def _differences(dataset: str, row: Any, record: dict[str, Any]) -> dict[str, list[Any]]:
-    """Figures the pages give differently (SPEC §8.5); growth rates differ by design."""
+    """Figures the pages give differently (SPEC §8.5); growth rates differ by design.
+
+    The viewer leaves out figures it could not work out, such as flows after an unfiled quarter.
+    """
+    if dataset == STATEMENT_VIEWER:
+        found = figure_differences(row, record)
+        return {name: pair for name, pair in found.items() if pair[1] is not None}
     if dataset != REVENUE_HISTORY:
         return figure_differences(row, record)
     if row.revenue is None or abs(row.revenue - record["revenue"]) > MONEY_TOLERANCE:

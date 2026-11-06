@@ -1,4 +1,4 @@
-"""Quarters FinMind lacks for delisted companies, read one stock at a time from the XBRL viewer."""
+"""Every settled quarter of a delisted company from the XBRL viewer, to insert or to compare."""
 
 from collections.abc import Callable
 from datetime import date, timedelta
@@ -47,6 +47,9 @@ def viewer_frame(
         records.extend({**row, "period": period} for row in rows)
     frame = pd.DataFrame(records, columns=columns, dtype=object)
     frame.attrs["absent"] = [period for period in missing if reports.get(period) is None]
+    frame.attrs["stored_absent"] = [
+        period for period in periods if period in stored and reports.get(period) is None
+    ]
     frame.attrs["no_revenue"] = [
         period for period in missing if _lacks(reports.get(period), INCOME, REVENUE)
     ]

@@ -119,6 +119,37 @@ def test_a_quarter_never_filed_is_noted_and_its_successor_has_no_flows(
     assert ("2013-Q3", "A") in asked
 
 
+@pytest.mark.django_db
+def test_figures_the_viewer_could_not_work_out_are_not_logged_as_differences(
+    pages: dict[str, str],
+) -> None:
+    answers = {(p, "C"): pages[p] for p in ("2013-Q1", "2013-Q3", "2013-Q4")}
+    page, _ = served(pages, answers)
+    FinancialStatement.objects.create(
+        stock_id="6211",
+        period="2013-Q3",
+        fin_type="consolidated",
+        revenue=96_580_000,
+        debt_ratio=0.99,
+        announce_date=date(2013, 12, 3),
+    )
+    frame = viewer_frame("6211", YEAR, {"2013-Q3"}, page, SCAN_COLUMNS)
+    span = (date(2013, 1, 1), date(2013, 12, 31))
+    insert_missing_history(
+        STATEMENT_VIEWER, frame, lambda period: date(2014, 6, 3), span, {"stock_id": "6211"}
+    )
+    logged = DataQualityLog.objects.get(check_name=MISMATCH_CHECKS[STATEMENT_VIEWER])
+    (row,) = logged.detail["rows"]
+    assert set(row["fields"]) == {"debt_ratio"}
+
+
+def test_a_stored_quarter_the_viewer_lacks_is_listed_apart(pages: dict[str, str]) -> None:
+    answers = {(p, "C"): pages[p] for p in ("2013-Q1", "2013-Q3", "2013-Q4")}
+    page, _ = served(pages, answers)
+    frame = viewer_frame("6211", YEAR, {"2013-Q2"}, page, COLUMNS)
+    assert (frame.attrs["absent"], frame.attrs["stored_absent"]) == ([], ["2013-Q2"])
+
+
 def test_an_individual_filer_is_asked_for_that_kind_first_afterwards(
     pages: dict[str, str],
 ) -> None:
