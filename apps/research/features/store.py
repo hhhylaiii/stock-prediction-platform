@@ -4,6 +4,7 @@ import logging
 import os
 import shutil
 import tempfile
+from collections.abc import Sequence
 from datetime import date
 from pathlib import Path
 
@@ -94,6 +95,29 @@ def read_partitions(start: date, end: date, directory: Path) -> pd.DataFrame:
             )
         parts.append(part)
     return _typed(parts)
+
+
+def read_columns(start: date, end: date, directory: Path, columns: Sequence[str]) -> pd.DataFrame:
+    """stock_id, date and the named feature columns of rows dated in [start, end]."""
+    unknown = [name for name in columns if name not in FEATURE_COLUMNS]
+    if unknown:
+        raise ValueError(f"{unknown} are not feature columns")
+    wanted = [*KEYS, *columns]
+    types = dict.fromkeys(columns, "float64")
+    parts: list[pd.DataFrame] = []
+    for low, high in years(start, end):
+        path = existing_partition(directory, low.year)
+        missing = [name for name in wanted if name not in pq.read_schema(path).names]
+        if missing:
+            raise ValueError(
+                f"feature partition for {low.year} in {directory} lacks {', '.join(missing)}; "
+                f"run build_features --start {low.year}-01-01 --end {low.year}-12-31"
+            )
+        dated = [("date", ">=", low), ("date", "<=", high)]
+        parts.append(pq.read_table(path, columns=wanted, filters=dated).to_pandas().astype(types))
+    if not parts:
+        return pd.DataFrame(columns=wanted).astype(types)
+    return pd.concat(parts, ignore_index=True)
 
 
 def export_year(year: int, directory: Path) -> Path | None:
