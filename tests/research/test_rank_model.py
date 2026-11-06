@@ -261,6 +261,8 @@ def test_variant_defaults_are_the_spec_recipe() -> None:
         ({"fixed_rounds": ((10, 3),)}, "fixed_rounds"),
         ({"half_life": 0.0}, "half_life"),
         ({"objective": "xendcg"}, "objective"),
+        ({"masked": ("mkt_taiex_ret_5d",)}, "masked"),
+        ({"masked": ("no_such_feature",)}, "masked"),
     ):
         with pytest.raises(ValueError, match=message):
             Variant(**bad)

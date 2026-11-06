@@ -93,7 +93,7 @@ from apps.research.walkforward import Fold
 MODEL = MODEL_TYPE
 RANK_FIELDS = (RANK_LABEL, "untradable_t1")
 RECIPE_VERSION = "4"
-LATER_DEFAULTS: dict[str, Any] = {"min_rounds": 0, "fixed_rounds": ()}
+LATER_DEFAULTS: dict[str, Any] = {"min_rounds": 0, "fixed_rounds": (), "masked": ()}
 MAX_ROUNDS = DEFAULT_MAX_ROUNDS
 SCOPE_HORIZONS: dict[str, tuple[int, ...]] = {
     HoldoutScope.RANK: HORIZONS,
@@ -586,7 +586,9 @@ def run_folds(
     if held:
         raise HoldoutError(f"folds {held} are holdout; they run once with the frozen design")
     bag_seeds(seed, bags)
-    features = scope_features(scope, target)
+    features = [name for name in scope_features(scope, target) if name not in variant.masked]
+    if not features:
+        raise ValueError(f"the variant masks every {scope} feature")
     missing = set(missing_folds(run_key, MODEL, chosen))
     ran = []
     for fold in chosen:

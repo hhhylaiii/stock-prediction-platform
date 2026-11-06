@@ -36,6 +36,7 @@ class Variant:
     objective: str = "regression"
     min_rounds: int = 0
     fixed_rounds: tuple[tuple[int, int], ...] = ()
+    masked: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.every < 1:
@@ -56,6 +57,9 @@ class Variant:
             raise ValueError(
                 f"fixed_rounds needs one positive count per horizon: {self.fixed_rounds}"
             )
+        foreign = [name for name in self.masked if name not in STOCK_LEVEL]
+        if foreign:
+            raise ValueError(f"masked takes stock-level features only, not {foreign}")
 
     def fixed_for(self, horizon: int) -> int:
         """The horizon's fixed refit rounds; 0 leaves them to early stopping."""
