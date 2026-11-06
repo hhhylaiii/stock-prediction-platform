@@ -41,7 +41,7 @@ def apply_residual_rules(
 def monthly_coverage(rows: pd.DataFrame, column: str, delisted: pd.Series) -> pd.DataFrame:
     """Share of universe rows with a value per month, for stocks later delisted and the rest."""
     inside = rows[rows["in_universe"].astype(bool)]
-    group = inside["stock_id"].map(delisted).fillna(False).astype(bool).map(GROUPS)
+    group = inside["stock_id"].map(delisted).eq(True).map(GROUPS)
     known = inside[column].notna().astype("float64")
     shares = known.groupby([_months(inside["date"]), group]).mean().unstack()
     return shares.reindex(columns=list(GROUPS.values())).rename_axis(index=None, columns=None)
