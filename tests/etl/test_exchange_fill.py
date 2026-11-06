@@ -11,6 +11,7 @@ from django.core.management.base import CommandError
 from apps.etl import exchange_fill
 from apps.etl.adapters.tpex import TpexAdapter
 from apps.etl.adapters.twse import TwseAdapter
+from apps.etl.errors import SourceNotReadyError
 from apps.etl.exchange_fill import FILL_CHECK, fill_missing
 from apps.etl.models import DataQualityLog, EtlRun, RawTwse
 from apps.etl.ratelimit import RateLimiter
@@ -220,10 +221,14 @@ def test_stored_values_that_differ_from_the_exchange_are_logged(
         "foreign_holding": {
             "count": 1,
             "sample": [["2317", "2026-10-28", "fi_holding_pct", 50.0, 39.96]],
+            "listed": 1,
+            "delisted": 0,
         },
         "shares_outstanding": {
             "count": 1,
             "sample": [["2330", "2026-10-28", "shares", 5, 25_932_370_067]],
+            "listed": 1,
+            "delisted": 0,
         },
     }
     assert list(
@@ -248,6 +253,8 @@ def test_stored_valuations_that_differ_are_logged_and_blank_ones_not_added(
     assert log.detail["differences"]["daily_valuation"] == {
         "count": 1,
         "sample": [["2317", "2026-10-28", "pb", 1.0, 1.85]],
+        "listed": 1,
+        "delisted": 0,
     }
 
 
@@ -351,4 +358,106 @@ def test_a_fill_still_marked_running_is_not_resumed() -> None:
             "holdings",
             "--resume",
             str(running.run_id),
+        )
+
+
+def holdings_on(load_fixture: Callable[[str], Any], day: date, shares: str) -> None:
+    page = edited(load_fixture, HOLDINGS, day, {"2330": tsmc_with(load_fixture, shares)})
+    responses.get(f"{BASE}/fund/MI_QFIIS", json=page)
+
+
+@responses.activate
+@pytest.mark.parametrize(
+    ("bound", "dates", "differing", "dropped"),
+    [
+        (date(2026, 10, 30), ["2026-10-27", "2026-10-28", "2026-10-30"], 0, []),
+        (date(2026, 10, 28), ["2026-10-27"], 1, [["2330", "2026-10-28", 25_932_370_067]]),
+    ],
+)
+def test_a_stored_first_count_stays_until_the_fill_has_passed_it(
+    adapter: TwseAdapter,
+    load_fixture: Callable[[str], Any],
+    bound: date,
+    dates: list[str],
+    differing: int,
+    dropped: list[list[Any]],
+) -> None:
+    before = date(2026, 10, 27)
+    holdings_on(load_fixture, before, "25,932,370,067")
+    holdings_on(load_fixture, DAY, "26,000,000,000")
+    priced("2330", day=before)
+    priced("2330")
+    SharesOutstanding.objects.create(
+        stock_id="2330", effective_date=bound, shares=25_932_370_067, reason="unknown"
+    )
+    fill_missing(adapter, "holdings", before, DAY)
+    kept = SharesOutstanding.objects.order_by("effective_date").values_list(
+        "effective_date", flat=True
+    )
+    assert [str(day) for day in kept] == dates
+    (log,) = DataQualityLog.objects.filter(check_name=FILL_CHECK)
+    assert log.detail["differences"].get("shares_outstanding", {}).get("count", 0) == differing
+    assert log.detail["dropped"] == dropped
+
+
+@responses.activate
+def test_a_day_that_fails_part_way_writes_nothing_and_keeps_its_checkpoint(
+    adapter: TwseAdapter, load_fixture: Callable[[str], Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    before = date(2026, 10, 27)
+    serve(load_fixture, "/fund/MI_QFIIS", HOLDINGS, before)
+    serve(load_fixture, "/fund/MI_QFIIS", HOLDINGS)
+    priced("2330", day=before)
+    priced("2330")
+    fill = exchange_fill.Shares.fill
+
+    def failing(self: exchange_fill.Shares, frame: Any, day: date) -> exchange_fill.Written:
+        if day == DAY:
+            raise RuntimeError("stopped")
+        return fill(self, frame, day)
+
+    monkeypatch.setattr(exchange_fill.Shares, "fill", failing)
+    with pytest.raises(RuntimeError):
+        fill_missing(adapter, "holdings", before, DAY)
+    assert not DailyChip.objects.filter(date=DAY).exists()
+    assert EtlRun.objects.get().checkpoint["last_date"] == "2026-10-27"
+
+
+@responses.activate
+@pytest.mark.parametrize(("stored", "differs"), [(1.84, True), (1.8504, False)])
+def test_a_value_one_published_digit_off_is_a_difference(
+    adapter: TwseAdapter, load_fixture: Callable[[str], Any], stored: float, differs: bool
+) -> None:
+    serve(load_fixture, "/afterTrading/BWIBBU_d", VALUATION)
+    priced("2317")
+    DailyValuation.objects.create(
+        stock_id="2317", date=DAY, pe=16.58, pb=stored, dividend_yield=0.0285
+    )
+    fill_missing(adapter, "valuation", DAY, DAY)
+    (log,) = DataQualityLog.objects.filter(check_name=FILL_CHECK)
+    assert bool(log.detail["differences"]["daily_valuation"]["count"]) == differs
+
+
+@responses.activate
+def test_a_table_none_of_whose_codes_is_priced_waits(
+    adapter: TwseAdapter, load_fixture: Callable[[str], Any]
+) -> None:
+    serve(load_fixture, "/fund/MI_QFIIS", HOLDINGS)
+    with pytest.raises(SourceNotReadyError, match="none of the 5 listed codes is priced"):
+        fill_missing(adapter, "holdings", DAY, DAY)
+
+
+@pytest.mark.usefixtures("october_2026_in_db")
+def test_a_start_after_the_end_is_refused() -> None:
+    with pytest.raises(CommandError, match="after"):
+        call_command(
+            "fill_from_exchange",
+            "--source",
+            "twse",
+            "--fill",
+            "valuation",
+            "--start",
+            "2026-10-28",
+            "--end",
+            "2026-10-27",
         )
