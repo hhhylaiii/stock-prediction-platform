@@ -293,6 +293,13 @@ done
 ```
 
 - 某一年中途失敗時，看那個 run 的 `etl_run.checkpoint.last_date`，從下一個交易日用 `--start` 接著跑到年底。
+- 每個市場約 3,100 個請求，3 秒一次約 2.6 小時。手動指令不和 worker 共用限速，在 ETL 時段（15:10–02:00）以外跑，或先 `docker compose stop worker`。
+- 「第一頁行情存檔」是從 raw 讀的，不是設定值：任何一次對更早日期抓交易所的 `daily_price`，界線就會移到那天，那天之後到 2026-10-21 的當沖都會 SourceNotReady。回補前先確認兩個市場的界線都是 `20261022`，回補期間不要對更早的日期抓交易所 `daily_price`：
+
+  ```sql
+  select min(payload->>'date') from raw_twse where dataset = 'daily_price';
+  select min(payload->>'date') from raw_tpex where dataset = 'daily_price' and request_params->>'type' = 'EW';
+  ```
 - 籌碼表只寫當天行情表上有的代號（K6）。歷史日期沒有存交易所的原始行情頁，價量是 FinMind 回補的，所以當沖在該市場第一頁行情存檔（2026-10-22）之前的日子，改用 `daily_price` 當天有價的代號來篩；之後的日子照舊要等當天的行情頁。`daily_price` 不分市場，所以當天的當沖表如果一個代號都沒留下（例如本市場的價還沒回補、只有另一個市場有價），run 會 SourceNotReady，不會記成成功 0 列。其他籌碼表（三大法人、融資券、借券、外資持股）仍要等行情頁。
 - 兩種篩法的差別（2018 年每月第一個交易日抽查）：`daily_price` 有價的代號全部都在行情表上；行情表多出 32–41 個代號。這些是 FinMind 沒有的 ETF、TDR，加上 5 檔 FinMind 整檔沒有價格的普通股（1589、4207、4804、5355、8176），以及沒成交那天的 4415。這些代號的當沖量會略過；它們沒有價格，本來也進不了研究母體。日後如果補了這些代號的 `daily_price`，要對同一段日期跑 `reprocess --source twse|tpex --dataset day_trade --start … --end …`（只讀 raw、不發請求），否則研究層會把它們的當沖量當成 0。
 - 當沖表會列出量為 0 的標的。同市場當天的表有寫入、某檔不在表上，研究層算 0；同市場當天一列當沖都沒有的，才是空值。所以兩個市場每個交易日都要有成功、而且有列的 run。
