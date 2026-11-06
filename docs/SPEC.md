@@ -224,13 +224,13 @@ Oct 29, 2026 · @Owen Lai
 | 籌碼面 | `chip_margin_chg_5d` `chip_margin_usage` `chip_short_ratio` | daily\_chip、shares\_outstanding | t 日晚間 | 融資餘額 5 日變化 / 流通股數；融資使用率 = 融資餘額 / 融資限額；券資比 |
 | 籌碼面 | `chip_fi_holding_pct` `chip_sbl_short_chg_5d` | daily\_chip、shares\_outstanding | t 日晚間 | 外資持股比；借券賣出餘額 5 日變化 / 流通股數，用借券賣出餘額而非借券餘額 |
 | 籌碼面 | `chip_big_holder_pct_chg_1w` `chip_holder_count_chg_1w` | weekly\_holding | publish\_date，即 data\_date 隔日 | 400 張以上級距占比週變化、總股東人數週變化；取 publish\_date ≤ t 的最近一期；level 16、17 排除 |
-| 基本面 | `fund_rev_yoy` `fund_rev_3m_yoy` `fund_rev_mom` | monthly\_revenue | announce\_date | 單月 yoy、近 3 個月合計 yoy、mom |
-| 基本面 | `fund_ep` `fund_eps_yoy` | financial\_statement、daily\_price | announce\_date | E/P = EPS TTM / 收盤價，虧損為負值，不用本益比；EPS TTM 為 PIT 最近四季合計，Q4 由年報減前三季；EPS yoy 為 TTM 年增，分母取去年 TTM 絕對值，去年為負或零時 NaN |
+| 基本面 | `fund_rev_yoy` `fund_rev_3m_yoy` `fund_rev_mom` | monthly\_revenue | announce\_date | 單月 yoy、近 3 個月合計 yoy、mom；最近一期月營收可見超過 62 天（日曆日）沒有新一期時為 NaN |
+| 基本面 | `fund_ep` `fund_eps_yoy` | financial\_statement、daily\_price | announce\_date | E/P = EPS TTM / 收盤價，虧損為負值，不用本益比；EPS TTM 為 PIT 最近四季合計，Q4 由年報減前三季；EPS yoy 為 TTM 年增，分母取去年 TTM 絕對值，去年為負或零時 NaN；最近一期財報可見超過 200 天（日曆日）沒有新一期時為 NaN |
 | 基本面 | `fund_bp` `fund_dividend_yield` | daily\_valuation | t 日晚間 | 證交所、櫃買每日公布的股價淨值比與殖利率；B/P = 1 / 股價淨值比 |
-| 基本面 | `fund_roe_ttm` `fund_gross_margin` `fund_op_margin` `fund_debt_ratio` | financial\_statement | announce\_date | 以 announce\_date 對齊 |
-| 基本面 | `fund_gm_yoy_chg` `fund_opm_yoy_chg` `fund_cfo_to_ni` | financial\_statement | announce\_date | 毛利率、營益率較去年同季的變化；營業現金流 / 淨利，TTM |
-| 基本面 | `fund_days_since_fs` | financial\_statement | announce\_date | 距最近一期財報公告的交易日數 |
-| 基本面 | `fund_rev_yoy_q` | financial\_statement | announce\_date | 單季營收對 4 季前的年增率，4 季前 ≤ 0 時 NaN；下市股缺月營收時仍有營收訊號 |
+| 基本面 | `fund_roe_ttm` `fund_gross_margin` `fund_op_margin` `fund_debt_ratio` | financial\_statement | announce\_date | 以 announce\_date 對齊；過期上限 200 天，同 `fund_ep` |
+| 基本面 | `fund_gm_yoy_chg` `fund_opm_yoy_chg` `fund_cfo_to_ni` | financial\_statement | announce\_date | 毛利率、營益率較去年同季的變化；營業現金流 / 淨利，TTM；過期上限 200 天，同 `fund_ep` |
+| 基本面 | `fund_days_since_fs` | financial\_statement | announce\_date | 距最近一期財報公告的交易日數；不套 200 天上限，最近一期公告超過 936 天（日曆日，往回讀財報的範圍）時為 NaN |
+| 基本面 | `fund_rev_yoy_q` | financial\_statement | announce\_date | 單季營收對 4 季前的年增率，4 季前 ≤ 0 時 NaN；下市股缺月營收時仍有營收訊號；過期上限 200 天，同 `fund_ep` |
 | 產業與風險 | `risk_beta_250d` `risk_idio_vol_60d` | daily\_price、index\_daily | t 日晚間 | 250 日回歸的 beta，上市股對加權指數、上櫃股對櫃買指數；60 日殘差報酬標準差 |
 | 產業與風險 | `ind_sector_ret_20d` `ind_rel_ret_20d` | daily\_price、stock\_master | t 日晚間 | 個股所屬產業 20 日平均報酬；個股 20 日報酬減產業平均 |
 | 市場層級 | `mkt_taiex_ret_5d` `mkt_taiex_ret_20d` `mkt_sox_ret_5d` | index\_daily | 台股 t 日晚間；美股用美國 t 日收盤，台北 t+1 約 05:00 可得 | 大盤、費半；全市場同值，排名模型不用、不做橫截面 z-score |
@@ -238,7 +238,7 @@ Oct 29, 2026 · @Owen Lai
 | 市場層級 | `mkt_business_signal` | macro\_indicator | announce\_date | 景氣燈號分數；同上 |
 | 技術面 | `tech_parkinson_vol_20d` `tech_gap_1d` `tech_close_loc_5d` | daily\_price | t 日晚間 | 第二批。Parkinson 波動 = √(20 日平均 ln(高/低)² / (4 ln 2))，年化；跳空 = 開盤 / 前收 − 1；收盤在 5 日高低區間的位置，0 到 1 |
 | 技術面 | `tech_max_ret_20d` `tech_skew_60d` | daily\_price | t 日晚間 | 第二批。過去 20 日最大單日報酬，樂透效應；60 日日報酬偏態 |
-| 籌碼面 | `chip_day_trade_ratio_5d` | daily\_chip | t−6 到 t−2 的 T+2 定案值 | 第二批。5 日當沖成交股數 / 5 日成交股數，5 日是 t−6 到 t−2（當沖表在 T、T+1、T+2 各更新一次，以 T+2 為準）；同市場當天有當沖表、該檔不在表上算 0，整個市場當天沒資料才是空值；證交所與櫃買每日公布，daily\_chip 需新增 day\_trade\_volume 欄位 |
+| 籌碼面 | `chip_day_trade_ratio_5d` | daily\_chip | t−6 到 t−2 的 T+2 定案值 | 第二批。5 日當沖成交股數 / 5 日成交股數，5 日是 t−6 到 t−2（當沖表在 T、T+1、T+2 各更新一次，以 T+2 為準）；同市場當天有當沖表、該檔不在表上算 0，整個市場當天沒資料才是空值；證交所與櫃買每日公布，存在 daily\_chip 的 day\_trade\_volume |
 | 籌碼面 | `chip_fi_holding_chg_20d` `chip_it_net_20d` `chip_fi_buy_streak` | daily\_chip、shares\_outstanding | t 日晚間 | 第二批。外資持股比 20 日變化，百分點；投信 20 日淨買 / 流通股數；外資連續淨買超交易日數 |
 | 產業與風險 | `ind_sector_id` `ind_mom_neutral` `ind_ep_neutral` | stock\_master、daily\_price、financial\_statement | t 日晚間 | 第二批。產業代碼，LightGBM 以 categorical 處理，Ridge 不用；`tech_mom_250_20` 與 `fund_ep` 減同日同產業中位數 |
 | 基本面 | `fund_days_to_ex_date` | dividend\_event | t 日晚間 | 第二批。距下一個已公告、有現金股利（`cash_dividend > 0`）的除息日的交易日數，無公告為 NaN；填息效應 |
