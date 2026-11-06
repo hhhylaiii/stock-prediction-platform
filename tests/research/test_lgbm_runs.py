@@ -25,7 +25,7 @@ from apps.research.prediction_cache import (
     load_fold_predictions,
     missing_folds,
 )
-from apps.research.rank_model import rank_inputs
+from apps.research.rank_model import Variant, rank_inputs
 from apps.research.runs import (
     SCREENING_MODEL,
     RunError,
@@ -338,3 +338,35 @@ def test_a_full_run_refuses_an_empty_bag_before_the_shuffle_check(
 
     with pytest.raises(CommandError, match="at least one"):
         call_command("train", model="lightgbm", scope="rank", run_key="rank-wf1", bags=0)
+
+
+def test_rank_variants_record_themselves_and_rerun_when_they_change(panel: Path) -> None:
+    fold = research()[0]
+    sampled = Variant(every=5)
+
+    assert run_folds("rank", [fold], "rank-wf1", panel, variant=sampled) == [fold.index]
+
+    notes = fold_notes("rank-wf1", MODEL, fold.index)
+    assert notes["recipe"] == recipe("rank", KEPT, 0, variant=sampled)
+    run = ModelRun.objects.get(run_id=lgbm_runs.run_id("rank-wf1", "rank", 5, fold))
+    assert run.params["variant"] == {"every": 5, "half_life": None, "objective": "regression"}
+    assert run_folds("rank", [fold], "rank-wf1", panel, variant=sampled) == []
+    assert run_folds("rank", [fold], "rank-wf1", panel) == [fold.index]
+    plain = ModelRun.objects.get(run_id=lgbm_runs.run_id("rank-wf1", "rank", 5, fold))
+    assert plain.params["variant"] == {"every": 1, "half_life": None, "objective": "regression"}
+
+
+def test_recipe_changes_with_the_rank_variant() -> None:
+    first = recipe("rank", KEPT, 0)
+
+    assert recipe("rank", KEPT, 0, variant=Variant()) == first
+    variants = [Variant(every=5), Variant(half_life=24.0), Variant(objective="lambdarank")]
+    recipes = {recipe("rank", KEPT, 0, variant=variant) for variant in variants}
+    assert len(recipes) == 3
+    assert first not in recipes
+
+
+def test_variants_are_refused_outside_the_rank_scope(panel: Path) -> None:
+    with pytest.raises(ValueError, match="rank scope only"):
+        run_folds("interval", research(), "interval-wf1", panel, variant=Variant(every=5))
+    assert not ModelRun.objects.filter(model_type="lightgbm").exists()
