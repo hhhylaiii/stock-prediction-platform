@@ -9,6 +9,7 @@ from apps.etl.adapters import build_adapter
 from apps.etl.exchange_fill import FILLS, fill_missing
 from apps.etl.management.options import required_date
 from apps.etl.models import EtlRun
+from apps.market.calendar import CalendarError
 
 SOURCES = ("twse", "tpex")
 
@@ -27,7 +28,14 @@ class Command(BaseCommand):
         resume = self._resumed(options)
         start = resume.start_date if resume else required_date(options["start"], "--start")
         end = resume.end_date if resume else required_date(options["end"], "--end")
-        run = fill_missing(build_adapter(options["source"]), options["fill"], start, end, resume)
+        if start > end:
+            raise CommandError(f"--start {start} is after --end {end}")
+        try:
+            run = fill_missing(
+                build_adapter(options["source"]), options["fill"], start, end, resume
+            )
+        except CalendarError as exc:
+            raise CommandError(str(exc)) from exc
         for target, codes in run.checkpoint["filled"].items():
             self.stdout.write(f"{target} {sum(count for _, _, count in codes.values())}")
 

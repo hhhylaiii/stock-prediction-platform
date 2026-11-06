@@ -1,7 +1,7 @@
 """Rows the exchanges' whole-market tables hold and the standard tables lack, filled (plan K17c)."""
 
-import math
-from collections.abc import Callable, Mapping
+from collections import Counter
+from collections.abc import Callable, Iterable, Mapping
 from datetime import date
 from typing import Any, NamedTuple
 
@@ -13,6 +13,7 @@ from apps.etl.adapters.base import BaseAdapter
 from apps.etl.adapters.exchange_tables import DailyTable, standard_rows
 from apps.etl.adapters.tpex_tables import TABLES as TPEX_TABLES
 from apps.etl.adapters.twse_tables import TABLES as TWSE_TABLES
+from apps.etl.errors import SourceNotReadyError
 from apps.etl.models import DataQualityLog, EtlRun
 from apps.etl.runs import failing_on_termination, tracked_run
 from apps.etl.share_counts import drop_repeated_counts, latest_counts
@@ -33,7 +34,7 @@ FILLS: dict[str, tuple[str, tuple[str, ...]]] = {
 }
 TABLES: dict[str, dict[str, DailyTable]] = {"twse": TWSE_TABLES, "tpex": TPEX_TABLES}
 FIGURES = ("pe", "pb", "dividend_yield")
-TOLERANCES = {"fi_holding_pct": 0.01, "pe": 0.01, "pb": 0.01, "dividend_yield": 1e-4}
+DIGITS = {"fi_holding_pct": 0.01, "pe": 0.01, "pb": 0.01, "dividend_yield": 1e-4}
 SAMPLES = 20
 Filled = dict[str, dict[str, list[Any]]]
 
@@ -74,10 +75,32 @@ class Shares:
                     reason=ShareChangeReason.UNKNOWN.value,
                 )
             )
-        SharesOutstanding.objects.bulk_create(rows, ignore_conflicts=True)
-        codes = [row.stock_id for row in rows]
-        drop_repeated_counts(codes)
-        return Written([], codes, differ)
+        taken = SharesOutstanding.objects.filter(
+            effective_date=day, stock_id__in=[row.stock_id for row in rows]
+        ).values_list("stock_id", flat=True)
+        new = [row for row in rows if row.stock_id not in set(taken)]
+        SharesOutstanding.objects.bulk_create(new)
+        return Written([], [row.stock_id for row in new], differ)
+
+    def drop_repeats(self, codes: Iterable[str]) -> list[list[Any]]:
+        """Once the bounds are passed, stored counts the fill now repeats go; each is listed."""
+        bounded = sorted(code for code in set(codes) if code in self.windows)
+        rows = SharesOutstanding.objects.filter(stock_id__in=bounded).order_by(
+            "stock_id", "effective_date"
+        )
+        dropped: list[list[Any]] = []
+        previous: SharesOutstanding | None = None
+        for row in rows:
+            if (
+                previous is not None
+                and previous.stock_id == row.stock_id
+                and previous.shares == row.shares
+                and row.reason == ShareChangeReason.UNKNOWN
+            ):
+                dropped.append([row.stock_id, row.effective_date.isoformat(), row.shares])
+            previous = row
+        drop_repeated_counts(bounded)
+        return dropped
 
     def _firsts(self, today: str) -> dict[str, int]:
         """First stored counts taking effect today, to set beside the exchange's."""
@@ -110,14 +133,20 @@ def fill_missing(
             rows = run.rows
             with transaction.atomic():
                 for target in targets:
-                    frame = standard_rows(raw, tables[target])
-                    written = _write(target, frame.loc[frame["stock_id"].isin(codes)], day, shares)
+                    frame = _kept(standard_rows(raw, tables[target]), codes, adapter.source, day)
+                    written = _write(target, frame, day, shares)
                     state = _tallied(state, target, written, day)
                     rows += len(written.filled) + len(written.created)
                 checkpoint = {**state, "start": span, "windows": windows, "last_date": str(day)}
                 EtlRun.objects.filter(pk=run.pk).update(rows=rows, checkpoint=checkpoint)
             run.rows, run.checkpoint = rows, checkpoint
-        _log(adapter.source, fill, date.fromisoformat(span), end, state)
+        with transaction.atomic():
+            written_counts = state["created"].get("shares_outstanding", {})
+            state = {
+                **state,
+                "dropped": state.get("dropped", []) + shares.drop_repeats(written_counts),
+            }
+            _log(adapter.source, fill, date.fromisoformat(span), end, state)
     return run
 
 
@@ -197,10 +226,20 @@ def _add_valuations(frame: pd.DataFrame, day: date) -> Written:
 
 
 def _differs(name: str, stored: float | None, exchange: float | None) -> bool:
-    """Apart by more than the exchange's last published digit."""
+    """Apart by the exchange's last published digit or more."""
     if stored is None or exchange is None:
         return False
-    return not math.isclose(stored, exchange, rel_tol=0, abs_tol=TOLERANCES[name])
+    return abs(stored - exchange) > DIGITS[name] / 2
+
+
+def _kept(frame: pd.DataFrame, codes: set[str], source: str, day: date) -> pd.DataFrame:
+    """The listed codes priced that day; a table listing codes none of which is priced waits."""
+    kept = frame.loc[frame["stock_id"].isin(codes)]
+    if kept.empty and not frame.empty:
+        raise SourceNotReadyError(
+            f"{source} {day}: none of the {len(frame)} listed codes is priced"
+        )
+    return kept
 
 
 def _priced(day: date) -> set[str]:
@@ -218,8 +257,9 @@ def _after(adapter: BaseAdapter, run: EtlRun) -> date:
 
 def _tallied(state: Mapping[str, Any], target: str, written: Written, day: date) -> dict[str, Any]:
     """The run's tallies with one day of one target added."""
-    found = state["differences"].get(target, {"count": 0, "sample": []})
+    found = state["differences"].get(target, {"count": 0, "sample": [], "codes": {}})
     room = max(SAMPLES - len(found["sample"]), 0)
+    codes = Counter(found.get("codes", {})) + Counter(entry[0] for entry in written.differ)
     return {
         **state,
         "filled": _counted(state["filled"], target, written.filled + written.created, day),
@@ -229,6 +269,7 @@ def _tallied(state: Mapping[str, Any], target: str, written: Written, day: date)
             target: {
                 "count": found["count"] + len(written.differ),
                 "sample": found["sample"] + written.differ[:room],
+                "codes": dict(codes),
             },
         },
     }
@@ -257,6 +298,13 @@ def _log(source: str, fill: str, start: date, end: date, state: Mapping[str, Any
         }
         for target, codes in state["filled"].items()
     }
+    differing = {
+        target: {
+            "listed": sum(n for code, n in found["codes"].items() if code not in delisted),
+            "delisted": sum(n for code, n in found["codes"].items() if code in delisted),
+        }
+        for target, found in state["differences"].items()
+    }
     DataQualityLog.objects.create(
         date=end,
         check_name=FILL_CHECK,
@@ -268,6 +316,10 @@ def _log(source: str, fill: str, start: date, end: date, state: Mapping[str, Any
             "totals": totals,
             "filled": state["filled"],
             "created": state["created"],
-            "differences": state["differences"],
+            "differences": {
+                target: {"count": found["count"], "sample": found["sample"], **differing[target]}
+                for target, found in state["differences"].items()
+            },
+            "dropped": state["dropped"],
         },
     )
