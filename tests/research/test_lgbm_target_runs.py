@@ -1,4 +1,3 @@
-import math
 from io import StringIO
 from pathlib import Path
 from typing import Any
@@ -41,6 +40,7 @@ from tests.research.run_panels import (
     UNSCREENED,
     folds,
     research,
+    store_taiex,
     weekdays,
 )
 
@@ -510,14 +510,6 @@ def test_rank_folds_refuse_a_target_variant(panel: Path) -> None:
             panel,
             target=target_models.TargetVariant(market=False),
         )
-
-
-def store_taiex() -> None:
-    """TAIEX closes that swing, so the relative label differs from the absolute one."""
-    IndexDaily.objects.bulk_create(
-        IndexDaily(index_id="TAIEX", date=day, close=round(100 * (1 + 0.1 * math.sin(k / 6)), 4))
-        for k, day in enumerate(weekdays())
-    )
 
 
 def test_an_interval_fold_on_the_relative_label_fits_its_probability_on_it(

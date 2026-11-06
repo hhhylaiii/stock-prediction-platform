@@ -1,5 +1,6 @@
 """A year of synthetic features and labels for the walk-forward runner tests."""
 
+import math
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
@@ -8,7 +9,7 @@ import numpy as np
 import pandas as pd
 
 from apps.market.calendar import TradingDays
-from apps.market.models import TradingCalendar
+from apps.market.models import IndexDaily, TradingCalendar
 from apps.research.features.store import export_year
 from apps.research.models import FeatureDaily, LabelDaily, ModelRun
 from apps.research.runs import SCREENING_MODEL
@@ -116,3 +117,11 @@ def folds() -> list[Fold]:
 
 def research() -> list[Fold]:
     return [fold for fold in folds() if not fold.holdout]
+
+
+def store_taiex() -> None:
+    """TAIEX closes that swing, so the relative label differs from the absolute one."""
+    IndexDaily.objects.bulk_create(
+        IndexDaily(index_id="TAIEX", date=day, close=round(100 * (1 + 0.1 * math.sin(k / 6)), 4))
+        for k, day in enumerate(weekdays())
+    )
