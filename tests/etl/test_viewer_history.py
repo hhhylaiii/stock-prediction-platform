@@ -1,3 +1,4 @@
+import contextlib
 from collections.abc import Callable
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -11,9 +12,11 @@ from django.conf import settings
 from responses import matchers
 
 from apps.etl.adapters.mops import MopsAdapter
-from apps.etl.models import DataQualityLog, RawMops
+from apps.etl.errors import RejectedStocksError
+from apps.etl.models import DataQualityLog, EtlRun, RawMops
 from apps.etl.mops_history import MISMATCH_CHECKS, STATEMENT_VIEWER, insert_missing_history
 from apps.etl.ratelimit import RateLimit, RateLimiter
+from apps.etl.statement_overwrite import viewer_frame_from_raw
 from apps.etl.statement_scan import SCAN_COLUMNS
 from apps.etl.viewer_history import KINDS, viewer_frame, viewer_periods
 from apps.market.calendar import TradingDays
@@ -385,3 +388,47 @@ def test_the_log_names_quarters_whose_revenue_was_not_recognised(
     backfill(adapter)
     logged = DataQualityLog.objects.get(check_name=MISMATCH_CHECKS[STATEMENT_VIEWER])
     assert logged.detail["no_revenue"] == ["2013-Q3"]
+
+
+@pytest.mark.django_db
+@responses.activate
+@pytest.mark.usefixtures("delisted")
+def test_a_stored_quarter_the_viewer_lacks_is_logged_apart(
+    adapter: MopsAdapter, pages: dict[str, str]
+) -> None:
+    FinancialStatement.objects.create(
+        stock_id="6211", period="2013-Q4", fin_type="consolidated", announce_date=date(2014, 3, 31)
+    )
+    serve(pages, unfiled=("2013-Q4",))
+    backfill(adapter)
+    logged = DataQualityLog.objects.get(check_name=MISMATCH_CHECKS[STATEMENT_VIEWER])
+    assert (logged.detail["absent"], logged.detail["stored_absent"]) == ([], ["2013-Q4"])
+
+
+@pytest.mark.django_db
+@responses.activate
+@pytest.mark.usefixtures("delisted")
+def test_a_page_fetched_again_after_a_blank_one_is_the_one_read_back(
+    adapter: MopsAdapter, pages: dict[str, str]
+) -> None:
+    blank = "<html><body><h4>blank</h4></body></html>"
+    for hours, second in ((0, pages["2013-Q2"]), (1, blank), (2, pages["2013-Q2"])):
+        responses.reset()
+        serve({**pages, "2013-Q2": second})
+        with (
+            time_machine.travel(TODAY + timedelta(hours=hours), tick=False),
+            contextlib.suppress(RejectedStocksError),
+        ):
+            adapter.backfill(STATEMENT_VIEWER, ["6211"], *SPAN, guard_streaks=False)
+    rejected = EtlRun.objects.order_by("run_id").values_list("checkpoint__rejected", flat=True)
+    assert [bool(found) for found in rejected] == [False, True, False]
+    assert viewer_frame_from_raw(["6211"]).attrs["unreadable"] == []
+
+
+def test_a_stored_quarter_without_a_known_revenue_account_is_listed(
+    pages: dict[str, str],
+) -> None:
+    renamed = {**pages, "2013-Q2": pages["2013-Q2"].replace("營業收入合計", "收入合計")}
+    page, _ = served(renamed)
+    frame = viewer_frame("6211", YEAR, {"2013-Q2"}, page, COLUMNS)
+    assert (frame.attrs["no_revenue"], frame.attrs["stored_no_revenue"]) == ([], ["2013-Q2"])
