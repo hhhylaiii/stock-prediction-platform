@@ -391,7 +391,7 @@ def reapply_announce_dates(session: Session, stock_ids: Sequence[str] | None = N
         answers = answers.filter(request_params__data_id__in=list(stock_ids))
     by_stock: dict[str, list[Any]] = {}
     for params, payload in answers.values_list("request_params", "payload").iterator():
-        by_stock.setdefault(str(params["data_id"]), []).extend(payload.get("data", []))
+        by_stock.setdefault(str(params["data_id"]), []).extend(payload.get("data") or [])
     filled, rejected = 0, {}
     for code, rows in sorted(by_stock.items()):
         try:

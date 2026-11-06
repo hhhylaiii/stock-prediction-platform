@@ -164,6 +164,27 @@ def test_the_command_can_take_only_the_stocks_named(
     assert dates == {"2884": None, "2885": date(2013, 7, 31)}
 
 
+@pytest.mark.django_db
+def test_every_stored_answer_of_a_stock_is_read_and_an_empty_one_skipped(
+    esun: Rows, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    later = [row for row in esun if row["CashExDividendTradingDate"] == "2014-08-21"]
+    for ex in (date(2013, 8, 15), date(2014, 8, 21)):
+        DividendEvent.objects.create(stock_id="2884", ex_date=ex)
+    for tag, data in (("a", policy(esun)), ("b", later), ("c", None)):
+        RawFinmind.objects.create(
+            dataset="dividend_policy",
+            source_hash=tag,
+            request_params={"dataset": "TaiwanStockDividend", "data_id": "2884"},
+            payload={"data": data},
+        )
+    monkeypatch.setattr(TradingDays, "from_db", classmethod(lambda cls: CALENDAR))
+    call_command("reapply_dividend_dates")
+    assert "2 events dated across 1 stocks" in capsys.readouterr().out
+    dates = dict(DividendEvent.objects.values_list("ex_date", "announce_date"))
+    assert dates == {date(2013, 8, 15): date(2013, 7, 31), date(2014, 8, 21): date(2014, 8, 6)}
+
+
 def test_the_command_loads_in_a_fresh_process() -> None:
     root = Path(__file__).resolve().parents[2]
     command = [sys.executable, "manage.py", "reapply_dividend_dates", "--help"]
