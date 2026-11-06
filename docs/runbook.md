@@ -106,7 +106,7 @@ uv run python manage.py reprocess --source twse --dataset daily_price --start 20
 uv run python manage.py check_quality --date 2026-10-28
 ```
 
-- `catchup` 預設補到前一交易日；`--dry-run` 只列出每個 dataset 缺哪些日子。
+- `catchup` 預設補到前一交易日；`--dry-run` 只列出每個 dataset 要抓的日子（`to fetch`：缺的日子，加上當沖要重抓的日子），不發請求。
 - 當沖 T+2 才定案，每晚的批次會重抓前兩個交易日。所以 `catchup` 補當沖時，每個缺的日子連同它前兩個交易日一起重抓，不管那兩天有沒有列。例如連漏兩晚，漏掉之前的那個交易日只抓過初值，要靠這一步換成定案值。`--dry-run` 的清單也包含這些日子。
 - `reprocess` 只用 raw 表重建，不發請求；只支援證交所、櫃買。
 
@@ -280,19 +280,22 @@ uv run python manage.py overwrite_statements --stock 2330
 
 ## 當沖歷史回補
 
-當沖量從 2014 年起回補，每個市場、每一年跑一個 run，失敗的會留在 etl_run：
+當沖量從 2014 年起回補，每個市場、每一年跑一個 run。兩個市場都從 2014-01-06 開始（現股當沖開放日，之前的日期來源沒有資料，run 會停在第一天），2026 年跑到每日排程接手的前一天（2026-10-21）。先確認 `daily_price` 的歷史回補已經跑完：
 
 ```bash
-for year in $(seq 2014 2026); do
-  uv run python manage.py fetch --source twse --dataset day_trade --start "$year-01-01" --end "$year-12-31"
+for source in twse tpex; do
+  uv run python manage.py fetch --source $source --dataset day_trade --start 2014-01-06 --end 2014-12-31
+  for year in $(seq 2015 2025); do
+    uv run python manage.py fetch --source $source --dataset day_trade --start "$year-01-01" --end "$year-12-31"
+  done
+  uv run python manage.py fetch --source $source --dataset day_trade --start 2026-01-01 --end 2026-10-21
 done
 ```
 
-櫃買把 `--source` 換成 `tpex`。2014 年從第一個有資料的交易日開始；2026 年跑到每日排程接手的前一天為止。
-
-- 籌碼表只寫當天行情表上有的代號（K6）。歷史日期沒有存交易所的原始行情頁，價量是 FinMind 回補的，所以當沖改用 `daily_price` 當天有價的代號來篩；有存行情頁的日子照舊用行情頁。其他籌碼表（三大法人、融資券、借券、外資持股）仍要等行情頁。
-- 兩種篩法的差別（2018 年每月第一個交易日抽查）：`daily_price` 有價的代號全部都在行情表上；行情表多出 32–41 個代號。這些是 FinMind 沒有的 ETF、TDR，加上 5 檔 FinMind 整檔沒有價格的普通股（1589、4207、4804、5355、8176），以及沒成交那天的 4415。這些代號的當沖量會略過；它們沒有價格，本來也進不了研究母體。
-- 當沖表會列出量為 0 的標的。同市場當天的表有寫入、某檔不在表上，研究層算 0；整個市場當天沒有 run 的，才是空值。所以兩個市場每個交易日都要有成功的 run。
+- 某一年中途失敗時，看那個 run 的 `etl_run.checkpoint.last_date`，從下一個交易日用 `--start` 接著跑到年底。
+- 籌碼表只寫當天行情表上有的代號（K6）。歷史日期沒有存交易所的原始行情頁，價量是 FinMind 回補的，所以當沖在該市場第一頁行情存檔（2026-10-22）之前的日子，改用 `daily_price` 當天有價的代號來篩；之後的日子照舊要等當天的行情頁。`daily_price` 不分市場，所以當天的當沖表如果一個代號都沒留下（例如本市場的價還沒回補、只有另一個市場有價），run 會 SourceNotReady，不會記成成功 0 列。其他籌碼表（三大法人、融資券、借券、外資持股）仍要等行情頁。
+- 兩種篩法的差別（2018 年每月第一個交易日抽查）：`daily_price` 有價的代號全部都在行情表上；行情表多出 32–41 個代號。這些是 FinMind 沒有的 ETF、TDR，加上 5 檔 FinMind 整檔沒有價格的普通股（1589、4207、4804、5355、8176），以及沒成交那天的 4415。這些代號的當沖量會略過；它們沒有價格，本來也進不了研究母體。日後如果補了這些代號的 `daily_price`，要對同一段日期跑 `reprocess --source twse|tpex --dataset day_trade --start … --end …`（只讀 raw、不發請求），否則研究層會把它們的當沖量當成 0。
+- 當沖表會列出量為 0 的標的。同市場當天的表有寫入、某檔不在表上，研究層算 0；同市場當天一列當沖都沒有的，才是空值。所以兩個市場每個交易日都要有成功、而且有列的 run。
 
 ## 告警
 
