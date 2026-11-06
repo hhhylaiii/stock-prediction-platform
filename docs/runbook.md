@@ -133,7 +133,7 @@ docker compose exec db psql -U twp -d twp -c \
 - 來源是 FinMind `TaiwanStockDividend` 的 `AnnouncementDate` 加 `AnnouncementTime`。驗證過它是除權息公告，不是董事會決議：2.35 萬筆有除權息日的列裡，96% 在除權息日前 30 天內，中位數 15 天。
 - 換成 session 的規則和財報申報相同：交易日 `FILING_VISIBLE_BEFORE`（22:40）之前公告就算當天，否則算下一個交易日；沒有公告時間的算下一個交易日。同一個除權息日有多筆，取最早的。
 - 公告晚於除權息日的（多半是事後更正）留空，資料表的約束也不允許；日誌會列出來。
-- 只填空的：FinMind 是次要來源，已經有日期的列不改。FinMind 回補時一併填；現有的列用 raw 重套，不用重抓：
+- 只填空的：證交所、櫃買的除權息預告表（plan 2.7）上線後是主要來源，FinMind 只補它沒給的；已經有日期的列不改。FinMind 回補時一併填；現有的列用 raw 重套，不用重抓：
 
 ```bash
 uv run python manage.py reapply_dividend_dates
@@ -141,6 +141,12 @@ uv run python manage.py reapply_dividend_dates --stock 2884 --stock 2885
 ```
 
 - 第二行只重套指定的股票，例如修過某檔的 raw 之後。輸出 `N events dated across M stocks`；被拒收的股票逐行寫在 stderr（`rejected <代號>: <原因>`），例如 FinMind 少了 `AnnouncementDate` 欄位，或公告日落在交易日曆之外。拒收只影響那一檔。
+- 要用 FinMind 重填某檔已經有的日期（例如 FinMind 事後更正了公告日），先把那檔清空再重套；2.7 上線後清掉的也包含預告表給的日期，要一起重跑預告表：
+
+  ```bash
+  uv run python manage.py shell -v 0 -c "from apps.market.models import DividendEvent as D; print(D.objects.filter(stock_id='2884').update(announce_date=None))"
+  uv run python manage.py reapply_dividend_dates --stock 2884
+  ```
 
 - 減資、分割這類只有參考價、沒有配息公告的事件，FinMind 沒有日期，等 2.7 的預告表。
 
