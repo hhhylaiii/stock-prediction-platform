@@ -41,6 +41,7 @@ class Command(BaseCommand):
         self.stdout.write(f"{sum(cleared.kinds.values())} margins {done} ({kinds or 'none'})")
         self.stdout.write(
             f"{cleared.unmatched} margins match no span and stay, "
+            f"{cleared.unverifiable} cannot be tried against their own quarter and stay, "
             f"{cleared.unchecked} have no MOPS figures to judge"
         )
         if viewers.attrs["unreadable"]:
