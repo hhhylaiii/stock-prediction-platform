@@ -101,6 +101,7 @@ def test_every_ex_date_becomes_one_event(esun: pd.DataFrame) -> None:
         "cash_dividend",
         "stock_dividend",
         "adj_factor",
+        "announce_date",
     ]
 
 
@@ -138,7 +139,7 @@ def test_an_announced_event_without_a_result_has_no_factor(rows: Callable[[str],
         "AnnouncementDate": "2026-12-01",
     }
     events = dividend_events([future], [], "2330")
-    assert "announce_date" not in events.columns
+    assert events.iloc[0]["announce_date"] is None
     assert events.iloc[0]["ex_date"] == date(2026, 12, 16)
     assert events.iloc[0]["adj_factor"] is None
 
