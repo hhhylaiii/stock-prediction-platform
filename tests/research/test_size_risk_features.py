@@ -10,6 +10,7 @@ from apps.research.features.registry import Group, feature_names
 from apps.research.features.size_risk import (
     canonical_industry,
     industry_risk_features,
+    second_batch_industry_features,
     size_liquidity_features,
 )
 from tests.research.feature_panels import at, listing, rising
@@ -216,3 +217,61 @@ def test_industry_features_ignore_a_load_start_inside_a_long_halt() -> None:
         full.iloc[start + FEATURE_WARMUP :].reset_index(drop=True),
         late.iloc[FEATURE_WARMUP:].reset_index(drop=True),
     )
+
+
+def test_sector_ids_are_twse_industry_codes_of_the_unified_names(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    names = ["半導體業", " 金融業", "水泥工業", "其他電子類", "新產業", "", None]
+    panel = pd.concat(
+        [listing(str(1000 + k), rising(3), industry=name) for k, name in enumerate(names)],
+        ignore_index=True,
+    )
+    technical = pd.DataFrame({"tech_mom_250_20": NAN}, index=panel.index)
+    fundamental = pd.DataFrame({"fund_ep": NAN}, index=panel.index)
+
+    features = second_batch_industry_features(panel, technical, fundamental)
+
+    assert list(features.columns) == [
+        "stock_id",
+        "date",
+        *feature_names(Group.INDUSTRY_RISK, batch=2),
+    ]
+    ids = [at(features, str(1000 + k), 2, "ind_sector_id") for k in range(len(names))]
+    assert ids[:4] == [24.0, 17.0, 1.0, 31.0]
+    assert all(math.isnan(value) for value in ids[4:])
+    assert [record.getMessage() for record in caplog.records] == [
+        "industries without a TWSE code: 新產業"
+    ]
+
+
+def test_neutral_features_subtract_the_day_median_of_universe_stocks_in_the_industry() -> None:
+    rows = [
+        ("2330", "半導體業", True, 0.1, 0.05),
+        ("2303", "半導體業", True, 0.3, 0.07),
+        ("2454", "半導體業", True, 0.8, 0.02),
+        ("2317", "半導體業", False, 0.9, 0.01),
+        ("1101", "水泥工業", False, 0.2, 0.04),
+        ("9999", "", True, 0.5, NAN),
+    ]
+    panel = pd.concat(
+        [listing(s, rising(2), industry=i, in_universe=u) for s, i, u, _, _ in rows],
+        ignore_index=True,
+    )
+
+    def column(k: int) -> list[float]:
+        return [float(row[k]) for row in rows for _ in range(2)]
+
+    rising_mom = [float(row[3]) + 0.1 * day for row in rows for day in range(2)]
+    technical = pd.DataFrame({"tech_ret_1d": 9.0, "tech_mom_250_20": rising_mom}, index=panel.index)
+    fundamental = pd.DataFrame({"fund_bp": 9.0, "fund_ep": column(4)}, index=panel.index)
+
+    features = second_batch_industry_features(panel, technical, fundamental)
+
+    for day in range(2):
+        neutral = [at(features, s, day, "ind_mom_neutral") for s, *_ in rows]
+        assert neutral == pytest.approx([-0.2, 0.0, 0.5, 0.6, -0.2, 0.1])
+    assert at(features, "2330", 1, "ind_ep_neutral") == pytest.approx(0.0)
+    assert at(features, "2454", 1, "ind_ep_neutral") == pytest.approx(0.02 - 0.05)
+    assert at(features, "1101", 1, "ind_ep_neutral") == pytest.approx(0.04 - 0.05)
+    assert math.isnan(at(features, "9999", 1, "ind_ep_neutral"))
