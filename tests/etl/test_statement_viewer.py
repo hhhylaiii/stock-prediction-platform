@@ -98,6 +98,26 @@ def test_a_quarter_never_filed_is_none(page: Callable[[str], str]) -> None:
     assert parse_viewer(page("t164sb01_6211_2019_1_C.html"), "6211", "2019-Q1") is None
 
 
+def test_a_kind_of_report_never_filed_can_answer_with_the_query_form(
+    page: Callable[[str], str],
+) -> None:
+    assert parse_viewer(page("t164sb01_1240_2015_2_A.html"), "1240", "2015-Q2") is None
+
+
+def test_an_individual_report_on_the_full_page_is_an_individual_row(
+    page: Callable[[str], str],
+) -> None:
+    found = parse_viewer(page("t164sb01_1240_2019_2_A.html"), "1240", "2019-Q2")
+    assert found is not None
+    current = {report: {"1240": found[report]} for report in found}
+    empty: dict[str, dict[str, dict[str, float | None]]] = {report: {} for report in found}
+    (row,) = statement_rows(current, empty, 2)
+    assert row["fin_type"] == "individual"
+    assert row["debt_ratio"] is not None
+    assert (found[INCOME][REVENUE], found[INCOME]["本期淨利（淨損）"]) == (857_797, 74_510)
+    assert found[INCOME]["營業毛利（毛損）"] == 145_617
+
+
 def test_another_company_or_quarter_is_refused(page: Callable[[str], str]) -> None:
     with pytest.raises(SchemaChangedError, match="is not 6212"):
         parse_viewer(page("t164sb01_6211_2013_1_C.html"), "6212", "2013-Q1")

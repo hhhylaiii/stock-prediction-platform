@@ -21,7 +21,7 @@ from apps.etl.statement_summary import (
 )
 
 TITLES = {BALANCE: "資產負債表", INCOME: "綜合損益表", CASH_FLOW: "現金流量表"}
-NOT_FILED = "檔案不存在"
+NOT_FILED = ("檔案不存在", "查無資料")
 THOUSANDS = "單位：新臺幣仟元"
 TITLE_HEADER = "會計項目"
 CODE_HEADER = "代號Code"
@@ -71,7 +71,7 @@ Table = list[list[str]]
 
 def parse_viewer(page: str, code: str, period: str) -> dict[str, dict[str, float | None]] | None:
     """Year-to-date thousands of TWD (EPS in TWD) per statement; a report never filed is None."""
-    if NOT_FILED in page and TITLE_HEADER not in page and CODE_HEADER not in page:
+    if TITLE_HEADER not in page and CODE_HEADER not in page and any(n in page for n in NOT_FILED):
         return None
     shown = _shown(page)
     if shown != (code, period):
