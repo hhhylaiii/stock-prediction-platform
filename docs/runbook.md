@@ -265,12 +265,16 @@ uv run python manage.py overwrite_statements
 uv run python manage.py overwrite_statements --stock 2330
 ```
 
-- 比對範圍是同一檔、同一季、同一種報表（合併或個體）。MOPS 的列和 K17a、K17b 一樣，用 `statement_rows` 換成單季值；前一季的頁面不在 raw 裡（2013-Q1 除外），那一季就不比。
+- 比對範圍是同一檔、同一季、同一種報表（合併或個體）。MOPS 的列和 K17a、K17b 一樣，用 `statement_rows` 換成單季值。前一季的頁面不在 raw 裡時，只比不需要前一季的數字：負債比，以及 Q1 的各項（Q1 的累計數就是單季數）；Q2–Q4 的流量、EPS、ROE 換算不出來，是空的，不比。
 - `revenue`、`net_income`、`operating_cf`、`debt_ratio`、`roe`：超過門檻就覆寫（金額差超過 1,000 元，比率照 `figure_differences`），FinMind 是空的就補上。
 - `eps` 只補空的，不覆寫：MOPS 的單季 EPS 是累計數相減，股數加權和財報上的單季數字不同。
-- `gross_margin`、`op_margin` 不動；MOPS 是空的，FinMind 的值照留。
+- `gross_margin`、`op_margin` 不動：兩邊都有值時，2013–2026 只有 4 筆 op_margin 不同。MOPS 是空的約 3,350 筆，多半是 Q2、Q4，而且前一季沒有申報，單季換算不出來；FinMind 這些列的毛利率是累計數的比率（例如 1264 的 2013-Q2 等於上半年的毛利率），照留。
+- MOPS 是空的欄位，一律保留 FinMind 的值。
+- 每日掃描開始看的那一季起（第一次 `statement_scan` 的 `open_periods`，目前是 2026-Q3）不改：那些季別以掃描第一次看到的數字為準。
+- 檢視頁 raw 讀不懂的股票整檔跳過，指令最後列出 `set aside …`；先修好格式、`--retry-rejected` 之後再跑一次。
 - 每檔股票一列 `statement_overwritten`（info），記 `[原值, 新值]`。重跑時同一欄位再改一次，原值仍是 FinMind 最早的那個；這次沒動到的紀錄照留。要還原就照這列把原值寫回。
-- 2026-11-07 在 twp 的 dry run：92,658 個 MOPS 列裡，9,986 列會改。
+- 2026-11-07 在 twp 的 dry run：92,792 個 MOPS 列，9,988 個財報列會改；1333、1469、1715、2847、6022 的檢視頁讀不懂，跳過。
+- 沒得比的列：彙總表不列下市公司，K17b 只抓 standard 表缺的季別和它們的前一季，所以下市公司已存的 FinMind 季別大多沒有 MOPS 可比。2026-11-07 量到 3,045 列，其中奇數年、有現金流的 1,405 列；還在公開發行的公司只有 404 列，沒有奇數年的現金流。下市公司這部分要讓檢視頁回補也抓已存的季別，補完再跑一次本指令。
 - 公告日不動。覆寫後要重建財報類特徵（Phase 3）。
 
 ## 告警
