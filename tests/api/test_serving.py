@@ -19,11 +19,13 @@ def test_each_slot_takes_the_newest_day_of_its_active_and_degraded_runs() -> Non
     add_stock()
     add_predictions(add_model_run("rank-a", "rank"), OCT_29, 20, RANKED)
     add_predictions(add_model_run("rank-b", "rank", status="degraded"), OCT_30, 20, RANKED)
+    add_predictions(add_model_run("rank-g", "rank"), OCT_29, 20, RANKED)
     add_predictions(add_model_run("rank-c", "rank", status="retired"), NOV_2, 20, RANKED)
     add_predictions(add_model_run("rank-d", "rank", status="candidate"), NOV_2, 20, RANKED)
     add_predictions(add_model_run("rank-e", "rank", model_type=SCREENING_MODEL), NOV_2, 20, RANKED)
     add_predictions(add_model_run("rank-f", "rank"), OCT_29, 5, RANKED)
     add_predictions(add_model_run("vol-a", "volatility"), NOV_2, 20, {"2330": {"vol_pred": 0.3}})
+    add_predictions(add_model_run("reg-a", "regression"), NOV_2, 20, {"2330": {"ret_pred": 0.01}})
 
     days = latest_days([RANK20, RANK5, Slot("regression", 5)])
 
