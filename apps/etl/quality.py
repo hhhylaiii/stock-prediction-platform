@@ -1,16 +1,15 @@
 """Daily data-quality checks of SPEC §5, written to data_quality_log."""
 
-import re
 from collections.abc import Sequence
 from datetime import date, timedelta
 from decimal import Decimal
 from typing import Any
 
 from django.db import models, transaction
-from django.db.models import Q
 
 from apps.etl.models import DataQualityLog
 from apps.market.calendar import NotATradingDayError, OutsideCalendarError, TradingDays
+from apps.market.common_stock import COMMON_STOCK_PATTERN, DEPOSITARY_INDUSTRY, DEPOSITARY_PREFIX
 from apps.market.models import (
     DailyChip,
     DailyPrice,
@@ -20,7 +19,6 @@ from apps.market.models import (
     IndexId,
     StockMaster,
 )
-from apps.market.universe import COMMON_STOCK_PATTERN, DEPOSITARY_INDUSTRY, DEPOSITARY_PREFIX
 
 Severity = DataQualityLog.Severity
 ROW_COUNT = "row_count"
@@ -68,7 +66,6 @@ MISSING_COLUMNS: dict[str, tuple[str, ...]] = {
     "daily_valuation": ("pb", "dividend_yield"),
 }
 COLUMN_LIMITS = {("daily_price", "close"): NO_TRADE_LIMIT}
-COMMON_CODE = re.compile(COMMON_STOCK_PATTERN)
 
 
 def run_checks(day: date, calendar: TradingDays) -> list[DataQualityLog]:
@@ -137,16 +134,14 @@ def big_move_result(day: date, previous: date | None) -> DataQualityLog:
 
 def missing_results(day: date) -> list[DataQualityLog]:
     """Per column, common stocks valued on its fullest recent day but not today, by market too."""
-    left_out = set(
-        StockMaster.objects.filter(
-            Q(delist_date__lte=day) | Q(industry=DEPOSITARY_INDUSTRY)
-        ).values_list("stock_id", flat=True)
+    delisted = set(
+        StockMaster.objects.filter(delist_date__lte=day).values_list("stock_id", flat=True)
     )
     markets = dict(StockMaster.objects.values_list("stock_id", "market"))
     results = []
     for table, columns in MISSING_COLUMNS.items():
         model = TABLES[table]
-        gaps = {column: _gap(model, column, day, left_out, markets) for column in columns}
+        gaps = {column: _gap(model, column, day, delisted, markets) for column in columns}
         shares = {column: _share(gap) for column, gap in gaps.items()}
         if any(_market_failed(gap) for gap in gaps.values()):
             severity = Severity.ERROR
@@ -212,11 +207,11 @@ def _gap(
     model: type[models.Model],
     column: str,
     day: date,
-    left_out: set[str],
+    delisted: set[str],
     markets: dict[str, str],
 ) -> dict[str, Any]:
     baseline = _baseline(model, column, day)
-    before = set() if baseline is None else _common(_codes_with(model, column, baseline)) - left_out
+    before = set() if baseline is None else _codes_with(model, column, baseline) - delisted
     missing = before - _codes_with(model, column, day)
     by_market: dict[str, dict[str, int]] = {}
     for code in before:
@@ -228,10 +223,14 @@ def _gap(
     return {"missing": len(missing), "population": len(before), "markets": by_market}
 
 
-def _common(codes: set[str]) -> set[str]:
-    """Four-digit codes outside the 91 depositary range, as `apps.market.universe` defines them."""
-    prefix = DEPOSITARY_PREFIX.removesuffix("%")
-    return {code for code in codes if COMMON_CODE.match(code) and not code.startswith(prefix)}
+def _common(rows: models.QuerySet[Any]) -> models.QuerySet[Any]:
+    """Rows of common stocks per `apps.market.common_stock`; codes off stock_master stay."""
+    depositary = StockMaster.objects.filter(industry=DEPOSITARY_INDUSTRY).values("stock_id")
+    return (
+        rows.filter(stock_id__regex=COMMON_STOCK_PATTERN)
+        .exclude(stock_id__startswith=DEPOSITARY_PREFIX.removesuffix("%"))
+        .exclude(stock_id__in=depositary)
+    )
 
 
 def _share(gap: dict[str, Any]) -> float:
@@ -249,7 +248,7 @@ def _market_failed(gap: dict[str, Any]) -> bool:
 
 def _baseline(model: type[models.Model], column: str, day: date) -> date | None:
     """The day within the past month with the most values in the column, the latest on ties."""
-    rows = model._default_manager.filter(date__lt=day, date__gte=day - BASELINE_DAYS)
+    rows = _common(model._default_manager.filter(date__lt=day, date__gte=day - BASELINE_DAYS))
     if column != ROW:
         rows = rows.filter(**{f"{column}__isnull": False})
     fullest = rows.values("date").annotate(n=models.Count("pk")).order_by("-n", "-date").first()
@@ -257,7 +256,7 @@ def _baseline(model: type[models.Model], column: str, day: date) -> date | None:
 
 
 def _codes_with(model: type[models.Model], column: str, day: date) -> set[str]:
-    rows = model._default_manager.filter(date=day)
+    rows = _common(model._default_manager.filter(date=day))
     if column != ROW:
         rows = rows.filter(**{f"{column}__isnull": False})
     return set(rows.values_list("stock_id", flat=True))

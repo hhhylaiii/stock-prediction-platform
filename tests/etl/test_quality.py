@@ -203,6 +203,16 @@ def test_common_stocks_gone_still_count_beside_non_common_ones(calendar: Trading
 
 
 @pytest.mark.django_db
+def test_the_baseline_day_is_the_one_fullest_in_common_stocks(calendar: TradingDays) -> None:
+    _prices(EARLIER, CODES)
+    _prices(PREV, [*CODES[:95], *(f"00{n}" for n in range(50, 60))])
+    _prices(DAY, CODES)
+    run_checks(DAY, calendar)
+    gap = _results()[("missing_values", "daily_price")].detail["columns"]["row"]
+    assert (gap["missing"], gap["population"]) == (0, 100)
+
+
+@pytest.mark.django_db
 @pytest.mark.parametrize(("emptied", "severity"), [(5, INFO), (6, WARNING), (100, ERROR)])
 def test_missing_closes_only_count_beyond_the_no_trade_level(
     calendar: TradingDays, emptied: int, severity: str

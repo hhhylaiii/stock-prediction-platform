@@ -11,7 +11,7 @@ import pandas as pd
 from django.db import connection
 
 from apps.market.calendar import NotATradingDayError, TradingDays
-from apps.market.universe import COMMON_STOCK_PATTERN, DEPOSITARY_INDUSTRY, DEPOSITARY_PREFIX
+from apps.market.common_stock import COMMON_STOCK_PATTERN, DEPOSITARY_INDUSTRY, DEPOSITARY_PREFIX
 
 REUSE_GAP = 250
 PRICE_COLUMNS = ("open", "high", "low", "close")
