@@ -33,6 +33,7 @@ RUN_FIELDS = (
     "created_at",
 )
 DEGRADED_ON = "run__params__degraded_on"
+ALERT_PERIODS = "run__params__alert_periods"
 ISO_DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
 SERVING_FIELDS = (
     "run_id",
@@ -40,6 +41,7 @@ SERVING_FIELDS = (
     "horizon",
     *(f"run__{name}" for name in RUN_FIELDS),
     DEGRADED_ON,
+    ALERT_PERIODS,
 )
 
 logger = logging.getLogger(__name__)
@@ -64,6 +66,7 @@ class ServingRun:
     train_end: date
     created_at: datetime
     degraded_on: date | None = None
+    alert_periods: tuple[tuple[date, date], ...] = ()
 
     def order(self) -> tuple[int, float, str]:
         return (STATUS_ORDER.index(self.status), -self.created_at.timestamp(), self.run_id)
@@ -77,8 +80,13 @@ def warn_undated(run_id: str) -> None:
     )
 
 
+@functools.cache
+def warn_unreadable_periods(run_id: str) -> None:
+    logger.warning("run %s has unreadable params.alert_periods entries; they are left out", run_id)
+
+
 def day_of(value: object) -> date | None:
-    """The params.degraded_on date, or None unless it is a YYYY-MM-DD string."""
+    """A params date, or None unless it is a YYYY-MM-DD string."""
     if not isinstance(value, str) or not ISO_DAY.fullmatch(value):
         return None
     try:
@@ -87,9 +95,31 @@ def day_of(value: object) -> date | None:
         return None
 
 
+def periods_of(run_id: str, value: object) -> tuple[tuple[date, date], ...]:
+    """The readable [start, end) periods of params.alert_periods; a warning names the rest."""
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        warn_unreadable_periods(run_id)
+        return ()
+    periods = []
+    for entry in value:
+        if isinstance(entry, dict):
+            start, end = day_of(entry.get("start")), day_of(entry.get("end"))
+            if start is not None and end is not None and start <= end:
+                periods.append((start, end))
+    if len(periods) < len(value):
+        warn_unreadable_periods(run_id)
+    return tuple(periods)
+
+
 def interval_alert(run: ServingRun | None, day: date) -> bool:
-    """A quantile band gives way to the volatility one from the day its run was degraded."""
-    if run is None or run.status == ModelStatus.ACTIVE:
+    """The volatility band stands in inside a closed alert period or from an open degraded_on."""
+    if run is None:
+        return False
+    if any(start <= day < end for start, end in run.alert_periods):
+        return True
+    if run.status == ModelStatus.ACTIVE:
         return False
     if run.degraded_on is not None:
         return day >= run.degraded_on
@@ -156,6 +186,7 @@ def serving_run(row: dict[str, Any]) -> ServingRun:
         horizon=row["horizon"],
         **{name: row[f"run__{name}"] for name in RUN_FIELDS},
         degraded_on=day_of(row.get(DEGRADED_ON)),
+        alert_periods=periods_of(row["run_id"], row.get(ALERT_PERIODS)),
     )
 
 
