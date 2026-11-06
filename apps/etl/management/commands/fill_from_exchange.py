@@ -37,6 +37,11 @@ class Command(BaseCommand):
         run = EtlRun.objects.filter(
             run_id=options["resume"], source=options["source"], dataset=f"fill:{options['fill']}"
         ).first()
-        if run is None or run.status != EtlRun.Status.FAILED:
+        if run is None or run.status == EtlRun.Status.SUCCESS:
             raise CommandError(f"--resume {options['resume']} is not a stopped fill of this kind")
+        if run.status == EtlRun.Status.RUNNING:
+            raise CommandError(
+                f"etl_run {run.run_id} is still marked running; stop that process first, "
+                "or set its status to failed if it died"
+            )
         return run
