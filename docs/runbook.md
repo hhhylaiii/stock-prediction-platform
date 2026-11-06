@@ -137,7 +137,10 @@ docker compose exec db psql -U twp -d twp -c \
 
 ```bash
 uv run python manage.py reapply_dividend_dates
+uv run python manage.py reapply_dividend_dates --stock 2884 --stock 2885
 ```
+
+- 第二行只重套指定的股票，例如修過某檔的 raw 之後。輸出 `N events dated across M stocks`；被拒收的股票逐行寫在 stderr（`rejected <代號>: <原因>`），例如 FinMind 少了 `AnnouncementDate` 欄位，或公告日落在交易日曆之外。拒收只影響那一檔。
 
 - 減資、分割這類只有參考價、沒有配息公告的事件，FinMind 沒有日期，等 2.7 的預告表。
 
