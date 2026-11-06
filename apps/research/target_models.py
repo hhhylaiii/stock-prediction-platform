@@ -33,6 +33,7 @@ class TargetVariant:
     """A return or interval design choice under comparison; the defaults are the SPEC recipe."""
 
     market: bool = True
+    relative_up: bool = False
 
 
 TARGET_RECIPE = TargetVariant()
