@@ -25,7 +25,7 @@
   };
   const ALERT_REASONS = { below_threshold: '低於門檻', outside_range: '超出範圍', above_baseline: '輸給 baseline', missing_reference: '缺參考值' };
   const ALERT_METRICS = { ic: 'IC', coverage: '覆蓋率', brier: 'Brier' };
-  const OBJECTIVES = { rank: '排名', regression: '絕對報酬', quantile: '分位數', volatility: '波動率', classification: '上漲機率' };
+  const OBJECTIVES = { rank: '排名', regression: '絕對報酬', quantile: '報酬區間', volatility: '波動率', classification: '上漲機率' };
   const SEVERITY = { info: ['通過', 'in'], warning: ['警告', 'warn'], error: ['錯誤', 'warn'] };
 
   const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -602,6 +602,119 @@
     overlay.addEventListener('pointerleave', () => { hover.style.display = 'none'; tip.style.display = 'none'; });
   }
 
+  const pct1 = v => (v * 100).toFixed(1) + '%';
+  const num3 = v => (v < 0 ? '−' : '') + Math.abs(v).toFixed(3);
+  const has = v => v !== null && v !== undefined;
+  const modelName = type => MODEL_NAMES[type] || type;
+  const monthOf = iso => iso ? iso.slice(0, 7) : '';
+
+  function recentText(row) {
+    const r = row.recent || {};
+    if (!r.days) return '尚無到期的評估日';
+    const parts = {
+      rank: [has(r.ic) ? 'rank IC ' + num3(r.ic) : '', has(r.icir) ? 'ICIR ' + r.icir.toFixed(2) : ''],
+      regression: [has(r.mae) ? 'MAE ' + pct1(r.mae) : '', has(r.direction_acc) ? '方向準確率 ' + pct1(r.direction_acc) : ''],
+      quantile: [has(r.coverage) ? '覆蓋率 ' + pct1(r.coverage) : '', has(r.width) ? '平均寬度 ' + (r.width * 100).toFixed(1) + ' 個百分點' : ''],
+      volatility: [has(r.mae) ? 'MAE ' + (r.mae * 100).toFixed(1) + ' 個百分點（年化）' : ''],
+      classification: [has(r.auc) ? 'AUC ' + num3(r.auc) : '', has(r.brier) ? 'Brier ' + num3(r.brier) : '']
+    }[row.objective] || [];
+    return parts.filter(Boolean).join('，') + '（近 ' + r.days + ' 個評估日）';
+  }
+
+  function researchText(row) {
+    if (row.objective !== 'rank') return '—';
+    if (!row.research) return '研究期成績尚未產出';
+    const m = row.research.metrics || {};
+    const own = '研究期 rank IC ' + (has(m.rank_ic) ? num3(m.rank_ic) : '—') + (has(m.rank_icir) ? '，ICIR ' + m.rank_icir.toFixed(2) : '');
+    const b = row.baseline ? row.baseline.metrics || {} : null;
+    return own + (b ? '；Ridge ' + (has(b.rank_ic) ? num3(b.rank_ic) : '—') + (has(b.rank_icir) ? '，ICIR ' + b.rank_icir.toFixed(2) : '') : '');
+  }
+
+  function modelRowHtml(row) {
+    const degraded = row.status === 'degraded' ? '<span class="faint small">　降級中</span>' : '';
+    return '<div class="trow model-cols"><div class="num">' + esc(OBJECTIVES[row.objective] || row.objective) + '<span class="faint small">　' + row.horizon + ' 日</span></div>' +
+      '<div>' + esc(modelName(row.model_type)) + degraded + '</div>' +
+      '<div class="muted version">' + esc(row.version) + '</div>' +
+      '<div class="muted">' + esc(monthOf(row.train_start)) + ' 到 ' + esc(monthOf(row.train_end)) + '</div>' +
+      '<div>' + esc(recentText(row)) + '</div>' +
+      '<div class="muted">' + esc(researchText(row)) + '</div></div>';
+  }
+
+  async function renderModelTable() {
+    const host = document.getElementById('model-table');
+    try {
+      const { data } = await api.get('models');
+      host.innerHTML = !data.length ? '<p class="placeholder">模型尚未上線。</p>' :
+        '<div class="scroll" style="margin-top:14px"><div class="table" style="min-width:1100px">' +
+        '<div class="thead model-cols"><div>目標</div><div>模型</div><div>版本</div><div>訓練區間</div><div>近 6 個月成績</div><div>研究期成績與 baseline</div></div>' +
+        data.map(modelRowHtml).join('') + '</div></div>';
+    } catch (err) {
+      host.innerHTML = errorBox(err);
+    }
+  }
+
+  function icTicks(lo, hi) {
+    const step = [0.01, 0.02, 0.05, 0.1, 0.2].find(s => (hi - lo) / s <= 5) || 0.5;
+    const first = Math.floor(lo / step + 1e-9), last = Math.max(first + 1, Math.ceil(hi / step - 1e-9));
+    return Array.from({ length: last - first + 1 }, (_, k) => Number(((first + k) * step).toFixed(2)));
+  }
+
+  function drawIcChart(host, rows, meta) {
+    const model = modelName(meta.model_type), baseline = modelName(meta.baseline);
+    const values = rows.flatMap(row => [row.model, row.baseline]).filter(has);
+    const W = 1280, H = 300, padL = 48, padR = 24, padT = 16, padB = 32, innerW = W - padL - padR, innerH = H - padT - padB;
+    const ticks = icTicks(Math.min(0, ...values), Math.max(0, ...values));
+    const vMin = ticks[0], vMax = ticks[ticks.length - 1];
+    const y = v => padT + (vMax - v) / (vMax - vMin) * innerH, y0 = y(0), gw = innerW / rows.length;
+    const bar = (cls, i, v, dx) => !has(v) ? '' : '<rect class="' + cls + (rows[i].complete ? '' : ' partial') + '" x="' + f1(padL + i * gw + gw / 2 + dx) + '" y="' + f1(Math.min(y(v), y0)) + '" width="' + f1(Math.max(2, gw / 2 - 3)) + '" height="' + f1(Math.abs(y(v) - y0)) + '" rx="2" fill="' + (cls === 'bar-model' ? 'var(--model)' : 'var(--ink-4)') + '"' + (rows[i].complete ? '' : ' fill-opacity="0.35"') + '></rect>';
+    host.innerHTML =
+      '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="近 ' + rows.length + ' 個月每月 rank IC，' + esc(model) + ' 與 ' + esc(baseline) + ' 並列長條圖">' +
+      ticks.map(v => '<line x1="' + padL + '" x2="' + (W - padR) + '" y1="' + f1(y(v)) + '" y2="' + f1(y(v)) + '" stroke="' + (v === 0 ? '#4A4A46' : '#2A2A28') + '"></line><text x="' + (padL - 8) + '" y="' + f1(y(v) + 4) + '" text-anchor="end" fill="#8A887F" font-size="12">' + v.toFixed(2) + '</text>').join('') +
+      '<g class="hl" style="display:none"><rect y="' + padT + '" width="' + f1(gw) + '" height="' + innerH + '" fill="rgba(255,255,255,0.04)"></rect></g>' +
+      rows.map((row, i) => bar('bar-model', i, row.model, -gw / 2 + 2) + bar('bar-baseline', i, row.baseline, 1)).join('') +
+      rows.map((row, i) => (i % 3 === 0 || i === rows.length - 1) ? '<text x="' + f1(padL + i * gw + gw / 2) + '" y="' + (H - 8) + '" text-anchor="middle" fill="#8A887F" font-size="12">' + esc(row.month.slice(2, 4) + '/' + row.month.slice(5)) + '</text>' : '').join('') +
+      '<rect class="overlay" x="' + padL + '" y="' + padT + '" width="' + innerW + '" height="' + innerH + '" fill="transparent"></rect></svg>' +
+      '<div class="tip" style="display:none;top:6px"><div class="t"></div><div class="b"></div></div>';
+    const svg = host.querySelector('svg'), overlay = host.querySelector('.overlay'), hl = host.querySelector('.hl'), hlRect = hl.querySelector('rect');
+    const tip = host.querySelector('.tip'), tt = tip.querySelector('.t'), tb = tip.querySelector('.b');
+    overlay.addEventListener('pointermove', ev => {
+      const rect = svg.getBoundingClientRect();
+      const i = Math.max(0, Math.min(rows.length - 1, Math.floor(((ev.clientX - rect.left) * (W / rect.width) - padL) / gw)));
+      const row = rows[i], gx = padL + i * gw;
+      hlRect.setAttribute('x', gx); hl.style.display = '';
+      tt.textContent = row.month.replace('-', ' 年 ').replace(/ 0(\d)$/, ' $1') + ' 月';
+      tb.textContent = model + ' ' + (has(row.model) ? num3(row.model) : '—') + '，' + baseline + ' ' + (has(row.baseline) ? num3(row.baseline) : '—') +
+        (row.complete ? '' : '（只有 ' + (row.days || 0) + ' 天，不計入比較）');
+      tip.style.display = ''; tip.style.left = ((gx + gw / 2) / W * 100) + '%';
+      tip.style.transform = i > rows.length - 4 ? 'translateX(-100%)' : i < 2 ? 'translateX(0)' : 'translateX(-50%)';
+    });
+    overlay.addEventListener('pointerleave', () => { hl.style.display = 'none'; tip.style.display = 'none'; });
+  }
+
+  const IC_SOURCES = { params: '上線模型指定的研究', self: '上線模型的研究', holdout: '最近一次 holdout' };
+
+  async function renderIcChart() {
+    const host = document.getElementById('ic-chart'), sub = document.getElementById('ic-sub'), legend = document.getElementById('ic-legend');
+    try {
+      const { data, meta } = await api.get('models/ic-monthly', { horizon: 20, months: 24 });
+      if (!data.length) {
+        host.innerHTML = '<p class="placeholder">回測結果尚未產出。</p>';
+        sub.textContent = 'walk-forward 研究期的月平均。';
+        legend.innerHTML = '';
+        return;
+      }
+      const model = modelName(meta.model_type), baseline = modelName(meta.baseline);
+      legend.innerHTML = '<span><i class="sw-sq" style="background:var(--model)"></i>' + esc(model) + '</span><span><i class="sw-sq" style="background:var(--ink-4)"></i>' + esc(baseline) + '</span>';
+      sub.textContent = 'walk-forward 研究期的月平均，近 ' + data.length + ' 個月（' + (IC_SOURCES[meta.source] || meta.source) + '，' + meta.run_key + '）。' +
+        model + ' 有 ' + meta.above_baseline + ' 個月高於 ' + baseline + '，負值月份 ' + meta.negative + ' 個；天數少於 ' + meta.min_days + ' 天的月份不計，以淡色表示。';
+      drawIcChart(host, data, meta);
+    } catch (err) {
+      host.innerHTML = errorBox(err);
+      sub.textContent = '';
+      legend.innerHTML = '';
+    }
+  }
+
   function etlRowHtml(run) {
     const status = RUN_STATUS[run.status] || [run.status, 'idle'];
     return '<div class="trow short etl-cols"><div class="muted">' + esc(hhmm(run.started_at)) + '</div><div>' + esc(run.dataset) + '</div>' +
@@ -736,7 +849,7 @@
     document.querySelector('[data-nav="stock"]').setAttribute('href', '#stock-' + encodeURIComponent(state.stock));
     if (name === 'today') { state.watchCache = null; loadToday(); }
     if (name === 'stock') renderStock(code);
-    if (name === 'models') { renderEtl(); renderQuality(); }
+    if (name === 'models') { renderModelTable(); renderIcChart(); renderEtl(); renderQuality(); }
     renderStatus();
     window.scrollTo(0, 0);
   }
