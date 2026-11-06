@@ -20,7 +20,7 @@ from apps.market.models import (
     IndexId,
     StockMaster,
 )
-from apps.research.panel import COMMON_STOCK_PATTERN, DEPOSITARY_INDUSTRY, DEPOSITARY_PREFIX
+from apps.market.universe import COMMON_STOCK_PATTERN, DEPOSITARY_INDUSTRY, DEPOSITARY_PREFIX
 
 Severity = DataQualityLog.Severity
 ROW_COUNT = "row_count"
@@ -229,7 +229,7 @@ def _gap(
 
 
 def _common(codes: set[str]) -> set[str]:
-    """Four-digit codes outside the 91 depositary range, as the research panel keeps them."""
+    """Four-digit codes outside the 91 depositary range, as `apps.market.universe` defines them."""
     prefix = DEPOSITARY_PREFIX.removesuffix("%")
     return {code for code in codes if COMMON_CODE.match(code) and not code.startswith(prefix)}
 

@@ -11,10 +11,8 @@ import pandas as pd
 from django.db import connection
 
 from apps.market.calendar import NotATradingDayError, TradingDays
+from apps.market.universe import COMMON_STOCK_PATTERN, DEPOSITARY_INDUSTRY, DEPOSITARY_PREFIX
 
-COMMON_STOCK_PATTERN = "^[1-9][0-9]{3}$"
-DEPOSITARY_PREFIX = "91%"
-DEPOSITARY_INDUSTRY = "存託憑證"
 REUSE_GAP = 250
 PRICE_COLUMNS = ("open", "high", "low", "close")
 PANEL_COLUMNS = (
