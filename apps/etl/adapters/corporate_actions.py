@@ -21,6 +21,7 @@ EX_RIGHTS = "ex_rights"
 EX_RIGHTS_DETAIL = "ex_rights_detail"
 CAPITAL_REDUCTION = "capital_reduction"
 PAR_VALUE_CHANGE = "par_value_change"
+SPLIT = "split"
 MISMATCH_CHECK = "dividend_source_mismatch"
 AMOUNTS = ("cash_dividend", "stock_dividend")
 FACTOR_TOLERANCE = 1e-6
