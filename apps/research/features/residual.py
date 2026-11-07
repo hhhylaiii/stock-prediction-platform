@@ -25,6 +25,7 @@ FALLBACKS: Mapping[str, str] = MappingProxyType(
 MASKED_MONTHS: Mapping[str, frozenset[str]] = MappingProxyType({})
 GROUPS = {True: "delisted", False: "current"}
 OBSERVED = "_observable"
+PRESENT = "present_"
 OBSERVABLE: Mapping[str, tuple[str, ...]] = MappingProxyType(
     {
         "fund_ep": ("eps_ttm",),
@@ -76,18 +77,29 @@ def observable_name(name: str) -> str:
     return f"{name}{OBSERVED}"
 
 
+def _recorded(panel: pd.DataFrame, signal: str, column: str) -> pd.Series:
+    """Whether the signal's inputs are on record, for a fallback also on one report basis."""
+    recorded = panel[sourced_name(signal)].eq(1.0)
+    if signal == column or signal not in BASIS_SIGNALS:
+        return recorded
+    return recorded & panel[crossed_name(signal)].ne(1.0)
+
+
 def observable_gaps(
     panel: pd.DataFrame, exempt: Mapping[str, frozenset[str]] = NO_MARGINS
 ) -> pd.DataFrame:
     """Per row, whether each OBSERVABLE gap reads only inputs on record or its industry lacks it.
 
-    A value read from inputs all on record is missing by its formula, not by the source.
+    A value read from inputs all on record is missing by its formula, not by the source; a
+    fallback left NaN by a report-basis switch does not explain its column's gap.
     """
     industry = canonical_industry(panel["industry"])
     observed = {}
     for name, signals in OBSERVABLE.items():
-        recorded = panel[[sourced_name(signal) for signal in signals]].eq(1.0).any(axis=1)
-        observed[observable_name(name)] = recorded | industry.isin(exempt.get(name, frozenset()))
+        recorded = pd.concat([_recorded(panel, signal, name) for signal in signals], axis=1)
+        observed[observable_name(name)] = recorded.any(axis=1) | industry.isin(
+            exempt.get(name, frozenset())
+        )
     crossed = {crossed_name(name): panel[crossed_name(name)].eq(1.0) for name in BASIS_SIGNALS}
     return panel[["stock_id", "date"]].assign(**observed, **crossed)
 
@@ -124,15 +136,23 @@ def masked_as_observable(
 
 
 def monthly_coverage(rows: pd.DataFrame, column: str, delisted: pd.Series) -> pd.DataFrame:
-    """Share of universe rows with a value, or an observable gap, per month and later fate."""
+    """Share of universe rows with a value or an observable gap, per month and later fate.
+
+    The present_ shares count values only.
+    """
     inside = rows[rows["in_universe"].astype(bool)]
     group = inside["stock_id"].map(delisted).eq(True).map(GROUPS)
-    known = inside[column].notna()
+    present = inside[column].notna()
     observed = observable_name(column)
-    if observed in inside:
-        known = known | inside[observed].eq(True)
-    shares = known.astype("float64").groupby([_months(inside["date"]), group]).mean().unstack()
-    return shares.reindex(columns=list(GROUPS.values())).rename_axis(index=None, columns=None)
+    known = present | inside[observed].eq(True) if observed in inside else present
+    months = _months(inside["date"])
+
+    def shares(flag: pd.Series) -> pd.DataFrame:
+        table = flag.astype("float64").groupby([months, group]).mean().unstack()
+        return table.reindex(columns=list(GROUPS.values()))
+
+    table = pd.concat([shares(known), shares(present).add_prefix(PRESENT)], axis=1)
+    return table.rename_axis(index=None, columns=None)
 
 
 def _apart(more: pd.Series, less: pd.Series) -> pd.Series:
@@ -142,9 +162,10 @@ def _apart(more: pd.Series, less: pd.Series) -> pd.Series:
 
 
 def affected_months(coverage: pd.DataFrame) -> list[str]:
-    """Months where, on their own, the delisted group is missing or present far more often."""
+    """Months where, on their own, the delisted group has source gaps or values far more often."""
     current, delisted = coverage["current"], coverage["delisted"]
-    affected = _apart(1 - delisted, 1 - current) | _apart(delisted, current)
+    present = coverage[f"{PRESENT}current"], coverage[f"{PRESENT}delisted"]
+    affected = _apart(1 - delisted, 1 - current) | _apart(present[1], present[0])
     return sorted(str(month) for month in coverage.index[affected])
 
 

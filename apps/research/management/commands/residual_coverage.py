@@ -28,7 +28,14 @@ from apps.research.features.residual import (
 from apps.research.ranges import years
 
 DEFAULT_START, DEFAULT_END = date(2010, 1, 1), date(2020, 12, 31)
-TABLE_COLUMNS = ["column", "month", "current", "delisted"]
+TABLE_COLUMNS = [
+    "column",
+    "month",
+    "current",
+    "delisted",
+    "present_current",
+    "present_delisted",
+]
 
 
 def _delisted() -> pd.Series:

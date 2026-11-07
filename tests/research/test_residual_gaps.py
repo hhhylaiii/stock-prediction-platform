@@ -163,14 +163,22 @@ def test_monthly_coverage_splits_universe_rows_by_later_delisting() -> None:
 def test_a_month_is_affected_when_it_fails_the_acceptance_on_its_own(
     current: float, delisted: float, affected: bool
 ) -> None:
-    coverage = pd.DataFrame({"current": [current], "delisted": [delisted]}, index=["2017-03"])
+    shares = {"current": [current], "delisted": [delisted]}
+    coverage = pd.DataFrame(
+        {**shares, **{f"present_{k}": v for k, v in shares.items()}}, ["2017-03"]
+    )
 
     assert affected_months(coverage) == (["2017-03"] if affected else [])
 
 
 def test_affected_months_are_sorted() -> None:
     coverage = pd.DataFrame(
-        {"current": [1.0, 1.0, 1.0], "delisted": [0.5, 1.0, 0.5]},
+        {
+            "current": [1.0, 1.0, 1.0],
+            "delisted": [0.5, 1.0, 0.5],
+            "present_current": [1.0, 1.0, 1.0],
+            "present_delisted": [0.5, 1.0, 0.5],
+        },
         index=["2017-05", "2017-04", "2017-03"],
     )
 
@@ -209,6 +217,7 @@ def test_a_gap_is_observable_only_when_every_input_its_value_reads_is_on_record(
     )
     panel.loc[[0, 3], sourced_name("fund_rev_yoy_q")] = 1.0
     panel = panel.assign(**{crossed_name(name): [0.0, 1.0, NAN, 0.0] for name in BASIS_SIGNALS})
+    panel.loc[3, crossed_name("fund_rev_yoy_q")] = 1.0
 
     gaps = observable_gaps(panel)
 
@@ -230,12 +239,14 @@ def test_a_gap_is_observable_only_when_every_input_its_value_reads_is_on_record(
         "fund_rev_yoy",
         "fund_rev_3m_yoy",
     }
-    for name in ("fund_ep", "ind_ep_neutral", "fund_eps_yoy", "fund_debt_ratio", "fund_cfo_to_ni"):
+    paired = {*MARGINS, "fund_rev_yoy", "fund_rev_3m_yoy", "fund_rev_yoy_q"}
+    for name in (name for name in OBSERVABLE if name not in paired):
         assert column(name) == [True, False, False, False]
     for name in MARGINS:
         assert column(name) == [True, True, False, False]
-    assert column("fund_rev_yoy") == [True, True, False, True]
+    assert column("fund_rev_yoy") == [True, True, False, False]
     assert column("fund_rev_3m_yoy") == [True, False, False, True]
+    assert column("fund_rev_yoy_q") == [True, False, False, True]
 
 
 def test_monthly_coverage_counts_an_observable_gap_as_covered() -> None:
@@ -295,3 +306,25 @@ def test_basis_counts_take_gaps_read_across_report_bases_by_later_fate() -> None
     counts = basis_counts(rows, "fund_rev_yoy_q", delisted)
 
     assert counts.to_dict() == {"current": 1, "delisted": 1, "rows_current": 2, "rows_delisted": 2}
+
+
+def test_a_month_where_only_the_delisted_have_values_stays_affected() -> None:
+    days = [d("2013-03-01")] * 200
+    rows = pd.DataFrame(
+        {
+            "stock_id": [f"c{k}" for k in range(100)] + [f"g{k}" for k in range(100)],
+            "date": days,
+            "in_universe": True,
+            "fund_rev_yoy": [NAN] * 100 + [0.2] * 29 + [NAN] * 71,
+            observable_name("fund_rev_yoy"): [True] * 100 + [False] * 29 + [True] * 71,
+        }
+    )
+    delisted = pd.Series(
+        {**{f"c{k}": False for k in range(100)}, **{f"g{k}": True for k in range(100)}}
+    )
+
+    coverage = monthly_coverage(rows, "fund_rev_yoy", delisted)
+
+    assert list(coverage.columns) == ["delisted", "current", "present_delisted", "present_current"]
+    assert list(coverage.loc["2013-03"]) == [1.0, 1.0, 0.29, 0.0]
+    assert affected_months(coverage) == ["2013-03"]
