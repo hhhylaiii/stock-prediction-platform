@@ -135,7 +135,7 @@ def test_a_change_older_than_thirty_sessions_is_sent_for_a_rebuild_by_hand(
     commands: list[tuple[str, dict[str, Any]]], sent: list[Any]
 ) -> None:
     named = changed({"stocks": {"2330": OLD.isoformat(), "2317": RECENT.isoformat()}})
-    counted = changed({"earliest": RECENT.isoformat(), "count": 900})
+    counted = changed({"earliest": "2026-10-05", "count": 900})
 
     tasks.STEPS["rebuild"](DAY)
 
@@ -148,6 +148,22 @@ def test_a_change_older_than_thirty_sessions_is_sent_for_a_rebuild_by_hand(
         "limit": 30,
         "notes": {str(named.pk): named.detail, str(counted.pk): counted.detail},
     }
+    assert sent == [(DAY, tasks.REBUILD_CHECK, Severity.WARNING)]
+    assert tasks._open_notes() == []
+
+
+def test_an_old_note_goes_by_hand_while_the_recent_ones_are_rebuilt(
+    commands: list[tuple[str, dict[str, Any]]], sent: list[Any]
+) -> None:
+    old = changed({"stocks": {"2330": OLD.isoformat()}})
+    recent = changed({"stocks": {"2317": RECENT.isoformat()}})
+
+    tasks.STEPS["rebuild"](DAY)
+
+    assert [options["start"] for name, options in commands if name == "build_features"] == [RECENT]
+    warning, done = rebuilds()
+    assert (warning.severity, set(warning.detail["notes"])) == (Severity.WARNING, {str(old.pk)})
+    assert (done.severity, set(done.detail["notes"])) == (Severity.INFO, {str(recent.pk)})
     assert sent == [(DAY, tasks.REBUILD_CHECK, Severity.WARNING)]
     assert tasks._open_notes() == []
 
@@ -198,6 +214,25 @@ def test_a_note_that_grew_after_its_rebuild_is_rebuilt_again(
 
     assert [open_note.pk for open_note in tasks._open_notes()] == [note.pk]
 
+    tasks.STEPS["rebuild"](DAY)
+
+    assert tasks._open_notes() == []
+
+
+def test_any_rebuild_that_read_a_note_as_it_reads_now_closes_it() -> None:
+    grown = {"stocks": {"2330": RECENT.isoformat(), "2317": "2026-11-24"}}
+    note = changed(grown)
+    first = {"stocks": {"2330": RECENT.isoformat()}}
+    for detail in (grown, first):
+        DataQualityLog.objects.create(
+            date=DAY,
+            check_name=tasks.REBUILD_CHECK,
+            severity=Severity.INFO,
+            detail={"earliest": RECENT.isoformat(), "stocks": 1, "notes": {str(note.pk): detail}},
+        )
+
+    assert tasks._open_notes() == []
+
 
 def test_notes_past_the_window_are_left_alone(
     commands: list[tuple[str, dict[str, Any]]], now: Callable[[date, time], None]
@@ -220,15 +255,22 @@ def test_a_failed_rebuild_warns_and_leaves_its_notes_open(
 
     summary = tasks.STEPS["rebuild"](DAY)
 
-    assert summary == f"rebuild from {RECENT} failed, see {tasks.REBUILD_CHECK}"
+    assert summary == f"rebuild failed, see {tasks.REBUILD_CHECK}"
     [warning] = rebuilds()
-    assert warning.detail == {
-        "earliest": RECENT.isoformat(),
-        "stocks": 1,
-        "error": "RuntimeError: feature_daily is locked",
-    }
+    assert warning.detail == {"error": "RuntimeError: feature_daily is locked"}
     assert sent == [(DAY, tasks.REBUILD_CHECK, Severity.WARNING)]
     assert len(tasks._open_notes()) == 1
+
+
+def test_an_unreadable_note_warns_instead_of_failing_the_step(sent: list[Any]) -> None:
+    changed({"stocks": {}})
+
+    summary = tasks.STEPS["rebuild"](DAY)
+
+    assert summary == f"rebuild failed, see {tasks.REBUILD_CHECK}"
+    [warning] = rebuilds()
+    assert warning.detail["error"].startswith("ValueError")
+    assert sent == [(DAY, tasks.REBUILD_CHECK, Severity.WARNING)]
 
 
 def test_a_failed_rebuild_lets_the_morning_predict(

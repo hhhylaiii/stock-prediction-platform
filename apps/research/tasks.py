@@ -131,12 +131,16 @@ def _promote(day: date) -> str:
     return "; ".join([*done, *(f"{key}: failed, see {PROMOTE_CHECK}" for key in failed)])
 
 
-def _taken(since: date) -> dict[str, Any]:
-    """Each adj_factor note a rebuild already took in, as the note read then."""
+def _taken(since: date) -> dict[str, list[Any]]:
+    """Every content a rebuild took each adj_factor note in at, by the note's pk."""
     rows = DataQualityLog.objects.filter(
         check_name=REBUILD_CHECK, date__gte=since - timedelta(days=NOTE_WINDOW)
     )
-    return {pk: detail for row in rows for pk, detail in row.detail.get("notes", {}).items()}
+    taken: dict[str, list[Any]] = {}
+    for row in rows:
+        for pk, detail in row.detail.get("notes", {}).items():
+            taken.setdefault(pk, []).append(detail)
+    return taken
 
 
 def _open_notes() -> list[DataQualityLog]:
@@ -144,7 +148,7 @@ def _open_notes() -> list[DataQualityLog]:
     since = timezone.localtime().date() - timedelta(days=NOTE_WINDOW)
     taken = _taken(since)
     notes = DataQualityLog.objects.filter(check_name=ADJ_CHECK, date__gte=since).order_by("pk")
-    return [note for note in notes if taken.get(str(note.pk)) != note.detail]
+    return [note for note in notes if note.detail not in taken.get(str(note.pk), [])]
 
 
 def _earliest(note: DataQualityLog) -> date:
@@ -176,28 +180,43 @@ def _rebuild_range(calendar: TradingDays, earliest: date, day: date, labels: boo
     return "; ".join(done) or f"nothing before {day} to rebuild"
 
 
-def _rebuild(day: date, labels: bool = True) -> str:
-    """Redo what adj_factor changes moved up to day; a failure warns and leaves them open."""
+def _summary(notes: list[DataQualityLog]) -> dict[str, Any]:
+    earliest = min(_earliest(note) for note in notes)
+    taken = {str(note.pk): note.detail for note in notes}
+    return {"earliest": earliest.isoformat(), "stocks": _stocks(notes), "notes": taken}
+
+
+def _rebuild_notes(day: date, labels: bool) -> str:
+    """Notes past the limit go to a person; the recent ones are rebuilt from their earliest."""
     notes = [note for note in _open_notes() if _earliest(note) <= day]
     if not notes:
         return f"no adj_factor change up to {day}"
-    earliest = min(_earliest(note) for note in notes)
-    taken = {str(note.pk): note.detail for note in notes}
-    detail = {"earliest": earliest.isoformat(), "stocks": _stocks(notes)}
     calendar = TradingDays.from_db()
+    cutoff = calendar.shift(day, -REBUILD_LIMIT)
+    old = [note for note in notes if _earliest(note) < cutoff]
+    recent = [note for note in notes if _earliest(note) >= cutoff]
+    done = []
+    if old:
+        limited = {**_summary(old), "limit": REBUILD_LIMIT}
+        _append(day, REBUILD_CHECK, Severity.WARNING, limited)
+        done.append(f"adj_factor moved from {limited['earliest']}, over {REBUILD_LIMIT} back")
+    if recent:
+        detail = _summary(recent)
+        built = _rebuild_range(calendar, date.fromisoformat(detail["earliest"]), day, labels)
+        _append(day, REBUILD_CHECK, Severity.INFO, detail)
+        done.append(built)
+    return "; ".join(done)
+
+
+def _rebuild(day: date, labels: bool = True) -> str:
+    """Redo what adj_factor changes moved up to day; a failure warns and leaves them open."""
     try:
-        if earliest < calendar.shift(day, -REBUILD_LIMIT):
-            limited = {**detail, "limit": REBUILD_LIMIT, "notes": taken}
-            _append(day, REBUILD_CHECK, Severity.WARNING, limited)
-            return f"adj_factor moved from {earliest}, over {REBUILD_LIMIT} sessions back"
-        summary = _rebuild_range(calendar, earliest, day, labels)
+        return _rebuild_notes(day, labels)
     except Exception as error:
-        logger.error("research rebuild %s from %s failed: %s", day, earliest, error)
-        failed = {**detail, "error": f"{type(error).__name__}: {error}"}
+        logger.error("research rebuild %s failed: %s", day, error)
+        failed = {"error": f"{type(error).__name__}: {error}"}
         _append(day, REBUILD_CHECK, Severity.WARNING, failed)
-        return f"rebuild from {earliest} failed, see {REBUILD_CHECK}"
-    _append(day, REBUILD_CHECK, Severity.INFO, {**detail, "notes": taken})
-    return summary
+        return f"rebuild failed, see {REBUILD_CHECK}"
 
 
 def _rebuild_features(day: date) -> str:
