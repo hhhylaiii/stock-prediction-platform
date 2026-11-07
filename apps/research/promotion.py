@@ -120,6 +120,7 @@ def _note(
 ) -> DataQualityLog:
     """The row of one promotion: info when every gate passed, else a warning to send."""
     detail = {
+        "scope": _scope(run_key),
         "run_key": run_key,
         "forced": bool(failed and reason),
         "reason": (reason or None) if failed else None,

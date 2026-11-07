@@ -116,6 +116,7 @@ def test_a_first_launch_goes_live_with_its_rows(
     [record] = alerts()
     assert (record.date, record.severity) == (LAST, DataQualityLog.Severity.INFO)
     assert record.detail == {
+        "scope": "rank",
         "run_key": "rank-prod",
         "forced": False,
         "reason": None,
@@ -174,7 +175,7 @@ def test_failed_gates_keep_the_serving_runs_and_alert(
     assert dispatched == [alert]
     assert alert.date == LAST
     assert alert.severity == DataQualityLog.Severity.WARNING
-    assert alert.detail["run_key"] == "rank-prod"
+    assert (alert.detail["scope"], alert.detail["run_key"]) == ("rank", "rank-prod")
     assert alert.detail["forced"] is False
     assert alert.detail["promoted"] is False
     failed = {entry["slot"]: entry for entry in alert.detail["failed"]}
@@ -215,6 +216,7 @@ def test_force_swaps_in_a_build_that_failed_and_records_why(
     assert alert.detail["forced"] is True
     assert alert.detail["reason"] == why
     assert alert.detail["promoted"] is True
+    assert alert.detail["scope"] == "rank"
     assert alert.severity == DataQualityLog.Severity.WARNING
     assert len(alert.detail["failed"]) == 2
 
@@ -234,6 +236,7 @@ def test_force_without_failures_is_not_recorded_as_forced(
     [record] = alerts()
     assert record.severity == DataQualityLog.Severity.INFO
     assert record.detail == {
+        "scope": "rank",
         "run_key": "rank-prod",
         "forced": False,
         "reason": None,
