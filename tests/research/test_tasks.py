@@ -170,10 +170,10 @@ def test_the_evening_chain_builds_features_then_labels_under_the_lock(
 
     tasks.evening.apply().get()
 
-    assert ran == [("features", WEDNESDAY, True), ("labels", WEDNESDAY, True)]
+    assert ran == [("recent_features", WEDNESDAY, True), ("labels", WEDNESDAY, True)]
     done = marker(WEDNESDAY, tasks.EVENING_CHECK)
     assert done.severity == Severity.INFO
-    assert done.detail == {"steps": [ok("features"), ok("labels")]}
+    assert done.detail == {"steps": [ok("recent_features"), ok("labels")]}
     assert sent == []
     assert not holds_lock()
 
@@ -186,7 +186,7 @@ def test_the_evening_waits_for_the_research_gate_and_runs_once_it_opens(
 
     tasks.evening.apply().get()
 
-    assert steps(ran) == ["features", "labels"]
+    assert steps(ran) == ["recent_features", "labels"]
     assert marker(WEDNESDAY, tasks.EVENING_CHECK).severity == Severity.INFO
 
 
@@ -241,7 +241,7 @@ def test_the_evening_keeps_its_session_when_the_gate_retries_run_past_midnight(
 
     assert asked == [WEDNESDAY] * 3
     if opens:
-        assert ran == [("features", WEDNESDAY, True), ("labels", WEDNESDAY, True)]
+        assert ran == [("recent_features", WEDNESDAY, True), ("labels", WEDNESDAY, True)]
         assert marker(WEDNESDAY, tasks.EVENING_CHECK).severity == Severity.INFO
     else:
         assert ran == []
@@ -633,12 +633,14 @@ def test_the_real_steps_run_the_research_commands_and_functions(
     monkeypatch.setattr(tasks, "run_monitor", monitored)
 
     assert tasks.STEPS["features"](WEDNESDAY) == "build_features: 7 rows"
+    assert tasks.STEPS["recent_features"](WEDNESDAY) == "build_features: 7 rows"
     assert tasks.STEPS["labels"](WEDNESDAY) == "build_labels: 7 rows"
     assert tasks.STEPS["predict"](WEDNESDAY) == "r1: 3 rows; no serving run for quantile 20 日"
     assert tasks.STEPS["monitor"](WEDNESDAY) == "4 model_monitor rows, degraded r2"
     assert called == [
         ("build_features", {"date": WEDNESDAY}),
-        ("build_labels", {"end": WEDNESDAY}),
+        ("build_features", {"end": WEDNESDAY, "recent": 60}),
+        ("build_labels", {"end": WEDNESDAY, "recent": 81}),
         ("predict", (WEDNESDAY, settings.FEATURE_PARQUET_DIR)),
         ("monitor", (WEDNESDAY, True)),
     ]
