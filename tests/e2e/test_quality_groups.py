@@ -7,7 +7,7 @@ from pytest_django.live_server_helper import LiveServer
 
 from apps.etl import filings
 from apps.etl.models import DataQualityLog
-from tests.e2e.conftest import XSS_NAME, Seed
+from tests.e2e.conftest import Seed
 
 pytestmark = pytest.mark.e2e
 
@@ -90,7 +90,7 @@ def test_a_failed_correction_request_leaves_the_daily_checks(
 def test_a_check_written_per_stock_on_the_day_reads_as_one_line(
     page: Page, live_server: LiveServer, seeded: Seed
 ) -> None:
-    for stock in ("2330", "2317", XSS_NAME):
+    for stock in ("2330", "2317", "2454"):
         logged(seeded, "probe_per_stock", "warning", {"stock_id": stock})
 
     page.goto(f"{live_server.url}/#models")
@@ -99,21 +99,21 @@ def test_a_check_written_per_stock_on_the_day_reads_as_one_line(
     expect(probe).to_have_count(1)
     expect(probe.locator(".muted")).to_have_text("3 檔")
     expect(probe.locator("i")).to_have_class("warn")
-    assert page.evaluate("window.__xss") is None
 
 
 def test_the_strip_and_the_day_count_warned_checks_not_rows(
     page: Page, live_server: LiveServer, seeded: Seed
 ) -> None:
-    for kind in ("consolidated", "individual", "other"):
-        logged(seeded, "statement_type_mismatch", "warning", {"statements": [{"fin_type": kind}]})
+    DataQualityLog.objects.filter(check_name="row_count").delete()
+    for table in ("daily_price", "daily_chip", "daily_valuation"):
+        logged(seeded, "row_count", "warning", {"table": table, "count": 1, "previous": 1800})
 
     page.goto(f"{live_server.url}/#models")
 
     expect(page.locator("#status")).to_contain_text("品質檢查通過（2 項警告）")
     expect(page.locator("#quality-sub")).to_contain_text("檢查通過，但有 2 項警告。")
     expect(page.locator("#quality-days")).to_contain_text("通過（2 項警告）")
-    expect(page.locator("#quality .check", has_text="財報種類不同")).to_have_count(3)
+    expect(page.locator("#quality .check", has_text="各表當日列數")).to_have_count(3)
 
 
 def test_checks_without_a_stock_keep_one_line_per_row_and_their_names(

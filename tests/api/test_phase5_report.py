@@ -270,11 +270,12 @@ def test_a_non_200_status_and_a_slow_p95_fail_the_timing_checks(
     complete: Runs, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     def slow(*args: Any) -> list[Timing]:
-        fast = [Timing(path, "200", 1.0, 2.0, 3.0) for path in ENDPOINTS[:10]]
+        fast = [Timing(path, "200", 1.0, 2.0, 3.0) for path in ENDPOINTS[:9]]
         return [
             *fast,
             Timing("/api/etl/runs", "200/429×2", 1.0, 2.0, 3.0),
             Timing("/api/data-quality", "200", 300.0, 612.0, 700.0),
+            Timing("/api/data-quality/corrections", "200", 1.0, 2.0, 3.0),
         ]
 
     monkeypatch.setattr(phase5_report, "measure", slow)

@@ -109,24 +109,18 @@ def test_warnings_are_counted_for_the_strip(client: Client, loaded: None) -> Non
 
 
 @time_machine.travel(FRIDAY_NIGHT, tick=False)
-def test_a_check_with_several_rows_counts_once_and_keeps_its_rows(
+def test_a_check_with_a_row_per_table_counts_once_and_keeps_its_rows(
     client: Client, loaded: None
 ) -> None:
-    DataQualityLog.objects.filter(date=OCT_30, check_name=CHECKS[0]).update(severity="warning")
-    for kind in ("consolidated", "individual", "other"):
+    DataQualityLog.objects.filter(date=OCT_30, check_name="row_count").delete()
+    for table in ("daily_price", "daily_chip", "daily_valuation"):
         DataQualityLog.objects.create(
-            date=OCT_30,
-            check_name="statement_type_mismatch",
-            severity="warning",
-            detail={"statements": [{"fin_type": kind}]},
+            date=OCT_30, check_name="row_count", severity="warning", detail={"table": table}
         )
-    DataQualityLog.objects.create(
-        date=OCT_30, check_name="statement_source_mismatch", severity="info", detail={}
-    )
 
     quality = envelope_of(client.get("/api/status"))["data"]["quality"]
 
-    assert (quality["worst"], quality["warnings"], quality["warning_rows"]) == ("warning", 2, 4)
+    assert (quality["worst"], quality["warnings"], quality["warning_rows"]) == ("warning", 1, 3)
 
 
 @time_machine.travel(MONDAY_MORNING, tick=False)
