@@ -10,6 +10,7 @@ from apps.research.features.fundamental import (
     revenue_sourcing,
     sourced_name,
     statement_signals,
+    statement_sourcing,
 )
 from apps.research.features.registry import UNUSED, Group, feature_names
 from tests.research.feature_panels import at, listing, rising
@@ -328,3 +329,46 @@ def test_the_first_announced_statement_of_a_quarter_is_kept() -> None:
 
     assert one(signals, "2015-Q1")["fund_gross_margin"] == pytest.approx(0.3)
     assert one(signals, "2015-Q2")["fund_gross_margin"] == pytest.approx(0.6)
+
+
+def test_statement_sourcing_marks_signals_whose_quarters_and_fields_are_on_record() -> None:
+    statements = quarters("2014-Q1", 12)
+    holed = statements[statements["period"] != "2015-Q1"]
+    blank = statements.assign(gross_margin=[0.4] * 7 + [NAN] + [0.4] * 4)
+
+    full, gaps, nulls = (statement_sourcing(frame) for frame in (statements, holed, blank))
+
+    assert set(full["signal"]) == {sourced_name(name) for name in STATEMENT_READS}
+    assert (one(full, "2016-Q4") == 1.0).all()
+    assert one(full, "2015-Q3")[sourced_name("fund_eps_yoy")] == 0.0
+    assert one(full, "2015-Q4")[sourced_name("fund_eps_yoy")] == 1.0
+    assert one(gaps, "2015-Q2")[sourced_name("eps_ttm")] == 0.0
+    assert one(gaps, "2015-Q2")[sourced_name("fund_debt_ratio")] == 1.0
+    assert one(gaps, "2016-Q1")[sourced_name("eps_ttm")] == 1.0
+    assert one(gaps, "2016-Q1")[sourced_name("fund_rev_yoy_q")] == 0.0
+    assert one(nulls, "2015-Q4")[sourced_name("fund_gross_margin")] == 0.0
+    assert one(nulls, "2015-Q4")[sourced_name("fund_op_margin")] == 1.0
+    assert one(nulls, "2016-Q4")[sourced_name("fund_gm_yoy_chg")] == 0.0
+    assert one(nulls, "2016-Q4")[sourced_name("fund_gross_margin")] == 1.0
+
+
+def test_statement_sourcing_holds_formula_and_basis_gaps_as_on_record() -> None:
+    losses = quarters("2014-Q1", 8, eps=[-1.0] * 4 + [1.0] * 4)
+    switched = quarters("2012-Q1", 12).assign(fin_type=["individual"] * 4 + ["consolidated"] * 8)
+
+    assert math.isnan(one(statement_signals(losses), "2015-Q4")["fund_eps_yoy"])
+    assert one(statement_sourcing(losses), "2015-Q4")[sourced_name("fund_eps_yoy")] == 1.0
+    assert math.isnan(one(statement_signals(switched), "2013-Q4")["fund_gm_yoy_chg"])
+    assert one(statement_sourcing(switched), "2013-Q4")[sourced_name("fund_gm_yoy_chg")] == 1.0
+
+
+@pytest.mark.parametrize("signal", list(STATEMENT_READS))
+def test_each_statement_flag_waits_for_exactly_the_quarters_its_signal_reads(signal: str) -> None:
+    statements = quarters("2013-Q1", 16)
+    statements.loc[statements["period"] == "2013-Q2", "announce_date"] = LATE.date()
+
+    flags = statement_sourcing(statements)
+
+    name = sourced_name(signal)
+    waits = [known(flags, later_by(flags, "2013-Q2", k), name) == LATE for k in range(8)]
+    assert waits == [k in STATEMENT_READS[signal] for k in range(8)]
