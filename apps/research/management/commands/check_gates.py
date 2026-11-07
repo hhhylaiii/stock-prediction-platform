@@ -6,7 +6,7 @@ from typing import Any
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
 
-from apps.research.gates import Gate, check_gates
+from apps.research.gates import ERROR_LIMIT, Gate, check_gates
 from apps.research.prediction_cache import FoldMismatchError, MissingFoldsError
 from apps.research.runs import RunError
 
@@ -19,8 +19,12 @@ def verdict(gate: Gate) -> str:
     detail = f"值 {shown}，門檻 {gate.threshold}，樣本 {gate.sample}"
     if gate.passed:
         return f"通過，{detail}"
-    listed = gate.extra.get("errors_total")
-    where = f'；{listed} 組 error 的清單在 N 的 params["gates"]' if listed else ""
+    total = gate.extra.get("errors_total")
+    where = (
+        f'；共 {total} 組 error，最近 {min(total, ERROR_LIMIT)} 組的清單在 N 的 params["gates"]'
+        if total
+        else ""
+    )
     return f"不過（{gate.reason}），{detail}{where}"
 
 

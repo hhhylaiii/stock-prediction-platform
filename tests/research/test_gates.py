@@ -449,8 +449,10 @@ def test_the_report_points_a_failed_quality_gate_to_its_full_error_list() -> Non
 
     assert verdict(failed) == (
         "不過（2 天有 error），值 3.0000，門檻 無 error，樣本 5；"
-        '3 組 error 的清單在 N 的 params["gates"]'
+        '共 3 組 error，最近 3 組的清單在 N 的 params["gates"]'
     )
+    many = Gate("data_quality", False, 250.0, "無 error", 9, "9 天有 error", {"errors_total": 250})
+    assert verdict(many).endswith('共 250 組 error，最近 200 組的清單在 N 的 params["gates"]')
     assert verdict(clean) == "通過，值 0.0000，門檻 無 error，樣本 5"
     assert verdict(gate(False)) == "不過（），值 —，門檻 ，樣本 0"
 
