@@ -11,6 +11,9 @@ from apps.etl.models import DataQualityLog
 from apps.etl.quality import CHECKS, should_run_prediction
 from apps.market.models import TradingCalendar
 from apps.research.evaluation import ALERT_SHARE
+from apps.research.gates import Gate, SlotGates
+from apps.research.predict import Slot
+from apps.research.promotion import _failed, _note
 from tests.api.conftest import envelope_of, sessions_until, taipei
 
 pytestmark = pytest.mark.usefixtures("calendar_in_db")
@@ -97,6 +100,7 @@ def test_model_output_checks_are_listed_apart(client: Client) -> None:
         "output_width_ratio",
     ]
     assert day["model_checks"][-1] == {
+        "id": DataQualityLog.objects.get(check_name="output_width_ratio").pk,
         "check_name": "output_width_ratio",
         "severity": "warning",
         "detail": {"share": 0.2, "flagged": 9, "n_stocks": 45},
@@ -105,6 +109,45 @@ def test_model_output_checks_are_listed_apart(client: Client) -> None:
     assert not {"model_alert", "monitor_unscored"} & {
         check["check_name"] for check in day["checks"]
     }
+
+
+@time_machine.travel(FRIDAY_NIGHT, tick=False)
+def test_research_schedule_checks_sit_with_the_model_checks(client: Client) -> None:
+    log_all(OCT_30)
+    log(OCT_30, "research_morning", Severity.WARNING, step="predict")
+    log(OCT_30, "research_evening", Severity.INFO)
+    log(OCT_30, "research_retrain", Severity.WARNING, refused=["rank"])
+
+    day = envelope_of(client.get("/api/data-quality", {"days": 1}))["data"][0]
+    quality = envelope_of(client.get("/api/status"))["data"]["quality"]
+
+    assert [check["check_name"] for check in day["model_checks"]] == [
+        "research_evening",
+        "research_morning",
+        "research_retrain",
+    ]
+    assert not [check for check in day["checks"] if check["check_name"].startswith("research_")]
+    assert (day["worst"], quality["worst"], quality["warnings"]) == ("info", "info", 0)
+
+
+@time_machine.travel(FRIDAY_NIGHT, tick=False)
+def test_model_checks_carry_their_row_id_in_write_order(client: Client) -> None:
+    log_all(OCT_30)
+    gate = Gate("agreement", False, 0.62, "相關 >= 0.7", 1842, "相關太低")
+    refused = _failed([SlotGates(Slot("rank", 20), "rank-a1", "serving-old", [gate])])
+    _note(OCT_30, "rank", "rank-a", refused, "", promoted=False)
+    _note(OCT_30, "rank", "rank-a", [], "", promoted=True)
+
+    day = envelope_of(client.get("/api/data-quality", {"days": 1}))["data"][0]
+
+    written = list(
+        DataQualityLog.objects.filter(check_name="model_promotion")
+        .order_by("pk")
+        .values_list("pk", flat=True)
+    )
+    assert [check["id"] for check in day["model_checks"]] == written
+    assert [check["detail"]["promoted"] for check in day["model_checks"]] == [False, True]
+    assert not [check for check in day["checks"] if "id" in check]
 
 
 @time_machine.travel(FRIDAY_NIGHT, tick=False)

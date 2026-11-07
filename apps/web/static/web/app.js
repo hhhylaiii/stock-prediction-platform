@@ -24,7 +24,8 @@
     model_alert: '模型告警',
     model_promotion: '換模',
     research_evening: '研究晚間排程',
-    research_morning: '研究早盤排程'
+    research_morning: '研究早盤排程',
+    research_retrain: '每月重訓'
   };
   const ALERT_REASONS = { below_threshold: '低於門檻', outside_range: '超出範圍', above_baseline: '輸給 baseline', missing_reference: '缺參考值' };
   const ALERT_METRICS = { ic: 'IC', coverage: '覆蓋率', brier: 'Brier' };
@@ -811,6 +812,7 @@
   }
 
   function promotionLines(d) {
+    if (d.promoted === true && !d.forced) return ['已換上 ' + (d.run_key || '')];
     const head = (d.forced ? '強制換模：' + (d.reason || '沒有寫原因') : '換模門檻未過，續用現役模型') + (d.run_key ? '（' + d.run_key + '）' : '');
     return [head, ...(d.failed || []).map(item => slotText(item.slot) + (item.run_id ? '（' + item.run_id + '）' : '') + '：' + (item.gates || []).map(gateText).join('、'))];
   }
@@ -835,7 +837,7 @@
         return ['', [d.flagged ? '少量標記，' + stocks : '沒有標記']];
       case 'monitor_unscored': return ['warn', [fmtInt(sizeOf(d.runs)) + ' 筆']];
       case 'model_alert': return ['warn', (d.runs || []).map(run => alertLine(run, date))];
-      case 'model_promotion': return ['warn', promotionLines(d)];
+      case 'model_promotion': return [check.severity === 'info' ? '' : 'warn', promotionLines(d)];
       default: return [check.severity === 'info' ? '' : 'warn', [(SEVERITY[check.severity] || [check.severity])[0]]];
     }
   }
@@ -850,22 +852,27 @@
       shown.map(line => '<div class="muted small' + runClass + '">' + esc(line) + '</div>').join('') + '</div></div>';
   }
 
-  function latestPromotions(data) {
-    const all = data.flatMap(entry => (entry.model_checks || []).filter(check => check.check_name === 'model_promotion').reverse().map(check => ({ date: entry.date, check: check })));
-    const runKey = item => (item.check.detail || {}).run_key;
-    const latest = all.filter(item => item.date === all[0].date);
-    return { total: all.length, shown: latest.filter((item, i) => latest.findIndex(other => runKey(other) === runKey(item)) === i) };
+  const isPromotion = check => check.check_name === 'model_promotion';
+  const isResearch = check => check.check_name.startsWith('research_');
+  const scopeOf = check => (check.detail || {}).scope || (check.detail || {}).run_key;
+
+  function latestBy(data, wanted, keyOf) {
+    const all = data.flatMap(entry => (entry.model_checks || []).filter(wanted).map(check => ({ date: entry.date, check: check })))
+      .sort((a, b) => (b.check.id || 0) - (a.check.id || 0));
+    return { total: all.length, shown: all.filter((item, i) => all.findIndex(other => keyOf(other.check) === keyOf(item.check)) === i) };
   }
 
   function renderModelChecks(data, meta) {
     const sub = document.getElementById('model-checks-sub'), host = document.getElementById('model-checks');
-    const day = data.find(entry => (entry.model_checks || []).some(check => check.check_name !== 'model_promotion'));
+    const day = data.find(entry => (entry.model_checks || []).some(check => !isPromotion(check) && !isResearch(check)));
     const share = meta.output_alert_share;
     sub.textContent = day ? '最近一次寫入的交易日：' + day.date + '；區間寬度比與機率矛盾的標記超過 ' + Math.round(share * 100) + '% 才算警告。' : '';
-    const promotions = latestPromotions(data);
+    const promotions = latestBy(data, isPromotion, scopeOf);
     const count = promotions.total > promotions.shown.length ? '，近 ' + data.length + ' 個交易日共 ' + promotions.total + ' 筆' : '';
-    const pinned = promotions.shown.map(item => modelCheckHtml(item.check, share, item.date, item.date + count)).join('');
-    const rest = day ? day.model_checks.filter(check => check.check_name !== 'model_promotion').map(check => modelCheckHtml(check, share, day.date)).join('') : '';
+    const research = latestBy(data, isResearch, check => check.check_name).shown;
+    const pinned = promotions.shown.map(item => modelCheckHtml(item.check, share, item.date, item.date + count)).join('') +
+      research.map(item => modelCheckHtml(item.check, share, item.date, item.date)).join('');
+    const rest = day ? day.model_checks.filter(check => !isPromotion(check) && !isResearch(check)).map(check => modelCheckHtml(check, share, day.date)).join('') : '';
     host.innerHTML = pinned + rest || '<p class="placeholder">還沒有模型輸出檢查。</p>';
   }
 

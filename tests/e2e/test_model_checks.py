@@ -249,6 +249,66 @@ def promotion_alert(
     _note(day, scope, run_key, _failed(results), reason, promoted=bool(reason))
 
 
+def swapped_in(seed: Seed, run_key: str, back: int = 1, scope: str = "rank") -> None:
+    _note(seed.sessions[-back], scope, run_key, [], "", promoted=True)
+
+
+def test_a_passed_promotion_reads_as_swapped_in_not_as_a_warning(
+    page: Page, live_server: LiveServer, seeded: Seed
+) -> None:
+    promotion_alert(
+        seeded, "rank-2026-11", [refused(Slot("rank", 20), "rank-n", AGREEMENT)], back=3
+    )
+    swapped_in(seeded, "rank-2026-12")
+
+    page.goto(f"{live_server.url}/#models")
+
+    promotion = page.locator("#model-checks .check").filter(has_text="換模")
+    expect(promotion).to_have_count(1)
+    expect(promotion.locator("i")).not_to_have_class("warn")
+    expect(promotion.locator(".pinned")).to_have_text(
+        f"{seeded.last_session.isoformat()}，近 30 個交易日共 2 筆"
+    )
+    expect(promotion_lines(page)).to_have_count(1)
+    expect(promotion_lines(page).first).to_have_text("已換上 rank-2026-12")
+    expect(page.locator("#model-checks")).not_to_contain_text("續用現役模型")
+
+
+def test_the_last_written_promotion_of_a_scope_wins_over_its_date(
+    page: Page, live_server: LiveServer, seeded: Seed
+) -> None:
+    promotion_alert(seeded, "rank-new", [refused(Slot("rank", 20), "rank-n", AGREEMENT)])
+    swapped_in(seeded, "rank-backfill", back=3)
+
+    page.goto(f"{live_server.url}/#models")
+
+    promotion = page.locator("#model-checks .check").filter(has_text="換模")
+    expect(promotion).to_have_count(1)
+    expect(promotion.locator(".pinned")).to_have_text(
+        f"{seeded.sessions[-3].isoformat()}，近 30 個交易日共 2 筆"
+    )
+    expect(promotion_lines(page).first).to_have_text("已換上 rank-backfill")
+
+
+def test_each_scope_keeps_its_own_latest_promotion_across_days(
+    page: Page, live_server: LiveServer, seeded: Seed
+) -> None:
+    promotion_alert(
+        seeded, "rank-2026-10", [refused(Slot("rank", 20), "rank-n", AGREEMENT)], back=10
+    )
+    interval = [refused(Slot("quantile", 20), "q-n", DATA_QUALITY)]
+    promotion_alert(seeded, "interval-2026-11", interval, back=2, scope="interval")
+
+    page.goto(f"{live_server.url}/#models")
+
+    promotions = page.locator("#model-checks .check").filter(has_text="換模")
+    expect(promotions).to_have_count(2)
+    expect(promotions.nth(0).locator(".pinned")).to_have_text(seeded.sessions[-2].isoformat())
+    expect(promotions.nth(0).locator(".run").first).to_contain_text("interval-2026-11")
+    expect(promotions.nth(1).locator(".pinned")).to_have_text(seeded.sessions[-10].isoformat())
+    expect(promotions.nth(1).locator(".run").first).to_contain_text("rank-2026-10")
+
+
 def test_a_refused_build_names_each_failed_slot_and_gate(
     page: Page, live_server: LiveServer, seeded: Seed
 ) -> None:
@@ -387,18 +447,49 @@ def test_a_numeric_threshold_off_the_contract_still_shows_zero(
     )
 
 
-def test_research_schedule_checks_are_named_in_the_quality_block(
+def test_research_schedule_checks_sit_with_the_model_checks(
     page: Page, live_server: LiveServer, seeded: Seed
 ) -> None:
-    log(seeded, "research_morning", "warning", {})
-    log(seeded, "research_evening", "info", {})
+    log(seeded, "research_morning", "info", {}, back=2)
+    clean = {"share": 0.0, "flagged": 0, "n_stocks": 1842, "stocks": []}
+    log(seeded, "output_width_ratio", "info", clean, back=2)
+    log(seeded, "research_evening", "warning", {})
 
     page.goto(f"{live_server.url}/#models")
 
-    quality = page.locator("#quality")
-    expect(quality).to_contain_text("研究早盤排程（警告）")
-    expect(quality).to_contain_text("研究晚間排程（通過）")
-    expect(page.locator("#model-checks")).not_to_contain_text("研究")
+    checks = page.locator("#model-checks .check")
+    expect(checks).to_have_count(3)
+    evening = checks.nth(0)
+    expect(evening).to_contain_text("研究晚間排程")
+    expect(evening).to_contain_text("警告")
+    expect(evening.locator(".pinned")).to_have_text(seeded.last_session.isoformat())
+    expect(evening.locator("i")).to_have_class("warn")
+    morning = checks.nth(1)
+    expect(morning).to_contain_text("研究早盤排程")
+    expect(morning.locator(".pinned")).to_have_text(seeded.sessions[-2].isoformat())
+    expect(morning.locator("i")).not_to_have_class("warn")
+    expect(checks.nth(2)).to_contain_text("區間寬度比異常")
+    expect(page.locator("#model-checks-sub")).to_contain_text(seeded.sessions[-2].isoformat())
+    expect(page.locator("#quality")).not_to_contain_text("研究")
+    expect(page.locator("#status")).to_contain_text("品質檢查通過（1 項警告）")
+
+
+def test_the_monthly_retrain_stays_pinned_beside_the_day_s_checks(
+    page: Page, live_server: LiveServer, seeded: Seed
+) -> None:
+    log(seeded, "research_retrain", "warning", {}, back=15)
+    clean = {"share": 0.0, "flagged": 0, "n_stocks": 1842, "stocks": []}
+    log(seeded, "output_width_ratio", "info", clean)
+
+    page.goto(f"{live_server.url}/#models")
+
+    checks = page.locator("#model-checks .check")
+    expect(checks).to_have_count(2)
+    expect(checks.nth(0)).to_contain_text("每月重訓")
+    expect(checks.nth(0).locator(".pinned")).to_have_text(seeded.sessions[-15].isoformat())
+    expect(checks.nth(0).locator("i")).to_have_class("warn")
+    expect(checks.nth(1)).to_contain_text("區間寬度比異常")
+    expect(page.locator("#model-checks-sub")).to_contain_text(seeded.last_session.isoformat())
 
 
 def test_model_output_checks_leave_the_data_verdict_alone(
