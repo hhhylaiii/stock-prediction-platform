@@ -450,6 +450,8 @@ def test_monthly_coverage_takes_fill_shares_and_rows_for_a_fallback_column() -> 
         (0.00, 0.10, True),
         (0.10, 0.16, True),
         (0.10, 0.15, False),
+        (0.20, 0.30, False),
+        (0.20, 0.31, True),
         (0.02, 0.06, False),
         (0.00, 0.03, True),
         (0.00, 0.00, False),
@@ -495,8 +497,8 @@ def test_unmasked_fills_weigh_the_months_left_by_their_rows() -> None:
 
 
 def test_fill_flags_mark_fills_over_the_ratio_or_on_the_delisted_only() -> None:
-    current = pd.Series([0.01, 0.01, 0.0, 0.0, NAN])
-    delisted = pd.Series([0.0301, 0.03, 0.01, 0.0, 0.1])
+    current = pd.Series([0.01, 0.01, 1 / 78, 0.0, 0.0, NAN])
+    delisted = pd.Series([0.0301, 0.03, 1 / 26, 0.01, 0.0, 0.1])
 
     assert MAX_FILL_RATIO == 3.0
-    assert fill_flags(current, delisted).tolist() == [True, False, True, False, False]
+    assert fill_flags(current, delisted).tolist() == [True, False, False, True, False, False]

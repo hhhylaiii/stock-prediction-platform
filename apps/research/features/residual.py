@@ -227,8 +227,8 @@ def fallback_filled(
 
 def fill_flags(current: pd.Series, delisted: pd.Series) -> pd.Series:
     """Whether fill shares still tell a later delisting: over MAX_FILL_RATIO or delisted only."""
-    ratio = delisted / current.where(current > 0)
-    return (ratio > MAX_FILL_RATIO) | (current.eq(0) & delisted.gt(0))
+    over = (delisted - MAX_FILL_RATIO * current).round(SHARE_DIGITS) > 0
+    return (current.gt(0) & over) | (current.eq(0) & delisted.gt(0))
 
 
 def monthly_coverage(
