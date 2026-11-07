@@ -1,15 +1,15 @@
-"""Stock header and price-series endpoints over stock_master and daily_price."""
+"""Stock search, header and price-series endpoints over stock_master and daily_price."""
 
 from datetime import date
 from typing import Any
 
-from django.db.models import Max, Min
+from django.db.models import Case, IntegerField, Max, Min, Q, Value, When
 from rest_framework.exceptions import NotFound
 from rest_framework.request import Request
 from rest_framework.response import Response
 
 from apps.api.envelope import envelope
-from apps.api.params import PriceQuery, parse
+from apps.api.params import PriceQuery, StockSearchQuery, parse
 from apps.api.sessions import load_calendar, trailing_sessions
 from apps.api.views import ReadOnlyView
 from apps.market.adjust import PRICE_COLUMNS, adjusted
@@ -19,6 +19,7 @@ PRICE_DIGITS = 4
 RATIO_DIGITS = 6
 QUOTE_FIELDS = ("date", "close", "adj_factor", "volume", "turnover")
 BAR_FIELDS = (*PRICE_COLUMNS, "date", "volume", "turnover", "adj_factor")
+SEARCH_LIMIT = 20
 
 
 def master_fields(stock: StockMaster) -> dict[str, Any]:
@@ -76,6 +77,35 @@ def require_stock(stock_id: str) -> StockMaster:
     if stock is None:
         raise NotFound(f"找不到股票 {stock_id}。")
     return stock
+
+
+def search(text: str) -> list[dict[str, Any]]:
+    """Code-prefix matches by code, so an exact code leads, then name matches by code."""
+    rank = Case(
+        When(stock_id__istartswith=text, then=Value(0)),
+        default=Value(1),
+        output_field=IntegerField(),
+    )
+    stocks = (
+        StockMaster.objects.filter(Q(stock_id__istartswith=text) | Q(name__icontains=text))
+        .annotate(rank=rank)
+        .order_by("rank", "stock_id")[:SEARCH_LIMIT]
+    )
+    return [
+        {
+            "stock_id": stock.stock_id,
+            "name": stock.name,
+            "market_label": stock.get_market_display(),
+            "delisted": stock.delist_date is not None,
+        }
+        for stock in stocks
+    ]
+
+
+class StockSearchView(ReadOnlyView):
+    def get(self, request: Request) -> Response:
+        text = parse(StockSearchQuery, request)["q"]
+        return envelope(search(text), {"q": text, "limit": SEARCH_LIMIT})
 
 
 class StockDetailView(ReadOnlyView):

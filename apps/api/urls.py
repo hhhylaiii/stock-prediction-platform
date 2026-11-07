@@ -7,13 +7,14 @@ from apps.api.status import StatusView
 from apps.api.stock_features import StockFeaturesView
 from apps.api.stock_history import StockHistoryView
 from apps.api.stock_predictions import StockPredictionsView
-from apps.api.stocks import StockDetailView, StockPricesView
+from apps.api.stocks import StockDetailView, StockPricesView, StockSearchView
 
 app_name = "api"
 
 STOCK = r"^stocks/(?P<stock_id>[0-9A-Za-z]{1,10})"
 
 urlpatterns = [
+    path("stocks", StockSearchView.as_view(), name="stock-search"),
     re_path(STOCK + r"$", StockDetailView.as_view(), name="stock-detail"),
     re_path(STOCK + r"/prices$", StockPricesView.as_view(), name="stock-prices"),
     re_path(STOCK + r"/predictions$", StockPredictionsView.as_view(), name="stock-predictions"),
