@@ -786,7 +786,8 @@
     return share ? share + '，多為前任 run 的列' : '窗口多為前任 run 的列';
   }
 
-  function modeText(run) {
+  function modeText(run, date) {
+    if (run.mode === 'reset' && run.reset_rows === 0 && run.restored_on && date && run.restored_on > date) return '恢復前的告警（' + run.restored_on + ' restore）';
     if (run.mode === 'grace') return (run.grace_start && run.grace_end ? '寬限期 ' + run.grace_start + '–' + run.grace_end : '寬限期內') + '，只告警不降級';
     if (run.mode !== 'reset') return '';
     const count = v => has(v) ? v : '—';
@@ -812,17 +813,17 @@
     return [head, ...(d.failed || []).map(item => slotText(item.slot) + (item.run_id ? '（' + item.run_id + '）' : '') + '：' + (item.gates || []).map(gateText).join('、'))];
   }
 
-  function alertLine(run) {
+  function alertLine(run, date) {
     const metric = ALERT_METRICS[run.metric] || run.metric || '';
     const threshold = Array.isArray(run.threshold) ? run.threshold.map(v => metricText(run.metric, v)).join('–') :
       run.threshold === null || run.threshold === undefined ? null : metricText(run.metric, run.threshold);
     return run.run_id + '（' + (OBJECTIVES[run.objective] || run.objective) + ' ' + run.horizon + ' 日）：' + metric + (/[A-Za-z]$/.test(metric) ? ' ' : '') + (ALERT_REASONS[run.reason] || run.reason) +
       (run.value === null || run.value === undefined ? '' : '，近 ' + run.days + ' 日 ' + metricText(run.metric, run.value)) +
       (threshold === null ? '' : '，門檻 ' + threshold) +
-      [windowText(run.own_rows, run.days, run.mostly_predecessors), modeText(run)].filter(Boolean).map(part => '；' + part).join('');
+      [windowText(run.own_rows, run.days, run.mostly_predecessors), modeText(run, date)].filter(Boolean).map(part => '；' + part).join('');
   }
 
-  function modelCheckState(check, alertShare) {
+  function modelCheckState(check, alertShare, date) {
     const d = check.detail || {};
     const stocks = fmtInt(d.flagged || 0) + '／' + fmtInt(d.n_stocks || 0) + ' 檔';
     switch (check.check_name) {
@@ -831,14 +832,14 @@
         if ((d.share || 0) > alertShare) return ['warn', ['警告，' + stocks]];
         return ['', [d.flagged ? '少量標記，' + stocks : '沒有標記']];
       case 'monitor_unscored': return ['warn', [fmtInt(sizeOf(d.runs)) + ' 筆']];
-      case 'model_alert': return ['warn', (d.runs || []).map(alertLine)];
+      case 'model_alert': return ['warn', (d.runs || []).map(run => alertLine(run, date))];
       case 'model_promotion': return ['warn', promotionLines(d)];
       default: return [check.severity === 'info' ? '' : 'warn', [(SEVERITY[check.severity] || [check.severity])[0]]];
     }
   }
 
-  function modelCheckHtml(check, alertShare, note) {
-    const [state, lines] = modelCheckState(check, alertShare);
+  function modelCheckHtml(check, alertShare, date, note) {
+    const [state, lines] = modelCheckState(check, alertShare, date);
     const failed = check.severity === 'error';
     const cls = failed ? 'warn' : state;
     const shown = failed ? ['錯誤，' + (lines[0] || ''), ...lines.slice(1)] : lines;
@@ -853,9 +854,9 @@
     const share = meta.output_alert_share;
     sub.textContent = day ? '最近一次寫入的交易日：' + day.date + '；區間寬度比與機率矛盾的標記超過 ' + Math.round(share * 100) + '% 才算警告。' : '';
     const promotions = data.flatMap(entry => (entry.model_checks || []).filter(check => check.check_name === 'model_promotion').map(check => ({ date: entry.date, check: check })));
-    const pinned = promotions.length ? modelCheckHtml(promotions[0].check, share, promotions[0].date + (promotions.length > 1 ? '，近 ' + data.length + ' 個交易日共 ' + promotions.length + ' 筆' : '')) : '';
+    const pinned = promotions.length ? modelCheckHtml(promotions[0].check, share, promotions[0].date, promotions[0].date + (promotions.length > 1 ? '，近 ' + data.length + ' 個交易日共 ' + promotions.length + ' 筆' : '')) : '';
     const rest = day ? day.model_checks.filter(check => check.check_name !== 'model_promotion') : [];
-    host.innerHTML = day ? pinned + rest.map(check => modelCheckHtml(check, share)).join('') : '<p class="placeholder">還沒有模型輸出檢查。</p>';
+    host.innerHTML = day ? pinned + rest.map(check => modelCheckHtml(check, share, day.date)).join('') : '<p class="placeholder">還沒有模型輸出檢查。</p>';
   }
 
   async function renderQuality() {

@@ -1,8 +1,12 @@
+from datetime import timedelta
+
 import pytest
 from playwright.sync_api import Locator, Page, expect
 from pytest_django.live_server_helper import LiveServer
 
 from apps.etl.models import DataQualityLog
+from apps.research.gates import SAMPLE_UNITS
+from apps.research.monitor import MODE_FIELDS, MODES, alert_problems
 from tests.e2e.conftest import XSS_NAME, Seed
 
 pytestmark = pytest.mark.e2e
@@ -16,7 +20,7 @@ def log(seed: Seed, check: str, severity: str, detail: dict[str, object], back: 
 
 @pytest.fixture
 def checked(seeded: Seed) -> Seed:
-    """Every kind of model output check on the last session, all written as warnings."""
+    """Every model output check on the last session as warnings; its alerts predate the modes."""
     log(
         seeded,
         "output_width_ratio",
@@ -67,6 +71,7 @@ def checked(seeded: Seed) -> Seed:
             "days": 60,
         },
     ]
+    assert all(alert_problems(entry) for entry in alerts)
     log(seeded, "model_alert", "warning", {"runs": alerts})
     return seeded
 
@@ -112,13 +117,7 @@ ALERT = {
     "days": 60,
 }
 ALERT_TEXT = "（排名 20 日）：IC 低於門檻，近 60 日 0.012，門檻 0.020"
-UNSET = {
-    "grace_start": None,
-    "grace_end": None,
-    "restored_on": None,
-    "reset_rows": None,
-    "reset_needed": None,
-}
+UNSET = dict.fromkeys(name for names in MODE_FIELDS.values() for name in names)
 
 
 def promotion_lines(page: Page) -> Locator:
@@ -128,7 +127,14 @@ def promotion_lines(page: Page) -> Locator:
 def test_alert_entries_say_how_each_run_was_judged(
     page: Page, live_server: LiveServer, seeded: Seed
 ) -> None:
-    judged = {**ALERT, **UNSET, "run_id": "rank-a", "mode": "judged", "own_rows": 45}
+    judged = {
+        **ALERT,
+        **UNSET,
+        "run_id": "rank-a",
+        "mode": "judged",
+        "own_rows": 45,
+        "mostly_predecessors": False,
+    }
     graced = {
         **ALERT,
         **UNSET,
@@ -150,7 +156,10 @@ def test_alert_entries_say_how_each_run_was_judged(
         "reset_rows": 12,
         "reset_needed": 60,
     }
-    log(seeded, "model_alert", "warning", {"runs": [judged, graced, reset]})
+    entries = [judged, graced, reset]
+    assert {entry["mode"] for entry in entries} == set(MODES)
+    assert [alert_problems(entry) for entry in entries] == [[], [], []]
+    log(seeded, "model_alert", "warning", {"runs": entries})
 
     page.goto(f"{live_server.url}/#models")
 
@@ -172,6 +181,7 @@ def test_a_mode_without_its_dates_still_says_it_only_warns(
 ) -> None:
     graced = {**ALERT, **UNSET, "run_id": "rank-b", "mode": "grace", "grace_start": "2026-10-01"}
     reset = {**ALERT, **UNSET, "run_id": "rank-c", "mode": "reset", "reset_rows": 12}
+    assert all(alert_problems(entry) for entry in (graced, reset))
     log(seeded, "model_alert", "warning", {"runs": [graced, reset]})
 
     page.goto(f"{live_server.url}/#models")
@@ -180,6 +190,38 @@ def test_a_mode_without_its_dates_still_says_it_only_warns(
     expect(lines.nth(0)).to_have_text(f"rank-b{ALERT_TEXT}；寬限期內，只告警不降級")
     expect(lines.nth(1)).to_have_text(
         f"rank-c{ALERT_TEXT}；此 slot 在 restore 重設期（已累積 12／— 列），只告警不降級"
+    )
+
+
+def test_a_reset_alert_dated_before_its_restore_says_it_came_before(
+    page: Page, live_server: LiveServer, seeded: Seed
+) -> None:
+    restored = (seeded.last_session + timedelta(days=3)).isoformat()
+    started = seeded.last_session.isoformat()
+    earlier = {
+        **ALERT,
+        **UNSET,
+        "run_id": "rank-c",
+        "mode": "reset",
+        "own_rows": 60,
+        "mostly_predecessors": False,
+        "restored_on": restored,
+        "reset_rows": 0,
+        "reset_needed": 60,
+    }
+    fresh = {**earlier, "run_id": "rank-d", "restored_on": started}
+    assert [alert_problems(entry) for entry in (earlier, fresh)] == [[], []]
+    log(seeded, "model_alert", "warning", {"runs": [earlier, fresh]})
+
+    page.goto(f"{live_server.url}/#models")
+
+    lines = page.locator("#model-checks .check").filter(has_text="模型告警").locator(".run")
+    expect(lines.nth(0)).to_have_text(
+        f"rank-c{ALERT_TEXT}；窗口 60／60 列為本 run（100%）；恢復前的告警（{restored} restore）"
+    )
+    expect(lines.nth(1)).to_have_text(
+        f"rank-d{ALERT_TEXT}；窗口 60／60 列為本 run（100%）"
+        f"；此 slot 在 restore 重設期（{started} restore，已累積 0／60 列），只告警不降級"
     )
 
 
@@ -238,7 +280,7 @@ def test_the_latest_promotion_stays_on_top_for_thirty_sessions(
         "value": 0.62,
         "threshold": ">= 0.7",
         "sample": 1842,
-        "sample_unit": "stocks",
+        "sample_unit": SAMPLE_UNITS["agreement"],
     }
     log(seeded, "model_promotion", "warning", promotion("prod-old", [gate]), back=12)
     log(seeded, "model_promotion", "warning", promotion("prod-new", [gate]), back=5)
@@ -273,7 +315,7 @@ def test_a_forced_swap_leads_with_its_reason(
             "value": 4.0,
             "threshold": 6,
             "sample": 10,
-            "sample_unit": "features",
+            "sample_unit": SAMPLE_UNITS["gain_overlap"],
         },
         {
             "name": "shadow_oos",
@@ -281,7 +323,7 @@ def test_a_forced_swap_leads_with_its_reason(
             "value": -0.01,
             "threshold": 0,
             "sample": 120,
-            "sample_unit": "days",
+            "sample_unit": SAMPLE_UNITS["shadow_oos"],
         },
     ]
     failed = [{"slot": "rank 5 日", "run_id": "rank5-n", "gates": gates}]
