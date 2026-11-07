@@ -13,7 +13,7 @@ from django.core.management.base import CommandError
 from django.db import IntegrityError, transaction
 
 from apps.research.features.store import export_year
-from apps.research.holdout import HoldoutError, claim_holdout
+from apps.research.holdout import HoldoutError, ProductionPass, claim_holdout, production_pass
 from apps.research.models import BacktestMetric, FeatureDaily, LabelDaily, ModelRun
 from apps.research.prediction_cache import fold_path, fold_record
 from apps.research.runs import (
@@ -217,6 +217,32 @@ def test_a_holdout_fold_is_rewritten_until_any_model_caches_it(artifacts: Path, 
 
     assert ModelRun.objects.get().ic_mean == pytest.approx(0.02)
     assert load_model("wf1", "wf1.ridge.h20.f044") == {"weights": [2.0]}
+
+
+def production_run(**changes: Any) -> ModelRun:
+    return run("rank-prod.lightgbm.h20.f044", run_key="rank-prod", **changes)
+
+
+def test_a_production_run_records_a_fold_past_the_holdout_start_once_the_design_froze(
+    artifacts: Path,
+) -> None:
+    forged = ProductionPass("rank", "rank-final")
+    with pytest.raises(HoldoutError, match="rank design is not frozen"):
+        record_run(production_run(), {"weights": [1.0]}, fold=HELD, production=forged)
+    assert not ModelRun.objects.exists()
+    assert not model_path("rank-prod", "rank-prod.lightgbm.h20.f044").exists()
+
+    claim_holdout("rank", "rank-final", d("2025-03-31"))
+    granted = production_pass("rank")
+    record_run(production_run(ic_mean=0.01), {"weights": [1.0]}, fold=HELD, production=granted)
+    fold_path("rank-prod", "lightgbm", HELD.index).parent.mkdir(parents=True)
+    fold_path("rank-prod", "lightgbm", HELD.index).write_bytes(b"cached")
+    record_run(production_run(ic_mean=0.02), {"weights": [2.0]}, fold=HELD, production=granted)
+
+    stored = ModelRun.objects.get()
+    assert stored.ic_mean == pytest.approx(0.02)
+    assert stored.params["fold"] == fold_record(HELD)
+    assert load_model("rank-prod", "rank-prod.lightgbm.h20.f044") == {"weights": [2.0]}
 
 
 def test_research_folds_of_a_claimed_run_stay_rewritable(artifacts: Path) -> None:

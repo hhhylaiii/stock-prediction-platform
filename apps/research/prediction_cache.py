@@ -17,7 +17,9 @@ from apps.research.holdout import (
     SPEC_HOLDOUT_START,
     HoldoutError,
     HoldoutTicket,
+    ProductionPass,
     authorize_folds,
+    authorize_production,
     is_holdout,
     require_key,
 )
@@ -113,12 +115,15 @@ def save_fold_predictions(
     fold: Fold,
     predictions: pd.DataFrame,
     notes: Mapping[str, str] | None = None,
+    production: ProductionPass | None = None,
 ) -> Path:
-    """Write one model's research fold atomically, without the index."""
+    """Write one model's research or production fold atomically, without the index."""
     path = fold_path(run_key, model, fold.index)
-    if is_holdout(fold):
+    if production is not None:
+        authorize_production(run_key, production)
+    elif is_holdout(fold):
         raise HoldoutError(f"fold {fold.index} is holdout; save_holdout_fold writes its models")
-    if _holds_holdout(path) or _marker(run_key, fold.index).exists():
+    elif _holds_holdout(path) or _marker(run_key, fold.index).exists():
         raise HoldoutError(f"holdout fold {fold.index} of {run_key} is written once and exists")
     _check(fold, predictions)
     temporary = _staged(path, fold, predictions, notes or {})

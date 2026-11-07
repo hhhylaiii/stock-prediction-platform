@@ -27,6 +27,14 @@ class HoldoutTicket:
     last_date: date
 
 
+@dataclass(frozen=True)
+class ProductionPass:
+    """Leave for production runs to write past the holdout start once a claim froze the design."""
+
+    scope: str
+    frozen_by: str
+
+
 def require_key(value: str) -> str:
     """Return value if it is a plain name that is safe as one path segment."""
     if not KEY_PATTERN.fullmatch(value):
@@ -79,6 +87,32 @@ def latest_ticket(scope: str) -> HoldoutTicket | None:
     if row is None:
         return None
     return HoldoutTicket(row.scope, row.run_key, row.attempt, row.last_date)
+
+
+def _not_frozen(scope: str) -> HoldoutError:
+    return HoldoutError(
+        f"the {scope} design is not frozen; production runs wait for its holdout claim"
+    )
+
+
+def production_pass(scope: str) -> ProductionPass:
+    """The scope's production pass, granted only once its holdout is claimed."""
+    ticket = latest_ticket(scope)
+    if ticket is None:
+        raise _not_frozen(scope)
+    return ProductionPass(scope, ticket.run_key)
+
+
+def authorize_production(run_key: str, granted: ProductionPass) -> None:
+    """Refuse a production write before its scope's claim, outside its scope or on a holdout key."""
+    if not holdout_claimed(granted.scope):
+        raise _not_frozen(granted.scope)
+    if not run_key.startswith(f"{granted.scope}-"):
+        raise HoldoutError(
+            f"a {granted.scope} production pass covers {granted.scope}- run_keys, not {run_key!r}"
+        )
+    if HoldoutRun.objects.filter(run_key=run_key).exists():
+        raise HoldoutError(f"{run_key} is a holdout run; production runs use their own run_key")
 
 
 def is_holdout(fold: Fold) -> bool:

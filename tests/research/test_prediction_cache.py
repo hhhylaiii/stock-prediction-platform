@@ -12,7 +12,7 @@ import pytest
 
 from apps.market.calendar import TradingDays
 from apps.research import prediction_cache
-from apps.research.holdout import HoldoutError, claim_holdout
+from apps.research.holdout import HoldoutError, ProductionPass, claim_holdout, production_pass
 from apps.research.prediction_cache import (
     FoldMismatchError,
     MissingFoldsError,
@@ -514,3 +514,21 @@ def test_model_names_with_path_characters_are_refused(
     with pytest.raises(ValueError, match="letters"):
         fold_cached("../escape", fold.index)
     assert not cache_dir.exists()
+
+
+@pytest.mark.django_db
+def test_a_production_pass_caches_a_fold_past_the_holdout_start(folds: list[Fold]) -> None:
+    fold = holdout_of(folds)
+    forged = ProductionPass("rank", "rank-final")
+    with pytest.raises(HoldoutError, match="rank design is not frozen"):
+        save_fold_predictions("rank-prod", MODEL, fold, predictions(fold), production=forged)
+    assert not fold_cached("rank-prod", fold.index)
+
+    claim_holdout("rank", "rank-final", LAST)
+    granted = production_pass("rank")
+    save_fold_predictions("rank-prod", MODEL, fold, predictions(fold), production=granted)
+    save_fold_predictions("rank-prod", MODEL, fold, predictions(fold, 0.5), production=granted)
+
+    assert load_fold_predictions("rank-prod", MODEL, fold)["score"].iloc[0] == pytest.approx(0.5)
+    with pytest.raises(HoldoutError, match="rank-final is a holdout run"):
+        save_fold_predictions("rank-final", MODEL, fold, predictions(fold), production=granted)
