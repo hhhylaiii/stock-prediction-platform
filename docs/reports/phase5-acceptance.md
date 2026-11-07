@@ -27,7 +27,7 @@ DATABASE_URL=<twp 的連線字串> PGOPTIONS='-c default_transaction_read_only=o
   API_THROTTLE_RATE=100000/min uv run python manage.py measure_api --repeat 20
 ```
 
-seed 那一輪與截圖由一支 `slow` 測試產生。沒有設 `ACCEPTANCE_OUT` 時這支測試會略過，CI 不跑。它在 seed 上跑 `phase5_report`，每條檢查都要通過，報告寫到輸出目錄的 `seed.md`，表二就是從這份抄來的；這個檔不入庫。截圖和 twp 那一輪用同一個函式：
+seed 那一輪與截圖由一支 `slow` 測試產生。沒有設 `ACCEPTANCE_OUT` 時這支測試會略過，CI 不跑。它在 seed 上跑 `phase5_report`（和下面的指令一樣把 `API_THROTTLE_RATE` 調到 100000/min：13 個端點各 21 次，加上逐頁讀預測，會超過預設的 300/min），每條檢查都要通過，報告寫到輸出目錄的 `seed.md`，表二就是從這份抄來的；這個檔不入庫。截圖和 twp 那一輪用同一個函式：
 
 ```bash
 ACCEPTANCE_OUT=docs/reports/phase5 uv run pytest tests/e2e/test_acceptance_capture.py
