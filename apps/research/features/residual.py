@@ -14,6 +14,7 @@ from apps.research.features.fundamental import (
     sourced_name,
 )
 from apps.research.features.size_risk import canonical_industry
+from apps.research.features.technical import MOMENTUM_DAYS
 
 ACCEPT_RATIO = 1.5
 ACCEPT_GAP = 0.05
@@ -36,6 +37,9 @@ OBSERVABLE: Mapping[str, tuple[str, ...]] = MappingProxyType(
         "fund_rev_3m_yoy": ("fund_rev_3m_yoy", "fund_rev_yoy_q"),
         **{name: (name,) for name in SOURCED_CHIPS},
     }
+)
+LISTING_WINDOWS: Mapping[str, int] = MappingProxyType(
+    {"tech_mom_250_20": MOMENTUM_DAYS, "ind_mom_neutral": MOMENTUM_DAYS}
 )
 NO_MARGINS = MappingProxyType(
     dict.fromkeys(
@@ -93,7 +97,8 @@ def observable_gaps(
     """Per row, whether each OBSERVABLE gap reads only inputs on record or its industry lacks it.
 
     A value read from inputs all on record is missing by its formula, not by the source; a
-    fallback left NaN by a report-basis switch does not explain its column's gap.
+    fallback left NaN by a report-basis switch does not explain its column's gap. A
+    LISTING_WINDOWS gap is known when the listing is younger than the window.
     """
     industry = canonical_industry(panel["industry"])
     observed = {}
@@ -102,8 +107,9 @@ def observable_gaps(
         observed[observable_name(name)] = recorded.any(axis=1) | industry.isin(
             exempt.get(name, frozenset())
         )
+    young = {observable_name(name): panel["age"].lt(days) for name, days in LISTING_WINDOWS.items()}
     crossed = {crossed_name(name): panel[crossed_name(name)].eq(1.0) for name in BASIS_SIGNALS}
-    return panel[["stock_id", "date"]].assign(**observed, **crossed)
+    return panel[["stock_id", "date"]].assign(**observed, **young, **crossed)
 
 
 def basis_counts(rows: pd.DataFrame, column: str, delisted: pd.Series) -> pd.Series:

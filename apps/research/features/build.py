@@ -34,6 +34,7 @@ from apps.research.features.market import (
 )
 from apps.research.features.registry import FEATURES, Group, feature_names
 from apps.research.features.residual import (
+    LISTING_WINDOWS,
     MASKED_MONTHS,
     OBSERVABLE,
     apply_fallbacks,
@@ -140,7 +141,7 @@ def observable_frame(
     keys = [
         "stock_id",
         "date",
-        *map(observable_name, OBSERVABLE),
+        *map(observable_name, [*OBSERVABLE, *LISTING_WINDOWS]),
         *map(crossed_name, BASIS_SIGNALS),
     ]
     columns = [*keys, *(map(current_name, CHECKED) if current else ())]

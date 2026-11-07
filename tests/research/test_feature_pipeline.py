@@ -820,6 +820,8 @@ def test_observable_gaps_mark_formula_and_industry_gaps_but_not_missing_inputs()
 
     assert gap("2330", "fund_eps_yoy") == (True, True)
     assert gap("2330", "fund_ep") == (False, True)
+    assert gap("2330", "tech_mom_250_20") == (True, True)
+    assert gap("2330", "ind_mom_neutral") == (True, True)
     assert gap("2881", "fund_gross_margin") == (True, True)
     assert gap("2881", "fund_gm_yoy_chg") == (True, True)
     assert gap("2881", "fund_debt_ratio") == (True, False)
