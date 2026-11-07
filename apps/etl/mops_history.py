@@ -16,11 +16,14 @@ from apps.market.models import FinancialStatement, MonthlyRevenue
 REVENUE_HISTORY = "revenue_history"
 STATEMENT_HISTORY = "statement_history"
 STATEMENT_VIEWER = "statement_viewer"
+REVENUE_COMPANY = "revenue_company"
 HISTORIES = frozenset({REVENUE_HISTORY, STATEMENT_HISTORY})
+REVENUES = frozenset({REVENUE_HISTORY, REVENUE_COMPANY})
 MISMATCH_CHECKS = {
     REVENUE_HISTORY: "revenue_history_mismatch",
     STATEMENT_HISTORY: "statement_history_mismatch",
     STATEMENT_VIEWER: "statement_viewer_mismatch",
+    REVENUE_COMPANY: "revenue_company_mismatch",
 }
 SCOPE = ("span", "stock_id")
 COMPARED = ("rows", "types")
@@ -71,7 +74,7 @@ def insert_missing_history(
     notes: dict[str, Any],
 ) -> int:
     """New periods only, from their conservative date; one log per span says what differs."""
-    model: type[models.Model] = MonthlyRevenue if dataset == REVENUE_HISTORY else FinancialStatement
+    model: type[models.Model] = MonthlyRevenue if dataset in REVENUES else FinancialStatement
     stored = _stored(model, frame)
     new: list[models.Model] = []
     seen: set[tuple[str, str]] = set()
@@ -155,7 +158,7 @@ def _differences(dataset: str, row: Any, record: dict[str, Any]) -> dict[str, li
     if dataset == STATEMENT_VIEWER:
         found = figure_differences(row, record)
         return {name: pair for name, pair in found.items() if pair[1] is not None}
-    if dataset != REVENUE_HISTORY:
+    if dataset not in REVENUES:
         return figure_differences(row, record)
     if row.revenue is None or abs(row.revenue - record["revenue"]) > MONEY_TOLERANCE:
         return {"revenue": [row.revenue, record["revenue"]]}

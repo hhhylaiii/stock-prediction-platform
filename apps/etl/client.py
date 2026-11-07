@@ -49,6 +49,10 @@ class SourceClient:
     def post_json(self, path: str, data: Mapping[str, str]) -> dict[str, Any]:
         return self.limiter.call(lambda: self._send("POST", path, data=dict(data)))
 
+    def post_json_body(self, url: str, body: Mapping[str, str]) -> dict[str, Any]:
+        """A JSON body POSTed to an absolute URL, for APIs on another host of the source."""
+        return self.limiter.call(lambda: self._parsed(self._receive("POST", url, json=dict(body))))
+
     def get_content(self, url: str, params: Mapping[str, str]) -> bytes:
         """The body of a GET to an absolute URL, for sources that answer with files."""
         return self.limiter.call(lambda: self._receive("GET", url, params=dict(params)).content)
@@ -67,7 +71,9 @@ class SourceClient:
         """Hook for sources that report errors inside a 200 response."""
 
     def _send(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
-        response = self._receive(method, f"{self.base_url}{path}", **kwargs)
+        return self._parsed(self._receive(method, f"{self.base_url}{path}", **kwargs))
+
+    def _parsed(self, response: requests.Response) -> dict[str, Any]:
         try:
             payload = response.json(parse_constant=_reject_constant)
         except ValueError:

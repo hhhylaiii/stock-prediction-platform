@@ -1,0 +1,9 @@
+{
+ "code": 200,
+ "message": "查詢成功",
+ "result": {
+  "yymm": "10201",
+  "marketKindName": "公開發行公司"
+ },
+ "datetime": "115/11/08 05:51:50"
+}
