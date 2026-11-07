@@ -19,7 +19,7 @@ from django.utils import timezone
 from apps.etl.alerts import dispatch
 from apps.etl.models import DataQualityLog
 from apps.etl.tasks import US_CLOSE_CHECK, ready_for_research
-from apps.market.adjust import ADJ_CHECK, REBUILT
+from apps.market.adjust import ADJ_CHECK
 from apps.market.calendar import OutsideCalendarError, TradingDays
 from apps.research.labels import HORIZONS
 from apps.research.lock import ResearchBusyError, research_lock
@@ -38,6 +38,7 @@ RETRAIN_CHECK = "research_retrain"
 PROMOTE_CHECK = "research_promote"
 REBUILD_CHECK = "research_rebuild"
 REBUILD_LIMIT = 30
+NOTE_WINDOW = 90
 CONCURRENT = "the research schedule runs on a single worker process"
 NOT_FROZEN = "the design is not frozen: DESIGNS names no research_run_key"
 ALREADY_BUILT = "already built this month"
@@ -130,12 +131,20 @@ def _promote(day: date) -> str:
     return "; ".join([*done, *(f"{key}: failed, see {PROMOTE_CHECK}" for key in failed)])
 
 
-def _open_notes() -> list[DataQualityLog]:
-    return list(
-        DataQualityLog.objects.filter(check_name=ADJ_CHECK)
-        .exclude(detail__has_key=REBUILT)
-        .order_by("pk")
+def _taken(since: date) -> dict[str, Any]:
+    """Each adj_factor note a rebuild already took in, as the note read then."""
+    rows = DataQualityLog.objects.filter(
+        check_name=REBUILD_CHECK, date__gte=since - timedelta(days=NOTE_WINDOW)
     )
+    return {pk: detail for row in rows for pk, detail in row.detail.get("notes", {}).items()}
+
+
+def _open_notes() -> list[DataQualityLog]:
+    """The recent adj_factor_changed rows no rebuild took in as they read now."""
+    since = timezone.localtime().date() - timedelta(days=NOTE_WINDOW)
+    taken = _taken(since)
+    notes = DataQualityLog.objects.filter(check_name=ADJ_CHECK, date__gte=since).order_by("pk")
+    return [note for note in notes if taken.get(str(note.pk)) != note.detail]
 
 
 def _earliest(note: DataQualityLog) -> date:
@@ -143,32 +152,61 @@ def _earliest(note: DataQualityLog) -> date:
     return date.fromisoformat(note.detail.get("earliest") or min(stocks.values()))
 
 
-def _rebuild(day: date) -> str:
-    """Labels and features again from the earliest session an adj_factor change moved."""
-    notes = _open_notes()
-    if not notes:
-        return "no adj_factor change"
-    earliest = min(_earliest(note) for note in notes)
-    calendar = TradingDays.from_db()
-    if earliest > day:
-        summary = f"adj_factor moved from {earliest}, after {day}"
-    elif earliest < calendar.shift(day, -REBUILD_LIMIT):
-        count = sum(len(note.detail.get("stocks", {})) or note.detail["count"] for note in notes)
-        detail = {"earliest": earliest.isoformat(), "stocks": count, "limit": REBUILD_LIMIT}
-        _record(day, REBUILD_CHECK, Severity.WARNING, detail)
-        summary = f"adj_factor moved from {earliest}, over {REBUILD_LIMIT} sessions back"
-    else:
+def _stocks(notes: list[DataQualityLog]) -> int:
+    named = {stock for note in notes for stock in note.detail.get("stocks", {})}
+    return len(named) + sum(int(note.detail.get("count", 0)) for note in notes)
+
+
+def _append(day: date, check: str, severity: str, detail: dict[str, Any]) -> None:
+    row = DataQualityLog.objects.create(
+        date=day, check_name=check, severity=severity, detail=detail
+    )
+    if severity != Severity.INFO:
+        dispatch([row])
+
+
+def _rebuild_range(calendar: TradingDays, earliest: date, day: date, labels: bool) -> str:
+    """Labels from h_max+1 sessions before earliest and features up to the day before day."""
+    done = []
+    if labels:
         start = calendar.shift(earliest, -(max(HORIZONS) + 1))
-        labels = _command("build_labels", start=start, end=day)
-        summary = f"{labels}; {_command('build_features', start=earliest, end=day)}"
-    for note in notes:
-        closed = {**note.detail, REBUILT: day.isoformat()}
-        DataQualityLog.objects.filter(pk=note.pk, detail=note.detail).update(detail=closed)
+        done.append(_command("build_labels", start=start, end=day))
+    if earliest < day:
+        done.append(_command("build_features", start=earliest, end=calendar.shift(day, -1)))
+    return "; ".join(done) or f"nothing before {day} to rebuild"
+
+
+def _rebuild(day: date, labels: bool = True) -> str:
+    """Redo what adj_factor changes moved up to day; a failure warns and leaves them open."""
+    notes = [note for note in _open_notes() if _earliest(note) <= day]
+    if not notes:
+        return f"no adj_factor change up to {day}"
+    earliest = min(_earliest(note) for note in notes)
+    taken = {str(note.pk): note.detail for note in notes}
+    detail = {"earliest": earliest.isoformat(), "stocks": _stocks(notes)}
+    calendar = TradingDays.from_db()
+    try:
+        if earliest < calendar.shift(day, -REBUILD_LIMIT):
+            limited = {**detail, "limit": REBUILD_LIMIT, "notes": taken}
+            _append(day, REBUILD_CHECK, Severity.WARNING, limited)
+            return f"adj_factor moved from {earliest}, over {REBUILD_LIMIT} sessions back"
+        summary = _rebuild_range(calendar, earliest, day, labels)
+    except Exception as error:
+        logger.error("research rebuild %s from %s failed: %s", day, earliest, error)
+        failed = {**detail, "error": f"{type(error).__name__}: {error}"}
+        _append(day, REBUILD_CHECK, Severity.WARNING, failed)
+        return f"rebuild from {earliest} failed, see {REBUILD_CHECK}"
+    _append(day, REBUILD_CHECK, Severity.INFO, {**detail, "notes": taken})
     return summary
+
+
+def _rebuild_features(day: date) -> str:
+    return _rebuild(day, labels=False)
 
 
 STEPS: dict[str, Callable[[date], str]] = {
     "rebuild": _rebuild,
+    "rebuild_features": _rebuild_features,
     "labels": _labels,
     "features": _features,
     "predict": _predict,
@@ -207,14 +245,16 @@ def _early(slot: str) -> bool:
     return True
 
 
-def _concurrency(task: Task[Any, Any]) -> int | None:
-    """The worker's process count when it is not one, as the schedule needs; else None."""
-    count = task.app.conf.get("worker_concurrency")
-    return None if count == 1 else count
+def _concurrency(task: Task[Any, Any]) -> Any:
+    """The worker's configured process count; the schedule runs only when it is exactly 1."""
+    return task.app.conf.get("worker_concurrency")
 
 
 def _with_rebuild(names: tuple[str, ...]) -> tuple[str, ...]:
-    return ("rebuild", *names) if _open_notes() else names
+    """A last rebuild step when adj_factor changes wait, leaving labels to a labels step."""
+    if not _open_notes():
+        return names
+    return (*names, "rebuild_features" if "labels" in names else "rebuild")
 
 
 def _failed(check: str, day: date, name: str, error: Exception, done: list[Done]) -> None:
@@ -310,7 +350,7 @@ def retrain(self: Task[Any, Any], day: str) -> str:
         logger.warning("research retrain %s not started: outside its hours", day)
         return "late"
     concurrency = _concurrency(self)
-    if concurrency is not None:
+    if concurrency != 1:
         refused = dict.fromkeys(HoldoutScope.values, f"worker concurrency {concurrency}, not 1")
         _record(session, RETRAIN_CHECK, Severity.WARNING, _retrain_detail(refused))
         return "concurrent"
@@ -398,7 +438,7 @@ def evening(self: Task[Any, Any], day: str | None = None) -> str:
     if _finished(session, EVENING_CHECK):
         return "done"
     concurrency = _concurrency(self)
-    if concurrency is not None:
+    if concurrency != 1:
         detail = {"reason": CONCURRENT, "concurrency": concurrency}
         _record(session, EVENING_CHECK, Severity.WARNING, detail)
         return "concurrent"
@@ -429,7 +469,7 @@ def morning(self: Task[Any, Any], day: str | None = None) -> str:
     if _finished(session, MORNING_CHECK):
         return "done"
     concurrency = _concurrency(self)
-    if concurrency is not None:
+    if concurrency != 1:
         detail = {"reason": CONCURRENT, "concurrency": concurrency}
         _record(session, MORNING_CHECK, Severity.WARNING, detail)
         return "concurrent"
