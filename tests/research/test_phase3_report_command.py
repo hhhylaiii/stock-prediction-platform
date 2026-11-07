@@ -22,18 +22,21 @@ __all__ = ["stored"]
 Explained = Callable[..., pd.DataFrame]
 
 
-def from_table(known: bool, drift: bool = False) -> Explained:
-    """observable_frame stand-in read from feature_daily: every gap known or none, same values."""
+def from_table(known: bool, drift: str = "") -> Explained:
+    """observable_frame stand-in from feature_daily; drift fills or empties today's values."""
 
-    def frame(calendar: object, start: date, end: date, current: bool = False) -> pd.DataFrame:
+    def frame(calendar: object, start: date, end: date, **_: object) -> pd.DataFrame:
         rows = pd.DataFrame(
             list(
                 FeatureDaily.objects.filter(date__range=(start, end)).values(
-                    "stock_id", "date", *CHECKED
+                    "stock_id", "date", "in_universe", *CHECKED
                 )
             )
         )
-        now = rows[CHECKED].fillna(1.0) if drift else rows[CHECKED]
+        moved = (~rows["in_universe"] & (drift == "outside")) | (drift == "all")
+        now = rows[CHECKED].where(~moved, rows[CHECKED].fillna(1.0), axis=0)
+        if drift == "emptied":
+            now = pd.DataFrame(float("nan"), index=rows.index, columns=CHECKED)
         return rows[["stock_id", "date"]].assign(
             **{observable_name(name): known for name in OBSERVABLE},
             **{current_name(name): now[name] for name in CHECKED},
@@ -274,7 +277,33 @@ def test_gaps_with_a_known_cause_leave_the_acceptance(
 def test_the_report_refuses_partitions_that_the_database_no_longer_gives(
     stored: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(phase3_report, "observable_frame", from_table(known=True, drift=True))
+    outside = FeatureDaily.objects.filter(stock_id=STOCKS[1], date__month=5)
+    assert outside.update(in_universe=False, fund_ep=None) > 0
+    monkeypatch.setattr(phase3_report, "observable_frame", from_table(known=True, drift="outside"))
+    report(stored)
+    monkeypatch.setattr(phase3_report, "observable_frame", from_table(known=True, drift="all"))
 
     with pytest.raises(CommandError, match="no longer gives"):
         report(stored)
+    monkeypatch.setattr(phase3_report, "observable_frame", from_table(known=True, drift="emptied"))
+
+    with pytest.raises(CommandError, match="no longer gives"):
+        report(stored)
+
+
+def test_gaps_in_masked_months_count_as_having_a_known_cause(
+    stored: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plain = report(stored)
+    monkeypatch.setattr(phase3_report, "MASKED_MONTHS", {"fund_ep": frozenset({"2016-03"})})
+
+    masked = report(stored)
+
+    def share(table: pd.DataFrame, name: str, column: str = "delisted") -> float:
+        value: float = table[column].loc[name]
+        return value
+
+    assert share(plain, "fund_ep") > 0
+    assert share(masked, "fund_ep") == 0.0
+    assert share(masked, "fund_ep", "observable_delisted") == share(plain, "fund_ep")
+    assert share(masked, "fund_rev_yoy") == share(plain, "fund_rev_yoy")

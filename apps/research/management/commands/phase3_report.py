@@ -111,10 +111,10 @@ def _gaps(
     for year in range(start.year, end.year + 1):
         low, high = max(start, date(year, 1, 1)), min(end, date(year, 12, 31))
         stored = read_partitions(low, high, directory, columns=FRAME_COLUMNS)
-        gaps = observable_frame(calendar, low, high, current=True)
+        gaps = observable_frame(calendar, low, high, current=True, masked=MASKED_MONTHS)
         merged = stored.merge(gaps, on=["stock_id", "date"], how="left", indicator=True)
         _unmoved(merged, year)
-        rows = masked_as_observable(merged.drop(columns="_merge"))
+        rows = masked_as_observable(merged.drop(columns="_merge"), MASKED_MONTHS)
         counts = missing_counts(rows, delisted, MODEL_COLUMNS)
         fills = fill_counts(rows, delisted, FALLBACKS)
         missing = counts if missing is None else missing.add(counts, fill_value=0)
