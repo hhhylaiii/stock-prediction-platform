@@ -91,17 +91,17 @@ def test_coverage_builds_each_year_unmasked_and_names_the_affected_months(
     assert (march["current"], march["delisted"]) == (1.0, 0.0)
 
 
-def test_coverage_defaults_to_the_masked_columns_and_refuses_unknown_ones(
+def test_coverage_defaults_to_the_rule_columns_and_refuses_unknown_ones(
     built: list[tuple[date, date, Any]],
 ) -> None:
     out = StringIO()
 
     call_command("residual_coverage", start="2016-03-01", end="2016-04-30", stdout=out)
 
-    assert "fund_rev_mom: 1 of 2 months affected (50%)" in out.getvalue()
     assert "fund_rev_yoy: 1 of 2 months affected (50%)" in out.getvalue()
     assert '    "fund_rev_3m_yoy": frozenset({"2016-03"}),' in out.getvalue()
     assert "chip_fi_holding_pct" not in out.getvalue()
+    assert "fund_rev_mom" not in out.getvalue()
     with pytest.raises(CommandError, match="not feature columns"):
         call_command("residual_coverage", columns="fwd_rank_pct", stdout=StringIO())
     with pytest.raises(CommandError, match="after"):
@@ -118,5 +118,5 @@ def test_coverage_reads_2010_to_2020_by_default_and_names_an_empty_period(
 
     assert [start for start, _, _ in built[:11]] == [date(year, 1, 1) for year in range(2010, 2021)]
     assert built[10][1] == date(2020, 12, 31)
-    assert "fund_rev_mom: 1 of 24 months affected (4%)" in out.getvalue()
-    assert "fund_rev_mom: no universe rows in the period" in empty.getvalue()
+    assert "fund_rev_yoy: 1 of 24 months affected (4%)" in out.getvalue()
+    assert "fund_rev_yoy: no universe rows in the period" in empty.getvalue()

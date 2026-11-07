@@ -28,7 +28,7 @@ from apps.market.models import (
 )
 from apps.research.features import store
 from apps.research.features.build import FEATURE_COLUMNS, FRAME_COLUMNS, build_feature_frame
-from apps.research.features.registry import feature_names
+from apps.research.features.registry import FEATURES, feature_names
 from apps.research.features.residual import rules_signature
 from apps.research.features.store import (
     export_year,
@@ -133,8 +133,7 @@ def test_feature_daily_holds_the_raw_values_of_both_batches() -> None:
         "stock_id",
         "date",
         "in_universe",
-        *feature_names(batch=1),
-        *feature_names(batch=2),
+        *(spec.name for spec in FEATURES),
     ]
 
 

@@ -291,6 +291,7 @@ def test_render_lists_only_flagged_gaps_and_marks_incomplete_months() -> None:
     assert "| fund_days_since_fs | 100／100 | 100.0% | 豁免（條件型） |" in text
     assert "C 全期套用" in text
     assert "補後未達驗收 2 個：size_log_mcap、chip_foreign_hold_pct。" in text
+    assert "不進任何一批的 `fund_rev_mom` 不列入驗收。" in text
     assert "| fund_rev_yoy | fund_rev_yoy_q | 50.0%／10.0% | 5.00 | 是 |" in text
     assert "| fund_rev_mom | 2016-01–2016-02 |" in text
     assert "| fund_roe_ttm | 30／30 | 30.0% | 不判定 |" in text

@@ -12,7 +12,7 @@ from django.core.management.base import BaseCommand, CommandError
 from apps.etl.management.options import as_date
 from apps.market.calendar import TradingDays
 from apps.market.models import StockMaster
-from apps.research.features.build import FEATURE_COLUMNS, FRAME_COLUMNS
+from apps.research.features.build import FRAME_COLUMNS, MODEL_COLUMNS
 from apps.research.features.residual import FALLBACKS, MASKED_MONTHS, rules_signature
 from apps.research.features.store import partition_rules, read_partitions
 from apps.research.labels import HORIZONS
@@ -83,7 +83,7 @@ def _gaps(start: date, end: date, delisted: pd.Series) -> tuple[pd.DataFrame, pd
     for year in range(start.year, end.year + 1):
         low, high = max(start, date(year, 1, 1)), min(end, date(year, 12, 31))
         rows = read_partitions(low, high, directory, columns=FRAME_COLUMNS)
-        counts = missing_counts(rows, delisted, FEATURE_COLUMNS)
+        counts = missing_counts(rows, delisted, MODEL_COLUMNS)
         fills = fill_counts(rows, delisted, FALLBACKS)
         missing = counts if missing is None else missing.add(counts, fill_value=0)
         filled = fills if filled is None else filled.add(fills, fill_value=0)

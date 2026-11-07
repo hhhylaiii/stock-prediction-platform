@@ -2,8 +2,10 @@ from collections import Counter
 
 import pytest
 
+from apps.research.features.build import FEATURE_COLUMNS, FIRST_BATCH_COLUMNS, MODEL_COLUMNS
 from apps.research.features.registry import (
     FEATURES,
+    UNUSED,
     Availability,
     Group,
     feature,
@@ -11,12 +13,13 @@ from apps.research.features.registry import (
 )
 from apps.research.features.transforms import STOCK_LEVEL
 from apps.research.management.commands.ic_report import UNSCREENED
+from apps.research.training import LINEAR_FEATURES, linear_features
 
 FIRST_BATCH_GROUPS = {
     Group.TECHNICAL: 22,
     Group.SIZE_LIQUIDITY: 3,
     Group.CHIP: 13,
-    Group.FUNDAMENTAL: 16,
+    Group.FUNDAMENTAL: 15,
     Group.INDUSTRY_RISK: 4,
     Group.MARKET: 6,
 }
@@ -62,10 +65,10 @@ US_CLOSE = {"mkt_sox_ret_5d", "mkt_tsm_adr_gap"}
 LONDON_PRIOR_CLOSE = {"mkt_usdtwd_chg_20d"}
 
 
-def test_first_batch_has_the_63_spec_features_and_quarterly_revenue_growth() -> None:
+def test_first_batch_has_63_features_including_quarterly_revenue_growth() -> None:
     first = [spec for spec in FEATURES if spec.batch == 1]
 
-    assert len(first) == 64
+    assert len(first) == 63
     assert Counter(spec.group for spec in first) == FIRST_BATCH_GROUPS
 
 
@@ -125,7 +128,7 @@ def test_lookups_by_group_and_batch() -> None:
         "ind_mom_neutral",
         "ind_ep_neutral",
     ]
-    assert len(feature_names()) == 64
+    assert len(feature_names()) == 63
     assert feature("tech_limit_up_t").group is Group.TECHNICAL
     with pytest.raises(KeyError, match="tech_nope"):
         feature("tech_nope")
@@ -137,3 +140,16 @@ def test_the_second_batch_stays_out_of_screening_and_training() -> None:
     assert len(second) == 14
     assert not second & set(STOCK_LEVEL)
     assert not second & set(UNSCREENED)
+
+
+def test_monthly_revenue_mom_is_stored_but_no_batch_reads_it() -> None:
+    read = [*FIRST_BATCH_COLUMNS, *MODEL_COLUMNS, *STOCK_LEVEL, *UNSCREENED, *LINEAR_FEATURES]
+
+    assert {spec.batch for spec in FEATURES} == {UNUSED, 1, 2}
+    assert feature_names(batch=UNUSED) == ["fund_rev_mom"]
+    assert [spec.name for spec in FEATURES] == FEATURE_COLUMNS
+    assert [*feature_names(batch=1), *feature_names(batch=2)] == MODEL_COLUMNS
+    assert "fund_rev_mom" in FEATURE_COLUMNS
+    assert "fund_rev_mom" not in read
+    with pytest.raises(ValueError, match="fund_rev_mom"):
+        linear_features(["fund_ep", "fund_rev_mom"])

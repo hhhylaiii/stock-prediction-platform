@@ -6,7 +6,7 @@ from typing import Any
 import pandas as pd
 
 from apps.market.calendar import TradingDays
-from apps.research.features.registry import Availability, Group, feature
+from apps.research.features.registry import UNUSED, Availability, Group, feature, feature_names
 from apps.research.features.residual import ACCEPT_GAP, ACCEPT_RATIO
 from apps.research.metrics.ic import daily_rank_ic
 
@@ -214,7 +214,10 @@ def _gap_rows(before: pd.DataFrame, after: pd.DataFrame) -> list[str]:
 
 def _failed(after: pd.DataFrame) -> str:
     names = [str(name) for name, ok in accepted(after).items() if not ok]
-    return f"補後未達驗收 {len(names)} 個：{'、'.join(names)}。" if names else "補後全部達到驗收。"
+    listed = "、".join(names)
+    verdict = f"補後未達驗收 {len(names)} 個：{listed}。" if names else "補後全部達到驗收。"
+    unused = "、".join(f"`{name}`" for name in feature_names(batch=UNUSED))
+    return verdict + (f"不進任何一批的 {unused} 不列入驗收。" if unused else "")
 
 
 def _monthly_rows(monthly: pd.DataFrame, top: Sequence[str]) -> list[str]:
@@ -308,9 +311,12 @@ def render(
         "",
         "A：沒有第二來源，在受影響月份對所有股票遮成空值。",
         "",
-        "| 特徵 | 遮罩月份 |",
-        "| --- | --- |",
-        *(f"| {name} | {month_ranges(months)} |" for name, months in masked.items()),
+        *(
+            ["| 特徵 | 遮罩月份 |", "| --- | --- |"]
+            + [f"| {name} | {month_ranges(months)} |" for name, months in masked.items()]
+            if masked
+            else ["目前沒有遮罩欄位。"]
+        ),
         "",
         f"## 逐月單因子 rank IC（|IC| 前 {len(top)} 名）",
         "",

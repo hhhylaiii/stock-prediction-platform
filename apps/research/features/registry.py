@@ -32,11 +32,15 @@ CONDITIONAL_PATTERNS = (
     "*_days_to_*",
 )
 CATEGORICAL = frozenset({"ind_sector_id"})
+UNUSED = 0
 
 
 @dataclass(frozen=True)
 class FeatureSpec:
-    """Conditional features skip the IC threshold of SPEC §6 處理步驟 7."""
+    """Conditional features skip the IC threshold of SPEC §6 處理步驟 7.
+
+    Batch UNUSED features are computed and stored, but no batch, screening or model reads them.
+    """
 
     name: str
     group: Group
@@ -83,7 +87,9 @@ FEATURES: tuple[FeatureSpec, ...] = (
     *_specs(CHIP, "chip_margin_chg_5d chip_margin_usage chip_short_ratio"),
     *_specs(CHIP, "chip_fi_holding_pct chip_sbl_short_chg_5d"),
     *_specs(CHIP, "chip_big_holder_pct_chg_1w chip_holder_count_chg_1w", PUBLISH),
-    *_specs(FUND, "fund_rev_yoy fund_rev_3m_yoy fund_rev_mom fund_ep fund_eps_yoy", ANNOUNCE),
+    *_specs(FUND, "fund_rev_yoy fund_rev_3m_yoy", ANNOUNCE),
+    *_specs(FUND, "fund_rev_mom", ANNOUNCE, batch=UNUSED),
+    *_specs(FUND, "fund_ep fund_eps_yoy", ANNOUNCE),
     *_specs(FUND, "fund_bp fund_dividend_yield"),
     *_specs(FUND, "fund_roe_ttm fund_gross_margin fund_op_margin fund_debt_ratio", ANNOUNCE),
     *_specs(FUND, "fund_gm_yoy_chg fund_opm_yoy_chg fund_cfo_to_ni fund_days_since_fs", ANNOUNCE),

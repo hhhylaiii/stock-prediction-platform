@@ -83,7 +83,7 @@ def rank_features(screened: Screened) -> list[str]:
 
 def rank_inputs(raw: pd.DataFrame, features: Sequence[str]) -> pd.DataFrame:
     """Features winsorized and z-scored on each day's universe, gaps left for LightGBM."""
-    return standardize(raw, features)
+    return standardize(raw, _stock_level(features))
 
 
 def fit_rank(

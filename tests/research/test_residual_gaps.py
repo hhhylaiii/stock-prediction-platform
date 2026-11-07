@@ -103,7 +103,7 @@ def test_defaults_are_the_decided_rules_and_empty_rules_change_nothing() -> None
         "fund_rev_yoy": "fund_rev_yoy_q",
         "fund_rev_3m_yoy": "fund_rev_yoy_q",
     }
-    assert dict(MASKED_MONTHS) == {"fund_rev_mom": frozenset()}
+    assert dict(MASKED_MONTHS) == {}
     assert (ACCEPT_RATIO, ACCEPT_GAP, MAX_MASKED_SHARE) == (1.5, 0.05, 0.2)
     features = frame([("2330", "2017-03-02", NAN, 0.2, 0.01, 0.30)])
 

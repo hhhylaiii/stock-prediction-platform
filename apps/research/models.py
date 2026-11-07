@@ -4,7 +4,7 @@ from django.db import models
 from django.utils import timezone
 
 from apps.market.models import finite
-from apps.research.features.registry import feature_names
+from apps.research.features.registry import FEATURES
 
 OUTPUT_HORIZONS = [5, 20]
 REST_FEATURE = "_rest"
@@ -172,7 +172,7 @@ class LabelDaily(models.Model):
 
 
 class FeatureDaily(models.Model):
-    """Raw features of both batches per stock and trading day; transforms run in the pipeline."""
+    """Raw values of every stored feature per stock and day; transforms run in the pipeline."""
 
     pk = models.CompositePrimaryKey("stock_id", "date")
     stock_id = models.CharField(max_length=10)
@@ -262,7 +262,7 @@ class FeatureDaily(models.Model):
         indexes = [models.Index(fields=["date"], name="feature_daily_date_idx")]
         constraints = [
             models.CheckConstraint(
-                condition=finite(*feature_names(batch=1), *feature_names(batch=2)),
+                condition=finite(*(spec.name for spec in FEATURES)),
                 name="feature_daily_finite",
             ),
         ]

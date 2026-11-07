@@ -11,7 +11,7 @@ from apps.research.features.fundamental import (
     sourced_name,
     statement_signals,
 )
-from apps.research.features.registry import Group, feature_names
+from apps.research.features.registry import UNUSED, Group, feature_names
 from tests.research.feature_panels import at, listing, rising
 
 NAN = math.nan
@@ -297,7 +297,8 @@ def test_features_divide_ttm_eps_by_the_carried_raw_close() -> None:
 
     features = fundamental_features(panel)
 
-    assert list(features.columns) == ["stock_id", "date", *feature_names(Group.FUNDAMENTAL)]
+    names = [*feature_names(Group.FUNDAMENTAL), *feature_names(Group.FUNDAMENTAL, batch=UNUSED)]
+    assert list(features.columns) == ["stock_id", "date", *names]
     assert at(features, "2330", 1, "fund_ep") == pytest.approx(6.0 / 101.0)
     assert at(features, "2330", 2, "fund_ep") == pytest.approx(6.0 / 101.0)
     assert at(features, "2330", 1, "fund_bp") == pytest.approx(0.25)
