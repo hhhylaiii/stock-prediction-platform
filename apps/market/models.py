@@ -55,6 +55,36 @@ class StockMaster(models.Model):
         return f"{self.stock_id} {self.name}"
 
 
+class MarketHistory(models.Model):
+    """The exchange a stock traded on over each span, ends included; its last span stays open."""
+
+    stock_id = models.CharField(max_length=10)
+    start_date = models.DateField()
+    end_date = models.DateField(null=True, blank=True)
+    market = models.CharField(max_length=4, choices=Market.choices)
+
+    class Meta:
+        db_table = "market_history"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["stock_id", "start_date"], name="market_history_stock_start_uniq"
+            ),
+            models.UniqueConstraint(
+                fields=["stock_id"],
+                condition=models.Q(end_date__isnull=True),
+                name="market_history_one_open_span",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(end_date__isnull=True)
+                | models.Q(end_date__gte=models.F("start_date")),
+                name="market_history_end_after_start",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.stock_id} {self.market} {self.start_date}–{self.end_date or ''}"
+
+
 class TradingCalendar(models.Model):
     """Every calendar day of the loaded range and whether TWSE trades on it (SPEC §8.7)."""
 
