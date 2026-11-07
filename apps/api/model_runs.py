@@ -53,6 +53,7 @@ RESEARCH_KEY = "research_run_key"
 MONTH_IC, MONTH_DAYS = RANK_METRICS[0], RANK_METRICS[-1]
 ENTRY_FIELDS = ("run_id", "run_key", "model_type", "version", "status", "train_start", "train_end")
 TOTAL_FIELDS = ("run_key", "model_type", "metric", "segment", "value", "period_start", "period_end")
+WINDOW_FIELDS = {"own_rows": int, "days": int, "mostly_predecessors": bool}
 
 
 def serving_models() -> list[tuple[ServingRun, date]]:
@@ -187,12 +188,23 @@ def rank_research(run: ServingRun, params: dict[str, Any], holdouts: list[str]) 
 NO_RESEARCH = {"metric_run_key": None, "metric_source": None, "research": None, "baseline": None}
 
 
+def degraded_window(params: dict[str, Any]) -> dict[str, Any] | None:
+    """params.degraded_window's three fields, or None when it is missing or unreadable."""
+    window = params.get("degraded_window")
+    if not isinstance(window, dict):
+        return None
+    if any(type(window.get(name)) is not kind for name, kind in WINDOW_FIELDS.items()):
+        return None
+    return {name: window[name] for name in WINDOW_FIELDS}
+
+
 class ModelListView(ReadOnlyView):
     def get(self, request: Request) -> Response:
         models = serving_models()
         recent = recent_scores(models)
         ranks = [run.run_id for run, _ in models if run.objective == ModelObjective.RANK]
-        params = dict(ModelRun.objects.filter(run_id__in=ranks).values_list("run_id", "params"))
+        served = [run.run_id for run, _ in models]
+        params = dict(ModelRun.objects.filter(run_id__in=served).values_list("run_id", "params"))
         holdouts = rank_holdouts() if ranks else []
         data = []
         for run, day in models:
@@ -206,6 +218,8 @@ class ModelListView(ReadOnlyView):
                     **{name: getattr(run, name) for name in ENTRY_FIELDS},
                     "created_at": timezone.localtime(run.created_at),
                     "served_on": day,
+                    "degraded_on": run.degraded_on,
+                    "degraded_window": degraded_window(params.get(run.run_id) or {}),
                     "recent": recent[Slot(run.objective, run.horizon)],
                     **research,
                 }
