@@ -174,7 +174,7 @@ def return_index_rows(payload: dict[str, Any], day: date) -> pd.DataFrame:
         isinstance(row, list) and len(row) == len(RETURN_INDEX_FIELDS) for row in rows
     ):
         raise SchemaChangedError("TWSE MFI94U rows are malformed")
-    by_day = {parse_roc_date(str(row[0]).strip()): row for row in rows}
+    by_day = {parse_roc_date(str(row[0])): row for row in rows}
     row = row_of_day(by_day, day, "TWSE MFI94U")
     return pd.DataFrame([row], columns=list(RETURN_INDEX_FIELDS)).assign(date=day)
 
