@@ -563,7 +563,7 @@ def test_rank_experiment_needs_a_screening_before_the_shuffle_check(
 def test_the_lambdarank_setting_names_its_truncation_and_gain() -> None:
     graded = experiments.experiments(CONFIG)["objective"].arms[-1]
 
-    line = experiments._setting(graded)
+    line = experiments.arm_setting(graded)
 
     assert "objective lambdarank" in line
     assert "前 30 名" in line
@@ -583,9 +583,9 @@ def test_rank_experiment_refuses_bad_seeds_before_training(command: Path, seeds:
 def test_the_stopping_settings_name_the_round_floor_and_the_tuned_rounds() -> None:
     _, floor, tuned = experiments.experiments(WalkForwardConfig())["stopping"].arms
 
-    assert experiments._setting(floor).endswith("，至少 200 輪")
-    assert "驗證段 6 個月" in experiments._setting(floor)
-    assert experiments._setting(tuned).endswith("，輪數由調參摺定")
+    assert experiments.arm_setting(floor).endswith("，至少 200 輪")
+    assert "驗證段 6 個月" in experiments.arm_setting(floor)
+    assert experiments.arm_setting(tuned).endswith("，輪數由調參摺定")
 
 
 @pytest.mark.django_db
@@ -660,7 +660,7 @@ def test_the_tuned_arm_fixes_each_horizon_to_the_tuning_folds_median_best_round(
     tuned = resolved.arms[2]
     assert tuned.variant == Variant(fixed_rounds=((5, rounds[5]), (20, rounds[20])))
     assert resolved.arms[:2] == chosen.arms[:2]
-    line = experiments._setting(tuned)
+    line = experiments.arm_setting(tuned)
     assert f"固定 5 日 {rounds[5]} 輪、20 日 {rounds[20]} 輪" in line
     assert "seed 0, 3, 6" in line
 
@@ -727,7 +727,7 @@ def test_tuned_settings_name_the_tuning_folds_behind_the_rounds() -> None:
     fixed = experiments.with_tuned_rounds(stopping, {5: 7, 20: 9}, [3]).arms[2]
 
     assert fixed.tuned_from == (3,)
-    assert experiments._setting(fixed).endswith(
+    assert experiments.arm_setting(fixed).endswith(
         "，固定 5 日 7 輪、20 日 9 輪（調參摺 3，共 1 摺 × seed 0, 3, 6 最佳輪數的中位數）"
     )
     assert experiments.with_tuned_rounds(stopping, {5: 7, 20: 9}).arms[0:2] == stopping.arms[0:2]
@@ -797,7 +797,7 @@ def test_rank_experiment_fixes_the_tuned_rounds_before_training_the_arms(
     assert f"tuned rounds from tuning folds {tuning} × seeds 0, 3, 6: {rounds}" in out.getvalue()
     text = output.read_text()
     tuned = experiments.with_tuned_rounds(chosen, rounds, tuning).arms[2]
-    assert f"- tuned：{experiments._setting(tuned)}" in text
+    assert f"- tuned：{experiments.arm_setting(tuned)}" in text
     fitted = ModelRun.objects.filter(run_key="rank-exp-tuned")
     refits = {(run.run_id.split(".")[2], run.params["rounds"]) for run in fitted}
     assert refits == {("h5", rounds[5]), ("h20", rounds[20])}

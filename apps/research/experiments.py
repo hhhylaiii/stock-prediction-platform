@@ -311,7 +311,7 @@ def with_tuned_rounds(
     return replace(experiment, arms=arms)
 
 
-def _setting(arm: Arm) -> str:
+def arm_setting(arm: Arm) -> str:
     """One line naming an arm's window, validation tail and rank variant."""
     config, variant = arm.config, arm.variant
     window = "expanding" if config.window == "expanding" else f"rolling {config.train_months} 個月"
@@ -335,6 +335,8 @@ def _setting(arm: Arm) -> str:
         line += f"，固定 {counts}（{source} seed {seeds} 最佳輪數的中位數）"
     elif arm.tuned:
         line += "，輪數由調參摺定"
+    if variant.masked:
+        line += f"，遮掉 {len(variant.masked)} 個特徵"
     return line
 
 
@@ -342,7 +344,7 @@ def _cell(value: float) -> str:
     return "—" if math.isnan(value) else f"{value:.4f}"
 
 
-def _table_lines(table: pd.DataFrame) -> list[str]:
+def ic_table_lines(table: pd.DataFrame) -> list[str]:
     base = table["mean"].iloc[0]
     lines = [
         f"| 組 | 5 日 IC | 20 日 IC | 平均 | 與 {table.index[0]} 差 | seed 間標準差 |",
@@ -378,7 +380,7 @@ def _verdict_lines(table: pd.DataFrame, chosen: str, seeds: int) -> list[str]:
     ]
 
 
-def _seed_lines(experiment: Experiment, daily: pd.DataFrame) -> list[str]:
+def seed_lines(experiment: Experiment, daily: pd.DataFrame) -> list[str]:
     means = per_seed(daily)["mean"].unstack("seed")
     seeds = list(means.columns)
     lines = ["", "## 各 seed", "", "| 組 | " + " | ".join(f"seed {seed}" for seed in seeds) + " |"]
@@ -412,7 +414,7 @@ def _round_lines(experiment: Experiment, rounds: pd.DataFrame) -> list[str]:
     return lines
 
 
-def _fold_lines(experiment: Experiment, daily: pd.DataFrame) -> list[str]:
+def fold_lines(experiment: Experiment, daily: pd.DataFrame) -> list[str]:
     by_fold = daily.groupby(["fold", "arm", "horizon"])["ic"].mean()
     names = [arm.name for arm in experiment.arms]
     header = " | ".join(f"{name} {horizon} 日" for name in names for horizon in HORIZONS)
@@ -441,7 +443,7 @@ def experiment_report(
     lines = [f"# 實驗：{experiment.name}（{run_key}）", ""]
     if note:
         lines += [f"> {note}", ""]
-    lines += [f"- {arm.name}：{_setting(arm)}" for arm in experiment.arms]
+    lines += [f"- {arm.name}：{arm_setting(arm)}" for arm in experiment.arms]
     folds = sorted(daily["fold"].unique())
     lines += [
         f"- 比較 {len(folds)} 個研究摺（摺 {folds[0]}–{folds[-1]}），seed "
@@ -450,13 +452,13 @@ def experiment_report(
         f"- 判定規則：{RULES[experiment.rule].format(first=experiment.arms[0].name)}；"
         "多個 seed 時取各 seed 的平均",
         "",
-        *_table_lines(table),
+        *ic_table_lines(table),
         "",
         *_verdict_lines(table, verdict(experiment, table), len(seeds)),
     ]
     if len(seeds) > 1:
-        lines += _seed_lines(experiment, daily)
+        lines += seed_lines(experiment, daily)
     if rounds is not None and not rounds.empty:
         lines += _round_lines(experiment, rounds)
-    lines += _fold_lines(experiment, daily)
+    lines += fold_lines(experiment, daily)
     return "\n".join(lines) + "\n"

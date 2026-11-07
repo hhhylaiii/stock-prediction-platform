@@ -366,9 +366,10 @@ def test_recipe_changes_with_the_rank_variant() -> None:
         Variant(half_life=24.0),
         Variant(objective="lambdarank"),
         Variant(min_rounds=200),
+        Variant(masked=("tech_ret_60d",)),
     ]
     recipes = {recipe("rank", KEPT, 0, variant=variant) for variant in variants}
-    assert len(recipes) == 4
+    assert len(recipes) == 5
     assert first not in recipes
 
 
@@ -386,6 +387,9 @@ def test_round_rules_leave_the_recipes_cached_before_them_unchanged() -> None:
     fixed = lgbm_runs.variant_note(Variant(fixed_rounds=((5, 300), (20, 400))))
     assert fixed["fixed_rounds"] == ((5, 300), (20, 400))
     assert "fixed_rounds" not in lgbm_runs.variant_note(Variant())
+    assert "masked" not in lgbm_runs.variant_note(Variant())
+    masked = lgbm_runs.variant_note(Variant(masked=("tech_ret_60d",)))
+    assert masked["masked"] == ("tech_ret_60d",)
 
 
 def test_fixed_rounds_refit_each_horizon_for_its_own_count(panel: Path) -> None:
@@ -399,6 +403,29 @@ def test_fixed_rounds_refit_each_horizon_for_its_own_count(panel: Path) -> None:
         assert run.params["rounds"] == rounds
         assert run.params["best_round"] >= 1
         assert run.params["variant"]["fixed_rounds"] == [[5, 7], [20, 9]]
+
+
+def test_masked_features_are_left_out_of_the_rank_fit(panel: Path) -> None:
+    fold = research()[0]
+    variant = Variant(masked=("tech_ret_60d",))
+
+    run_folds("rank", [fold], "rank-masked", panel, variant=variant)
+
+    kept = [name for name in KEPT if name != "tech_ret_60d"]
+    for horizon in (5, 20):
+        run = ModelRun.objects.get(run_id=lgbm_runs.run_id("rank-masked", "rank", horizon, fold))
+        assert run.feature_list == kept
+        assert set(run.params["importance_gain"]) == set(kept)
+        assert run.params["variant"]["masked"] == ["tech_ret_60d"]
+    notes = fold_notes("rank-masked", MODEL, fold.index)
+    assert notes["recipe"] == recipe("rank", kept, 0, variant=variant)
+    assert run_folds("rank", [fold], "rank-masked", panel, variant=variant) == []
+
+
+def test_masking_every_rank_feature_is_refused(panel: Path) -> None:
+    with pytest.raises(ValueError, match="masks every rank feature"):
+        run_folds("rank", research()[:1], "rank-masked", panel, variant=Variant(masked=tuple(KEPT)))
+    assert not ModelRun.objects.filter(model_type="lightgbm").exists()
 
 
 def test_variants_are_refused_outside_the_rank_scope(panel: Path) -> None:
