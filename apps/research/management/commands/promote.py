@@ -11,7 +11,7 @@ from apps.market.calendar import CalendarError
 from apps.research.holdout import HoldoutError
 from apps.research.predict import PredictionGateError
 from apps.research.prediction_cache import FoldMismatchError, MissingFoldsError
-from apps.research.promotion import Promoted, build_day, promote
+from apps.research.promotion import Promoted, first_day, promote
 from apps.research.runs import RunError
 
 
@@ -33,14 +33,17 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser: ArgumentParser) -> None:
         parser.add_argument("--run-key", required=True, help="The run_key build_run fitted.")
-        parser.add_argument("--date", help="First day N serves, YYYY-MM-DD; the build's as_of.")
+        parser.add_argument(
+            "--date",
+            help="First day N serves, YYYY-MM-DD; the build's as_of, or its slots' latest rows.",
+        )
         parser.add_argument("--force", action="store_true", help="Swap in despite failed gates.")
         parser.add_argument("--reason", default="", help="Why --force overrides the gates.")
 
     def handle(self, *args: Any, **options: Any) -> None:
         run_key = options["run_key"]
         try:
-            day = date.fromisoformat(options["date"]) if options["date"] else build_day(run_key)
+            day = date.fromisoformat(options["date"]) if options["date"] else first_day(run_key)
             result = promote(
                 run_key,
                 day,

@@ -6,6 +6,7 @@ from typing import Any
 import pytest
 from django.core.management import call_command
 from django.core.management.base import CommandError
+from django.utils import timezone
 
 from apps.api import serving
 from apps.research.models import ModelRun, ModelStatus, Prediction
@@ -22,18 +23,20 @@ SLOT = serving.Slot("quantile", 20)
 def degraded(
     run_id: str = "interval-old.lightgbm.quantile.h20.f000",
     status: str = ModelStatus.DEGRADED,
+    objective: str = "quantile",
+    horizon: int = 20,
     **params: Any,
 ) -> ModelRun:
     return ModelRun.objects.create(
         run_id=run_id,
         run_key=run_id.split(".", 1)[0],
         model_type="lightgbm",
-        objective="quantile",
+        objective=objective,
         version="4",
         status=status,
         train_start=DAYS[0],
         train_end=DAYS[100],
-        params={"horizon": 20, "degraded_on": SINCE.isoformat(), **params},
+        params={"horizon": horizon, "degraded_on": SINCE.isoformat(), **params},
         feature_list=[],
         lib_versions={},
         feature_hash="0" * 64,
@@ -90,6 +93,8 @@ def test_restore_closes_the_degraded_period_and_reactivates_the_run(run_panel: P
         ("no reason", r"needs a reason"),
         ("unknown", r"no run interval-none"),
         ("periods", r"alert_periods is not a list"),
+        ("served later", r"served degraded rows through .*; restore it from then or later"),
+        ("future", r"is after today"),
     ],
 )
 def test_restore_refuses_what_a_person_should_look_at(
@@ -109,6 +114,11 @@ def test_restore_refuses_what_a_person_should_look_at(
         reason = "  "
     if case == "unknown":
         run_id = "interval-none.lightgbm.quantile.h20.f000"
+    if case == "served later":
+        served(run, BACK)
+        day = DAYS[-6]
+    if case == "future":
+        day = timezone.localdate() + timedelta(days=30)
     if case == "periods":
         ModelRun.objects.filter(pk=run.pk).update(
             params={**run.params, "alert_periods": {"start": "x"}}
@@ -134,3 +144,26 @@ def test_the_restore_command_reports_the_period_and_its_errors(run_panel: Path) 
     assert f"{run.run_id} 自 {BACK} 恢復 active，警示期 {SINCE}–{BACK}" in out.getvalue()
     with pytest.raises(CommandError, match="only a degraded run is restored"):
         call_command("restore_run", run_id=run.run_id, date=BACK.isoformat(), reason="again")
+
+
+@pytest.mark.django_db
+def test_a_run_restored_on_its_degraded_day_keeps_no_alert_period(run_panel: Path) -> None:
+    run = degraded()
+    served(run, SINCE)
+
+    restore(run.run_id, SINCE, "degraded by mistake")
+
+    stored = ModelRun.objects.get(pk=run.pk)
+    assert stored.params["alert_periods"][-1]["start"] == SINCE.isoformat()
+    assert stored.params["alert_periods"][-1]["end"] == SINCE.isoformat()
+    assert serving.interval_alert(serving.runs_on(SINCE, [SLOT])[SLOT], SINCE) is False
+
+
+@pytest.mark.django_db
+def test_an_active_run_of_another_horizon_does_not_block_a_restore(run_panel: Path) -> None:
+    run = degraded("rank-old.lightgbm.rank.h5.f000", objective="rank", horizon=5)
+    degraded("rank-new.lightgbm.rank.h20.f000", ModelStatus.ACTIVE, objective="rank", horizon=20)
+
+    restored = restore(run.run_id, BACK, "the h20 run is a different slot")
+
+    assert restored.status == ModelStatus.ACTIVE

@@ -1,11 +1,14 @@
 """Model swaps (SPEC §7 每月重訓): promote a build past its gates, restore a degraded run."""
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 from typing import Any
 
 from django.db import transaction
+from django.db.models import Max, Q
+from django.utils import timezone
 
 from apps.api.serving import day_of
 from apps.etl.alerts import dispatch
@@ -14,9 +17,9 @@ from apps.market.calendar import TradingDays
 from apps.research.baseline_runs import SCOPES
 from apps.research.gates import SlotGates, build_runs, check_gates
 from apps.research.holdout import production_pass
-from apps.research.models import ModelRun, ModelStatus
+from apps.research.models import ModelRun, ModelStatus, Prediction
 from apps.research.monitor import DEGRADED_ON
-from apps.research.predict import Slot, predict, serving_run
+from apps.research.predict import SERVING, Slot, predict, serving_run
 from apps.research.runs import PRODUCTION, SCREENING_MODEL, RunError
 
 PROMOTED_ON = "promoted_on"
@@ -47,23 +50,42 @@ def _trading(day: date) -> None:
         raise RunError(f"{day} is not a trading day")
 
 
-def build_day(run_key: str) -> date:
-    """The as_of the build of run_key was fitted through."""
-    notes = [run.params[PRODUCTION] for run in build_runs(run_key).values()]
-    return max(date.fromisoformat(note["as_of"]) for note in notes)
+def _as_of(runs: dict[Slot, ModelRun]) -> date:
+    return max(date.fromisoformat(run.params[PRODUCTION]["as_of"]) for run in runs.values())
+
+
+def _last_rows(slots: Iterable[Slot]) -> date | None:
+    """The latest day any run holds prediction rows for the slots."""
+    condition = Q()
+    for slot in slots:
+        condition |= Q(run__objective=slot.objective, horizon=slot.horizon)
+    last: date | None = Prediction.objects.filter(condition).aggregate(last=Max("date"))["last"]
+    return last
+
+
+def first_day(run_key: str) -> date:
+    """The first day build run_key can serve: its as_of, or its slots' latest rows if later."""
+    runs = build_runs(run_key)
+    last = _last_rows(runs)
+    return max(_as_of(runs), last) if last is not None else _as_of(runs)
 
 
 def _check_build(run_key: str, day: date, frozen_by: str) -> dict[Slot, ModelRun]:
-    """N of run_key, built under the scope's current claim and as of day or earlier."""
+    """N of run_key, built under the current claim, as of day or earlier, with no rows past day."""
     runs = build_runs(run_key)
     claims = sorted({run.params[PRODUCTION]["frozen_by"] for run in runs.values()} - {frozen_by})
     if claims:
         raise RunError(
             f"{run_key} was built under {', '.join(claims)}, not under the claim {frozen_by}"
         )
-    as_of = build_day(run_key)
+    as_of = _as_of(runs)
     if day < as_of:
         raise RunError(f"{run_key} is built as of {as_of}; promote it on that day or later")
+    last = _last_rows(runs)
+    if last is not None and last > day:
+        raise RunError(
+            f"the slots of {run_key} already hold rows through {last}; promote on {last} or later"
+        )
     return runs
 
 
@@ -99,22 +121,37 @@ def _alert(day: date, run_key: str, failed: list[dict[str, Any]], reason: str) -
     )
 
 
+def _slot_runs(slot: Slot, statuses: Iterable[str]) -> list[ModelRun]:
+    runs = ModelRun.objects.filter(
+        objective=slot.objective, params__horizon=slot.horizon, status__in=list(statuses)
+    ).exclude(model_type=SCREENING_MODEL)
+    return list(runs.order_by("run_id"))
+
+
 def _swap(
-    runs: dict[Slot, ModelRun], day: date, failed: list[dict[str, Any]], reason: str
+    runs: dict[Slot, ModelRun],
+    checked: list[SlotGates],
+    day: date,
+    failed: list[dict[str, Any]],
+    reason: str,
 ) -> list[str]:
-    """Retire each slot's serving run and make N active from day, noting how it got there."""
+    """Retire every serving run of N's slots and make N active from day, noting how."""
+    judged = {result.slot: result.serving for result in checked}
     retired = []
     for slot, run in runs.items():
         old = serving_run(slot)
-        if old is not None:
-            ModelRun.objects.filter(pk=old.pk).update(status=ModelStatus.RETIRED)
-            retired.append(old.run_id)
+        if (None if old is None else old.run_id) != judged[slot]:
+            raise RunError(
+                f"the serving run of {slot} changed since its gates were checked; promote again"
+            )
+        serving = _slot_runs(slot, SERVING)
+        ModelRun.objects.filter(pk__in=[item.pk for item in serving]).update(
+            status=ModelStatus.RETIRED
+        )
+        retired += [item.run_id for item in serving]
         current = ModelRun.objects.get(pk=run.pk)
-        note = {
-            "forced": bool(failed),
-            "reason": reason or None,
-            "failed": [item for item in failed if item["run_id"] == run.run_id],
-        }
+        own = [item for item in failed if item["run_id"] == run.run_id]
+        note = {"forced": bool(own), "reason": reason or None, "failed": own}
         params = {**current.params, PROMOTED_ON: day.isoformat(), PROMOTION: note}
         ModelRun.objects.filter(pk=run.pk).update(status=ModelStatus.ACTIVE, params=params)
     return sorted(retired)
@@ -140,7 +177,7 @@ def promote(
             alert = _alert(day, run_key, failed, "")
             result = Promoted(False, checked, failed=failed)
         else:
-            retired = _swap(runs, day, failed, reason)
+            retired = _swap(runs, checked, day, failed, reason)
             written = predict(day, directory, replace=True, slots=list(runs)).written
             alert = _alert(day, run_key, failed, reason) if failed else None
             result = Promoted(True, checked, retired, written, failed)
@@ -150,10 +187,8 @@ def promote(
 
 
 def _active_in(slot: Slot, run_id: str) -> list[str]:
-    runs = ModelRun.objects.filter(
-        objective=slot.objective, params__horizon=slot.horizon, status=ModelStatus.ACTIVE
-    ).exclude(model_type=SCREENING_MODEL)
-    return sorted(runs.exclude(run_id=run_id).values_list("run_id", flat=True))
+    runs = _slot_runs(slot, [ModelStatus.ACTIVE])
+    return [run.run_id for run in runs if run.run_id != run_id]
 
 
 def restore(run_id: str, day: date, reason: str) -> ModelRun:
@@ -161,6 +196,8 @@ def restore(run_id: str, day: date, reason: str) -> ModelRun:
     reason = reason.strip()
     if not reason:
         raise RunError("restoring a run needs a reason")
+    if day > timezone.localdate():
+        raise RunError(f"{day} is after today; a run is restored from today or an earlier day")
     _trading(day)
     with transaction.atomic():
         run = ModelRun.objects.select_for_update().filter(run_id=run_id).first()
@@ -173,6 +210,11 @@ def restore(run_id: str, day: date, reason: str) -> ModelRun:
             raise RunError(f"{run_id} has no readable degraded_on; fix it before restoring")
         if day < since:
             raise RunError(f"{run_id} was degraded on {since}, after {day}")
+        served = Prediction.objects.filter(run=run).aggregate(last=Max("date"))["last"]
+        if served is not None and day < served:
+            raise RunError(
+                f"{run_id} served degraded rows through {served}; restore it from then or later"
+            )
         slot = Slot(run.objective, int(run.params["horizon"]))
         active = _active_in(slot, run_id)
         if active:

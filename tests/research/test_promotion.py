@@ -9,15 +9,18 @@ from django.core.management.base import CommandError
 
 from apps.etl.models import DataQualityLog
 from apps.research import gates, promotion
+from apps.research.gates import Gate
 from apps.research.holdout import HoldoutError
 from apps.research.models import HoldoutRun, ModelRun, ModelStatus, Prediction
 from apps.research.predict import PredictionGateError, Slot
 from apps.research.promotion import PROMOTION_CHECK, promote
 from apps.research.runs import RunError
-from tests.research.test_gates import LAST, built, other_shadow, serve_copy
+from tests.research.run_panels import weekdays
+from tests.research.test_gates import LAST, built, logged, other_shadow, serve_copy
 from tests.research.test_predict import checked, passed
 
 RANK_SLOTS = [Slot("rank", 5), Slot("rank", 20)]
+PREV = weekdays()[-2]
 
 
 def fresh(run: ModelRun) -> ModelRun:
@@ -40,6 +43,31 @@ def serving_copies(runs: list[ModelRun], monkeypatch: pytest.MonkeyPatch) -> lis
     return [serve_copy(fresh(run)) for run in runs]
 
 
+def rebased(run_key: str, as_of: date) -> None:
+    """Move a build's as_of, for N and N′ alike, as if it had been fitted a day earlier."""
+    for run in ModelRun.objects.filter(run_key__in=[run_key, f"{run_key}-shadow"]):
+        note = {**run.params["production"], "as_of": as_of.isoformat()}
+        ModelRun.objects.filter(pk=run.pk).update(params={**run.params, "production": note})
+
+
+def retired_copies(runs: list[ModelRun]) -> list[ModelRun]:
+    """Retired runs that served the build's slots on LAST."""
+    copies = [serve_copy(fresh(run)) for run in runs]
+    ModelRun.objects.filter(pk__in=[run.pk for run in copies]).update(status=ModelStatus.RETIRED)
+    return copies
+
+
+def failing_h5(monkeypatch: pytest.MonkeyPatch) -> None:
+    checked_quality = gates.data_quality
+
+    def quality(run: ModelRun) -> Gate:
+        if run.params["horizon"] == 5:
+            return Gate("data_quality", False, 1.0, "no error", 1, f"{LAST} row_count")
+        return checked_quality(run)
+
+    monkeypatch.setattr(gates, "data_quality", quality)
+
+
 def untouched(runs: list[ModelRun], status: str = ModelStatus.CANDIDATE) -> None:
     for run in runs:
         current = fresh(run)
@@ -52,6 +80,12 @@ def untouched(runs: list[ModelRun], status: str = ModelStatus.CANDIDATE) -> None
 def test_a_first_launch_goes_live_with_its_rows(
     researched: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    others = built("interval", "interval-wf1", researched)
+    ModelRun.objects.filter(pk__in=[run.pk for run in others]).update(status=ModelStatus.ACTIVE)
+    elsewhere = others[0]
+    Prediction.objects.create(
+        run=elsewhere, stock_id="1101", date=LAST, horizon=20, in_universe=True, vol_pred=0.3
+    )
     runs = built("rank", "rank-wf1", researched)
     passed(LAST)
     dispatched = sent(monkeypatch)
@@ -60,6 +94,12 @@ def test_a_first_launch_goes_live_with_its_rows(
 
     assert result.promoted is True
     assert result.retired == []
+    assert set(
+        Prediction.objects.filter(date=LAST, horizon=20)
+        .exclude(run__objective="rank")
+        .values_list("run_id", "stock_id")
+    ) == {(elsewhere.run_id, "1101")}
+    assert {fresh(run).status for run in others} == {ModelStatus.ACTIVE}
     for run in map(fresh, runs):
         assert run.status == ModelStatus.ACTIVE
         assert run.params["promoted_on"] == LAST.isoformat()
@@ -295,3 +335,166 @@ def test_the_command_reports_failed_gates_and_its_errors(
         call_command("promote", run_key="rank-prod", force=True)
     with pytest.raises(CommandError, match="holds no production model N"):
         call_command("promote", run_key="rank-wf1")
+
+
+@pytest.mark.django_db
+def test_a_late_promotion_serves_and_alerts_from_its_own_day(
+    researched: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs = built("rank", "rank-wf1", researched)
+    rebased("rank-prod", PREV)
+    logged(runs[0])
+    passed(LAST)
+    sent(monkeypatch)
+    monkeypatch.setattr(gates, "MIN_DAYS", 500)
+
+    kept = promote("rank-prod", LAST, researched)
+
+    assert kept.promoted is False
+    assert [alert.date for alert in alerts()] == [LAST]
+
+    monkeypatch.setattr(gates, "MIN_DAYS", 1)
+    result = promote("rank-prod", LAST, researched)
+
+    assert result.promoted is True
+    for run in map(fresh, runs):
+        assert run.params["promoted_on"] == LAST.isoformat()
+        assert set(Prediction.objects.filter(run=run).values_list("date", flat=True)) == {LAST}
+
+
+@pytest.mark.django_db
+def test_later_rows_set_the_default_day_and_refuse_an_earlier_one(
+    researched: Path, settings: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs = built("rank", "rank-wf1", researched)
+    rebased("rank-prod", PREV)
+    logged(runs[0])
+    passed(LAST)
+    copies = retired_copies(runs)
+    settings.FEATURE_PARQUET_DIR = researched
+    sent(monkeypatch)
+
+    with pytest.raises(RunError, match=f"already hold rows through {LAST}; promote on {LAST}"):
+        promote("rank-prod", PREV, researched)
+
+    untouched(runs)
+    assert Prediction.objects.filter(run__in=copies, date=LAST).exists()
+    out = StringIO()
+
+    call_command("promote", run_key="rank-prod", stdout=out)
+
+    assert f"rank-prod 於 {LAST} 換模" in out.getvalue()
+    assert {fresh(run).params["promoted_on"] for run in runs} == {LAST.isoformat()}
+    assert not Prediction.objects.filter(run__in=copies).exists()
+
+
+@pytest.mark.django_db
+def test_one_failing_slot_keeps_the_whole_build_out_unless_forced(
+    researched: Path, settings: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs = built("rank", "rank-wf1", researched)
+    passed(LAST)
+    failing_h5(monkeypatch)
+    settings.FEATURE_PARQUET_DIR = researched
+    sent(monkeypatch)
+    five = next(run for run in runs if run.params["horizon"] == 5)
+    twenty = next(run for run in runs if run.params["horizon"] == 20)
+
+    kept = promote("rank-prod", LAST, researched)
+
+    assert kept.promoted is False
+    untouched(runs)
+    assert not Prediction.objects.exists()
+    [alert] = alerts()
+    assert [item["run_id"] for item in alert.detail["failed"]] == [five.run_id]
+    out = StringIO()
+
+    call_command("promote", run_key="rank-prod", force=True, reason="checked by hand", stdout=out)
+
+    assert "強制換模（checked by hand）" in out.getvalue()
+    assert f"{five.run_id}：data_quality（{LAST} row_count）" in out.getvalue()
+    assert fresh(five).params["promotion"]["forced"] is True
+    assert fresh(five).params["promotion"]["failed"][0]["gates"] == [
+        {"name": "data_quality", "reason": f"{LAST} row_count"}
+    ]
+    assert fresh(twenty).params["promotion"] == {
+        "forced": False,
+        "reason": "checked by hand",
+        "failed": [],
+    }
+    assert {fresh(run).status for run in runs} == {ModelStatus.ACTIVE}
+
+
+@pytest.mark.django_db
+def test_promote_judges_fresh_gates_not_the_last_recorded_ones(
+    researched: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs = built("rank", "rank-wf1", researched)
+    passed(LAST)
+    sent(monkeypatch)
+    gates.check_gates("rank-prod", researched)
+    assert {fresh(run).params["gates"]["passed"] for run in runs} == {True}
+    monkeypatch.setattr(gates, "MIN_DAYS", 500)
+
+    result = promote("rank-prod", LAST, researched)
+
+    assert result.promoted is False
+    untouched(runs)
+    assert {fresh(run).params["gates"]["passed"] for run in runs} == {False}
+
+
+@pytest.mark.django_db
+def test_a_forced_promotion_that_fails_to_write_sends_no_alert(
+    researched: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs = built("rank", "rank-wf1", researched)
+    checked(LAST)
+    monkeypatch.setattr(gates, "MIN_DAYS", 500)
+    dispatched = sent(monkeypatch)
+
+    with pytest.raises(PredictionGateError):
+        promote("rank-prod", LAST, researched, force=True, reason="overriding")
+
+    untouched(runs)
+    assert alerts() == []
+    assert dispatched == []
+
+
+@pytest.mark.django_db
+def test_a_serving_run_that_changed_after_the_gates_stops_the_swap(
+    researched: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs = built("rank", "rank-wf1", researched)
+    passed(LAST)
+    sent(monkeypatch)
+    judge = promotion.check_gates
+
+    def judged_then_moved(run_key: str, directory: Path) -> list[Any]:
+        found = judge(run_key, directory)
+        copy = serve_copy(fresh(runs[0]))
+        ModelRun.objects.filter(pk=copy.pk).update(status=ModelStatus.ACTIVE)
+        return found
+
+    monkeypatch.setattr(promotion, "check_gates", judged_then_moved)
+    with pytest.raises(RunError, match="changed since its gates were checked"):
+        promote("rank-prod", LAST, researched)
+
+    untouched(runs)
+
+
+@pytest.mark.django_db
+def test_every_serving_run_of_a_slot_is_retired(
+    researched: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs = built("rank", "rank-wf1", researched)
+    passed(LAST)
+    old = serving_copies(runs, monkeypatch)
+    stale = fresh(old[0])
+    stale.run_id, stale.status = f"{stale.run_id}.stale", ModelStatus.DEGRADED
+    stale.save(force_insert=True)
+
+    result = promote("rank-prod", LAST, researched)
+
+    assert stale.run_id in result.retired
+    assert fresh(stale).status == ModelStatus.RETIRED
+    assert {fresh(run).status for run in old} == {ModelStatus.RETIRED}
