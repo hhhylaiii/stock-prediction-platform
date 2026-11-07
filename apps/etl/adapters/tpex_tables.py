@@ -291,7 +291,7 @@ def sbl_rolls_forward(row: Mapping[Hashable, Any]) -> bool:
 
 
 def published_ratio(values: Sequence[Any]) -> float | None:
-    """A ratio such as P/E; N/A is TPEx's only mark for a missing one."""
+    """A ratio such as P/E; N/A or a JSON null marks a missing one."""
     (text,) = (str(value).strip() for value in values)
     if text == NOT_AVAILABLE:
         return None

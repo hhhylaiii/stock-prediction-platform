@@ -128,8 +128,9 @@ def percent(values: Sequence[Any]) -> float:
 
 
 def ratio(values: Sequence[Any]) -> float | None:
-    """A published ratio such as P/E; TWSE prints '-' where none is published."""
-    (text,) = (str(value).replace(",", "").strip() for value in values)
+    """A published ratio such as P/E; '-', a blank or a JSON null means none is published."""
+    (value,) = values
+    text = "" if value is None else str(value).replace(",", "").strip()
     if text in BLANK_MARKERS:
         return None
     try:
