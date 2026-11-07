@@ -38,7 +38,7 @@ class Command(BaseCommand):
         ) as error:
             raise CommandError(str(error)) from error
         for result in results:
-            against = "（首次上線）" if result.serving is None else f" 對 {result.serving}"
+            against = "（沒有服務中的 run）" if result.serving is None else f" 對 {result.serving}"
             self.stdout.write(f"{result.slot} {result.run_id}{against}")
             for gate in result.gates:
                 self.stdout.write(f"  {gate.name}：{verdict(gate)}")

@@ -7,13 +7,14 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+from django.db import transaction
 
 from apps.etl.models import DataQualityLog
 from apps.research import target_eval
-from apps.research.baseline_runs import RETURN_HORIZON
+from apps.research.baseline_runs import BASELINE, RETURN_HORIZON
 from apps.research.lgbm_runs import MODEL
 from apps.research.metrics.ic import daily_rank_ic, research_ic
-from apps.research.models import ModelObjective, ModelRun, Prediction
+from apps.research.models import ModelObjective, ModelRun, ModelStatus, Prediction
 from apps.research.predict import Slot, serving_run
 from apps.research.prediction_cache import fold_path, load_fold_predictions
 from apps.research.production import SHADOW, shadow_key
@@ -28,7 +29,7 @@ MIN_STOCKS = 30
 MIN_DAYS = 60
 COVERAGE = (0.70, 0.90)
 GATES = "gates"
-FIRST_LAUNCH = "不適用（首次上線）"
+NO_SERVING = "不適用（沒有服務中的 run）"
 FIELDS = {
     ModelObjective.RANK: "score",
     ModelObjective.REGRESSION: "ret_pred",
@@ -88,7 +89,7 @@ def _column(run: ModelRun) -> str:
 
 
 def build_runs(run_key: str) -> dict[Slot, ModelRun]:
-    """The production model N of run_key by slot; research runs and shadows are refused."""
+    """The candidate production model N of run_key by slot; others are refused."""
     runs = ModelRun.objects.filter(run_key=run_key, model_type=MODEL)
     found = {
         Slot(run.objective, int(run.params["horizon"])): run
@@ -97,6 +98,11 @@ def build_runs(run_key: str) -> dict[Slot, ModelRun]:
     }
     if not found:
         raise RunError(f"{run_key} holds no production model N; gates check build_run's run_key")
+    moved = sorted(run.run_id for run in found.values() if run.status != ModelStatus.CANDIDATE)
+    if moved:
+        raise RunError(f"{', '.join(moved)} left candidate; gates judge N before promotion only")
+    if not fold_path(run_key, MODEL, 0).exists():
+        raise RunError(f"{run_key} has no cached fold 0; its last build_run did not finish")
     return found
 
 
@@ -104,7 +110,7 @@ def agreement(run: ModelRun, serving: ModelRun | None, as_of: date) -> Gate:
     """Gate 1: Spearman of N and the serving run over universe stocks on as_of."""
     threshold = f">= {SPEARMAN_LIMIT}"
     if serving is None:
-        return Gate("agreement", None, None, threshold, 0, FIRST_LAUNCH)
+        return Gate("agreement", None, None, threshold, 0, NO_SERVING)
     cached = load_fold_predictions(run.run_key, MODEL, _fold(run))
     mine = cached[(cached["date"] == as_of) & cached["in_universe"].astype(bool)]
     name = FIELDS[ModelObjective(run.objective)]
@@ -128,7 +134,7 @@ def gain_overlap(run: ModelRun, serving: ModelRun | None) -> Gate:
     """Gate 2: shared features among the GAIN_TOP largest gains of N and the serving run."""
     threshold = f">= {GAIN_OVERLAP} of top {GAIN_TOP}"
     if serving is None:
-        return Gate("gain_overlap", None, None, threshold, 0, FIRST_LAUNCH)
+        return Gate("gain_overlap", None, None, threshold, 0, NO_SERVING)
     gains = [run.params.get("importance_gain") or {}, serving.params.get("importance_gain") or {}]
     if not all(gains):
         missing = run.run_id if not gains[0] else serving.run_id
@@ -165,6 +171,10 @@ def _shadow_ic(shadow: ModelRun) -> Gate:
 
 def _shadow_target(shadow: ModelRun, directory: Path) -> Gate:
     fold = _fold(shadow)
+    if not fold_path(shadow.run_key, BASELINE, fold.index).exists():
+        return Gate(
+            "shadow_oos", False, None, "N′ 的 OOS", 0, f"{shadow.run_key} 沒有 baseline 快取"
+        )
     frame = target_eval.target_frame(shadow.run_key, [fold], directory)
     objective = ModelObjective(shadow.objective)
     if objective == ModelObjective.REGRESSION:
@@ -195,17 +205,22 @@ def shadow_oos(run: ModelRun, directory: Path) -> Gate:
     ).first()
     if shadow is None or not fold_path(key, MODEL, 0).exists():
         return Gate("shadow_oos", False, None, "N′ 的 OOS", 0, f"{key} 沒有對應的 N′")
+    mine, theirs = run.params[PRODUCTION], shadow.params[PRODUCTION]
+    if theirs.get("shadow_of") != run.run_key or theirs.get("as_of") != mine["as_of"]:
+        reason = f"{shadow.run_id} 是 {theirs.get('as_of')} 的 N′，N 是 {mine['as_of']}"
+        return Gate("shadow_oos", False, None, "N′ 的 OOS", 0, reason)
     if run.objective == ModelObjective.RANK:
         return _shadow_ic(shadow)
     return _shadow_target(shadow, directory)
 
 
 def data_quality(run: ModelRun) -> Gate:
-    """Gate 4: no error in data_quality_log over N's training window, and some checks logged."""
-    window = DataQualityLog.objects.filter(date__range=(run.train_start, run.train_end))
+    """Gate 4: no error in data_quality_log from train_start to as_of, where N's labels end."""
+    as_of = date.fromisoformat(run.params[PRODUCTION]["as_of"])
+    window = DataQualityLog.objects.filter(date__range=(run.train_start, as_of))
     days = window.values("date").distinct().count()
     if not days:
-        reason = f"{run.train_start}–{run.train_end} 沒有任何品質檢查紀錄"
+        reason = f"{run.train_start}–{as_of} 沒有任何品質檢查紀錄"
         return Gate("data_quality", False, None, "no error", 0, reason)
     errors = sorted(
         set(window.filter(severity=DataQualityLog.Severity.ERROR).values_list("date", "check_name"))
@@ -216,8 +231,8 @@ def data_quality(run: ModelRun) -> Gate:
 
 
 def check_gates(run_key: str, directory: Path) -> list[SlotGates]:
-    """Every gate of each N slot of run_key, recorded on the N run; nothing changes status."""
-    results = []
+    """Every gate of each N slot of run_key, recorded on the N runs together; no status changes."""
+    checked = []
     for slot, run in build_runs(run_key).items():
         serving = serving_run(slot)
         as_of = date.fromisoformat(run.params[PRODUCTION]["as_of"])
@@ -227,10 +242,12 @@ def check_gates(run_key: str, directory: Path) -> list[SlotGates]:
             shadow_oos(run, directory),
             data_quality(run),
         ]
-        checked = SlotGates(slot, run.run_id, None if serving is None else serving.run_id, gates)
-        _record(run, checked)
-        results.append(checked)
-    return results
+        served = None if serving is None else serving.run_id
+        checked.append((run, SlotGates(slot, run.run_id, served, gates)))
+    with transaction.atomic():
+        for run, result in checked:
+            _record(run, result)
+    return [result for _, result in checked]
 
 
 def _record(run: ModelRun, checked: SlotGates) -> None:

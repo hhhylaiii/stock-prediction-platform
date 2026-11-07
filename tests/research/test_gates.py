@@ -1,5 +1,6 @@
 import shutil
-from datetime import date
+from dataclasses import replace
+from datetime import date, timedelta
 from io import StringIO
 from pathlib import Path
 from typing import Any
@@ -10,11 +11,19 @@ from django.core.management.base import CommandError
 
 from apps.etl.models import DataQualityLog
 from apps.research import gates
-from apps.research.gates import FIRST_LAUNCH, Gate, SlotGates, check_gates
+from apps.research.baseline_runs import BASELINE
+from apps.research.gates import NO_SERVING, Gate, SlotGates, check_gates
 from apps.research.lgbm_runs import MODEL
-from apps.research.models import HoldoutRun, ModelRun, ModelStatus, Prediction
+from apps.research.models import (
+    HoldoutRun,
+    LabelDaily,
+    ModelObjective,
+    ModelRun,
+    ModelStatus,
+    Prediction,
+)
 from apps.research.predict import Slot
-from apps.research.prediction_cache import load_fold_predictions
+from apps.research.prediction_cache import fold_path, load_fold_predictions
 from apps.research.production import build_run
 from apps.research.runs import RunError, model_path
 from tests.research.run_panels import claim_all, weekdays
@@ -53,32 +62,26 @@ def by_slot(results: list[SlotGates]) -> dict[Slot, dict[str, Gate]]:
     return {result.slot: {gate.name: gate for gate in result.gates} for result in results}
 
 
-def serve_copy(run: ModelRun, scores: dict[str, float] | None = None) -> ModelRun:
-    """An active copy of N whose as_of rows hold N's own cached scores unless given others."""
-    source = model_path(run.run_key, run.run_id)
-    original = run.run_id
-    run.run_id, run.run_key, run.status = (
-        f"rank-old.{original.split('.', 1)[1]}",
-        "rank-old",
-        "active",
-    )
+def serve_copy(run: ModelRun, values: dict[str, float] | None = None) -> ModelRun:
+    """An active copy of N whose as_of rows hold N's own cached values unless given others."""
+    source, original, prod = model_path(run.run_key, run.run_id), run.run_id, run.run_key
+    column, name = gates._column(run), gates.FIELDS[ModelObjective(run.objective)]
+    old = prod.replace("-prod", "-old")
+    run.run_id, run.run_key, run.status = f"{old}.{original.split('.', 1)[1]}", old, "active"
     run.params = {key: value for key, value in run.params.items() if key != "production"}
     run.save(force_insert=True)
     model_path(run.run_key, run.run_id).parent.mkdir(parents=True, exist_ok=True)
     shutil.copy(source, model_path(run.run_key, run.run_id))
-    cached = load_fold_predictions(
-        "rank-prod", MODEL, gates._fold(ModelRun.objects.get(pk=original))
-    )
-    column = f"{MODEL}_h{run.params['horizon']}"
-    today = cached[cached["date"] == LAST]
+    cached = load_fold_predictions(prod, MODEL, gates._fold(ModelRun.objects.get(pk=original)))
+    today = cached[(cached["date"] == LAST) & cached[column].notna()]
     Prediction.objects.bulk_create(
         Prediction(
             run=run,
             stock_id=row["stock_id"],
             date=LAST,
             horizon=run.params["horizon"],
-            score=(scores or {}).get(row["stock_id"], row[column]),
             in_universe=bool(row["in_universe"]),
+            **{name: float((values or {}).get(row["stock_id"], row[column]))},
         )
         for row in today.to_dict(orient="records")
     )
@@ -87,6 +90,7 @@ def serve_copy(run: ModelRun, scores: dict[str, float] | None = None) -> ModelRu
 
 @pytest.mark.django_db
 def test_a_first_launch_skips_the_comparisons_and_judges_the_shadow(researched: Path) -> None:
+    LabelDaily.objects.filter(stock_id="1100").update(untradable_t1=True)
     runs = built("rank", "rank-wf1", researched)
     logged(runs[0])
 
@@ -95,17 +99,19 @@ def test_a_first_launch_skips_the_comparisons_and_judges_the_shadow(researched: 
     assert set(results) == {Slot("rank", 5), Slot("rank", 20)}
     for slot, found in results.items():
         assert found["agreement"].passed is None
-        assert found["agreement"].reason == FIRST_LAUNCH
+        assert found["agreement"].reason == NO_SERVING
         assert found["gain_overlap"].passed is None
         shadow = ModelRun.objects.get(
             run_key="rank-prod-shadow", objective="rank", params__horizon=slot.horizon
         )
         assert found["shadow_oos"].value == pytest.approx(shadow.ic_mean)
         assert found["shadow_oos"].sample >= gates.MIN_DAYS
+        assert found["shadow_oos"].passed is True
         assert found["data_quality"].passed is True
         assert found["data_quality"].sample == 1
     stored = ModelRun.objects.get(run_id=runs[0].run_id).params["gates"]
     assert stored["serving"] is None
+    assert stored["passed"] is True
     assert [gate["name"] for gate in stored["gates"]] == [
         "agreement",
         "gain_overlap",
@@ -195,6 +201,13 @@ def test_the_shadow_gate_fails_without_enough_days_or_a_shadow(
     assert "少於 500" in found.reason
     assert found.sample > 0
 
+    monkeypatch.setattr(gates, "MIN_DAYS", 1)
+    fold_path("rank-prod-shadow", MODEL, 0).unlink()
+    missing = by_slot(check_gates("rank-prod", researched))[Slot("rank", 5)]["shadow_oos"]
+
+    assert missing.passed is False
+    assert "沒有對應的 N′" in missing.reason
+
     ModelRun.objects.filter(run_key="rank-prod-shadow").delete()
     found = by_slot(check_gates("rank-prod", researched))[Slot("rank", 5)]["shadow_oos"]
 
@@ -232,17 +245,22 @@ def test_the_quality_gate_lists_errors_and_needs_some_checks(researched: Path) -
 
     logged(run)
     logged(run, "error", run.train_end)
+    logged(run, "warning", run.train_end)
+    logged(run, "error", run.train_start - timedelta(days=1))
     DataQualityLog.objects.create(
         date=run.train_end, check_name="etl_runs", severity="error", detail={}
     )
     logged(run, "error", LAST)
+    logged(run, "error", LAST + timedelta(days=1))
 
     found = by_slot(check_gates("rank-prod", researched))[Slot("rank", 20)]["data_quality"]
 
     assert found.passed is False
-    assert found.value == 2
-    assert found.reason == f"{run.train_end} etl_runs, {run.train_end} row_count"
-    assert found.sample == 2
+    assert found.value == 3
+    assert found.reason == (
+        f"{run.train_end} etl_runs, {run.train_end} row_count, {LAST} row_count"
+    )
+    assert found.sample == 3
 
 
 @pytest.mark.django_db
@@ -270,6 +288,11 @@ def test_the_target_shadow_gates_reuse_the_target_evaluation(researched: Path) -
     probability = results[Slot("classification", 20)]["shadow_oos"]
     assert probability.value == pytest.approx(evaluated.brier.model)
     assert probability.sample == evaluated.brier.days > 0
+    assert probability.passed is (evaluated.brier.model <= evaluated.brier.baseline)
+    interval = load_fold_predictions("interval-prod", MODEL, gates._fold(built_n("interval-prod")))
+    returns = load_fold_predictions("return-prod", MODEL, gates._fold(built_n("return-prod")))
+    assert set(gates.COLUMNS.values()) <= {*interval.columns, *returns.columns}
+    assert set(gates.FIELDS.values()) <= {item.name for item in Prediction._meta.get_fields()}
     returned = results[Slot("regression", 5)]["shadow_oos"]
     folded = ModelRun.objects.filter(run_key="return-prod-shadow").first()
     assert folded is not None
@@ -288,13 +311,18 @@ def test_the_target_shadow_gates_fail_without_enough_days(
     researched: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     built("interval", "interval-wf1", researched)
+    built("return", "return-wf1", researched)
     monkeypatch.setattr(gates, "MIN_DAYS", 500)
 
-    results = by_slot(check_gates("interval-prod", researched))
+    results = by_slot(
+        [*check_gates("interval-prod", researched), *check_gates("return-prod", researched)]
+    )
 
-    for objective in ("quantile", "volatility", "classification"):
-        assert results[Slot(objective, 20)]["shadow_oos"].passed is False
-        assert "少於 500" in results[Slot(objective, 20)]["shadow_oos"].reason
+    for slot in (Slot("quantile", 20), Slot("volatility", 20), Slot("classification", 20)):
+        assert results[slot]["shadow_oos"].passed is False
+        assert "少於 500" in results[slot]["shadow_oos"].reason
+    assert results[Slot("regression", 5)]["shadow_oos"].passed is False
+    assert "少於 500" in results[Slot("regression", 5)]["shadow_oos"].reason
 
 
 @pytest.mark.django_db
@@ -304,6 +332,14 @@ def test_gates_check_production_builds_only(researched: Path) -> None:
     for key in ("rank-prod-shadow", "rank-wf1"):
         with pytest.raises(RunError, match=f"{key} holds no production model N"):
             check_gates(key, researched)
+    ModelRun.objects.filter(run_id="rank-prod.lightgbm.h5.f000").update(status="active")
+    with pytest.raises(RunError, match=r"rank-prod\.lightgbm\.h5\.f000 left candidate"):
+        check_gates("rank-prod", researched)
+    assert not ModelRun.objects.filter(run_key="rank-prod", params__has_key="gates").exists()
+    ModelRun.objects.filter(run_key="rank-prod").update(status="candidate")
+    fold_path("rank-prod", MODEL, 0).unlink()
+    with pytest.raises(RunError, match="rank-prod has no cached fold 0"):
+        check_gates("rank-prod", researched)
 
 
 @pytest.mark.django_db
@@ -316,9 +352,180 @@ def test_the_command_prints_each_gate(researched: Path, settings: Any) -> None:
     call_command("check_gates", run_key="rank-prod", stdout=out)
 
     text = out.getvalue()
-    assert "rank 20 日 rank-prod.lightgbm.h20.f000（首次上線）" in text
-    assert f"agreement：{FIRST_LAUNCH}" in text
+    assert "rank 20 日 rank-prod.lightgbm.h20.f000（沒有服務中的 run）" in text
+    assert f"agreement：{NO_SERVING}" in text
     assert "data_quality：通過" in text
+    assert text.strip().endswith("全部通過")
     with pytest.raises(CommandError, match="holds no production model N"):
         call_command("check_gates", run_key="rank-prod-shadow")
     assert ModelRun.objects.filter(status=ModelStatus.ACTIVE).count() == 0
+
+
+def built_n(run_key: str) -> ModelRun:
+    run = ModelRun.objects.filter(run_key=run_key).first()
+    assert run is not None
+    return run
+
+
+def gate(passed: bool | None) -> Gate:
+    return Gate("agreement", passed, None, "", 0, "")
+
+
+def test_a_slot_passes_unless_some_gate_fails() -> None:
+    slot = Slot("rank", 5)
+
+    assert SlotGates(slot, "n", None, [gate(None), gate(True)]).passed is True
+    assert SlotGates(slot, "n", None, [gate(None), gate(True), gate(False)]).passed is False
+    assert SlotGates(slot, "n", None, [gate(None), gate(None)]).passed is True
+
+
+def ranked(gains: dict[str, float]) -> ModelRun:
+    return ModelRun(run_id="x", params={"importance_gain": gains})
+
+
+def test_gain_overlap_counts_the_largest_gains_only() -> None:
+    small = {f"b{k}": 1.0 for k in range(10)}
+    mine = ranked({**{f"a{k}": 10.0 for k in range(10)}, **small})
+    apart = ranked({**{f"c{k}": 10.0 for k in range(10)}, **small})
+    six = ranked(
+        {**{f"a{k}": 10.0 for k in range(6)}, **{f"c{k}": 10.0 for k in range(4)}, **small}
+    )
+    five = ranked(
+        {**{f"a{k}": 10.0 for k in range(5)}, **{f"c{k}": 10.0 for k in range(5)}, **small}
+    )
+
+    assert gains_shared(mine, apart) == (0.0, False)
+    assert gains_shared(mine, six) == (6.0, True)
+    assert gains_shared(mine, five) == (5.0, False)
+
+
+def gains_shared(mine: ModelRun, theirs: ModelRun) -> tuple[float | None, bool | None]:
+    found = gates.gain_overlap(mine, theirs)
+    return found.value, found.passed
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("scope", "slot", "field", "value", "passed"),
+    [
+        ("interval", Slot("quantile", 20), "coverage", 0.69, False),
+        ("interval", Slot("quantile", 20), "coverage", 0.70, True),
+        ("interval", Slot("quantile", 20), "coverage", 0.90, True),
+        ("interval", Slot("quantile", 20), "coverage", 0.91, False),
+        ("interval", Slot("volatility", 20), "qlike", 0.0, True),
+        ("interval", Slot("volatility", 20), "qlike", 0.01, False),
+        ("interval", Slot("classification", 20), "brier", 0.0, True),
+        ("interval", Slot("classification", 20), "brier", 0.01, False),
+        ("return", Slot("regression", 5), "mae", 0.0, True),
+        ("return", Slot("regression", 5), "mae", 0.01, False),
+    ],
+)
+def test_the_target_shadow_gates_hold_their_bounds(
+    researched: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scope: str,
+    slot: Slot,
+    field: str,
+    value: float,
+    passed: bool,
+) -> None:
+    built(scope, f"{scope}-wf1", researched)
+    evaluate_interval = gates.target_eval.evaluate_interval
+    evaluate_return = gates.target_eval.evaluate_return
+
+    def interval(*args: Any) -> Any:
+        found = evaluate_interval(*args)
+        if field == "coverage":
+            return replace(found, coverage=value)
+        compared = getattr(found, field)
+        return replace(found, **{field: replace(compared, model=compared.baseline + value)})
+
+    def returned(*args: Any) -> Any:
+        found = evaluate_return(*args)
+        zero = found.mae["zero"]
+        return replace(found, mae={**found.mae, "zero": replace(zero, model=zero.baseline + value)})
+
+    monkeypatch.setattr(gates.target_eval, "evaluate_interval", interval)
+    monkeypatch.setattr(gates.target_eval, "evaluate_return", returned)
+
+    found = by_slot(check_gates(f"{scope}-prod", researched))[slot]["shadow_oos"]
+
+    assert found.passed is passed
+
+
+@pytest.mark.django_db
+def test_a_shadow_of_another_day_or_without_baselines_fails(researched: Path) -> None:
+    built("interval", "interval-wf1", researched)
+    shadows = ModelRun.objects.filter(run_key="interval-prod-shadow", model_type=MODEL)
+    for run in shadows:
+        note = {**run.params["production"], "as_of": "2016-11-30"}
+        ModelRun.objects.filter(pk=run.pk).update(params={**run.params, "production": note})
+
+    stale = by_slot(check_gates("interval-prod", researched))[Slot("quantile", 20)]["shadow_oos"]
+
+    assert stale.passed is False
+    assert "2016-11-30 的 N′" in stale.reason
+
+    for run in shadows:
+        note = {**run.params["production"], "as_of": LAST.isoformat()}
+        ModelRun.objects.filter(pk=run.pk).update(params={**run.params, "production": note})
+    fold_path("interval-prod-shadow", BASELINE, 0).unlink()
+
+    bare = by_slot(check_gates("interval-prod", researched))[Slot("quantile", 20)]["shadow_oos"]
+
+    assert bare.passed is False
+    assert "沒有 baseline 快取" in bare.reason
+
+
+@pytest.mark.django_db
+def test_gates_are_recorded_only_once_every_slot_is_checked(
+    researched: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    built("rank", "rank-wf1", researched)
+    checked = gates.data_quality
+    calls: list[int] = []
+
+    def broken(run: ModelRun) -> Gate:
+        calls.append(1)
+        if len(calls) == 2:
+            raise RuntimeError("the second slot broke")
+        return checked(run)
+
+    monkeypatch.setattr(gates, "data_quality", broken)
+    with pytest.raises(RuntimeError, match="second slot"):
+        check_gates("rank-prod", researched)
+
+    assert not ModelRun.objects.filter(run_key="rank-prod", params__has_key="gates").exists()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("scope", "slot"),
+    [
+        ("interval", Slot("quantile", 20)),
+        ("interval", Slot("volatility", 20)),
+        ("interval", Slot("classification", 20)),
+        ("return", Slot("regression", 5)),
+    ],
+)
+def test_each_objective_compares_its_own_prediction_field(
+    researched: Path, monkeypatch: pytest.MonkeyPatch, scope: str, slot: Slot
+) -> None:
+    monkeypatch.setattr(gates, "GAIN_TOP", 2)
+    monkeypatch.setattr(gates, "GAIN_OVERLAP", 2)
+    built(scope, f"{scope}-wf1", researched)
+    run = ModelRun.objects.get(
+        run_key=f"{scope}-prod",
+        model_type=MODEL,
+        objective=slot.objective,
+        params__horizon=slot.horizon,
+    )
+    serving = serve_copy(ModelRun.objects.get(pk=run.pk))
+
+    found = by_slot(check_gates(f"{scope}-prod", researched))[slot]
+
+    assert found["agreement"].passed is True
+    assert found["agreement"].value == pytest.approx(1.0)
+    assert found["agreement"].sample >= gates.MIN_STOCKS
+    assert found["gain_overlap"].passed is True
+    assert ModelRun.objects.get(pk=run.pk).params["gates"]["serving"] == serving.run_id
