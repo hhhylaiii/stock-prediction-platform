@@ -24,7 +24,8 @@ from apps.research.evaluation import ALERT_SHARE
 Severity = DataQualityLog.Severity
 SEVERITY_ORDER = (Severity.INFO, Severity.WARNING, Severity.ERROR)
 CHECK_FIELDS = ("check_name", "severity", "detail")
-MODEL_CHECK_PREFIXES = ("output_", "monitor_", "model_")
+MODEL_CHECK_FIELDS = ("id", *CHECK_FIELDS)
+MODEL_CHECK_PREFIXES = ("output_", "monitor_", "model_", "research_")
 
 
 class EtlRunSerializer(serializers.ModelSerializer[EtlRun]):
@@ -57,7 +58,7 @@ def session_summary(day: date, logs: list[dict[str, Any]]) -> dict[str, Any]:
         "worst": worst,
         "missing_checks": missing,
         "checks": [{field: entry[field] for field in CHECK_FIELDS} for entry in data],
-        "model_checks": [{field: entry[field] for field in CHECK_FIELDS} for entry in model],
+        "model_checks": [{field: entry[field] for field in MODEL_CHECK_FIELDS} for entry in model],
     }
 
 
@@ -88,7 +89,7 @@ class DataQualityView(ReadOnlyView):
         logs = (
             DataQualityLog.objects.filter(date__range=(sessions[0], sessions[-1]))
             .order_by("date", "check_name", "id")
-            .values("date", *CHECK_FIELDS)
+            .values("date", *MODEL_CHECK_FIELDS)
         )
         by_day = {day: list(entries) for day, entries in groupby(logs, key=itemgetter("date"))}
         data = [session_summary(day, by_day.get(day, [])) for day in reversed(sessions)]

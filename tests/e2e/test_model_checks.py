@@ -387,7 +387,7 @@ def test_a_numeric_threshold_off_the_contract_still_shows_zero(
     )
 
 
-def test_research_schedule_checks_are_named_in_the_quality_block(
+def test_research_schedule_checks_sit_with_the_model_checks(
     page: Page, live_server: LiveServer, seeded: Seed
 ) -> None:
     log(seeded, "research_morning", "warning", {})
@@ -395,10 +395,15 @@ def test_research_schedule_checks_are_named_in_the_quality_block(
 
     page.goto(f"{live_server.url}/#models")
 
-    quality = page.locator("#quality")
-    expect(quality).to_contain_text("研究早盤排程（警告）")
-    expect(quality).to_contain_text("研究晚間排程（通過）")
-    expect(page.locator("#model-checks")).not_to_contain_text("研究")
+    checks = page.locator("#model-checks .check")
+    morning = checks.filter(has_text="研究早盤排程")
+    expect(morning).to_contain_text("警告")
+    expect(morning.locator("i")).to_have_class("warn")
+    evening = checks.filter(has_text="研究晚間排程")
+    expect(evening).to_contain_text("通過")
+    expect(evening.locator("i")).not_to_have_class("warn")
+    expect(page.locator("#quality")).not_to_contain_text("研究")
+    expect(page.locator("#status")).to_contain_text("品質檢查通過（1 項警告）")
 
 
 def test_model_output_checks_leave_the_data_verdict_alone(

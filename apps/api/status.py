@@ -6,7 +6,7 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 
 from apps.api.envelope import envelope
-from apps.api.ops import CHECK_FIELDS, Severity, session_summary
+from apps.api.ops import MODEL_CHECK_FIELDS, Severity, session_summary
 from apps.api.serving import DEFAULT_HORIZON, Slot, latest_served_date, runs_on
 from apps.api.sessions import latest_session, load_calendar
 from apps.api.views import ReadOnlyView
@@ -28,7 +28,7 @@ class StatusView(ReadOnlyView):
         logs = list(
             DataQualityLog.objects.filter(date=data_date)
             .order_by("check_name", "id")
-            .values("date", *CHECK_FIELDS)
+            .values("date", *MODEL_CHECK_FIELDS)
         )
         summary = session_summary(data_date, logs)
         updated_at = EtlRun.objects.filter(
