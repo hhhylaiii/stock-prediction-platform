@@ -405,6 +405,18 @@ def test_each_statement_flag_waits_for_exactly_the_quarters_its_signal_reads(sig
     assert waits == [k in STATEMENT_READS[signal] for k in range(8)]
 
 
+@pytest.mark.parametrize("signal", BASIS_SIGNALS)
+def test_each_basis_flag_waits_for_exactly_the_quarters_its_signal_reads(signal: str) -> None:
+    statements = quarters("2013-Q1", 16)
+    statements.loc[statements["period"] == "2013-Q2", "announce_date"] = LATE.date()
+
+    flags = statement_sourcing(statements)
+
+    name = crossed_name(signal)
+    waits = [known(flags, later_by(flags, "2013-Q2", k), name) == LATE for k in range(8)]
+    assert waits == [k in STATEMENT_READS[signal] for k in range(8)]
+
+
 def test_statement_sourcing_flags_signals_that_read_a_quarter_on_the_other_basis() -> None:
     switched = quarters("2012-Q1", 12).assign(fin_type=["individual"] * 4 + ["consolidated"] * 8)
 
