@@ -94,6 +94,9 @@ class Command(BaseCommand):
     def _fills(self, column: str, coverage: pd.DataFrame, affected: list[str]) -> None:
         shares = unmasked_fills(coverage, affected)
         current, delisted = shares["current"], shares["delisted"]
+        if shares.isna().all():
+            self.stdout.write(f"{column}: every month is affected, so no fills are left unmasked")
+            return
         self.stdout.write(
             f"{column}: filled from {FALLBACKS[column]} in the months left unmasked, "
             f"current {current:.2%}, delisted {delisted:.2%}"

@@ -245,3 +245,21 @@ def test_the_fill_warning_reads_the_months_left_unmasked(
 
     assert f"current {current:.2%}, delisted {delisted:.2%}" in out.getvalue()
     assert ("warning: fills still lean on stocks later delisted" in out.getvalue()) is warned
+
+
+def test_the_fill_line_says_so_when_every_month_is_affected() -> None:
+    out = StringIO()
+    coverage = pd.DataFrame(
+        {
+            "filled_current": [0.0],
+            "filled_delisted": [0.9],
+            "rows_current": [100],
+            "rows_delisted": [100],
+        },
+        ["2016-03"],
+    )
+
+    residual_coverage.Command(stdout=out)._fills("fund_rev_yoy", coverage, ["2016-03"])
+
+    expected = "fund_rev_yoy: every month is affected, so no fills are left unmasked\n"
+    assert out.getvalue() == expected
