@@ -13,8 +13,8 @@ from apps.etl.management.options import as_date
 from apps.market.calendar import TradingDays
 from apps.market.models import StockMaster
 from apps.research.features.build import FEATURE_COLUMNS, FRAME_COLUMNS
-from apps.research.features.residual import FALLBACKS, MASKED_MONTHS
-from apps.research.features.store import read_partitions
+from apps.research.features.residual import FALLBACKS, MASKED_MONTHS, rules_signature
+from apps.research.features.store import partition_rules, read_partitions
 from apps.research.labels import HORIZONS
 from apps.research.models import ModelRun
 from apps.research.phase3_report import (
@@ -28,7 +28,6 @@ from apps.research.phase3_report import (
     render,
     statement_coverage,
     strongest,
-    unfilled,
 )
 from apps.research.runs import SCREENING_MODEL, feature_hash
 from apps.research.screening import RANK_LABEL
@@ -67,6 +66,16 @@ def _delisted() -> pd.Series:
     return pd.Series({stock: delisted is not None for stock, delisted in rows}, dtype=bool)
 
 
+def _ruled(start: date, end: date) -> None:
+    """Refuse partitions exported under source-gap rules other than this code's."""
+    for year in range(start.year, end.year + 1):
+        if partition_rules(settings.FEATURE_PARQUET_DIR, year) != rules_signature():
+            raise CommandError(
+                f"the {year} partition was exported under other source-gap rules than this "
+                "code's; rebuild features"
+            )
+
+
 def _gaps(start: date, end: date, delisted: pd.Series) -> tuple[pd.DataFrame, pd.DataFrame]:
     missing: pd.DataFrame | None = None
     filled: pd.DataFrame | None = None
@@ -74,12 +83,6 @@ def _gaps(start: date, end: date, delisted: pd.Series) -> tuple[pd.DataFrame, pd
     for year in range(start.year, end.year + 1):
         low, high = max(start, date(year, 1, 1)), min(end, date(year, 12, 31))
         rows = read_partitions(low, high, directory, columns=FRAME_COLUMNS)
-        stale = unfilled(rows, FALLBACKS, MASKED_MONTHS)
-        if stale:
-            raise CommandError(
-                f"partitions of {year} were built without the source-gap rules for "
-                f"{', '.join(stale)}; rebuild features"
-            )
         counts = missing_counts(rows, delisted, FEATURE_COLUMNS)
         fills = fill_counts(rows, delisted, FALLBACKS)
         missing = counts if missing is None else missing.add(counts, fill_value=0)
@@ -131,6 +134,8 @@ class Command(BaseCommand):
             )
         try:
             _unchanged(run)
+            _ruled(start, end)
+            _ruled(run.train_start, run.train_end)
             after, fills = _gaps(start, end, _delisted())
             monthly = _monthly(run, TradingDays.from_db())
         except (ValueError, FileNotFoundError) as error:

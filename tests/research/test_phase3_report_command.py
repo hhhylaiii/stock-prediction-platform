@@ -10,6 +10,7 @@ from django.core.management.base import CommandError
 from apps.market.models import StockMaster
 from apps.research.features.build import FEATURE_COLUMNS
 from apps.research.features.store import existing_partition, export_year
+from apps.research.management.commands import phase3_report
 from apps.research.models import FeatureDaily, ModelRun
 from apps.research.phase3_report import TABLE_COLUMNS
 from tests.research.test_screening import STOCKS, stored
@@ -136,12 +137,14 @@ def test_the_report_adds_up_years_and_lists_every_screened_feature(stored: Path)
     assert set(monthly["feature"]) == set(screened)
 
 
-def test_the_report_refuses_partitions_built_without_the_fallbacks(stored: Path) -> None:
-    FeatureDaily.objects.filter(date__month=3).update(fund_rev_yoy=None)
-    export_year(2016, stored / "features")
+def test_the_report_refuses_partitions_exported_without_the_source_gap_rules(
+    stored: Path,
+) -> None:
+    partition = existing_partition(stored / "features", 2016)
+    pd.read_parquet(partition).to_parquet(partition, index=False)
     call_command("ic_report", run_key="screen1", output=str(stored / "ic.md"), stdout=StringIO())
 
-    with pytest.raises(CommandError, match="without the source-gap rules for fund_rev_yoy"):
+    with pytest.raises(CommandError, match="2016 partition was exported under other source-gap"):
         call_command(
             "phase3_report",
             run_key="screen1",
@@ -150,3 +153,42 @@ def test_the_report_refuses_partitions_built_without_the_fallbacks(stored: Path)
             end="2016-12-31",
             stdout=StringIO(),
         )
+
+
+def test_the_report_refuses_partitions_stamped_with_other_rules(
+    stored: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    call_command("ic_report", run_key="screen1", output=str(stored / "ic.md"), stdout=StringIO())
+    monkeypatch.setattr(phase3_report, "rules_signature", lambda: "{}")
+
+    with pytest.raises(CommandError, match="rebuild features"):
+        call_command(
+            "phase3_report",
+            run_key="screen1",
+            before=str(before_table(stored / "before.csv")),
+            start="2016-01-01",
+            end="2016-12-31",
+            stdout=StringIO(),
+        )
+
+
+def test_the_report_checks_the_rules_of_the_gap_years_and_the_screening_window(
+    stored: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    call_command("ic_report", run_key="screen1", output=str(stored / "ic.md"), stdout=StringIO())
+    seen: list[tuple[date, date]] = []
+    monkeypatch.setattr(phase3_report, "_ruled", lambda start, end: seen.append((start, end)))
+
+    call_command(
+        "phase3_report",
+        run_key="screen1",
+        before=str(before_table(stored / "before.csv")),
+        start="2016-01-01",
+        end="2016-06-30",
+        output=str(stored / "data.md"),
+        appendix=str(stored / "appendix"),
+        stdout=StringIO(),
+    )
+
+    run = ModelRun.objects.get(run_id="screen1.screening")
+    assert seen == [(date(2016, 1, 1), date(2016, 6, 30)), (run.train_start, run.train_end)]

@@ -7,12 +7,11 @@ import pandas as pd
 
 from apps.market.calendar import TradingDays
 from apps.research.features.registry import Availability, Group, feature
+from apps.research.features.residual import ACCEPT_GAP, ACCEPT_RATIO
 from apps.research.metrics.ic import daily_rank_ic
 
 FLAG_RATIO = 3.0
 FLAG_GAP = 0.20
-ACCEPT_RATIO = 1.5
-ACCEPT_GAP = 0.05
 MONTHLY_TOP = 10
 TABLE_COLUMNS = ["current", "delisted", "rows_current", "rows_delisted", "ratio", "gap_pp", "flag"]
 
@@ -73,22 +72,6 @@ def missing_table(counts: pd.DataFrame) -> pd.DataFrame:
 def accepted(table: pd.DataFrame) -> pd.Series:
     """Features meeting the 11/07 bar: ratio at most ACCEPT_RATIO or gap at most ACCEPT_GAP."""
     return (table["ratio"] <= ACCEPT_RATIO) | (table["gap_pp"] <= ACCEPT_GAP * 100)
-
-
-def unfilled(
-    rows: pd.DataFrame, fallbacks: Mapping[str, str], masked: Mapping[str, frozenset[str]]
-) -> list[str]:
-    """Fallback features left empty where their source has a value, outside their masked months."""
-    months = pd.to_datetime(pd.Series(rows["date"], index=rows.index)).dt.strftime("%Y-%m")
-    return [
-        name
-        for name, source in fallbacks.items()
-        if (
-            rows[name].isna()
-            & rows[source].notna()
-            & ~months.isin(list(masked.get(name, frozenset())))
-        ).any()
-    ]
 
 
 def fill_counts(

@@ -16,7 +16,6 @@ from apps.research.phase3_report import (
     render,
     statement_coverage,
     strongest,
-    unfilled,
 )
 from tests.research.conftest import weekday_calendar
 
@@ -329,19 +328,3 @@ def test_accepted_takes_a_small_ratio_or_a_small_gap() -> None:
         "only_delisted": False,
         "both_over": False,
     }
-
-
-def test_unfilled_names_fallbacks_left_empty_outside_masked_months() -> None:
-    frame = pd.DataFrame(
-        {
-            "date": [d("2016-01-04"), d("2016-02-01"), d("2016-02-02")],
-            "fund_rev_yoy": [NAN, NAN, 0.3],
-            "fund_rev_yoy_q": [0.1, 0.2, 0.3],
-        }
-    )
-    fallbacks = {"fund_rev_yoy": "fund_rev_yoy_q"}
-
-    assert unfilled(frame, fallbacks, {}) == ["fund_rev_yoy"]
-    assert unfilled(frame, fallbacks, {"fund_rev_yoy": frozenset({"2016-01"})}) == ["fund_rev_yoy"]
-    assert unfilled(frame, fallbacks, {"fund_rev_yoy": frozenset({"2016-01", "2016-02"})}) == []
-    assert unfilled(rows(), fallbacks, {}) == []
