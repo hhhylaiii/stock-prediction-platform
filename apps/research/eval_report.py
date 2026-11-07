@@ -116,12 +116,13 @@ def _folds(indices: Sequence[int]) -> str:
 def _shuffle_line(shuffled: ShuffleCheck | None) -> str:
     if shuffled is None:
         return "- 打亂 label：這次沒跑，未判定"
+    name = f"打亂 label（{shuffled.horizon} 日 Ridge）"
     if shuffled.leak is None:
-        return f"- 打亂 label：第 {shuffled.fold} 摺沒有 OOS 日，未判定"
+        return f"- {name}：第 {shuffled.fold} 摺沒有 OOS 日，未判定"
     measured = f"第 {shuffled.fold} 摺的 OOS rank IC {shuffled.ic:.4f}"
     if shuffled.leak:
-        return f"- 🔴 洩漏警訊：打亂 label 後{measured}，絕對值達 {shuffled.limit}，先當成洩漏追查"
-    return f"- 打亂 label：{measured}，絕對值低於 {shuffled.limit}"
+        return f"- 🔴 洩漏警訊：{name}後{measured}，絕對值達 {shuffled.limit}，先當成洩漏追查"
+    return f"- {name}：{measured}，絕對值低於 {shuffled.limit}"
 
 
 def _leak_lines(report: RankReport, shuffled: ShuffleCheck | None) -> list[str]:

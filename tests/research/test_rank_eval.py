@@ -334,7 +334,7 @@ def test_report_renders_each_horizon_with_deciles_and_importance(caches: Path) -
         assert section in text
         assert rank_eval._gates(horizon, evaluated) in text
     assert text.index("（5 日）") < text.index("（20 日）")
-    check = ShuffleCheck(fold=chosen[0].index, ic=0.0312, limit=0.02)
+    check = ShuffleCheck(fold=chosen[0].index, horizon=20, ic=0.0312, limit=0.02)
     shuffled = rank_eval.report(RUN_KEY, evaluations, shuffled=check)
     for horizon in (5, 20):
         evaluated = evaluations[horizon]
@@ -346,7 +346,7 @@ def test_report_renders_each_horizon_with_deciles_and_importance(caches: Path) -
             shuffled=check,
         )
         assert section in shuffled
-    assert shuffled.count("打亂 label 後") == 2
+    assert shuffled.count("打亂 label（20 日 Ridge）後") == 2
 
 
 def test_shuffle_result_checks_the_first_research_fold_against_the_limit(
@@ -358,7 +358,7 @@ def test_shuffle_result_checks_the_first_research_fold_against_the_limit(
     check = rank_eval.shuffle_result(research(), caches, 2)
 
     ic = baseline_runs.shuffle_check(first, caches, 2)
-    assert check == ShuffleCheck(fold=first.index, ic=ic, limit=0.5)
+    assert check == ShuffleCheck(fold=first.index, horizon=20, ic=ic, limit=0.5)
     with pytest.raises(ValueError, match="no research folds"):
         rank_eval.shuffle_result([fold for fold in research() if fold.tuning], caches, 2)
 

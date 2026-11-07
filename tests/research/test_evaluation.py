@@ -235,7 +235,6 @@ def test_a_research_fold_far_ahead_of_its_baseline_is_flagged_as_a_leak() -> Non
 
     report = rank_report(frame, "score", 20, folds(), baseline="ridge")
 
-    assert report.leak
     assert report.leak_folds == (ahead.index,)
     assert report.unjudged_folds == ()
     assert report.by_fold.loc[ahead.index, "leak"]
@@ -251,7 +250,6 @@ def test_an_equal_baseline_clears_every_research_fold() -> None:
 
     report = rank_report(frame, "score", 5, folds(), baseline="ridge")
 
-    assert not report.leak
     assert report.leak_folds == ()
     assert report.unjudged_folds == ()
     assert report.by_fold.loc[tuning.index, "leak"]
@@ -266,7 +264,7 @@ def test_research_folds_without_a_baseline_are_unjudged_not_cleared() -> None:
     alone = rank_report(copied, "score", 20, folds())
     compared = rank_report(copied, "score", 20, folds(), baseline="ridge")
 
-    assert not alone.leak
+    assert alone.leak_folds == ()
     assert alone.unjudged_folds == tuple(fold.index for fold in research())
     assert compared.unjudged_folds == (missing.index,)
     assert compared.leak_folds == tuple(
@@ -279,7 +277,7 @@ def test_research_folds_without_a_baseline_are_unjudged_not_cleared() -> None:
     [(0.0199, False), (-0.0199, False), (0.02, True), (-0.031, True), (math.nan, None)],
 )
 def test_a_shuffle_check_flags_an_absolute_ic_at_the_limit(ic: float, flagged: bool | None) -> None:
-    assert ShuffleCheck(fold=3, ic=ic, limit=0.02).leak is flagged
+    assert ShuffleCheck(fold=3, horizon=20, ic=ic, limit=0.02).leak is flagged
 
 
 def test_importance_drift_ranks_top_features_and_counts_overlap() -> None:

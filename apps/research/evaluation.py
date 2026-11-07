@@ -68,6 +68,7 @@ class ShuffleCheck:
     """SPEC §8 shuffled-label OOS rank IC of one fold and the absolute limit it is held to."""
 
     fold: int
+    horizon: int
     ic: float
     limit: float
 
@@ -108,10 +109,6 @@ class RankReport:
         """Research folds with no baseline IC to hold the model's against."""
         flags = self._research_leaks()
         return tuple(int(fold) for fold in flags.index[flags.isna()])
-
-    @property
-    def leak(self) -> bool:
-        return bool(self.leak_folds)
 
 
 def _months(ic: pd.Series) -> pd.Index:

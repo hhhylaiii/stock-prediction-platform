@@ -13,7 +13,7 @@ from django.db import transaction
 from apps.market.calendar import TradingDays
 from apps.market.models import StockMaster
 from apps.research import lgbm_runs
-from apps.research.baseline_runs import BASELINE, check_run_key, shuffle_check
+from apps.research.baseline_runs import BASELINE, SHUFFLE_HORIZON, check_run_key, shuffle_check
 from apps.research.ensemble import cached_scores
 from apps.research.eval_report import render_report, write_rank_metrics
 from apps.research.evaluation import (
@@ -154,7 +154,8 @@ def shuffle_result(folds: Sequence[Fold], directory: Path, seed: int) -> Shuffle
     fold = next((fold for fold in folds if fold.research), None)
     if fold is None:
         raise ValueError("no research folds to run the shuffle check on")
-    return ShuffleCheck(fold.index, shuffle_check(fold, directory, seed), settings.SHUFFLE_IC_LIMIT)
+    ic = shuffle_check(fold, directory, seed)
+    return ShuffleCheck(fold.index, SHUFFLE_HORIZON, ic, settings.SHUFFLE_IC_LIMIT)
 
 
 def write_metrics(run_key: str, evaluations: Mapping[int, RankEvaluation]) -> int:

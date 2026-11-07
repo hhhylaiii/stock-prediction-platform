@@ -161,7 +161,7 @@ def test_report_skips_sections_it_was_not_given() -> None:
     assert "特徵重要度" not in text
     assert "覆蓋率" not in text
     assert "一致性" not in text
-    assert "打亂 label 後" not in text
+    assert "打亂 label（20 日 Ridge）" not in text
     assert "- 打亂 label：這次沒跑，未判定" in text
 
 
@@ -324,7 +324,7 @@ def test_leak_lines_name_folds_ahead_folds_unjudged_and_a_flagged_shuffle_check(
     frame["base"] = frame["score"].where(~ahead, frame["ridge"])
     frame.loc[inside(frame, [fourth]), "base"] = np.nan
     report = rank_report(frame, "score", 20, folds(), baseline="base")
-    check = ShuffleCheck(fold=second.index, ic=0.0312, limit=0.02)
+    check = ShuffleCheck(fold=second.index, horizon=20, ic=0.0312, limit=0.02)
 
     text = render_report("rank-x", [report], shuffled=check)
 
@@ -334,7 +334,7 @@ def test_leak_lines_name_folds_ahead_folds_unjudged_and_a_flagged_shuffle_check(
     )
     assert f"- 洩漏未判定：第 {fourth.index} 摺沒有同摺 baseline 的 IC 可比" in text
     assert (
-        f"- 🔴 洩漏警訊：打亂 label 後第 {second.index} 摺的 OOS rank IC 0.0312，"
+        f"- 🔴 洩漏警訊：打亂 label（20 日 Ridge）後第 {second.index} 摺的 OOS rank IC 0.0312，"
         "絕對值達 0.02，先當成洩漏追查" in text
     )
     assert "洩漏判定：每個研究摺" not in text
@@ -344,6 +344,9 @@ def test_leak_lines_name_folds_ahead_folds_unjudged_and_a_flagged_shuffle_check(
     assert rows[fourth.index].endswith("| 未判定 |")
     tuning = next(fold for fold in folds() if fold.tuning)
     assert rows[tuning.index].endswith("| — |")
+    holdout = next(fold for fold in folds() if fold.holdout)
+    assert report.by_fold["leak"].notna()[holdout.index]
+    assert rows[holdout.index].endswith("| — |")
     assert_tables_are_rectangular(text)
 
 
@@ -351,10 +354,10 @@ def test_leak_lines_state_a_clean_comparison_and_the_shuffle_check_result() -> N
     frame = panel()
     report = rank_report(frame.assign(base=frame["score"]), "score", 5, folds(), baseline="base")
 
-    clean = render_report("rank-x", [report], shuffled=ShuffleCheck(3, -0.0041, 0.02))
-    empty = render_report("rank-x", [report], shuffled=ShuffleCheck(3, math.nan, 0.02))
+    clean = render_report("rank-x", [report], shuffled=ShuffleCheck(3, 20, -0.0041, 0.02))
+    empty = render_report("rank-x", [report], shuffled=ShuffleCheck(3, 20, math.nan, 0.02))
 
     assert "🔴" not in clean
     assert "- 洩漏判定：每個研究摺比同摺 baseline 的 IC 都高不到 0.05" in clean
-    assert "- 打亂 label：第 3 摺的 OOS rank IC -0.0041，絕對值低於 0.02" in clean
-    assert "- 打亂 label：第 3 摺沒有 OOS 日，未判定" in empty
+    assert "- 打亂 label（20 日 Ridge）：第 3 摺的 OOS rank IC -0.0041，絕對值低於 0.02" in clean
+    assert "- 打亂 label（20 日 Ridge）：第 3 摺沒有 OOS 日，未判定" in empty
