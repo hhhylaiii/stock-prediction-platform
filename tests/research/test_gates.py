@@ -119,6 +119,7 @@ def test_a_first_launch_skips_the_comparisons_and_judges_the_shadow(researched: 
         "data_quality",
     ]
     assert set(stored["gates"][2]) == {"name", "passed", "value", "threshold", "sample", "reason"}
+    assert set(gates.SAMPLE_UNITS) == {gate["name"] for gate in stored["gates"]}
     assert ModelRun.objects.filter(run_key="rank-prod", status="candidate").count() == 2
 
 
