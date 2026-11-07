@@ -17,8 +17,9 @@ from apps.research.inference import (
     top_contributions,
 )
 from apps.research.lgbm_runs import MODEL, run_id
-from apps.research.models import REST_FEATURE, ModelRun
+from apps.research.models import REST_FEATURE, ModelObjective, ModelRun
 from apps.research.prediction_cache import load_fold_predictions
+from apps.research.rank_model import MODEL_TYPE
 from apps.research.runs import load_model
 from tests.research.run_panels import research, weekdays
 
@@ -241,3 +242,25 @@ def test_inference_serves_lightgbm_runs_only(served_runs: Path) -> None:
 def test_a_day_without_feature_rows_is_refused(served_runs: Path) -> None:
     with pytest.raises(ValueError, match="no feature rows on 2016-12-31; run build_features"):
         day_rows(date(2016, 12, 31), served_runs, ["tech_ret_1d"])
+
+
+def test_a_raw_value_run_listing_a_feature_no_model_takes_is_refused() -> None:
+    features = ["fund_ep", "fund_rev_mom"]
+    rng = np.random.default_rng(0)
+    rows = pd.DataFrame({name: rng.normal(size=50) for name in features})
+    booster = lgb.train(
+        {"objective": "regression", "verbose": -1},
+        lgb.Dataset(rows, rng.normal(size=50)),
+        num_boost_round=2,
+    )
+    run = ModelRun(
+        run_id="old-mom",
+        model_type=MODEL_TYPE,
+        objective=ModelObjective.REGRESSION,
+        feature_list=features,
+    )
+
+    with pytest.raises(ValueError, match=r"old-mom reads .*\['fund_rev_mom'\]"):
+        model_inputs(
+            run, {"booster": booster, "market_bins": {}}, rows.assign(date=DAY, in_universe=True)
+        )
