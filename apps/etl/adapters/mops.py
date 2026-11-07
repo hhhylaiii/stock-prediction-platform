@@ -222,7 +222,7 @@ class MopsSummaryClient(SourceClient):
             "month": str(int(period[5:])),
             "subsidiaryCompanyId": "",
         }
-        url = f"{settings.MOPS_API_BASE_URL}{COMPANY_REVENUE_PATH}"
+        url = f"{str(settings.MOPS_API_BASE_URL).rstrip('/')}{COMPANY_REVENUE_PATH}"
         return body, self.post_json_body(url, body)
 
 
@@ -378,6 +378,10 @@ class MopsAdapter(BaseAdapter):
             pending = unsettled(dataset, start, end, today, days_after)
             if pending:
                 raise ValueError(f"{self.source}/{dataset} leaves {pending} to the daily scan")
+            scanned = self.scanned_from(dataset)
+            dated = [p for p in periods_between(dataset, start, end) if scanned and p >= scanned]
+            if dated:
+                raise ValueError(f"{self.source}/{dataset}: the daily scan dated {dated} itself")
         return super().run(dataset, start, end, stock_id)
 
     def units(self, dataset: str, start: date, end: date) -> Iterator[tuple[date, date]]:
@@ -544,6 +548,8 @@ class MopsAdapter(BaseAdapter):
         listed = StockMaster.objects.filter(stock_id=stock_id).values_list("delist_date", flat=True)
         days_after = int(settings.STATEMENT_SCAN_DAYS_AFTER)
         periods = viewer_periods(start, end, timezone.localdate(), days_after, listed.first())
+        scanned = self.scanned_from(STATEMENT_VIEWER)
+        periods = [period for period in periods if scanned is None or period < scanned]
         kept = FinancialStatement.objects.filter(stock_id=stock_id, period__in=periods)
         stored = set(kept.values_list("period", flat=True))
 
@@ -561,13 +567,15 @@ class MopsAdapter(BaseAdapter):
     def _company_revenue(self, stock_id: str, start: date, end: date) -> pd.DataFrame:
         """Listed months FinMind lacks, one answer each; months MOPS holds nothing for are noted.
 
-        The span ends at the last listed month, so a rerun on any day keeps the same log.
+        The span ends at the last listed month; once the daily scan has taken over that month no
+        longer moves, so a rerun on any day keeps the same log.
         """
         today, days_after = timezone.localdate(), int(settings.REVENUE_SCAN_DAYS_AFTER)
-        months = listed_months(stock_id, start, end, today, days_after)
+        scanned = self.scanned_from(REVENUE_COMPANY)
+        months = listed_months(stock_id, start, end, today, days_after, scanned)
         found: dict[str, CompanyFigures] = {}
         absent: list[str] = []
-        for period in company_months(stock_id, start, end, today, days_after):
+        for period in company_months(stock_id, start, end, today, days_after, scanned):
             params, payload = self.summaries.company_revenue(stock_id, period)
             self.save_raw(REVENUE_COMPANY, params, payload, without_query_time(payload))
             figures = parse_company_revenue(payload, period)
@@ -579,6 +587,26 @@ class MopsAdapter(BaseAdapter):
         last = _month_end(months[-1]) if months else end
         frame.attrs.update(start=start, end=last, stock_id=stock_id, absent=absent)
         return frame
+
+    def scanned_from(self, dataset: str) -> str | None:
+        """The first period the daily scan dated itself; a fill there would guess too early a date.
+
+        A late filer the scan never saw within its window has no row, and its deadline-based date
+        would come before its real filing.
+        """
+        revenue = dataset in REVENUES
+        runs = EtlRun.objects.filter(
+            source=self.source,
+            dataset=REVENUE_SCAN if revenue else STATEMENT_SCAN,
+            status=EtlRun.Status.SUCCESS,
+        )
+        first = runs.order_by("start_date").values_list("start_date", flat=True).first()
+        if first is None:
+            return None
+        if revenue:
+            return open_months(first, int(settings.REVENUE_SCAN_DAYS_AFTER))[0]
+        periods = open_periods(first, int(settings.STATEMENT_SCAN_DAYS_AFTER))
+        return periods[0] if periods else None
 
     def _conservative(self, dataset: str) -> Callable[[str], date]:
         """The deadline-based date FinMind rows carry, for periods first seen long after."""

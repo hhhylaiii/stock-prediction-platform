@@ -20,6 +20,7 @@ THIS_MONTH, LAST_YEAR = "本月", "去年同期"
 TWD = "新台幣"
 AMOUNT = re.compile(r"^-?\d+$")
 QUERY_TIME = "datetime"
+ANSWERS_FROM = "2014-01"
 THOUSAND = 1000
 ROC_OFFSET = 1911
 MONTHS = 12
@@ -56,10 +57,13 @@ def without_query_time(payload: Mapping[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in payload.items() if key != QUERY_TIME}
 
 
-def listed_months(stock_id: str, start: date, end: date, today: date, days_after: int) -> list[str]:
+def listed_months(
+    stock_id: str, start: date, end: date, today: date, days_after: int, scanned: str | None
+) -> list[str]:
     """Settled months in [start, end] from a common stock's listing month to its delisting month.
 
-    A stock without a listing date starts at its first close.
+    A stock without a listing date starts at its first close. The API holds nothing before 2014,
+    and months from scanned on are the daily scan's, dated by the session that saw them.
     """
     stock = (
         StockMaster.objects.filter(stock_id=stock_id, stock_id__regex=COMMON_STOCK_PATTERN)
@@ -75,14 +79,20 @@ def listed_months(stock_id: str, start: date, end: date, today: date, days_after
         return []
     last = min(end, stock["delist_date"]) if stock["delist_date"] else end
     months = months_between(max(start, first.replace(day=1)), last)
-    return [m for m in months if revenue_deadline(m) + timedelta(days=days_after) < today]
+    return [
+        month
+        for month in months
+        if month >= ANSWERS_FROM
+        and (scanned is None or month < scanned)
+        and revenue_deadline(month) + timedelta(days=days_after) < today
+    ]
 
 
 def company_months(
-    stock_id: str, start: date, end: date, today: date, days_after: int
+    stock_id: str, start: date, end: date, today: date, days_after: int, scanned: str | None
 ) -> list[str]:
     """Listed months monthly_revenue lacks."""
-    months = listed_months(stock_id, start, end, today, days_after)
+    months = listed_months(stock_id, start, end, today, days_after, scanned)
     stored = set(
         MonthlyRevenue.objects.filter(stock_id=stock_id, period__in=months).values_list(
             "period", flat=True
@@ -92,21 +102,14 @@ def company_months(
 
 
 def company_frame(stock_id: str, found: Mapping[str, Figures]) -> pd.DataFrame:
-    """Rows in TWD; mom against the month before as stored or found, yoy against MOPS's own."""
-    before = {month: _previous(month) for month in found}
-    stored = dict(
-        MonthlyRevenue.objects.filter(stock_id=stock_id, period__in=before.values()).values_list(
-            "period", "revenue"
-        )
-    )
-    known = {**stored, **{month: figures[0] for month, figures in found.items()}}
+    """Rows in TWD; growth only against MOPS's own figures, so sources are never mixed."""
     records = [
         {
             "stock_id": stock_id,
             "period": month,
             "revenue": now,
             "yoy": _growth(now, last_year),
-            "mom": _growth(now, known.get(before[month])),
+            "mom": _growth(now, found[_previous(month)][0] if _previous(month) in found else None),
         }
         for month, (now, last_year) in sorted(found.items())
     ]
