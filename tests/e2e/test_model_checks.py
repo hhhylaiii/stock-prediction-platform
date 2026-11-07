@@ -492,6 +492,22 @@ def test_the_monthly_retrain_stays_pinned_beside_the_day_s_checks(
     expect(page.locator("#model-checks-sub")).to_contain_text(seeded.last_session.isoformat())
 
 
+def test_research_checks_keep_a_fixed_order_whatever_ran_last(
+    page: Page, live_server: LiveServer, seeded: Seed
+) -> None:
+    log(seeded, "research_retrain", "info", {}, back=15)
+    log(seeded, "research_evening", "info", {}, back=2)
+    log(seeded, "research_morning", "warning", {})
+
+    page.goto(f"{live_server.url}/#models")
+
+    checks = page.locator("#model-checks .check")
+    expect(checks).to_have_count(3)
+    for n, (name, back) in enumerate((("每月重訓", 15), ("研究晚間排程", 2), ("研究早盤排程", 1))):
+        expect(checks.nth(n)).to_contain_text(name)
+        expect(checks.nth(n).locator(".pinned")).to_have_text(seeded.sessions[-back].isoformat())
+
+
 def test_model_output_checks_leave_the_data_verdict_alone(
     page: Page, live_server: LiveServer, checked: Seed
 ) -> None:

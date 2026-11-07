@@ -855,6 +855,11 @@
   const isPromotion = check => check.check_name === 'model_promotion';
   const isResearch = check => check.check_name.startsWith('research_');
   const scopeOf = check => (check.detail || {}).scope || (check.detail || {}).run_key;
+  const RESEARCH_ORDER = ['research_retrain', 'research_evening', 'research_morning'];
+  const researchRank = check => {
+    const rank = RESEARCH_ORDER.indexOf(check.check_name);
+    return rank < 0 ? RESEARCH_ORDER.length : rank;
+  };
 
   function latestBy(data, wanted, keyOf) {
     const all = data.flatMap(entry => (entry.model_checks || []).filter(wanted).map(check => ({ date: entry.date, check: check })))
@@ -869,7 +874,8 @@
     sub.textContent = day ? '最近一次寫入的交易日：' + day.date + '；區間寬度比與機率矛盾的標記超過 ' + Math.round(share * 100) + '% 才算警告。' : '';
     const promotions = latestBy(data, isPromotion, scopeOf);
     const count = promotions.total > promotions.shown.length ? '，近 ' + data.length + ' 個交易日共 ' + promotions.total + ' 筆' : '';
-    const research = latestBy(data, isResearch, check => check.check_name).shown;
+    const research = latestBy(data, isResearch, check => check.check_name).shown
+      .slice().sort((a, b) => researchRank(a.check) - researchRank(b.check));
     const pinned = promotions.shown.map(item => modelCheckHtml(item.check, share, item.date, item.date + count)).join('') +
       research.map(item => modelCheckHtml(item.check, share, item.date, item.date)).join('');
     const rest = day ? day.model_checks.filter(check => !isPromotion(check) && !isResearch(check)).map(check => modelCheckHtml(check, share, day.date)).join('') : '';
