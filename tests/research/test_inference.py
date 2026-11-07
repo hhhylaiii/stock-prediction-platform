@@ -105,6 +105,19 @@ def test_return_and_interval_inference_match_their_fits_on_every_test_day(
 
 
 @pytest.mark.django_db
+def test_an_uncalibrated_probability_model_serves_its_raw_probability(served_runs: Path) -> None:
+    run = live_run("interval", "classification", 20)
+    model = {**load_model(run.run_key, run.run_id), "calibrator": None}
+    rows = day_rows(DAY, served_runs, run.feature_list)
+
+    produced = rows[["stock_id"]].join(run_values(run, model, rows))
+
+    merged = produced.merge(cached("interval"), on="stock_id")
+    np.testing.assert_allclose(merged["prob_up_5pct"], merged["lightgbm_prob_raw_h20"], rtol=1e-6)
+    assert not np.allclose(merged["prob_up_5pct"], merged["lightgbm_prob_h20"])
+
+
+@pytest.mark.django_db
 def test_market_features_enter_the_raw_models_as_their_training_bins(served_runs: Path) -> None:
     run = live_run("return", "regression", 5)
     model = load_model(run.run_key, run.run_id)
@@ -156,10 +169,11 @@ def boosters(features: list[str]) -> Bagged:
 
 
 def test_tied_contributions_follow_the_feature_list() -> None:
-    features = ["a", "b", "c", "z0", "z1", "z2", "z3"]
+    zeros = [f"z{k}" for k in range(14)]
+    features = ["a", "b", "c", *zeros]
     rng = np.random.default_rng(9)
     frame = pd.DataFrame(rng.normal(size=(400, 3)), columns=["a", "b", "c"]).assign(
-        z0=0.0, z1=0.0, z2=0.0, z3=0.0
+        **dict.fromkeys(zeros, 0.0)
     )
     target = 3 * frame["a"] + 2 * frame["b"] + frame["c"]
     booster = lgb.train(
@@ -173,7 +187,7 @@ def test_tied_contributions_follow_the_feature_list() -> None:
     for _, group in contrib.groupby("stock_id"):
         assert list(group["feature"])[3:] == ["z0", "z1", REST_FEATURE]
         assert set(list(group["feature"])[:3]) == {"a", "b", "c"}
-        assert group.iloc[-1]["n_features"] == 2
+        assert group.iloc[-1]["n_features"] == 12
         assert group.iloc[-1]["contrib"] == 0.0
 
 

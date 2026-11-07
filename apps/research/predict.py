@@ -10,8 +10,10 @@ import pandas as pd
 from django.db import transaction
 
 from apps.etl.tasks import ready_for_research
+from apps.market.calendar import TradingDays
 from apps.research.inference import day_rows, run_contributions, run_values
 from apps.research.models import (
+    ModelMonitor,
     ModelObjective,
     ModelRun,
     ModelStatus,
@@ -20,6 +22,7 @@ from apps.research.models import (
 )
 from apps.research.rank_model import prediction_frame
 from apps.research.runs import SCREENING_MODEL, RunError, load_model
+from apps.research.walkforward import oos_start
 
 SERVING = (ModelStatus.ACTIVE, ModelStatus.DEGRADED)
 FIELDS = ("score", "rank", "pct", "ret_pred", "q10", "q50", "q90", "vol_pred", "prob_up_5pct")
@@ -149,26 +152,44 @@ def _recheck(runs: dict[Slot, ModelRun | None]) -> None:
         raise RunError(f"the serving run of {', '.join(moved)} changed while predicting; run again")
 
 
-def _check_day(day: date, serving: dict[Slot, ModelRun], replace: bool) -> None:
-    """Refuse in-sample days, and other runs' rows on the day unless replace was asked for."""
-    trained = sorted(run.run_id for run in serving.values() if day <= run.train_end)
+def _check_day(day: date, serving: dict[Slot, ModelRun]) -> None:
+    """Refuse a day whose label window overlaps the labels a run trained on."""
+    calendar = TradingDays.from_db()
+    trained = sorted(
+        run.run_id
+        for run in serving.values()
+        if day < oos_start(calendar, run.train_end, int(run.params["horizon"]))
+    )
     if trained:
-        raise RunError(f"{', '.join(trained)} trained through {day}; it would score in-sample")
-    if replace:
-        return
-    others = sorted(
+        raise RunError(
+            f"{', '.join(trained)} trained on labels reaching past {day}; it would score in-sample"
+        )
+
+
+def _others(day: date, serving: dict[Slot, ModelRun], table: Any) -> list[str]:
+    return sorted(
         {
             run_id
             for slot, run in serving.items()
-            for run_id in Prediction.objects.filter(**_same_slot(day, slot))
+            for run_id in table.objects.filter(**_same_slot(day, slot))
             .exclude(run_id=run.run_id)
             .values_list("run_id", flat=True)
             .distinct()
         }
     )
-    if others:
+
+
+def _check_rows(day: date, serving: dict[Slot, ModelRun], replace: bool) -> None:
+    """Refuse other runs' rows on the day unless replace was asked for, and their scored days."""
+    others = _others(day, serving, Prediction)
+    if others and not replace:
         raise RunError(
             f"{day} already holds rows of {', '.join(others)}; replace them only on purpose"
+        )
+    scored = _others(day, serving, ModelMonitor)
+    if scored:
+        raise RunError(
+            f"model_monitor already scored {', '.join(scored)} on {day}; its history stays"
         )
 
 
@@ -183,12 +204,14 @@ def predict(day: date, directory: Path, replace: bool = False) -> Predicted:
     serving = {slot: run for slot, run in runs.items() if run is not None}
     if not serving:
         raise RunError("no active or degraded run serves any slot")
-    _check_day(day, serving, replace)
+    _check_day(day, serving)
+    _check_rows(day, serving, replace)
     features = [name for run in serving.values() for name in run.feature_list]
     rows = day_rows(day, directory, features)
     prepared = [slot_rows(slot, run, rows, day) for slot, run in serving.items()]
     with transaction.atomic():
         _recheck(runs)
+        _check_rows(day, serving, replace)
         for written in prepared:
             _write(day, written)
     return Predicted(

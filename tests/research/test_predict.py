@@ -13,11 +13,13 @@ from django.core.management.base import CommandError
 from apps.etl import tasks
 from apps.etl.models import DataQualityLog, EtlRun
 from apps.etl.quality import CHECKS
+from apps.market.calendar import TradingDays
 from apps.research import predict as predict_module
 from apps.research.inference import day_rows, run_values, top_contributions
 from apps.research.lgbm_runs import run_id
 from apps.research.models import (
     REST_FEATURE,
+    ModelMonitor,
     ModelRun,
     ModelStatus,
     Prediction,
@@ -267,15 +269,50 @@ def test_predict_needs_a_serving_run(served_runs: Path) -> None:
         predict(DAY, served_runs)
 
 
+def refused_runs(error: pytest.ExceptionInfo[RunError]) -> set[str]:
+    listed = str(error.value).split(" trained on labels")[0]
+    return set(listed.split(", "))
+
+
 @pytest.mark.django_db
-def test_predict_refuses_a_day_its_runs_trained_on(served_runs: Path) -> None:
+def test_predict_refuses_days_whose_labels_overlap_a_runs_training(served_runs: Path) -> None:
     serve(*SLOTS)
-    passed(LIVE.train_end)
+    day = TradingDays.from_db().shift(LIVE.train_end, 10)
+    passed(day)
 
-    with pytest.raises(RunError, match=f"trained through {LIVE.train_end}; it would score"):
-        predict(LIVE.train_end, served_runs)
+    with pytest.raises(RunError, match="it would score in-sample") as error:
+        predict(day, served_runs)
 
+    assert refused_runs(error) == {live(slot).run_id for slot in SLOTS if slot.horizon == 20}
     assert not Prediction.objects.exists()
+
+
+@pytest.mark.django_db
+def test_any_one_run_trained_too_late_stops_the_day(served_runs: Path) -> None:
+    serve(*SLOTS)
+    late = live(Slot("volatility", 20))
+    ModelRun.objects.filter(pk=late.pk).update(train_end=DAY)
+    passed()
+
+    with pytest.raises(RunError, match="it would score in-sample") as error:
+        predict(DAY, served_runs)
+
+    assert refused_runs(error) == {late.run_id}
+    assert not Prediction.objects.exists()
+
+
+@pytest.mark.django_db
+def test_replace_leaves_a_day_the_monitor_already_scored(served_runs: Path) -> None:
+    serve(Slot("rank", 20))
+    old = clone(live(Slot("rank", 20)), ".old", ModelStatus.RETIRED)
+    keep_rows(old, DAY, 20, score=0.5, rank=1, pct=1.0)
+    ModelMonitor.objects.create(run=old, date=DAY, horizon=20, ic=0.1, n_stocks=39)
+    passed()
+
+    with pytest.raises(RunError, match=rf"model_monitor already scored {old.run_id} on {DAY}"):
+        predict(DAY, served_runs, replace=True)
+
+    assert list(Prediction.objects.values_list("run_id", flat=True)) == [old.run_id]
 
 
 @pytest.mark.django_db
