@@ -13,7 +13,7 @@ from responses import matchers
 
 from apps.etl.adapters.mops import COMPANY_REVENUE_PATH, MopsAdapter
 from apps.etl.company_revenue import company_months, no_longer_public, parse_company_revenue
-from apps.etl.errors import SchemaChangedError
+from apps.etl.errors import RejectedStocksError, SchemaChangedError
 from apps.etl.models import DataQualityLog, EtlRun, RawMops
 from apps.etl.mops_history import (
     MISMATCH_CHECKS,
@@ -70,6 +70,7 @@ def test_a_month_after_the_company_stopped_being_public_is_told_apart(
     assert no_longer_public(answer("1258_112_6"))
     assert not no_longer_public(answer("1258_112_5"))
     assert not no_longer_public({"code": 500, "result": None, "message": "查詢過量"})
+    assert not no_longer_public({**answer("1258_112_6"), "code": 406})
 
 
 @pytest.mark.parametrize(
@@ -253,6 +254,19 @@ def test_missing_months_are_added_at_the_conservative_date_from_mops_figures_onl
         {"stock_id": "5349", "period": "2014-02"},
     ]
     assert (logged.detail["absent"], logged.detail["not_public"]) == (["2014-03"], ["2014-04"])
+
+
+@pytest.mark.django_db
+@responses.activate
+@pytest.mark.usefixtures("delisted")
+def test_a_company_refused_as_not_public_before_its_delisting_month_is_rejected(
+    adapter: MopsAdapter, answer: Callable[[str], dict[str, Any]]
+) -> None:
+    replies = answers(answer)
+    serve({**{m: fixed(replies[m]) for m in ("1", "2", "4")}, "3": fixed(replies["4"])})
+    with pytest.raises(RejectedStocksError, match="not public"):
+        backfill(adapter)
+    assert not MonthlyRevenue.objects.filter(period__gte="2014-01").exists()
 
 
 @pytest.mark.django_db

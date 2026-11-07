@@ -576,8 +576,8 @@ class MopsAdapter(BaseAdapter):
     def _company_revenue(self, stock_id: str, start: date, end: date) -> pd.DataFrame:
         """Listed months FinMind lacks, one answer each; months MOPS holds nothing for are noted.
 
-        The span ends at the last listed month; once the daily scan has taken over that month no
-        longer moves, so a rerun on any day keeps the same log.
+        Only the delisting month may come back as no longer public, else the stock is rejected.
+        The span ends at the last listed month, fixed once the daily scan has taken over.
         """
         today, days_after = timezone.localdate(), int(settings.REVENUE_SCAN_DAYS_AFTER)
         scanned = self.scanned_from(REVENUE_COMPANY)
@@ -596,6 +596,8 @@ class MopsAdapter(BaseAdapter):
                 absent.append(period)
             else:
                 found[period] = figures
+        if not_public and not_public != months[-1:]:
+            raise SchemaChangedError(f"MOPS t05st10_ifrs {stock_id} not public in {not_public}")
         frame = company_frame(stock_id, found)
         last = _month_end(months[-1]) if months else end
         frame.attrs.update(
