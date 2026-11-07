@@ -1,4 +1,5 @@
 import math
+import os
 import warnings
 from datetime import date, timedelta
 from decimal import Decimal
@@ -32,6 +33,7 @@ from apps.research.features.residual import rules_signature
 from apps.research.features.store import (
     export_year,
     partition_rules,
+    read_columns,
     read_partitions,
     write_features,
 )
@@ -454,6 +456,66 @@ def test_training_reads_the_first_batch_even_from_a_partition_without_the_second
     pd.testing.assert_frame_equal(first, stored()[list(first.columns)])
     with pytest.raises(ValueError, match=f"lacks {second[0]}, {second[1]}"):
         read_partitions(d("2016-03-01"), d("2016-03-31"), tmp_path, FRAME_COLUMNS)
+
+
+def swapped_on(
+    step: str, path: Path, monkeypatch: pytest.MonkeyPatch, newer_rows: pd.DataFrame
+) -> None:
+    """Replace the partition with newer_rows the moment pyarrow's step is first called."""
+    newer = path.with_name("newer.parquet")
+    newer_rows.to_parquet(newer, index=False)
+    original = getattr(store.pq, step)
+
+    def replaced(source: Any, *args: Any, **kwargs: Any) -> Any:
+        if newer.exists():
+            os.replace(newer, path)
+        return original(source, *args, **kwargs)
+
+    monkeypatch.setattr(store.pq, step, replaced)
+
+
+def exported_march(tmp_path: Path) -> Path:
+    listed("2330", "2015-06-01", "2016-03-31")
+    frame = build_feature_frame(CALENDAR, d("2016-03-01"), d("2016-03-31"))
+    write_features(frame, d("2016-03-01"), d("2016-03-31"))
+    path = export_year(2016, tmp_path)
+    assert path is not None
+    return path
+
+
+def test_a_partition_replaced_before_its_schema_is_read_gives_the_file_opened(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = exported_march(tmp_path)
+    expected = read_partitions(d("2016-03-01"), d("2016-03-31"), tmp_path)
+    lacking = pd.read_parquet(path).drop(columns=["tech_ret_1d"]).assign(tech_ret_5d=999.0)
+
+    swapped_on("ParquetFile", path, monkeypatch, lacking)
+    rows = read_partitions(d("2016-03-01"), d("2016-03-31"), tmp_path)
+
+    pd.testing.assert_frame_equal(rows, expected)
+    assert "tech_ret_1d" not in pd.read_parquet(path).columns
+
+
+def test_a_partition_replaced_before_its_rows_are_read_gives_the_file_opened(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = exported_march(tmp_path)
+    expected = stored()
+    first = list(read_partitions(d("2016-03-01"), d("2016-03-31"), tmp_path).columns)
+
+    swapped_on("read_table", path, monkeypatch, pd.read_parquet(path).assign(tech_ret_1d=999.0))
+    rows = read_partitions(d("2016-03-01"), d("2016-03-31"), tmp_path)
+
+    pd.testing.assert_frame_equal(rows, expected[first])
+    assert pd.read_parquet(path)["tech_ret_1d"].eq(999.0).all()
+
+    pd.read_parquet(path).assign(tech_ret_1d=1.5).to_parquet(path, index=False)
+    swapped_on("read_table", path, monkeypatch, pd.read_parquet(path).assign(tech_ret_1d=999.0))
+    columns = read_columns(d("2016-03-01"), d("2016-03-31"), tmp_path, ["tech_ret_1d"])
+
+    assert columns["tech_ret_1d"].eq(1.5).all()
+    assert pd.read_parquet(path)["tech_ret_1d"].eq(999.0).all()
 
 
 def test_an_empty_year_leaves_no_partition_and_the_directory_reads(tmp_path: Path) -> None:

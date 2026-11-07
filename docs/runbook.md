@@ -51,7 +51,7 @@ docker compose logs -f worker
 | 時間 | 工作 | 內容 | 備註 |
 | --- | --- | --- | --- |
 | 15:10 | `etl.prepare_day` | `refresh_calendar` 更正交易日曆（失敗寫 log，當晚 22:50 的 `etl_runs` 列出），再 `catch_up` 補抓前 14 天到前一交易日漏掉的日子；排程開始後沒跑過品質檢查的交易日（至少前一交易日）補跑，跑過但還有告警的重新判斷 | 先補抓再跑當日 |
-| 15:30 | `etl.run_batch prices` | 證交所、櫃買日價量與指數 | — |
+| 15:30 | `etl.run_batch prices` | 證交所、櫃買日價量與指數；證交所加權股價報酬指數，見下方「加權股價報酬指數」 | — |
 | 16:00 | `etl.refresh_master` | 用當天行情更新 `stock_master` | — |
 | 16:30 | `etl.run_batch afternoon` | 三大法人、本益比與淨值比、注意、處置、全額交割；證交所外資持股與發行股數 | 借券、當沖在 21:30；櫃買外資持股與發行股數在 18:30 |
 | 18:30 | `etl.run_batch qfii` | 櫃買外資持股與發行股數 | 櫃買每日 18:00、22:00 更新 |
@@ -71,7 +71,7 @@ docker compose logs -f worker
 研究層 23:00、06:00 的任務要先確認 `apps.etl.tasks.ready_for_research(day)`：`etl_complete(day)` 且 `should_run_prediction(day)`。
 
 - `etl_complete`：當日快照都有成功的 `etl_run`，也就是兩個交易所的日價量、指數、三大法人、融資融券、借券、外資持股、本益比與淨值比（`GATE_DATASETS`）。這些缺一天，當天的特徵就是空的。
-- 注意、處置、全額交割、股數變動、當沖不擋：前四個是事件或變動紀錄，漏一天只是晚一天反映，隔天 catchup 補；當沖是規格的第二批特徵，T+2 才定案。
+- 注意、處置、全額交割、股數變動、當沖、加權股價報酬指數不擋：前四個是事件或變動紀錄，漏一天只是晚一天反映，隔天 catchup 補；當沖是規格的第二批特徵，T+2 才定案；報酬指數目前沒有特徵或 label 讀它（見下方「加權股價報酬指數」）。
 - `etl_runs` 那一列跟閘門一致：缺快照是 error（規格「error 不執行當日預測」），只缺其他 dataset 是 warning，都到了是 info；`detail` 的 `missing` 列出全部缺的，`blocking` 列出擋閘門的。
 - 品質檢查之後才補進來的資料：那天的 `etl_runs` 不是 info 就重算；五項檢查有 error 就重跑。重算只送之前沒送過的告警（同一個檢查、同一個 severity 不重送）。
 - 排程工作（交易日曆更新、`refresh_master`、週持股、景氣燈號）只由負責那晚的 22:50 檢查列入：交易日曆更新與 `refresh_master` 是每個交易日，週持股與景氣燈號是到期日之後第一個交易日。補審沒審過的交易日時不列；已經列出的，之後重算時會保留，直到補上：
@@ -316,6 +316,20 @@ done
 - 兩種篩法的差別（2018 年每月第一個交易日抽查）：`daily_price` 有價的代號全部都在行情表上；行情表多出 32–41 個代號。這些是 FinMind 沒有的 ETF、TDR，加上 5 檔 FinMind 整檔沒有價格的普通股（1589、4207、4804、5355、8176），以及沒成交那天的 4415。這些代號的當沖量會略過；它們沒有價格，本來也進不了研究母體。日後如果補了這些代號的 `daily_price`，要對同一段日期跑 `reprocess --source twse|tpex --dataset day_trade --start … --end …`（只讀 raw、不發請求），否則研究層會把它們的當沖量當成 0。
 - 當沖表會列出量為 0 的標的。同市場當天的表有寫入、某檔不在表上，研究層算 0；同市場當天一列當沖都沒有的，才是空值。所以兩個市場每個交易日都要有成功、而且有列的 run。
 
+## 加權股價報酬指數
+
+`index_daily` 的 `TAIEX_TR` 是證交所的發行量加權股價報酬指數（MFI94U）：成分股的現金股利再投入，除息不會讓它下跌。`TAIEX` 是價格指數，除息時照樣扣掉股息，7、8 月除息旺季 20 日內約差 1 個百分點。研究層的 label 用還原價，要比大盤時用 `TAIEX_TR` 才同一個口徑。
+
+- 每日 15:30 的 prices 批抓一次，一個月一個請求；不擋研究閘門，品質檢查的指數新鮮度也不含它。當天沒抓到時，22:50 的 `etl_runs` 檢查記 warning 並告警；隔天 15:10 的 catchup 補上後，會對那天重跑品質檢查，把那天的告警再送一次。
+- 回補從 2010 年起，一個月一個請求，約 203 個、12 分鐘。先跑 `migrate`（`market.0003`），回補要在 worker 換成新程式後的第一次 15:10 之前做完；否則 `prepare_day` 的 catchup 會一天一個請求補回看期內的日子，並對那些日子重跑品質檢查、把舊告警再送一次：
+
+  ```bash
+  uv run python manage.py migrate market
+  uv run python manage.py fetch --source twse --dataset return_index --start 2010-01-04 --end $(date -v-1d +%F)
+  ```
+
+- 中途失敗時，看那個 run 的 `etl_run.checkpoint.last_date`，從下一個交易日接著跑。
+
 ## 交易所逐日表補缺（plan K17c）
 
 FinMind 的外資持股、流通股數、本益比在 2010–2020 有缺，下市股缺得特別多（約 21% 對現存股 0.4–0.7%），模型會把「缺值」學成「之後會下市」。交易所的逐日全市場表列出當天所有掛牌的股票，用它把缺的補上。範圍是 2010 年起到每日排程接手的前一天（2026-10-21）：只補到 2020 年的話，2021 年後才有第一筆股數、或完全沒有股數的股票，會把 2020 年最後一個股數一路帶到下市或下一筆。
@@ -340,6 +354,29 @@ done
 - `etl_run` 的 dataset 是 `fill:holdings`／`fill:valuation`，每天和寫入同一個交易記 checkpoint。跑完記一列 `exchange_fill`（info）：`filled` 是每檔補了哪段日期、幾天，`created` 是其中新增整列的部分，`totals` 分下市股和現存股的列數，`span` 是第一次開跑的起點到結尾。
 - 先跑完 FinMind 的 `daily_price`、`shares_outstanding`、`daily_chip`、`daily_valuation` 回補（含 `--retry-rejected`）再跑補缺：`daily_price` 決定補哪些代號、`shares_outstanding` 決定股數的界線（第一次 `holdings` 補缺時就固定）；FinMind 寫 `daily_chip`、`daily_valuation` 時整列已存在就跳過，補缺新增的列會擋掉之後的 FinMind 回補。之後真的要再回補 FinMind，先刪掉補缺新增的列：`daily_chip` 是只有 `fi_holding_pct` 有值、其他欄位都是空的列；`daily_valuation` 的 `created` 只記每檔的日期範圍，範圍內可能夾著 FinMind 的列，要逐日分辨時從兩邊的 raw 重算。
 - 每個請求約 3.5 秒；一個市場一個 fill 2010-01-04 到 2026-10-21 約 4,130 天、約 4 小時，兩個 fill 約 8 小時。可以跑的時段是平日 02:00–15:00 和週末，和每日 ETL（含 02:00 前的重試）錯開；平日 15:00 前沒跑完就停，之後 `--resume`。
+
+## FinMind 外資持股 0 的覆寫（plan K21）
+
+FinMind 的外資持股比有一部分存成 0，但交易所那天的頁面不是 0。依 0 連續的長度與頁面涵蓋分四類，只覆寫前兩類：
+
+| 類別 | 條件 | 處理 |
+| --- | --- | --- |
+| 整段都錯 | 同一檔連續 20 天以上的 0，90% 以上的日子交易所頁面有這檔，其中 90% 以上不是 0 | 交易所不是 0 的那幾天改成交易所的值；交易所也是 0 的日子留 0 |
+| 零星短段 | 連續不到 20 天的 0，交易所那天不是 0 | 改成交易所的值 |
+| 長段混著幾天 | 連續 20 天以上的 0，頁面夠，但交易所不是 0 的日子不到 90% | 不動：改了會在一長段 0 裡做出 0 → 小值 → 0 的跳動 |
+| 頁面不夠 | 連續 20 天以上的 0，交易所頁面有這檔的日子不到 90%（不看比例，先判這類） | 不動：只改有頁面的日子同樣會做出跳動；補齊頁面後重跑 |
+
+- 只看普通股（`^[1-9][0-9]{3}$`，不含 91 開頭與產業是存託憑證的代號，和研究母體相同）；交易所的值讀已經存在 raw 的 `foreign_holding` 頁（證交所 MI_QFIIS、櫃買 insti/qfii，不發請求），同一天有好幾份時用最新的。
+- 每覆寫一列記一列 `fi_holding_zero_replaced`（info，`date` 是那一天，`detail` 有 `stock_id`、`kind`、`old`、`new`、`source`、`raw_id`）；FinMind 和交易所的 raw 都不動。重跑只會碰到還是 0 的列，同一檔同一天不會記第二列 log。
+- 要等兩個市場的持股補缺（plan K17c）都跑完、交易所的頁面都在 raw 裡再跑；先看 dry run 的數字：
+
+  ```bash
+  uv run python manage.py replace_zero_holdings --dry-run
+  uv run python manage.py replace_zero_holdings
+  ```
+
+- 輸出的 `replaced` 是每個市場、每類的檔數與列數。`left` 是不動的列：`mixed_run`、`thin_run` 是兩類長段裡交易所不是 0 的檔數與列數；`unchecked` 是沒有交易所值的 0，分成 `no_page`（那天至少一個市場沒有頁面）、`unreadable`（那天至少一個市場的頁面讀不了，另記 warning）、`not_listed`（兩個市場的頁面都在、都沒列這檔）；原因是按整天判的，補缺跑到一半時兩個市場的數字會混在一起。補缺跑完後 `no_page`、`thin_run` 應該接近 0；不是的話先查補缺。
+- 覆寫後外資持股類特徵的歷史值會變，要重算：`uv run python manage.py build_features --start 2010-01-01 --end <最新價日>`。
 
 ## 交易所產業補缺（plan K17c）
 
