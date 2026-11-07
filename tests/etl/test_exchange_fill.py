@@ -29,6 +29,7 @@ DAY = date(2026, 10, 28)
 HOLDINGS = "twse/foreign_holding/mi_qfiis_20261028.json"
 VALUATION = "twse/daily_valuation/bwibbu_20261028.json"
 MARGIN = "twse/margin/mi_margn_20261028.json"
+LENDING = "twse/sbl/twt93u_20261028.json"
 MARGINS = ("margin_balance", "margin_limit", "short_balance")
 
 pytestmark = pytest.mark.django_db
@@ -156,6 +157,52 @@ def test_the_otc_market_fills_margins_from_its_balance_page(
     fill_missing(TpexAdapter(october_2026, twse_limiter), "margin", DAY, DAY)
     assert margins("1240") == (14_000, 11_610_000, 0)
     assert margins("3293")[0] == 1_976_000
+    assert len(responses.calls) == 1
+
+
+def lent(code: str) -> int | None:
+    return DailyChip.objects.values_list("sbl_short_balance", flat=True).get(stock_id=code)
+
+
+@responses.activate
+def test_missing_lending_balances_are_added_and_stored_ones_left_alone(
+    adapter: TwseAdapter, load_fixture: Callable[[str], Any]
+) -> None:
+    serve(load_fixture, "/marginTrading/TWT93U", LENDING)
+    priced("1101", "1213", "2317", "2330", "2603", "2609")
+    DailyChip.objects.create(stock_id="1101", date=DAY, fi_holding_pct=13.36)
+    DailyChip.objects.create(stock_id="2317", date=DAY, sbl_short_balance=5)
+    DailyChip.objects.create(stock_id="2330", date=DAY, sbl_short_balance=15_528_514)
+    DailyChip.objects.create(stock_id="2609", date=DAY, fi_net=1)
+    run = fill_missing(adapter, "sbl", DAY, DAY)
+    assert [lent(code) for code in ("1101", "1213", "2317", "2330", "2609")] == [
+        113_290_742,
+        0,
+        5,
+        15_528_514,
+        None,
+    ]
+    assert DailyChip.objects.get(stock_id="1101").fi_holding_pct == 13.36
+    assert not DailyChip.objects.filter(stock_id__in=["0050", "2603"]).exists()
+    (log,) = DataQualityLog.objects.filter(check_name=FILL_CHECK)
+    assert sorted(log.detail["filled"]["sbl"]) == ["1101", "1213"]
+    assert log.detail["differences"]["sbl"]["sample"] == [
+        ["2317", "2026-10-28", "sbl_short_balance", 5, 77_830_749]
+    ]
+    assert (run.status, run.rows) == ("success", 2)
+
+
+@responses.activate
+def test_the_otc_market_fills_lending_balances_from_its_sbl_page(
+    october_2026: TradingDays, twse_limiter: RateLimiter, load_fixture: Callable[[str], Any]
+) -> None:
+    responses.post(
+        "https://www.tpex.org.tw/www/zh-tw/margin/sbl",
+        json=load_fixture("tpex/sbl/sbl_20261028.json"),
+    )
+    priced("1240", "3293")
+    fill_missing(TpexAdapter(october_2026, twse_limiter), "sbl", DAY, DAY)
+    assert (lent("1240"), lent("3293")) == (17_310, 4_159_575)
     assert len(responses.calls) == 1
 
 
