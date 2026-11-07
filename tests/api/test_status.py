@@ -88,6 +88,7 @@ def test_status_reports_prices_predictions_quality_and_last_update(
             "worst": "info",
             "missing_checks": [],
             "warnings": 0,
+            "warning_rows": 0,
         },
         "updated_at": "2026-10-30T23:04:00+08:00",
         "degraded": [],
@@ -104,6 +105,29 @@ def test_warnings_are_counted_for_the_strip(client: Client, loaded: None) -> Non
     quality = envelope_of(client.get("/api/status"))["data"]["quality"]
 
     assert (quality["passed"], quality["worst"], quality["warnings"]) == (True, "warning", 2)
+    assert quality["warning_rows"] == 2
+
+
+@time_machine.travel(FRIDAY_NIGHT, tick=False)
+def test_a_check_written_once_per_stock_counts_once_and_keeps_its_rows(
+    client: Client, loaded: None
+) -> None:
+    DataQualityLog.objects.filter(date=OCT_30, check_name=CHECKS[0]).update(severity="warning")
+    for stock in ("1101", "1102", "2330"):
+        filings = [{"period": "2026Q2", "fin_type": "consolidated"}]
+        DataQualityLog.objects.create(
+            date=OCT_30,
+            check_name="statement_filed_later",
+            severity="warning",
+            detail={"stock_id": stock, "filings": filings},
+        )
+    DataQualityLog.objects.create(
+        date=OCT_30, check_name="statement_filed_late", severity="info", detail={"stock_id": "2330"}
+    )
+
+    quality = envelope_of(client.get("/api/status"))["data"]["quality"]
+
+    assert (quality["worst"], quality["warnings"], quality["warning_rows"]) == ("warning", 2, 4)
 
 
 @time_machine.travel(MONDAY_MORNING, tick=False)
@@ -135,6 +159,7 @@ def test_new_prices_before_their_checks_are_not_ready(client: Client, loaded: No
         "worst": None,
         "missing_checks": list(CHECKS),
         "warnings": 0,
+        "warning_rows": 0,
     }
     assert data["updated_at"] == "2026-11-02T15:40:00+08:00"
 
@@ -204,6 +229,7 @@ def test_an_empty_database_reports_nothing_loaded(client: Client, db: None) -> N
             "worst": None,
             "missing_checks": list(CHECKS),
             "warnings": 0,
+            "warning_rows": 0,
         },
         "updated_at": None,
         "degraded": [],

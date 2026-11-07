@@ -62,6 +62,12 @@ def session_summary(day: date, logs: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def warning_counts(checks: list[dict[str, Any]]) -> dict[str, int]:
+    """Checks with a warning, one per name however many rows it wrote, and those rows."""
+    warned = [check["check_name"] for check in checks if check["severity"] == Severity.WARNING]
+    return {"warnings": len(set(warned)), "warning_rows": len(warned)}
+
+
 def runs_of(day: date, scope: str) -> QuerySet[EtlRun]:
     """Single-day runs of the day, or with scope covering every run whose range holds it."""
     if scope == "day":
