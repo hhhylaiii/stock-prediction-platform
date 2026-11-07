@@ -370,7 +370,7 @@ def test_the_morning_chain_rebuilds_features_then_predicts_then_monitors(
     assert sent == []
 
 
-def test_the_morning_first_builds_the_labels_the_evening_did_not(
+def test_the_morning_makes_up_the_evening_around_its_own_steps(
     now: Callable[[date, time], None], gate: list[bool], ran: list[tuple[str, date, bool]]
 ) -> None:
     record(WEDNESDAY, tasks.EVENING_CHECK, Severity.WARNING)
@@ -379,7 +379,7 @@ def test_the_morning_first_builds_the_labels_the_evening_did_not(
 
     tasks.morning.apply().get()
 
-    assert steps(ran) == ["labels", "recent_features", "predict", "monitor"]
+    assert steps(ran) == ["labels", "features", "predict", "monitor", "recent_features"]
 
 
 def test_the_morning_after_friday_runs_on_saturday_and_not_again_until_tuesday(

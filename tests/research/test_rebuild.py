@@ -355,7 +355,8 @@ def test_a_morning_that_makes_up_a_missed_evening_recomputes_its_sixty_sessions(
 
     tasks.morning.apply().get()
 
-    assert steps(ran) == ["labels", "recent_features", "predict", "monitor", "rebuild_covered"]
+    made_up = ["labels", "features", "predict", "monitor", "recent_features"]
+    assert steps(ran) == [*made_up, "rebuild_covered"]
 
 
 def test_no_open_note_no_rebuild(
