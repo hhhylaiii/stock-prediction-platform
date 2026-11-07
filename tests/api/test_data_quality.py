@@ -119,6 +119,8 @@ def test_research_schedule_checks_sit_with_the_model_checks(client: Client) -> N
     log(OCT_30, "research_evening", Severity.INFO)
     log(OCT_30, "research_retrain", Severity.WARNING, **_retrain_detail({"rank": NOT_FROZEN}))
     log(OCT_30, "research_promote", Severity.WARNING, failed={"rank-a": "RunError: x"}, done=[])
+    log(OCT_30, "research_rebuild", Severity.INFO, earliest="2026-10-27", stocks=1, notes={})
+    log(OCT_30, "adj_factor_changed", Severity.INFO, stocks={"2330": "2026-10-27"})
 
     day = envelope_of(client.get("/api/data-quality", {"days": 1}))["data"][0]
     quality = envelope_of(client.get("/api/status"))["data"]["quality"]
@@ -127,9 +129,11 @@ def test_research_schedule_checks_sit_with_the_model_checks(client: Client) -> N
         "research_evening",
         "research_morning",
         "research_promote",
+        "research_rebuild",
         "research_retrain",
     ]
     assert not [check for check in day["checks"] if check["check_name"].startswith("research_")]
+    assert "adj_factor_changed" in [check["check_name"] for check in day["checks"]]
     assert (day["worst"], quality["worst"], quality["warnings"]) == ("info", "info", 0)
 
 

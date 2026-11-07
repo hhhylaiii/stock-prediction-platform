@@ -6,6 +6,7 @@ from playwright.sync_api import Locator, Page, expect
 from pytest_django.live_server_helper import LiveServer
 
 from apps.etl.models import DataQualityLog
+from apps.market.adjust import ADJ_CHECK, _merged
 from apps.research import tasks
 from apps.research.gates import SAMPLE_UNITS, Gate, SlotGates
 from apps.research.monitor import MODE_FIELDS, MODES, alert_problems
@@ -508,6 +509,22 @@ def promote_step(
     tasks._promote(day)
 
 
+def rebuild_step(
+    seed: Seed,
+    monkeypatch: pytest.MonkeyPatch,
+    error: str | None = None,
+) -> None:
+    monkeypatch.setattr(tasks, "_command", lambda name, **options: name)
+    monkeypatch.setattr(tasks, "dispatch", lambda rows: None)
+    if error is not None:
+
+        def broken(day: date, labels: bool) -> str:
+            raise RuntimeError(error)
+
+        monkeypatch.setattr(tasks, "_rebuild_notes", broken)
+    tasks._rebuild(seed.last_session)
+
+
 def test_the_monthly_retrain_stays_pinned_beside_the_day_s_checks(
     page: Page, live_server: LiveServer, seeded: Seed
 ) -> None:
@@ -532,17 +549,87 @@ def test_research_checks_keep_a_fixed_order_whatever_ran_last(
 ) -> None:
     log(seeded, "research_evening", "info", {}, back=2)
     log(seeded, "research_morning", "warning", {})
+    rebuild_step(seeded, monkeypatch, error="boom")
     retrained(seeded, 1, BUILT, {})
     promote_step(seeded, monkeypatch, 1, {"rank-2026-11": "boom"})
 
     page.goto(f"{live_server.url}/#models")
 
     checks = page.locator("#model-checks .check")
-    expect(checks).to_have_count(4)
-    expected = (("每月重訓", 1), ("自動換模", 1), ("研究晚間排程", 2), ("研究早盤排程", 1))
+    expect(checks).to_have_count(5)
+    expected = (
+        ("每月重訓", 1),
+        ("自動換模", 1),
+        ("研究資料重建", 1),
+        ("研究晚間排程", 2),
+        ("研究早盤排程", 1),
+    )
     for n, (name, back) in enumerate(expected):
         expect(checks.nth(n)).to_contain_text(name)
         expect(checks.nth(n).locator(".pinned")).to_have_text(seeded.sessions[-back].isoformat())
+
+
+def test_a_rebuild_shows_every_row_of_its_day_the_one_over_the_limit_first(
+    page: Page, live_server: LiveServer, seeded: Seed, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old, recent = seeded.sessions[-40], seeded.sessions[-5]
+    log(seeded, ADJ_CHECK, "info", _merged({}, "2330", old), back=3)
+    log(seeded, ADJ_CHECK, "info", _merged(_merged({}, "2330", recent), "9999", recent), back=2)
+    rebuild_step(seeded, monkeypatch)
+
+    page.goto(f"{live_server.url}/#models")
+
+    rebuilds = page.locator("#model-checks .check")
+    expect(rebuilds).to_have_count(2)
+    expect(rebuilds.nth(0)).to_contain_text("研究資料重建")
+    expect(rebuilds.nth(0).locator(".muted")).to_have_text(
+        f"超過 30 個交易日，未自動重建：1 檔，自 {old.isoformat()} 起"
+    )
+    expect(rebuilds.nth(0).locator("i")).to_have_class("warn")
+    expect(rebuilds.nth(1).locator(".muted")).to_have_text(f"重建 2 檔，自 {recent.isoformat()} 起")
+    expect(rebuilds.nth(1).locator("i")).not_to_have_class("warn")
+    for row in (rebuilds.nth(0), rebuilds.nth(1)):
+        expect(row.locator(".pinned")).to_have_text(seeded.last_session.isoformat())
+
+
+def test_a_failed_rebuild_shows_its_error(
+    page: Page, live_server: LiveServer, seeded: Seed, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rebuild_step(seeded, monkeypatch, error=XSS_NAME)
+
+    page.goto(f"{live_server.url}/#models")
+
+    failed = page.locator("#model-checks .check")
+    expect(failed).to_have_count(1)
+    expect(failed.locator(".muted")).to_have_text(f"重建失敗：RuntimeError: {XSS_NAME}")
+    expect(failed.locator("i")).to_have_class("warn")
+    assert page.evaluate("window.__xss") is None
+
+
+def test_an_adj_factor_change_is_a_data_check_counting_its_stocks(
+    page: Page, live_server: LiveServer, seeded: Seed
+) -> None:
+    named = _merged(_merged({}, "2330", seeded.sessions[-4]), "9999", seeded.sessions[-2])
+    log(seeded, ADJ_CHECK, "info", named)
+
+    page.goto(f"{live_server.url}/#models")
+
+    change = page.locator("#quality .check", has_text="還原因子更新")
+    expect(change).to_contain_text(f"2 檔，最早 {seeded.sessions[-4].isoformat()}")
+    expect(change.locator("i")).not_to_have_class("warn")
+    expect(page.locator("#model-checks")).not_to_contain_text("還原因子")
+
+
+def test_a_collapsed_adj_factor_change_reads_its_count(
+    page: Page, live_server: LiveServer, seeded: Seed
+) -> None:
+    collapsed = {"earliest": seeded.sessions[-9].isoformat(), "count": 249}
+    log(seeded, ADJ_CHECK, "info", _merged(collapsed, "2330", seeded.sessions[-3]))
+
+    page.goto(f"{live_server.url}/#models")
+
+    change = page.locator("#quality .check", has_text="還原因子更新")
+    expect(change).to_contain_text(f"250 檔，最早 {seeded.sessions[-9].isoformat()}")
 
 
 def test_a_failed_automatic_promotion_names_each_build_and_its_error(
