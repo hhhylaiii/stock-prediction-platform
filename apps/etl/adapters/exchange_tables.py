@@ -189,6 +189,7 @@ class DailyTable(NamedTuple):
     consistent: Callable[[Mapping[Hashable, Any]], bool] | None = None
     locate: Callable[[dict[str, Any]], dict[str, Any]] | None = None
     renamed: Renamed | None = None
+    unbalanced_allowed: int = 0
 
     @property
     def where(self) -> str:
@@ -269,6 +270,7 @@ def check_complete(
 def standard_rows(raw_df: pd.DataFrame, table: DailyTable) -> pd.DataFrame:
     """One row per local-currency security; the total row is skipped, repeats are refused."""
     records = []
+    unbalanced: list[str] = []
     seen: set[tuple[str, date]] = set()
     for row in raw_df.to_dict("records"):
         if not str(row[table.code]).strip() and str(row[table.name]).strip() == TOTAL_ROW_NAME:
@@ -281,9 +283,7 @@ def standard_rows(raw_df: pd.DataFrame, table: DailyTable) -> pd.DataFrame:
             raise SchemaChangedError(f"{table.where} repeated {code} on {row['date']}")
         seen.add(key)
         if table.consistent is not None and not table.consistent(row):
-            raise SchemaChangedError(
-                f"{table.where} {code} on {row['date']}: columns do not add up"
-            )
+            unbalanced.append(code)
         values = {
             column: table.converters.get(column, table.convert)([row[name] for name in names])
             for column, names in table.columns.items()
@@ -291,7 +291,18 @@ def standard_rows(raw_df: pd.DataFrame, table: DailyTable) -> pd.DataFrame:
         records.append({"stock_id": code, "date": row["date"], **_validated(values, table, key)})
     if not records:
         raise SourceNotReadyError(f"{table.where} has no stock rows yet")
+    _check_balanced(unbalanced, table, records[0]["date"])
     return pd.DataFrame(records, columns=["stock_id", "date", *table.columns], dtype=object)
+
+
+def _check_balanced(codes: list[str], table: DailyTable, day: date) -> None:
+    """A few rows that do not add up keep their published values; more mean a layout change."""
+    if not codes:
+        return
+    message = f"{table.where} {len(codes)} rows on {day} do not add up: {codes[:20]}"
+    if len(codes) > table.unbalanced_allowed:
+        raise SchemaChangedError(message)
+    logger.warning("%s; kept as published", message)
 
 
 def _validated(

@@ -91,6 +91,7 @@ DISPOSAL_FIELDS = (SECURITY_CODE, "公布日期", "處置起訖時間")
 ALTERED_TITLE = "變更交易、分盤交易、管理股票與停止交易資訊"
 ALTERED_FLAGS = ("變更交易", "屬管理股票")
 FLAG = "Ｙ"
+UNBALANCED_SBL_ROWS = 3
 MISSING_RATIOS = frozenset({"N/A", "null"})
 PERCENT_SIGN = "%"
 QFII_TITLE = "櫃檯買賣股票僑外資及陸資持股比例排行表"
@@ -410,6 +411,7 @@ TABLES: dict[str, DailyTable] = {
             for group, field in zip(SBL_GROUPS, SBL_SOURCE_FIELDS, strict=True)
         ),
         consistent=sbl_rolls_forward,
+        unbalanced_allowed=UNBALANCED_SBL_ROWS,
     ),
     "foreign_holding": DailyTable(
         label="insti/qfii",
