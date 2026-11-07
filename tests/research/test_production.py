@@ -1,19 +1,34 @@
+import json
+import math
 from dataclasses import replace
 from datetime import date, timedelta
 from io import StringIO
 from pathlib import Path
+from typing import Any
 
 import pytest
 from django.core.management import call_command
 from django.core.management.base import CommandError
 
 from apps.market.calendar import TradingDays
-from apps.research import baseline_runs, holdout, lgbm_runs, monitor_refs, production
+from apps.research import (
+    baseline_runs,
+    holdout,
+    lgbm_runs,
+    monitor_refs,
+    prediction_cache,
+    production,
+)
 from apps.research.holdout import HoldoutError, claim_holdout, production_pass
 from apps.research.lgbm_runs import MODEL, run_fold, run_id
 from apps.research.models import ModelRun
 from apps.research.monitor_refs import research_brier, research_ic_thresholds
-from apps.research.prediction_cache import MissingFoldsError, fold_notes, load_fold_predictions
+from apps.research.prediction_cache import (
+    MissingFoldsError,
+    fold_notes,
+    fold_path,
+    load_fold_predictions,
+)
 from apps.research.production import (
     SHADOW_MONTHS,
     Design,
@@ -24,6 +39,7 @@ from apps.research.production import (
 from apps.research.rank_model import SPEC_RECIPE, Variant
 from apps.research.runs import RunError
 from apps.research.walkforward import (
+    Fold,
     WalkForwardConfig,
     WalkForwardError,
     add_months,
@@ -120,6 +136,30 @@ def test_a_production_fold_past_the_holdout_start_needs_the_pass(frozen: Path) -
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("run_key", "index", "message"),
+    [
+        ("interval-prod", 0, "start with rank-"),
+        ("rank-final", 0, "holdout run"),
+        ("rank-prod", 7, "production folds only"),
+    ],
+)
+def test_run_fold_checks_a_production_write_before_touching_the_cache(
+    frozen: Path, run_key: str, index: int, message: str
+) -> None:
+    fold = replace(production_fold(panel_calendar(), weekdays()[-1], CONFIG), index=index)
+    cached = fold_path(run_key, MODEL, fold.index)
+    cached.parent.mkdir(parents=True)
+    cached.write_bytes(b"kept")
+
+    with pytest.raises((ValueError, HoldoutError), match=message):
+        run_fold("rank", fold, run_key, frozen, KEPT, 0, production=production_pass("rank"))
+
+    assert cached.read_bytes() == b"kept"
+    assert not ModelRun.objects.filter(run_key=run_key).exists()
+
+
+@pytest.mark.django_db
 def test_a_production_rank_fold_fits_without_evaluating_and_scores_its_day(frozen: Path) -> None:
     last = weekdays()[-1]
     fold = production_fold(panel_calendar(), last, CONFIG)
@@ -188,7 +228,7 @@ def test_a_shadow_fold_is_evaluated_on_its_labelled_months(frozen: Path) -> None
 
 @pytest.fixture
 def researched(run_panel: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Research caches of a rank and an interval walk-forward on the panel, before any claim.
+    """Research caches of a rank and an interval walk-forward, then the panel's holdout start.
 
     The panel's research folds hold fewer than 60 IC days, so the rolling window is 5 here.
     """
@@ -196,6 +236,8 @@ def researched(run_panel: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     chosen = [fold for fold in research() if fold.research]
     lgbm_runs.run_folds("rank", chosen, "rank-wf1", run_panel)
     baseline_runs.run_folds("interval", chosen, "interval-wf1", run_panel)
+    monkeypatch.setattr(holdout, "SPEC_HOLDOUT_START", CONFIG.holdout_start)
+    monkeypatch.setattr(prediction_cache, "SPEC_HOLDOUT_START", CONFIG.holdout_start)
     rolling = monitor_refs.rolling_ic_threshold
     monkeypatch.setattr(monitor_refs, "rolling_ic_threshold", lambda ic: rolling(ic, 5))
     monkeypatch.setattr(production, "SHADOW_MONTHS", 4)
@@ -219,10 +261,16 @@ def test_build_run_waits_for_the_holdout_claim(researched: Path) -> None:
     assert not ModelRun.objects.filter(run_key__startswith="rank-prod").exists()
 
 
+def production_note(run: ModelRun) -> dict[str, Any]:
+    note: dict[str, Any] = run.params["production"]
+    return note
+
+
 @pytest.mark.django_db
 def test_build_run_fits_the_model_and_its_shadow_on_the_frozen_design(researched: Path) -> None:
     claim_all()
     last = weekdays()[-1]
+    assert holdout.is_holdout(production_fold(panel_calendar(), last, CONFIG))
 
     built = build_run("rank", "rank-prod", "rank-wf1", last, researched)
 
@@ -233,8 +281,11 @@ def test_build_run_fits_the_model_and_its_shadow_on_the_frozen_design(researched
     assert [run.params["horizon"] for run in model] == [20, 5]
     folds = [fold for fold in generate_folds(panel_calendar(), last, CONFIG) if fold.research]
     thresholds = research_ic_thresholds("rank-wf1", MODEL, folds)
-    assert len(thresholds) == 2
-    assert all(value == value for value in thresholds.values())
+    assert sorted(thresholds) == [5, 20]
+    expected = {str(horizon): pytest.approx(value) for horizon, value in thresholds.items()}
+    assert built.references == {"rolling_ic_threshold": expected}
+    design = json.loads(json.dumps(production.design_note(production.DESIGNS["rank"])))
+    shared = {"as_of": last.isoformat(), "frozen_by": "rank-final", "design": design}
     for run in model:
         assert run.status == "candidate"
         assert run.ic_mean is None
@@ -242,39 +293,83 @@ def test_build_run_fits_the_model_and_its_shadow_on_the_frozen_design(researched
         assert run.params["bags"] == 2
         assert run.params["variant"]["masked"] == ["tech_ret_60d"]
         assert run.params["research_run_key"] == "rank-wf1"
-        assert run.params["shadow_run_key"] == "rank-prod-shadow"
-        assert run.params["as_of"] == last.isoformat()
-        assert run.params["design"]["config"]["train_months"] == CONFIG.train_months
-        assert run.params["rolling_ic_threshold"] == {
-            str(horizon): pytest.approx(value) for horizon, value in thresholds.items()
+        assert production_note(run) == {
+            **shared,
+            "role": "model",
+            "shadow_run_key": "rank-prod-shadow",
         }
+        assert run.params["rolling_ic_threshold"] == expected
         assert run.train_end == production_fold(panel_calendar(), last, CONFIG).train_end
     for run in shadow:
+        assert run.status == "candidate"
         assert run.ic_mean is not None
-        assert run.params["shadow_of"] == "rank-prod"
+        assert run.params["research_run_key"] == "rank-wf1"
+        assert production_note(run) == {**shared, "role": "shadow", "shadow_of": "rank-prod"}
         assert "rolling_ic_threshold" not in run.params
         assert run.train_end == shadow_fold(panel_calendar(), last, CONFIG).train_end
-    assert set(
-        load_fold_predictions("rank-prod", MODEL, production_fold(panel_calendar(), last, CONFIG))[
-            "date"
-        ]
-    ) == {last}
+    fold = production_fold(panel_calendar(), last, CONFIG)
+    assert set(load_fold_predictions("rank-prod", MODEL, fold)["date"]) == {last}
 
 
 @pytest.mark.django_db
-def test_build_run_gives_the_probability_model_the_research_brier(researched: Path) -> None:
+def test_build_run_command_gives_the_probability_model_the_research_brier(
+    researched: Path,
+) -> None:
     claim_all()
     last = weekdays()[-1]
+    out = StringIO()
 
-    build_run("interval", "interval-prod", "interval-wf1", last, researched)
+    call_command(
+        "build_run",
+        scope="interval",
+        run_key="interval-prod",
+        research_run_key="interval-wf1",
+        as_of=last.isoformat(),
+        stdout=out,
+    )
 
     folds = [fold for fold in generate_folds(panel_calendar(), last, CONFIG) if fold.research]
+    brier = research_brier("interval-wf1", folds)
     runs = {run.objective: run for run in ModelRun.objects.filter(run_key="interval-prod")}
-    assert runs["classification"].params["brier_baseline"] == pytest.approx(
-        research_brier("interval-wf1", folds)
-    )
+    assert runs["classification"].params["brier_baseline"] == pytest.approx(brier)
     assert "brier_baseline" not in runs["quantile"].params
     assert {run.params["research_run_key"] for run in runs.values()} == {"interval-wf1"}
+    shadow = ModelRun.objects.filter(run_key="interval-prod-shadow")
+    assert not any("brier_baseline" in run.params for run in shadow)
+    assert f"Brier baseline from interval-wf1: {brier:.4f}" in out.getvalue()
+    assert "rolling IC" not in out.getvalue()
+
+
+@pytest.mark.django_db
+def test_build_run_fits_the_return_scope_without_references(researched: Path) -> None:
+    claim_all()
+    research_row("return-wf1")
+
+    built = build_run("return", "return-prod", "return-wf1", weekdays()[-1], researched)
+
+    assert built.references == {}
+    assert built.model == ["return-prod.lightgbm.h5.f000"]
+    assert built.shadow == ["return-prod-shadow.lightgbm.h5.f000"]
+    model = ModelRun.objects.get(run_key="return-prod")
+    assert production_note(model)["role"] == "model"
+    assert "rolling_ic_threshold" not in model.params
+    assert "brier_baseline" not in model.params
+
+
+def research_row(run_key: str, **params: Any) -> ModelRun:
+    return ModelRun.objects.create(
+        run_id=f"{run_key}.lightgbm.h20.f000",
+        run_key=run_key,
+        model_type="lightgbm",
+        objective="rank",
+        version="4",
+        train_start=date(2016, 1, 4),
+        train_end=date(2016, 6, 1),
+        params=params,
+        feature_list=[],
+        lib_versions={},
+        feature_hash="0" * 64,
+    )
 
 
 @pytest.mark.django_db
@@ -286,40 +381,117 @@ def test_build_run_gives_the_probability_model_the_research_brier(researched: Pa
         ("rank", "rank-prod", "interval-wf1", "start with rank-"),
         ("rank", "rank-prod", "rank-none", "no model_run"),
         ("return", "return-prod", "return-none", "no model_run"),
+        ("rank", "rank-wf1", "rank-wf1", "is the research run"),
+        ("rank", "rank-wf1", "rank-wf1-shadow", "is the research run"),
+        ("rank", "rank-final", "rank-wf1", "rank-final is a holdout run"),
+        ("rank", "rank-used", "rank-wf1", "not a production build"),
+        ("rank", "rank-prod", "rank-made", "is a production build"),
     ],
 )
 def test_build_run_checks_its_keys_before_fitting(
     researched: Path, scope: str, run_key: str, research_key: str, message: str
 ) -> None:
     claim_all()
+    research_row("rank-used")
+    research_row("rank-made", production={"role": "model"})
+    rows = {run.run_id: run.params for run in ModelRun.objects.all()}
+    cached = sorted(path.name for path in fold_path("rank-wf1", MODEL, 0).parent.iterdir())
 
-    with pytest.raises((ValueError, RunError), match=message):
+    with pytest.raises((ValueError, RunError, HoldoutError), match=message):
         build_run(scope, run_key, research_key, weekdays()[-1], researched)
 
-    assert not ModelRun.objects.filter(run_key__in=[run_key, f"{run_key}-shadow"]).exists()
+    assert {run.run_id: run.params for run in ModelRun.objects.all()} == rows
+    assert sorted(path.name for path in fold_path("rank-wf1", MODEL, 0).parent.iterdir()) == cached
 
 
 @pytest.mark.django_db
 def test_build_run_needs_the_research_caches_before_fitting(researched: Path) -> None:
     claim_all()
-    ModelRun.objects.create(
-        run_id="rank-wf2.lightgbm.h20.f000",
-        run_key="rank-wf2",
-        model_type="lightgbm",
-        objective="rank",
-        version="4",
-        train_start=date(2016, 1, 4),
-        train_end=date(2016, 6, 1),
-        params={},
-        feature_list=[],
-        lib_versions={},
-        feature_hash="0" * 64,
-    )
+    research_row("rank-wf2")
 
     with pytest.raises(MissingFoldsError):
         build_run("rank", "rank-prod", "rank-wf2", weekdays()[-1], researched)
 
+    assert not ModelRun.objects.filter(run_key__startswith="rank-prod").exists()
+
+
+@pytest.mark.django_db
+def test_build_run_refuses_missing_references_before_fitting(
+    researched: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    claim_all()
+    monkeypatch.setattr(monitor_refs, "rolling_ic_threshold", lambda ic: math.nan)
+    monkeypatch.setattr(production, "research_brier", lambda run_key, folds: math.nan)
+
+    with pytest.raises(RunError, match=r"no rolling IC threshold at \[5, 20\] days"):
+        build_run("rank", "rank-prod", "rank-wf1", weekdays()[-1], researched)
+    with pytest.raises(RunError, match="no logistic baseline Brier"):
+        build_run("interval", "interval-prod", "interval-wf1", weekdays()[-1], researched)
+
+    assert not ModelRun.objects.filter(run_key__endswith="-prod").exists()
+    assert not ModelRun.objects.filter(run_key__endswith="-prod-shadow").exists()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("scope", "design", "message"),
+    [
+        ("rank", Design(CONFIG, Variant(masked=tuple(KEPT))), "masks every rank feature"),
+        ("return", Design(CONFIG, Variant(masked=("tech_ret_60d",))), "rank scope only"),
+    ],
+)
+def test_build_run_checks_the_design_before_fitting(
+    researched: Path, monkeypatch: pytest.MonkeyPatch, scope: str, design: Design, message: str
+) -> None:
+    claim_all()
+    research_row("return-wf1")
+    monkeypatch.setitem(production.DESIGNS, scope, design)
+
+    with pytest.raises(ValueError, match=message):
+        build_run(scope, f"{scope}-prod", f"{scope}-wf1", weekdays()[-1], researched)
+
+    assert not ModelRun.objects.filter(run_key__startswith=f"{scope}-prod").exists()
+
+
+@pytest.mark.django_db
+def test_a_failed_build_leaves_an_annotated_shadow_and_builds_again(
+    researched: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    claim_all()
+    last = weekdays()[-1]
+    fold = production.production_fold
+
+    def broken(*args: Any) -> Fold:
+        raise WalkForwardError("model N's window is gone")
+
+    monkeypatch.setattr(production, "production_fold", broken)
+    with pytest.raises(WalkForwardError, match="window is gone"):
+        build_run("rank", "rank-prod", "rank-wf1", last, researched)
+
+    shadow = list(ModelRun.objects.filter(run_key="rank-prod-shadow"))
+    assert shadow
+    assert all(production_note(run)["role"] == "shadow" for run in shadow)
     assert not ModelRun.objects.filter(run_key="rank-prod").exists()
+
+    monkeypatch.setattr(production, "production_fold", fold)
+    built = build_run("rank", "rank-prod", "rank-wf1", last, researched)
+
+    assert len(built.model) == 2
+    assert built.shadow == sorted(run.run_id for run in shadow)
+
+
+@pytest.mark.django_db
+def test_research_fits_refuse_a_production_run_key(researched: Path) -> None:
+    research_row("rank-made", production={"role": "model"})
+    research_row("interval-made", production={"role": "model"})
+    chosen = [fold for fold in research() if fold.research]
+
+    with pytest.raises(RunError, match="rank-made holds a production build"):
+        lgbm_runs.run_folds("rank", chosen, "rank-made", researched)
+    with pytest.raises(RunError, match="interval-made holds a production build"):
+        baseline_runs.run_folds("interval", chosen, "interval-made", researched)
+
+    assert not fold_path("rank-made", MODEL, chosen[0].index).exists()
 
 
 @pytest.mark.django_db
@@ -337,9 +509,16 @@ def test_build_run_command_reports_both_runs(researched: Path) -> None:
     )
 
     text = out.getvalue()
+    limits = ModelRun.objects.get(run_id="rank-prod.lightgbm.h20.f000").params[
+        "rolling_ic_threshold"
+    ]
     assert "rank-prod: rank-prod.lightgbm.h20.f000, rank-prod.lightgbm.h5.f000" in text
     assert "rank-prod-shadow: rank-prod-shadow.lightgbm.h20.f000" in text
-    assert "rolling IC thresholds from rank-wf1:" in text
+    assert (
+        f"rolling IC thresholds from rank-wf1: 5 日 {limits['5']:.4f}, 20 日 {limits['20']:.4f}"
+        in text
+    )
+    assert "Brier" not in text
 
 
 @pytest.mark.django_db

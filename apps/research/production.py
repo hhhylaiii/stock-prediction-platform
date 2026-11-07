@@ -1,21 +1,33 @@
 """Production runs (SPEC §7): the frozen design fit through the latest labels, and its shadow."""
 
 import math
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
-from django.db import transaction
-
 from apps.market.calendar import TradingDays
 from apps.research.baseline_runs import check_run_key
-from apps.research.holdout import production_pass
-from apps.research.lgbm_runs import MODEL, run_fold, scope_features, target_note, variant_note
-from apps.research.models import HoldoutScope, ModelObjective, ModelRun
-from apps.research.monitor_refs import research_brier, research_ic_thresholds, store_references
+from apps.research.holdout import (
+    PRODUCTION_FOLD,
+    ProductionPass,
+    authorize_production,
+    production_pass,
+)
+from apps.research.lgbm_runs import (
+    MODEL,
+    check_design,
+    design_features,
+    run_fold,
+    target_note,
+    variant_note,
+)
+from apps.research.models import OUTPUT_HORIZONS, HoldoutScope, ModelObjective, ModelRun
+from apps.research.monitor import BRIER_BASELINE, IC_THRESHOLD, WINDOW
+from apps.research.monitor_refs import research_brier, research_ic_thresholds
 from apps.research.rank_model import SPEC_RECIPE, Variant
-from apps.research.runs import RunError
+from apps.research.runs import PRODUCTION, RunError
 from apps.research.target_models import TARGET_RECIPE, TargetVariant
 from apps.research.walkforward import (
     Fold,
@@ -27,7 +39,6 @@ from apps.research.walkforward import (
 )
 
 SHADOW_MONTHS = 6
-PRODUCTION_FOLD = 0
 
 
 def _fold(
@@ -84,13 +95,16 @@ class Design:
 class Built:
     model: list[str]
     shadow: list[str]
-    thresholds: dict[int, float]
-    brier: float
+    references: dict[str, Any]
 
 
 DESIGNS: dict[str, Design] = {scope: Design() for scope in HoldoutScope.values}
 BAGS = 5
 SHADOW = "shadow"
+REFERENCED: dict[str, str] = {
+    ModelObjective.RANK: IC_THRESHOLD,
+    ModelObjective.CLASSIFICATION: BRIER_BASELINE,
+}
 
 
 def shadow_key(run_key: str) -> str:
@@ -111,68 +125,126 @@ def design_note(design: Design) -> dict[str, Any]:
     }
 
 
-def _references(
-    scope: str, research_run_key: str, folds: list[Fold]
-) -> tuple[dict[int, float], float]:
+def _references(scope: str, research_run_key: str, folds: list[Fold]) -> dict[str, Any]:
+    """The monitor references N carries, from the research run's folds; none may be missing."""
     if scope == HoldoutScope.RANK:
-        return research_ic_thresholds(research_run_key, MODEL, folds), math.nan
+        thresholds = research_ic_thresholds(research_run_key, MODEL, folds)
+        missing = [h for h in OUTPUT_HORIZONS if not math.isfinite(thresholds.get(h, math.nan))]
+        if missing:
+            raise RunError(
+                f"{research_run_key} gives no rolling IC threshold at {missing} days; "
+                f"its research folds need {WINDOW} IC days"
+            )
+        return {IC_THRESHOLD: {str(h): float(thresholds[h]) for h in OUTPUT_HORIZONS}}
     if scope == HoldoutScope.INTERVAL:
-        return {}, research_brier(research_run_key, folds)
-    return {}, math.nan
+        brier = research_brier(research_run_key, folds)
+        if not math.isfinite(brier):
+            raise RunError(f"{research_run_key} gives no logistic baseline Brier")
+        return {BRIER_BASELINE: brier}
+    return {}
 
 
-def _annotate(run_key: str, note: dict[str, Any]) -> list[str]:
-    runs = list(ModelRun.objects.filter(run_key=run_key).order_by("run_id"))
-    for run in runs:
-        run.params = {**run.params, **note}
-        run.save(update_fields=["params"])
-    return [run.run_id for run in runs]
+def _annotation(
+    note: dict[str, Any], references: dict[str, Any]
+) -> Callable[[ModelRun], dict[str, Any]]:
+    def annotate(run: ModelRun) -> dict[str, Any]:
+        wanted = REFERENCED.get(str(run.objective))
+        return {**note, **{key: value for key, value in references.items() if key == wanted}}
+
+    return annotate
 
 
-def _check_keys(scope: str, run_key: str, research_run_key: str) -> None:
-    for key in (run_key, shadow_key(run_key), research_run_key):
+def _check_keys(scope: str, run_key: str, research_run_key: str, granted: ProductionPass) -> None:
+    keys = (run_key, shadow_key(run_key))
+    for key in (*keys, research_run_key):
         check_run_key(scope, key)
-    if not ModelRun.objects.filter(run_key=research_run_key).exists():
+    if research_run_key in keys:
+        raise RunError(f"{research_run_key} is the research run; production needs its own run_key")
+    for key in keys:
+        authorize_production(key, granted)
+        if ModelRun.objects.filter(run_key=key).exclude(params__has_key=PRODUCTION).exists():
+            raise RunError(f"{key} holds runs that are not a production build")
+    research = ModelRun.objects.filter(run_key=research_run_key)
+    if not research.exists():
         raise RunError(f"no model_run of the research run {research_run_key}")
+    if research.filter(params__has_key=PRODUCTION).exists():
+        raise RunError(f"{research_run_key} is a production build, not a research run")
+
+
+def _fit(
+    scope: str,
+    fold: Fold,
+    key: str,
+    directory: Path,
+    features: list[str],
+    seed: int,
+    design: Design,
+    granted: ProductionPass,
+    annotate: Callable[[ModelRun], dict[str, Any]],
+) -> list[str]:
+    run_fold(
+        scope,
+        fold,
+        key,
+        directory,
+        features,
+        seed,
+        BAGS,
+        design.variant,
+        design.target,
+        production=granted,
+        annotate=annotate,
+    )
+    return list(
+        ModelRun.objects.filter(run_key=key).order_by("run_id").values_list("run_id", flat=True)
+    )
 
 
 def build_run(
     scope: str, run_key: str, research_run_key: str, as_of: date, directory: Path, seed: int = 0
 ) -> Built:
-    """Fit N and its shadow N′ on scope's frozen design through as_of, with monitor references."""
+    """Fit shadow N′, then N, on scope's frozen design through as_of; N carries the references."""
     granted = production_pass(scope)
-    _check_keys(scope, run_key, research_run_key)
+    _check_keys(scope, run_key, research_run_key, granted)
     design = DESIGNS[scope]
+    check_design(scope, design.variant, design.target)
     calendar = TradingDays.from_db()
     research = [fold for fold in generate_folds(calendar, as_of, design.config) if fold.research]
-    thresholds, brier = _references(scope, research_run_key, research)
-    masked = design.variant.masked
-    features = [name for name in scope_features(scope, design.target) if name not in masked]
-    folds = {
-        run_key: production_fold(calendar, as_of, design.config),
-        shadow_key(run_key): shadow_fold(calendar, as_of, design.config),
+    references = _references(scope, research_run_key, research)
+    features = design_features(scope, design.variant, design.target)
+    shared = {
+        "as_of": as_of.isoformat(),
+        "frozen_by": granted.frozen_by,
+        "design": design_note(design),
     }
-    for key, fold in folds.items():
-        run_fold(
-            scope,
-            fold,
-            key,
-            directory,
-            features,
-            seed,
-            BAGS,
-            design.variant,
-            design.target,
-            granted,
-        )
-    note = {"research_run_key": research_run_key, "design": design_note(design)}
-    note["as_of"] = as_of.isoformat()
-    with transaction.atomic():
-        model = _annotate(run_key, {**note, "shadow_run_key": shadow_key(run_key)})
-        shadow = _annotate(shadow_key(run_key), {**note, "shadow_of": run_key})
-        for run in ModelRun.objects.filter(run_key=run_key):
-            if run.objective == ModelObjective.RANK:
-                store_references(run.run_id, thresholds, math.nan)
-            elif run.objective == ModelObjective.CLASSIFICATION:
-                store_references(run.run_id, {}, brier)
-    return Built(model, shadow, thresholds, brier)
+    roles = {
+        "shadow": {**shared, "role": SHADOW, "shadow_of": run_key},
+        "model": {**shared, "role": "model", "shadow_run_key": shadow_key(run_key)},
+    }
+    notes = {
+        role: {"research_run_key": research_run_key, PRODUCTION: note}
+        for role, note in roles.items()
+    }
+    shadow = _fit(
+        scope,
+        shadow_fold(calendar, as_of, design.config),
+        shadow_key(run_key),
+        directory,
+        features,
+        seed,
+        design,
+        granted,
+        _annotation(notes["shadow"], {}),
+    )
+    model = _fit(
+        scope,
+        production_fold(calendar, as_of, design.config),
+        run_key,
+        directory,
+        features,
+        seed,
+        design,
+        granted,
+        _annotation(notes["model"], references),
+    )
+    return Built(model, shadow, references)

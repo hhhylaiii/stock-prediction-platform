@@ -11,6 +11,7 @@ from apps.market.calendar import CalendarError
 from apps.research.holdout import HoldoutError
 from apps.research.labels import latest_price_date
 from apps.research.models import HoldoutScope
+from apps.research.monitor import BRIER_BASELINE, IC_THRESHOLD
 from apps.research.prediction_cache import FoldMismatchError, MissingFoldsError
 from apps.research.production import build_run
 from apps.research.runs import RunError
@@ -61,10 +62,13 @@ class Command(BaseCommand):
             raise CommandError(str(error)) from error
         self.stdout.write(f"{options['run_key']}: {', '.join(built.model)}")
         self.stdout.write(f"{options['run_key']}-shadow: {', '.join(built.shadow)}")
-        if built.thresholds:
-            limits = ", ".join(f"{h} 日 {value:.4f}" for h, value in built.thresholds.items())
-            self.stdout.write(f"rolling IC thresholds from {options['research_run_key']}: {limits}")
-        if built.brier == built.brier:
+        source = options["research_run_key"]
+        if IC_THRESHOLD in built.references:
+            listed = ", ".join(
+                f"{h} 日 {value:.4f}" for h, value in built.references[IC_THRESHOLD].items()
+            )
+            self.stdout.write(f"rolling IC thresholds from {source}: {listed}")
+        if BRIER_BASELINE in built.references:
             self.stdout.write(
-                f"Brier baseline from {options['research_run_key']}: {built.brier:.4f}"
+                f"Brier baseline from {source}: {built.references[BRIER_BASELINE]:.4f}"
             )
