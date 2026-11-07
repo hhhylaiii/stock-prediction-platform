@@ -892,14 +892,20 @@
     return { total: all.length, shown: all.filter((item, i) => all.findIndex(other => keyOf(other.check) === keyOf(item.check)) === i) };
   }
 
+  const leftByHand = check => check.check_name === 'research_rebuild' && ((check.detail || {}).handled === 'by_hand' || has((check.detail || {}).limit));
+
   function researchPins(data) {
     const dayOf = top => ((data.find(entry => entry.date === top.date) || {}).model_checks || [])
       .filter(check => check.check_name === top.check.check_name)
       .sort((a, b) => (a.id || 0) - (b.id || 0))
       .map(check => ({ date: top.date, check: check }));
-    return latestBy(data, isResearch, check => check.check_name).shown
+    const pins = latestBy(data, isResearch, check => check.check_name).shown
       .slice().sort((a, b) => researchRank(a.check) - researchRank(b.check))
       .flatMap(dayOf);
+    const hand = latestBy(data, leftByHand, () => 'by_hand').shown[0];
+    if (!hand || pins.some(item => item.check.id === hand.check.id)) return pins;
+    const at = pins.findIndex(item => item.check.check_name === hand.check.check_name);
+    return [...pins.slice(0, at), hand, ...pins.slice(at)];
   }
 
   function renderModelChecks(data, meta) {
