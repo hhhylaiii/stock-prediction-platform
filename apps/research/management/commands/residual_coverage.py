@@ -20,10 +20,13 @@ from apps.research.features.residual import (
     BASIS_GAP,
     FALLBACKS,
     MASKED_MONTHS,
+    MAX_FILL_RATIO,
     MAX_MASKED_SHARE,
     affected_months,
     basis_counts,
+    fill_flags,
     monthly_coverage,
+    unmasked_fills,
 )
 from apps.research.ranges import years
 
@@ -35,6 +38,10 @@ TABLE_COLUMNS = [
     "delisted",
     "present_current",
     "present_delisted",
+    "filled_current",
+    "filled_delisted",
+    "rows_current",
+    "rows_delisted",
 ]
 
 
@@ -81,6 +88,24 @@ class Command(BaseCommand):
             )
         months = ", ".join(f'"{month}"' for month in affected)
         self.stdout.write(f'    "{column}": frozenset({{{months}}}),')
+        if column in FALLBACKS:
+            self._fills(column, coverage, affected)
+
+    def _fills(self, column: str, coverage: pd.DataFrame, affected: list[str]) -> None:
+        shares = unmasked_fills(coverage, affected)
+        current, delisted = shares["current"], shares["delisted"]
+        if shares.isna().all():
+            self.stdout.write(f"{column}: every month is affected, so no fills are left unmasked")
+            return
+        self.stdout.write(
+            f"{column}: filled from {FALLBACKS[column]} in the months left unmasked, "
+            f"current {current:.2%}, delisted {delisted:.2%}"
+        )
+        if fill_flags(pd.Series([current]), pd.Series([delisted])).iloc[0]:
+            self.stdout.write(
+                f"    warning: fills still lean on stocks later delisted (over {MAX_FILL_RATIO:g} "
+                "times, or delisted only); report before filling MASKED_MONTHS"
+            )
 
     def _basis(self, column: str, counts: pd.Series) -> None:
         current = counts["current"] / max(counts["rows_current"], 1)
@@ -125,5 +150,6 @@ class Command(BaseCommand):
                 coverage.rename_axis("month").reset_index().assign(column=column)
                 for column, coverage in tables.items()
             ]
-            pd.concat(rows)[TABLE_COLUMNS].to_csv(options["output"], index=False)
+            table = pd.concat(rows).reindex(columns=TABLE_COLUMNS)
+            table.to_csv(options["output"], index=False)
             self.stdout.write(f"wrote {options['output']}")

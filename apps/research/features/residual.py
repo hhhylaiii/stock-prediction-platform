@@ -1,7 +1,8 @@
 """Source-gap rules applied alike to every stock, so missing values never mark a later delisting."""
 
 import json
-from collections.abc import Mapping
+import math
+from collections.abc import Iterable, Mapping
 from types import MappingProxyType
 
 import pandas as pd
@@ -20,6 +21,7 @@ ACCEPT_RATIO = 1.5
 ACCEPT_GAP = 0.05
 MAX_MASKED_SHARE = 0.2
 BASIS_GAP = 0.01
+MAX_FILL_RATIO = 3.0
 SHARE_DIGITS = 12
 FALLBACKS: Mapping[str, str] = MappingProxyType(
     {"fund_rev_yoy": "fund_rev_yoy_q", "fund_rev_3m_yoy": "fund_rev_yoy_q"}
@@ -101,6 +103,8 @@ MASKED_MONTHS: Mapping[str, frozenset[str]] = MappingProxyType(
 GROUPS = {True: "delisted", False: "current"}
 OBSERVED = "_observable"
 PRESENT = "present_"
+FILLED = "filled_"
+ROWS = "rows_"
 OBSERVABLE: Mapping[str, tuple[str, ...]] = MappingProxyType(
     {
         "fund_ep": ("eps_ttm",),
@@ -214,10 +218,28 @@ def masked_as_observable(
     return frame.assign(**marked)
 
 
-def monthly_coverage(rows: pd.DataFrame, column: str, delisted: pd.Series) -> pd.DataFrame:
+def fallback_filled(
+    rows: pd.DataFrame, name: str, fallbacks: Mapping[str, str] = FALLBACKS
+) -> pd.Series:
+    """Rows whose value equals the fallback source, i.e. rows the fallback filled."""
+    return rows[name].notna() & rows[name].eq(rows[fallbacks[name]])
+
+
+def fill_flags(current: pd.Series, delisted: pd.Series) -> pd.Series:
+    """Whether fill shares still tell a later delisting: over MAX_FILL_RATIO or delisted only."""
+    over = (delisted - MAX_FILL_RATIO * current).round(SHARE_DIGITS) > 0
+    return (current.gt(0) & over) | (current.eq(0) & delisted.gt(0))
+
+
+def monthly_coverage(
+    rows: pd.DataFrame,
+    column: str,
+    delisted: pd.Series,
+    fallbacks: Mapping[str, str] = FALLBACKS,
+) -> pd.DataFrame:
     """Share of universe rows with a value or an observable gap, per month and later fate.
 
-    The present_ shares count values only.
+    The present_ shares count values only; a fallback column adds filled_ shares.
     """
     inside = rows[rows["in_universe"].astype(bool)]
     group = inside["stock_id"].map(delisted).eq(True).map(GROUPS)
@@ -230,7 +252,12 @@ def monthly_coverage(rows: pd.DataFrame, column: str, delisted: pd.Series) -> pd
         table = flag.astype("float64").groupby([months, group]).mean().unstack()
         return table.reindex(columns=list(GROUPS.values()))
 
-    table = pd.concat([shares(known), shares(present).add_prefix(PRESENT)], axis=1)
+    parts = [shares(known), shares(present).add_prefix(PRESENT)]
+    if column in fallbacks:
+        parts.append(shares(fallback_filled(inside, column, fallbacks)).add_prefix(FILLED))
+    sizes = group.groupby([months, group]).size().unstack(fill_value=0)
+    parts.append(sizes.reindex(columns=list(GROUPS.values()), fill_value=0).add_prefix(ROWS))
+    table = pd.concat(parts, axis=1)
     return table.rename_axis(index=None, columns=None)
 
 
@@ -241,11 +268,28 @@ def _apart(more: pd.Series, less: pd.Series) -> pd.Series:
 
 
 def affected_months(coverage: pd.DataFrame) -> list[str]:
-    """Months where, on their own, the delisted group has source gaps or values far more often."""
+    """Months where, on their own, the delisted group has gaps, values or fills far more often.
+
+    A month where only the delisted group takes the fallback is affected too.
+    """
     current, delisted = coverage["current"], coverage["delisted"]
     present = coverage[f"{PRESENT}current"], coverage[f"{PRESENT}delisted"]
     affected = _apart(1 - delisted, 1 - current) | _apart(present[1], present[0])
+    if f"{FILLED}delisted" in coverage:
+        filled = coverage[f"{FILLED}current"], coverage[f"{FILLED}delisted"]
+        affected = affected | _apart(filled[1], filled[0]) | (filled[0].eq(0) & filled[1].gt(0))
     return sorted(str(month) for month in coverage.index[affected])
+
+
+def unmasked_fills(coverage: pd.DataFrame, masked: Iterable[str]) -> pd.Series:
+    """Fill shares of each group over the months outside masked, weighted by universe rows."""
+    kept = coverage.loc[~coverage.index.isin(list(masked))]
+    shares = {}
+    for name in GROUPS.values():
+        rows = kept[f"{ROWS}{name}"]
+        filled = (kept[f"{FILLED}{name}"].fillna(0) * rows).sum()
+        shares[name] = float(filled / rows.sum()) if rows.sum() else math.nan
+    return pd.Series(shares)
 
 
 def rules_signature(

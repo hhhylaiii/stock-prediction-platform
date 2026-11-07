@@ -7,7 +7,14 @@ import pandas as pd
 
 from apps.market.calendar import TradingDays
 from apps.research.features.registry import UNUSED, Availability, Group, feature, feature_names
-from apps.research.features.residual import ACCEPT_GAP, ACCEPT_RATIO, observable_name
+from apps.research.features.residual import (
+    ACCEPT_GAP,
+    ACCEPT_RATIO,
+    MAX_FILL_RATIO,
+    fallback_filled,
+    fill_flags,
+    observable_name,
+)
 from apps.research.metrics.ic import daily_rank_ic
 
 FLAG_RATIO = 3.0
@@ -95,20 +102,17 @@ def fill_counts(
     """Universe rows whose value equals the fallback source, i.e. rows the fallback filled."""
     inside, fate = _inside(rows, delisted)
     filled = pd.DataFrame(
-        {
-            name: inside[name].notna() & inside[name].eq(inside[source])
-            for name, source in fallbacks.items()
-        },
+        {name: fallback_filled(inside, name, fallbacks) for name in fallbacks},
         index=inside.index,
     )
     return _split(filled.groupby(fate).sum().T, fate, "filled")
 
 
 def fill_table(counts: pd.DataFrame) -> pd.DataFrame:
-    """Filled shares per group and their ratio; flagged past FLAG_RATIO or if only delisted fill."""
+    """Filled shares per group and their ratio, flagged as residual.fill_flags says."""
     current, delisted = _rates(counts, "filled")
     ratio = delisted / current.where(current > 0)
-    flag = (ratio > FLAG_RATIO) | (current.eq(0) & delisted.gt(0))
+    flag = fill_flags(current, delisted)
     return pd.DataFrame({"current": current, "delisted": delisted, "ratio": ratio, "flag": flag})
 
 
@@ -319,8 +323,9 @@ def render(
         "## 殘餘缺口的處理",
         "",
         "C 全期套用：主來源缺值時，對所有股票一律改用第二來源，沒有受影響期間。"
-        f"補值比例的比值 > {FLAG_RATIO:g}，或只有下市組被補過，表示「被補過」仍分得出下市與否。"
-        "主來源剛好等於第二來源的列也算補過，所以補值比例偏高。",
+        f"補值比例的比值 > {MAX_FILL_RATIO:g}，或只有下市組被補過，表示「被補過」仍分得出下市與否。"
+        "主來源剛好等於第二來源的列也算補過，所以補值比例偏高。"
+        "第二來源被遮的月份，這裡看不到補值；受影響月份與補值比例以 `residual_coverage` 為準。",
         "",
         "| 特徵 | 第二來源 | 補值比例 下市／現存 | 比值 | 超標 |",
         "| --- | --- | --- | --- | --- |",
@@ -330,7 +335,8 @@ def render(
             for name, row in fill_rates.iterrows()
         ),
         "",
-        "A：沒有第二來源，在受影響月份對所有股票遮成空值。",
+        "A：在受影響月份對所有股票遮成空值；"
+        "沒有第二來源的欄位，以及 C 補完仍分得出下市的欄位都適用。",
         "",
         *(
             ["| 特徵 | 遮罩月份 |", "| --- | --- |"]
