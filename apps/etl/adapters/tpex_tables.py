@@ -91,7 +91,7 @@ DISPOSAL_FIELDS = (SECURITY_CODE, "公布日期", "處置起訖時間")
 ALTERED_TITLE = "變更交易、分盤交易、管理股票與停止交易資訊"
 ALTERED_FLAGS = ("變更交易", "屬管理股票")
 FLAG = "Ｙ"
-NOT_AVAILABLE = "N/A"
+MISSING_RATIOS = frozenset({"N/A", "null"})
 PERCENT_SIGN = "%"
 QFII_TITLE = "櫃檯買賣股票僑外資及陸資持股比例排行表"
 DAY_TRADE_SUMMARY_TITLE = "現股當沖交易統計資訊"
@@ -291,9 +291,9 @@ def sbl_rolls_forward(row: Mapping[Hashable, Any]) -> bool:
 
 
 def published_ratio(values: Sequence[Any]) -> float | None:
-    """A ratio such as P/E; N/A or a JSON null marks a missing one."""
+    """A ratio such as P/E; N/A, null or a JSON null marks a missing one."""
     (text,) = (str(value).strip() for value in values)
-    if text == NOT_AVAILABLE:
+    if text in MISSING_RATIOS:
         return None
     if text in BLANK_MARKERS:
         raise SchemaChangedError(f"unexpected ratio value {text!r}")
