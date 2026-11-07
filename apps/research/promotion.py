@@ -115,19 +115,20 @@ def _failed(checked: list[SlotGates]) -> list[dict[str, Any]]:
     ]
 
 
-def _alert(day: date, run_key: str, failed: list[dict[str, Any]], reason: str) -> DataQualityLog:
-    """The warning that a build failed its gates, kept out or forced in with a reason."""
+def _note(
+    day: date, run_key: str, failed: list[dict[str, Any]], reason: str, promoted: bool
+) -> DataQualityLog:
+    """The row of one promotion: info when every gate passed, else a warning to send."""
     detail = {
         "run_key": run_key,
-        "forced": bool(reason),
-        "reason": reason or None,
+        "forced": bool(failed and reason),
+        "reason": (reason or None) if failed else None,
         "failed": failed,
+        "promoted": promoted,
     }
+    severity = DataQualityLog.Severity.WARNING if failed else DataQualityLog.Severity.INFO
     return DataQualityLog.objects.create(
-        date=day,
-        check_name=PROMOTION_CHECK,
-        severity=DataQualityLog.Severity.WARNING,
-        detail=detail,
+        date=day, check_name=PROMOTION_CHECK, severity=severity, detail=detail
     )
 
 
@@ -179,22 +180,21 @@ def promote(
         raise RunError("--reason goes with --force only")
     granted = production_pass(_scope(run_key))
     _trading(day)
-    alert = None
     with transaction.atomic():
         runs = _check_build(run_key, day, granted.frozen_by)
         checked = check_gates(run_key, directory)
         failed = _failed(checked)
         if failed and not force:
-            alert = _alert(day, run_key, failed, "")
+            note = _note(day, run_key, failed, "", promoted=False)
             result = Promoted(False, checked, failed=failed)
         else:
             retired = _swap(runs, checked, day, failed, reason)
             _refuse_later_rows(run_key, runs, day)
             written = predict(day, directory, replace=True, slots=list(runs)).written
-            alert = _alert(day, run_key, failed, reason) if failed else None
+            note = _note(day, run_key, failed, reason, promoted=True)
             result = Promoted(True, checked, retired, written, failed)
-    if alert is not None:
-        dispatch([alert])
+    if note.severity == DataQualityLog.Severity.WARNING:
+        dispatch([note])
     return result
 
 
