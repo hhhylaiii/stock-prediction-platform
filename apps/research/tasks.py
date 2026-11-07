@@ -190,7 +190,7 @@ def _rebuild_range(
     return "; ".join(done) or f"nothing before {day} to rebuild"
 
 
-def _summary(notes: list[DataQualityLog]) -> dict[str, Any]:
+def _summary(notes: list[DataQualityLog], handled: str) -> dict[str, Any]:
     earliest = min(_earliest(note) for note in notes)
     taken = {str(note.pk): note.detail for note in notes}
     return {
@@ -198,11 +198,12 @@ def _summary(notes: list[DataQualityLog]) -> dict[str, Any]:
         "stocks": _stocks(notes),
         "notes": taken,
         "limit_days": RECENT_SESSIONS,
+        "handled": handled,
     }
 
 
 def _rebuild_notes(day: date, labels: bool, features: bool) -> str:
-    """Notes past the feature window go to a person; the rest are rebuilt from their earliest."""
+    """Notes past the feature window go to a person; the rest are rebuilt or found covered."""
     notes = [note for note in _open_notes() if _earliest(note) <= day]
     if not notes:
         return f"no adj_factor change up to {day}"
@@ -212,11 +213,12 @@ def _rebuild_notes(day: date, labels: bool, features: bool) -> str:
     recent = [note for note in notes if _earliest(note) >= cutoff]
     done = []
     if old:
-        limited = _summary(old)
+        limited = _summary(old, "by_hand")
         _append(day, REBUILD_CHECK, Severity.WARNING, limited)
-        done.append(f"adj_factor moved from {limited['earliest']}, over {RECENT_SESSIONS} back")
+        outside = f"outside the last {RECENT_SESSIONS} sessions"
+        done.append(f"adj_factor moved from {limited['earliest']}, {outside}")
     if recent:
-        detail = _summary(recent)
+        detail = _summary(recent, "rebuilt" if labels or features else "covered")
         earliest = date.fromisoformat(detail["earliest"])
         built = _rebuild_range(calendar, earliest, day, labels, features)
         _append(day, REBUILD_CHECK, Severity.INFO, detail)
@@ -225,18 +227,18 @@ def _rebuild_notes(day: date, labels: bool, features: bool) -> str:
 
 
 def _rebuild(day: date, labels: bool = True, features: bool = True) -> str:
-    """Redo what adj_factor changes moved up to day; a failure warns and leaves them open."""
+    """Take in the adj_factor changes up to day; a failure warns and leaves them open."""
     try:
         return _rebuild_notes(day, labels, features)
     except Exception as error:
         logger.error("research rebuild %s failed: %s", day, error)
-        failed = {"error": f"{type(error).__name__}: {error}", "limit_days": RECENT_SESSIONS}
+        failed = {
+            "error": f"{type(error).__name__}: {error}",
+            "limit_days": RECENT_SESSIONS,
+            "handled": "failed",
+        }
         _append(day, REBUILD_CHECK, Severity.WARNING, failed)
         return f"rebuild failed, see {REBUILD_CHECK}"
-
-
-def _rebuild_features(day: date) -> str:
-    return _rebuild(day, labels=False)
 
 
 def _rebuild_covered(day: date) -> str:
@@ -245,7 +247,6 @@ def _rebuild_covered(day: date) -> str:
 
 STEPS: dict[str, Callable[[date], str]] = {
     "rebuild": _rebuild,
-    "rebuild_features": _rebuild_features,
     "rebuild_covered": _rebuild_covered,
     "labels": _labels,
     "features": _features,
@@ -292,12 +293,11 @@ def _concurrency(task: Task[Any, Any]) -> Any:
 
 
 def _with_rebuild(names: tuple[str, ...]) -> tuple[str, ...]:
-    """A last rebuild step when adj_factor changes wait, building only what no step covers."""
+    """A last step for waiting adj_factor changes: recorded if the chain's steps cover them."""
     if not _open_notes():
         return names
-    if "labels" not in names:
-        return (*names, "rebuild")
-    return (*names, "rebuild_covered" if "recent_features" in names else "rebuild_features")
+    covered = "recent_features" in names and "labels" in names
+    return (*names, "rebuild_covered" if covered else "rebuild")
 
 
 def _failed(check: str, day: date, name: str, error: Exception, done: list[Done]) -> None:
@@ -470,7 +470,7 @@ def _flag_missed(calendar: TradingDays, day: date) -> None:
 
 @shared_task(bind=True, max_retries=None, name="research.evening")
 def evening(self: Task[Any, Any], day: str | None = None) -> str:
-    """Today's features and the recent labels, once the session's research gate passes."""
+    """The last sixty sessions' features and their labels, once the research gate passes."""
     if not settings.RESEARCH_SCHEDULE_ENABLED:
         return "disabled"
     if day is None and _early("EVENING"):
@@ -524,8 +524,9 @@ def morning(self: Task[Any, Any], day: str | None = None) -> str:
         raise self.retry(
             args=(session.isoformat(),), countdown=settings.RESEARCH_US_CLOSE_COUNTDOWN
         )
-    first = () if _finished(session, EVENING_CHECK) else ("labels",)
+    made_up = ("labels", "recent_features", *MORNING_STEPS[1:])
+    steps = MORNING_STEPS if _finished(session, EVENING_CHECK) else made_up
     last = ("promote",) if _pending(session) else ()
-    names = _with_rebuild((*first, *MORNING_STEPS, *last))
+    names = _with_rebuild((*steps, *last))
     _start(MORNING_CHECK, session, names, {} if landed else {"us_close": US_CLOSE_MISSING})
     return "started"
