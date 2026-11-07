@@ -5,7 +5,9 @@ import pandas as pd
 import pytest
 
 from apps.market.calendar import TradingDays
+from apps.research.features.residual import observable_name
 from apps.research.phase3_report import (
+    AFTER_COLUMNS,
     accepted,
     fill_counts,
     fill_table,
@@ -35,6 +37,7 @@ def rows() -> pd.DataFrame:
             "fund_ep": [NAN, NAN, 0.1, 0.1, 0.1, 0.1, NAN],
             "fund_rev_yoy": [0.3, 0.3, NAN, 0.2, 0.3, 0.2, 0.3],
             "fund_rev_yoy_q": [0.3, 0.3, NAN, 0.1, 0.3, 0.1, 0.3],
+            observable_name("fund_ep"): [True, False, None, None, None, None, None],
         }
     )
 
@@ -52,10 +55,14 @@ def test_missing_counts_add_up_over_chunks_and_split_by_later_delisting() -> Non
     pd.testing.assert_frame_equal(whole, halves, check_dtype=False)
     assert whole.loc["fund_ep"].to_dict() == {
         "missing_current": 0,
-        "missing_delisted": 2,
+        "missing_delisted": 1,
+        "observable_current": 0,
+        "observable_delisted": 1,
         "rows_current": 3,
         "rows_delisted": 3,
     }
+    yoy = whole.loc["fund_rev_yoy"]
+    assert [yoy["missing_delisted"], yoy["observable_delisted"]] == [1, 0]
 
 
 def test_missing_table_matches_the_saved_before_table_and_flags_gaps() -> None:
@@ -63,6 +70,8 @@ def test_missing_table_matches_the_saved_before_table_and_flags_gaps() -> None:
         {
             "missing_current": [1, 0, 30, 0],
             "missing_delisted": [5, 0, 60, 1],
+            "observable_current": [2, 0, 0, 0],
+            "observable_delisted": [10, 0, 0, 0],
             "rows_current": [100, 100, 100, 100],
             "rows_delisted": [100, 100, 100, 100],
         },
@@ -79,7 +88,12 @@ def test_missing_table_matches_the_saved_before_table_and_flags_gaps() -> None:
         "ratio",
         "gap_pp",
         "flag",
+        "observable_current",
+        "observable_delisted",
     ]
+    assert list(table.columns) == AFTER_COLUMNS
+    ep = table.loc["fund_ep"]
+    assert [ep["observable_current"], ep["observable_delisted"]] == pytest.approx([0.02, 0.1])
     assert table.loc["fund_ep", "ratio"] == pytest.approx(5.0)
     assert table.loc["fund_ep", "flag"]
     assert math.isnan(float(table["ratio"]["tech_ret_1d"]))
@@ -126,6 +140,8 @@ def test_counts_of_a_chunk_without_universe_rows_are_zero() -> None:
     assert missing.loc["fund_ep"].to_dict() == {
         "missing_current": 0,
         "missing_delisted": 0,
+        "observable_current": 0,
+        "observable_delisted": 0,
         "rows_current": 0,
         "rows_delisted": 0,
     }
@@ -239,6 +255,8 @@ def test_render_lists_only_flagged_gaps_and_marks_incomplete_months() -> None:
             {
                 "missing_current": [0, 0, 10, 1],
                 "missing_delisted": [1, 0, 2, 10],
+                "observable_current": [0, 0, 0, 0],
+                "observable_delisted": [0, 0, 0, 50],
                 "rows_current": [100, 100, 100, 1000],
                 "rows_delisted": [10, 10, 10, 1000],
             },
@@ -284,10 +302,14 @@ def test_render_lists_only_flagged_gaps_and_marks_incomplete_months() -> None:
         top=["fund_ep"],
     )
 
-    assert "| size_log_mcap | 20.9%／0.4% | 10.0%／0.0% | — | 10.0 | 否 |" in text
-    assert "| chip_foreign_hold_pct | 20.0%／10.0% | 20.0%／10.0% | 2.00 | 10.0 | 否 |" in text
+    assert "| size_log_mcap | 20.9%／0.4% | 10.0%／0.0% | — | 10.0 | 否 | 0.0%／0.0% |" in text
+    assert (
+        "| chip_foreign_hold_pct | 20.0%／10.0% | 20.0%／10.0% | 2.00 | 10.0 | 否 | 0.0%／0.0% |"
+        in text
+    )
     assert "| tech_ret_1d |" not in text
-    assert "| fund_cfo_to_ni | 0.0%／0.0% | 1.0%／0.1% | 10.00 | 0.9 | 是 |" in text
+    assert "| fund_cfo_to_ni | 0.0%／0.0% | 1.0%／0.1% | 10.00 | 0.9 | 是 | 5.0%／0.0% |" in text
+    assert "另列在「補後有原因」一欄，不列入驗收" in text
     assert "| fund_days_since_fs | 100／100 | 100.0% | 豁免（條件型） |" in text
     assert "C 全期套用" in text
     assert "補後未達驗收 2 個：size_log_mcap、chip_foreign_hold_pct。" in text

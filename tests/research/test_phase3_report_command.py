@@ -12,7 +12,7 @@ from apps.research.features.build import MODEL_COLUMNS
 from apps.research.features.store import existing_partition, export_year
 from apps.research.management.commands import phase3_report
 from apps.research.models import FeatureDaily, ModelRun
-from apps.research.phase3_report import TABLE_COLUMNS
+from apps.research.phase3_report import AFTER_COLUMNS, TABLE_COLUMNS
 from tests.research.test_screening import STOCKS, stored
 
 pytestmark = pytest.mark.django_db
@@ -68,7 +68,7 @@ def test_the_report_covers_gaps_fallbacks_and_monthly_ic(stored: Path) -> None:
     assert "目前沒有遮罩欄位。" in text
     assert "| 特徵 | 遮罩月份 |" not in text
     after = pd.read_csv(stored / "appendix" / "missing-after.csv", index_col=0)
-    assert list(after.columns) == TABLE_COLUMNS
+    assert list(after.columns) == AFTER_COLUMNS
     assert list(after.index) == MODEL_COLUMNS
     assert after["rows_delisted"].iloc[0] > 0
     assert after["rows_current"].iloc[0] > after["rows_delisted"].iloc[0]

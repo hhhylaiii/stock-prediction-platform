@@ -7,13 +7,14 @@ import pandas as pd
 
 from apps.market.calendar import TradingDays
 from apps.research.features.registry import UNUSED, Availability, Group, feature, feature_names
-from apps.research.features.residual import ACCEPT_GAP, ACCEPT_RATIO
+from apps.research.features.residual import ACCEPT_GAP, ACCEPT_RATIO, observable_name
 from apps.research.metrics.ic import daily_rank_ic
 
 FLAG_RATIO = 3.0
 FLAG_GAP = 0.20
 MONTHLY_TOP = 10
 TABLE_COLUMNS = ["current", "delisted", "rows_current", "rows_delisted", "ratio", "gap_pp", "flag"]
+AFTER_COLUMNS = [*TABLE_COLUMNS, "observable_current", "observable_delisted"]
 
 
 def _inside(rows: pd.DataFrame, delisted: pd.Series) -> tuple[pd.DataFrame, pd.Series]:
@@ -35,11 +36,22 @@ def _split(counts: pd.DataFrame, fate: pd.Series, prefix: str) -> pd.DataFrame:
     ).astype("int64")
 
 
+def _observed(rows: pd.DataFrame, name: str) -> pd.Series:
+    column = observable_name(name)
+    if column not in rows:
+        return pd.Series(False, index=rows.index)
+    return rows[column].eq(True)
+
+
 def missing_counts(rows: pd.DataFrame, delisted: pd.Series, names: Sequence[str]) -> pd.DataFrame:
-    """Missing values and universe rows per feature for stocks later delisted and the rest."""
+    """Source gaps, gaps with a cause known on their day, and universe rows, by later fate."""
     inside, fate = _inside(rows, delisted)
-    counts = inside[list(names)].isna().groupby(fate).sum().T
-    return _split(counts, fate, "missing")
+    gaps = inside[list(names)].isna()
+    known = pd.DataFrame({name: _observed(inside, name) for name in names}, index=inside.index)
+    missing = _split((gaps & ~known).groupby(fate).sum().T, fate, "missing")
+    observable = _split((gaps & known).groupby(fate).sum().T, fate, "observable")
+    order = ["missing_current", "missing_delisted", "observable_current", "observable_delisted"]
+    return missing.join(observable[order[2:]])[[*order, "rows_current", "rows_delisted"]]
 
 
 def _rates(counts: pd.DataFrame, prefix: str) -> tuple[pd.Series, pd.Series]:
@@ -53,6 +65,7 @@ def _rates(counts: pd.DataFrame, prefix: str) -> tuple[pd.Series, pd.Series]:
 def missing_table(counts: pd.DataFrame) -> pd.DataFrame:
     """Missing shares, their ratio and gap in points, flagged past FLAG_RATIO or FLAG_GAP."""
     current, delisted = _rates(counts, "missing")
+    seen_current, seen_delisted = _rates(counts, "observable")
     ratio = delisted / current.where(current > 0)
     gap = (delisted - current) * 100
     table = pd.DataFrame(
@@ -64,9 +77,11 @@ def missing_table(counts: pd.DataFrame) -> pd.DataFrame:
             "ratio": ratio,
             "gap_pp": gap,
             "flag": (ratio > FLAG_RATIO) | (gap > FLAG_GAP * 100),
+            "observable_current": seen_current,
+            "observable_delisted": seen_delisted,
         }
     )
-    return table[TABLE_COLUMNS]
+    return table[AFTER_COLUMNS]
 
 
 def accepted(table: pd.DataFrame) -> pd.Series:
@@ -204,9 +219,10 @@ def _gap_rows(before: pd.DataFrame, after: pd.DataFrame) -> list[str]:
         was = "—" if old is None else f"{_pct(old['delisted'])}／{_pct(old['current'])}"
         now = "—" if new is None else f"{_pct(new['delisted'])}／{_pct(new['current'])}"
         tail = (
-            "— | — | —"
+            "— | — | — | —"
             if new is None
-            else f"{_num(new['ratio'], 2)} | {_num(new['gap_pp'], 1)} | {_yes(bool(passed[name]))}"
+            else f"{_num(new['ratio'], 2)} | {_num(new['gap_pp'], 1)} | {_yes(bool(passed[name]))} "
+            f"| {_pct(new['observable_delisted'])}／{_pct(new['observable_current'])}"
         )
         rows.append(f"| {name} | {was} | {now} | {tail} |")
     return rows
@@ -287,12 +303,15 @@ def render(
         f"驗收：補後比值 ≤ {ACCEPT_RATIO:g}，或差距 ≤ {ACCEPT_GAP * 100:g} 個百分點。"
         f"{_failed(after)}",
         "",
+        "補後只算來源缺。t 日當下看得到原因的缺值（要讀的期別與欄位都在、由公式留空，"
+        "或金融業沒有毛利率與營益率）另列在「補後有原因」一欄，不列入驗收。",
+        "",
         f"只列補前或補後超過列表門檻（比值 > {FLAG_RATIO:g}，"
         f"或差距 > {FLAG_GAP * 100:g} 個百分點），或補後未達驗收的特徵。完整表見附錄 CSV。",
         "",
         "| 特徵 | 補前 下市／現存 | 補後 下市／現存 | 補後比值 | 補後差距（百分點） "
-        "| 補後達到驗收 |",
-        "| --- | --- | --- | --- | --- | --- |",
+        "| 補後達到驗收 | 補後有原因 下市／現存 |",
+        "| --- | --- | --- | --- | --- | --- | --- |",
         *_gap_rows(before, after),
         "",
         "## 殘餘缺口的處理",

@@ -12,7 +12,7 @@ from django.core.management.base import BaseCommand, CommandError
 from apps.etl.management.options import as_date
 from apps.market.calendar import TradingDays
 from apps.market.models import StockMaster
-from apps.research.features.build import FRAME_COLUMNS, MODEL_COLUMNS
+from apps.research.features.build import FRAME_COLUMNS, MODEL_COLUMNS, observable_frame
 from apps.research.features.residual import FALLBACKS, MASKED_MONTHS, rules_signature
 from apps.research.features.store import partition_rules, read_partitions
 from apps.research.labels import HORIZONS
@@ -76,13 +76,17 @@ def _ruled(start: date, end: date) -> None:
             )
 
 
-def _gaps(start: date, end: date, delisted: pd.Series) -> tuple[pd.DataFrame, pd.DataFrame]:
+def _gaps(
+    start: date, end: date, delisted: pd.Series, calendar: TradingDays
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     missing: pd.DataFrame | None = None
     filled: pd.DataFrame | None = None
     directory = settings.FEATURE_PARQUET_DIR
     for year in range(start.year, end.year + 1):
         low, high = max(start, date(year, 1, 1)), min(end, date(year, 12, 31))
-        rows = read_partitions(low, high, directory, columns=FRAME_COLUMNS)
+        stored = read_partitions(low, high, directory, columns=FRAME_COLUMNS)
+        gaps = observable_frame(calendar, low, high)
+        rows = stored.merge(gaps, on=["stock_id", "date"], how="left")
         counts = missing_counts(rows, delisted, MODEL_COLUMNS)
         fills = fill_counts(rows, delisted, FALLBACKS)
         missing = counts if missing is None else missing.add(counts, fill_value=0)
@@ -136,8 +140,9 @@ class Command(BaseCommand):
             _unchanged(run)
             _ruled(start, end)
             _ruled(run.train_start, run.train_end)
-            after, fills = _gaps(start, end, _delisted())
-            monthly = _monthly(run, TradingDays.from_db())
+            calendar = TradingDays.from_db()
+            after, fills = _gaps(start, end, _delisted(), calendar)
+            monthly = _monthly(run, calendar)
         except (ValueError, FileNotFoundError) as error:
             raise CommandError(str(error)) from error
         base = Path(settings.BASE_DIR)
