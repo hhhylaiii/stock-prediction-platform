@@ -134,6 +134,28 @@ def test_the_serving_models_are_listed_with_their_scores(
     expect(rules).to_contain_text("上漲機率模型 20 日 Brier 高於 baseline")
 
 
+def test_a_degraded_model_says_since_when_and_whose_rows_judged_it(
+    page: Page, live_server: LiveServer, scored: Seed
+) -> None:
+    window = {"own_rows": 40, "days": 60, "mostly_predecessors": True}
+    ModelRun.objects.filter(pk="prob-h20").update(
+        status="degraded", params={"degraded_on": "2026-10-20", "degraded_window": window}
+    )
+    ModelRun.objects.filter(pk="quantile-h20").update(
+        status="degraded", params={"degraded_on": "2026-10-21"}
+    )
+
+    page.goto(f"{live_server.url}/#models")
+
+    rows = page.locator("#model-table .trow")
+    expect(rows.nth(5)).to_contain_text("降級中")
+    expect(rows.nth(5).locator(".degraded")).to_have_text(
+        "2026-10-20 起；窗口 40／60 列為本 run（67%），多為前任 run 的列"
+    )
+    expect(rows.nth(3).locator(".degraded")).to_have_text("2026-10-21 起")
+    expect(rows.nth(0).locator(".degraded")).to_have_count(0)
+
+
 BARS_INSIDE_PLOT = """() => {
   const plot = document.querySelector('#ic-chart .overlay').getBBox();
   return [...document.querySelectorAll('#ic-chart rect.bar-model, #ic-chart rect.bar-baseline')]

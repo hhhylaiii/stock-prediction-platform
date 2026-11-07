@@ -1,5 +1,5 @@
 import pytest
-from playwright.sync_api import Page, expect
+from playwright.sync_api import Locator, Page, expect
 from pytest_django.live_server_helper import LiveServer
 
 from apps.etl.models import DataQualityLog
@@ -100,6 +100,132 @@ def test_model_output_checks_have_their_own_block(
     expect(lines.nth(2)).to_have_text("prob-h20（上漲機率 20 日）：Brier 缺參考值，近 60 日 0.231")
     expect(page.locator("#model-checks img")).to_have_count(0)
     expect(page.locator("#model-checks-sub")).to_contain_text(checked.last_session.isoformat())
+
+
+ALERT = {
+    "objective": "rank",
+    "horizon": 20,
+    "metric": "ic",
+    "reason": "below_threshold",
+    "value": 0.0123,
+    "threshold": 0.02,
+    "days": 60,
+}
+ALERT_TEXT = "（排名 20 日）：IC 低於門檻，近 60 日 0.012，門檻 0.020"
+UNSET = {
+    "grace_start": None,
+    "grace_end": None,
+    "restored_on": None,
+    "reset_rows": None,
+    "reset_needed": None,
+}
+
+
+def promotion_lines(page: Page) -> Locator:
+    return page.locator("#model-checks .check").filter(has_text="換模").locator(".run")
+
+
+def test_alert_entries_say_how_each_run_was_judged(
+    page: Page, live_server: LiveServer, seeded: Seed
+) -> None:
+    judged = {**ALERT, **UNSET, "run_id": "rank-a", "mode": "judged", "own_rows": 45}
+    graced = {
+        **ALERT,
+        **UNSET,
+        "run_id": "rank-b",
+        "mode": "grace",
+        "own_rows": 12,
+        "mostly_predecessors": True,
+        "grace_start": "2026-10-01",
+        "grace_end": "2026-10-28",
+    }
+    reset = {
+        **ALERT,
+        **UNSET,
+        "run_id": "rank-c",
+        "mode": "reset",
+        "own_rows": 60,
+        "mostly_predecessors": False,
+        "restored_on": "2026-10-20",
+        "reset_rows": 12,
+        "reset_needed": 60,
+    }
+    log(seeded, "model_alert", "warning", {"runs": [judged, graced, reset]})
+
+    page.goto(f"{live_server.url}/#models")
+
+    lines = page.locator("#model-checks .check").filter(has_text="模型告警").locator(".run")
+    expect(lines).to_have_count(3)
+    expect(lines.nth(0)).to_have_text(f"rank-a{ALERT_TEXT}；窗口 45／60 列為本 run（75%）")
+    expect(lines.nth(1)).to_have_text(
+        f"rank-b{ALERT_TEXT}；窗口 12／60 列為本 run（20%），多為前任 run 的列"
+        "；寬限期 2026-10-01–2026-10-28，只告警不降級"
+    )
+    expect(lines.nth(2)).to_have_text(
+        f"rank-c{ALERT_TEXT}；窗口 60／60 列為本 run（100%）"
+        "；此 slot 在 restore 重設期（2026-10-20 restore，已累積 12／60 列），只告警不降級"
+    )
+
+
+def test_a_refused_build_names_each_failed_slot_and_gate(
+    page: Page, live_server: LiveServer, seeded: Seed
+) -> None:
+    failed = [
+        {
+            "slot": "rank 20 日",
+            "run_id": "rank-n",
+            "gates": [
+                {"name": "agreement", "reason": "相關太低"},
+                {"name": "shadow_oos", "reason": XSS_NAME},
+            ],
+        },
+        {
+            "slot": "quantile 20 日",
+            "run_id": "quantile-n",
+            "gates": [{"name": "data_quality", "reason": "2 天有 error"}],
+        },
+    ]
+    detail = {"run_key": "prod-2026-11", "forced": False, "reason": None, "failed": failed}
+    log(seeded, "model_promotion", "warning", detail)
+
+    page.goto(f"{live_server.url}/#models")
+
+    promotion = page.locator("#model-checks .check").filter(has_text="換模")
+    expect(promotion.locator("i")).to_have_class("warn")
+    lines = promotion_lines(page)
+    expect(lines).to_have_count(3)
+    expect(lines.nth(0)).to_have_text("換模門檻未過，續用現役模型（prod-2026-11）")
+    expect(lines.nth(1)).to_have_text(
+        "排名 20 日（rank-n）：與現役模型的預測相關（相關太低）"
+        f"、影子模型最近 6 個月 OOS（{XSS_NAME}）"
+    )
+    expect(lines.nth(2)).to_have_text(
+        "報酬區間 20 日（quantile-n）：訓練窗內的資料品質（2 天有 error）"
+    )
+    expect(page.locator("#model-checks img")).to_have_count(0)
+    expect(page.locator("#quality")).not_to_contain_text("換模")
+
+
+def test_a_forced_swap_leads_with_its_reason(
+    page: Page, live_server: LiveServer, seeded: Seed
+) -> None:
+    failed = [
+        {
+            "slot": "rank 5 日",
+            "run_id": "rank5-n",
+            "gates": [{"name": "gain_overlap", "reason": "4 個"}],
+        }
+    ]
+    detail = {"run_key": "prod-2026-11", "forced": True, "reason": XSS_NAME, "failed": failed}
+    log(seeded, "model_promotion", "warning", detail)
+
+    page.goto(f"{live_server.url}/#models")
+
+    lines = promotion_lines(page)
+    expect(lines).to_have_count(2)
+    expect(lines.nth(0)).to_have_text(f"強制換模：{XSS_NAME}（prod-2026-11）")
+    expect(lines.nth(1)).to_have_text("排名 5 日（rank5-n）：與現役模型的重要特徵重疊（4 個）")
+    expect(page.locator("#model-checks img")).to_have_count(0)
 
 
 def test_model_output_checks_leave_the_data_verdict_alone(

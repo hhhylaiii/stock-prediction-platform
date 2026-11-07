@@ -21,10 +21,12 @@
     output_width_ratio: '區間寬度比異常',
     output_odds_vs_q50: '機率與中位數矛盾',
     monitor_unscored: '到期預測缺 label',
-    model_alert: '模型告警'
+    model_alert: '模型告警',
+    model_promotion: '換模'
   };
   const ALERT_REASONS = { below_threshold: '低於門檻', outside_range: '超出範圍', above_baseline: '輸給 baseline', missing_reference: '缺參考值' };
   const ALERT_METRICS = { ic: 'IC', coverage: '覆蓋率', brier: 'Brier' };
+  const GATES = { agreement: '與現役模型的預測相關', gain_overlap: '與現役模型的重要特徵重疊', shadow_oos: '影子模型最近 6 個月 OOS', data_quality: '訓練窗內的資料品質' };
   const OBJECTIVES = { rank: '排名', regression: '絕對報酬', quantile: '報酬區間', volatility: '波動率', classification: '上漲機率' };
   const SEVERITY = { info: ['通過', 'in'], warning: ['警告', 'warn'], error: ['錯誤', 'warn'] };
 
@@ -630,10 +632,16 @@
     return own + (b ? '；Ridge ' + (has(b.rank_ic) ? num3(b.rank_ic) : '—') + (has(b.rank_icir) ? '，ICIR ' + b.rank_icir.toFixed(2) : '') : '');
   }
 
+  function degradedText(row) {
+    const w = row.degraded_window;
+    return [row.degraded_on ? row.degraded_on + ' 起' : '', w ? windowText(w.own_rows, w.days, w.mostly_predecessors) : ''].filter(Boolean).join('；');
+  }
+
   function modelRowHtml(row) {
     const degraded = row.status === 'degraded' ? '<span class="faint small">　降級中</span>' : '';
+    const detail = row.status === 'degraded' ? degradedText(row) : '';
     return '<div class="trow model-cols"><div class="num">' + esc(OBJECTIVES[row.objective] || row.objective) + '<span class="faint small">　' + row.horizon + ' 日</span></div>' +
-      '<div>' + esc(modelName(row.model_type)) + degraded + '</div>' +
+      '<div>' + esc(modelName(row.model_type)) + degraded + (detail ? '<div class="faint small degraded">' + esc(detail) + '</div>' : '') + '</div>' +
       '<div class="muted version">' + esc(row.version) + '</div>' +
       '<div class="muted">' + esc(monthOf(row.train_start)) + ' 到 ' + esc(monthOf(row.train_end)) + '</div>' +
       '<div>' + esc(recentText(row)) + '</div>' +
@@ -771,13 +779,38 @@
 
   const metricText = (metric, v) => metric === 'coverage' ? (v * 100).toFixed(1) + '%' : Number(v).toFixed(3);
 
+  function windowText(own, days, mostly) {
+    const share = Number.isInteger(own) && Number.isInteger(days) ? '窗口 ' + own + '／' + days + ' 列為本 run' + (days > 0 ? '（' + Math.round(own / days * 100) + '%）' : '') : '';
+    if (mostly !== true) return share;
+    return share ? share + '，多為前任 run 的列' : '窗口多為前任 run 的列';
+  }
+
+  function modeText(run) {
+    if (run.mode === 'grace' && run.grace_start && run.grace_end) return '寬限期 ' + run.grace_start + '–' + run.grace_end + '，只告警不降級';
+    if (run.mode !== 'reset' || !run.restored_on) return '';
+    const count = v => has(v) ? v : '—';
+    return '此 slot 在 restore 重設期（' + run.restored_on + ' restore，已累積 ' + count(run.reset_rows) + '／' + count(run.reset_needed) + ' 列），只告警不降級';
+  }
+
+  function slotText(slot) {
+    const [objective, ...rest] = String(slot || '').split(' ');
+    return [OBJECTIVES[objective] || objective, ...rest].join(' ');
+  }
+
+  function promotionLines(d) {
+    const head = (d.forced ? '強制換模：' + (d.reason || '沒有寫原因') : '換模門檻未過，續用現役模型') + (d.run_key ? '（' + d.run_key + '）' : '');
+    return [head, ...(d.failed || []).map(item => slotText(item.slot) + (item.run_id ? '（' + item.run_id + '）' : '') + '：' +
+      (item.gates || []).map(gate => (GATES[gate.name] || gate.name) + (gate.reason ? '（' + gate.reason + '）' : '')).join('、'))];
+  }
+
   function alertLine(run) {
     const metric = ALERT_METRICS[run.metric] || run.metric || '';
     const threshold = Array.isArray(run.threshold) ? run.threshold.map(v => metricText(run.metric, v)).join('–') :
       run.threshold === null || run.threshold === undefined ? null : metricText(run.metric, run.threshold);
     return run.run_id + '（' + (OBJECTIVES[run.objective] || run.objective) + ' ' + run.horizon + ' 日）：' + metric + (/[A-Za-z]$/.test(metric) ? ' ' : '') + (ALERT_REASONS[run.reason] || run.reason) +
       (run.value === null || run.value === undefined ? '' : '，近 ' + run.days + ' 日 ' + metricText(run.metric, run.value)) +
-      (threshold === null ? '' : '，門檻 ' + threshold);
+      (threshold === null ? '' : '，門檻 ' + threshold) +
+      [windowText(run.own_rows, run.days, run.mostly_predecessors), modeText(run)].filter(Boolean).map(part => '；' + part).join('');
   }
 
   function modelCheckState(check, alertShare) {
@@ -790,6 +823,7 @@
         return ['', [d.flagged ? '少量標記，' + stocks : '沒有標記']];
       case 'monitor_unscored': return ['warn', [fmtInt(sizeOf(d.runs)) + ' 筆']];
       case 'model_alert': return ['warn', (d.runs || []).map(alertLine)];
+      case 'model_promotion': return ['warn', promotionLines(d)];
       default: return [check.severity === 'info' ? '' : 'warn', [(SEVERITY[check.severity] || [check.severity])[0]]];
     }
   }
@@ -799,7 +833,7 @@
     const failed = check.severity === 'error';
     const cls = failed ? 'warn' : state;
     const shown = failed ? ['錯誤，' + (lines[0] || ''), ...lines.slice(1)] : lines;
-    const runClass = check.check_name === 'model_alert' ? ' run' : '';
+    const runClass = ['model_alert', 'model_promotion'].includes(check.check_name) ? ' run' : '';
     return '<div class="check"><i class="' + cls + '"></i><div><div>' + esc(CHECKS[check.check_name] || check.check_name) + '</div>' +
       shown.map(line => '<div class="muted small' + runClass + '">' + esc(line) + '</div>').join('') + '</div></div>';
   }
