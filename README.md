@@ -53,7 +53,7 @@ uv run python manage.py runserver
 | 事後監控 | `monitor --date 2026-11-06` |
 | Phase 5 驗收報告 | `phase5_report --out <dir>` |
 
-API 都是唯讀的 GET，回應格式是 `{"success", "data", "error", "meta"}`：`/api/status`、`/api/predictions`、`/api/stocks/<代號>`（加 `/prices`、`/predictions`、`/features`、`/history`）、`/api/models`、`/api/models/ic-monthly`、`/api/etl/runs`、`/api/data-quality`（加 `/corrections`）。
+API 都是唯讀的 GET，回應格式是 `{"success", "data", "error", "meta"}`：`/api/status`、`/api/predictions`、`/api/stocks?q=<代號或名稱>`（最多 20 筆）、`/api/stocks/<代號>`（加 `/prices`、`/predictions`、`/features`、`/history`）、`/api/models`、`/api/models/ic-monthly`、`/api/etl/runs`、`/api/data-quality`（加 `/corrections`）。
 
 ## 目錄
 
