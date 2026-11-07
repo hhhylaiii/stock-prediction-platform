@@ -416,16 +416,16 @@ for fill in holdings valuation margin sbl; do
 done
 ```
 
-櫃買把 `--source` 換成 `tpex`。中斷了用 `--resume <run_id>` 接著跑。某一天固定過不了檢查（`SchemaChangedError`，例如櫃買借券表的逐列餘額檢查；raw 會先存，可以查）或固定回沒有資料（`SourceNotReadyError`，不存 raw）時，`--resume` 會一直停在那天。確定是來源本身的問題，就把那個 run 的 checkpoint 推到那一天再續跑，不要另開一個 run（另開的 run 從空的統計開始，卡住之前那段的 `filled`、`differences` 不會寫進 log，holdings 也不會刪掉前一段的重複股數）：
+櫃買把 `--source` 換成 `tpex`。中斷了用 `--resume <run_id>` 接著跑。某一天固定過不了檢查（`SchemaChangedError`，例如櫃買借券表有 4 列以上餘額對不上；raw 會先存，可以查）或固定回沒有資料（`SourceNotReadyError`，不存 raw）時，`--resume` 會一直停在那天。確定是來源本身的問題，就把那個 run 的 checkpoint 推到那一天再續跑，不要另開一個 run（另開的 run 從空的統計開始，卡住之前那段的 `filled`、`differences` 不會寫進 log，holdings 也不會刪掉前一段的重複股數）：
 
 ```bash
 uv run python manage.py shell -c "from apps.etl.models import EtlRun; r = EtlRun.objects.get(run_id=<id>); r.checkpoint = {**r.checkpoint, 'last_date': '<卡住的那天>'}; r.save(update_fields=['checkpoint'])"
 uv run python manage.py fill_from_exchange --source <twse|tpex> --fill <fill> --resume <id>
 ```
 
-跳過的那天留成缺值，交給 SPEC §6 處理步驟 6 的殘餘缺口規則。櫃買借券表沒有單位檢查（證交所 TWT93U 看「單位：股」、融資券表看「張」）：`sbl` 開跑幾分鐘後看一次 `etl_run.checkpoint->'differences'->'sbl'->'sample'`，已存值和交易所值差 1,000 倍就停下來查。
+跳過的那天留成缺值，交給 SPEC §6 處理步驟 6 的殘餘缺口規則。`margin`、`sbl` 跳過的那天仍在 run 的 checkpoint 範圍內，Phase 3 的 `covered_days` 會把它算成交易所表已寫入，那天沒有列的股票會被當成交易所沒列它（PIT 可觀察），所以跳過前把那天和原因記下來交給 Phase 3，當成來源缺處理。櫃買借券表每列都檢查融券、借券賣出的前日餘額加減當日變動等於當日餘額；一頁最多 3 列對不上時照頁面的數字存、記 warning（例如 2013-07-31 的 6177：借券前日 124,000、當日沒有賣出或還券、當日餘額 0，FinMind 也存 0；2026-11-07 前抓過的 213 頁只有這一列），4 列以上才當成版面變更。櫃買借券表沒有單位檢查（證交所 TWT93U 看「單位：股」、融資券表看「張」）：`sbl` 開跑幾分鐘後看一次 `etl_run.checkpoint->'differences'->'sbl'->'sample'`，已存值和交易所值差 1,000 倍就停下來查。
 
-- `holdings`：證交所 MI_QFIIS、櫃買 insti/qfii，一天一個請求，同一頁補外資持股比率（`daily_chip.fi_holding_pct`）和發行股數（`shares_outstanding`）。`valuation`：證交所 BWIBBU_d、櫃買 peQryDate，補 `daily_valuation`。`margin`：證交所 MI_MARGN、櫃買 margin/balance，補 `daily_chip` 的融資餘額、融資限額、融券餘額（`margin_balance`、`margin_limit`、`short_balance`，張換成股）。頁面上有的股票才補，不在頁面上的（例如還沒有信用交易資格）不補；停止信用交易的股票有的照樣列在頁面上、數字是 0（例如證交所註記 `OX`），照存 0，和每日抓取相同。`sbl`：證交所 TWT93U、櫃買 margin/sbl，補 `daily_chip.sbl_short_balance`（借券賣出當日餘額，單位股），規則和 `margin` 相同。
+- `holdings`：證交所 MI_QFIIS、櫃買 insti/qfii，一天一個請求，同一頁補外資持股比率（`daily_chip.fi_holding_pct`）和發行股數（`shares_outstanding`）。`valuation`：證交所 BWIBBU_d、櫃買 peQryDate，補 `daily_valuation`。`margin`：證交所 MI_MARGN、櫃買 margin/balance，補 `daily_chip` 的融資餘額、融資限額、融券餘額（`margin_balance`、`margin_limit`、`short_balance`，張換成股）。頁面上有的股票才補，不在頁面上的（例如還沒有信用交易資格）不補；停止信用交易的股票有的照樣列在頁面上、數字是 0（例如證交所註記 `OX`），照存 0，和每日抓取相同。`sbl`：證交所 TWT93U、櫃買 margin/sbl，補 `daily_chip.sbl_short_balance`（借券賣出當日餘額，單位股），規則和 `margin` 相同。櫃買借券表 2012-10-02 才開始有資料，之前每天都回沒有資料，櫃買 `sbl` 從 2012-10-02 起跑。證交所 TWT93U 自 2012-03-19 起改用新公式（頁面註明「自101年3月19日起借券賣出餘額採用新公式計算及資訊揭露」），之前的頁面借券賣出只有前日餘額、賣出、庫存異動、今日餘額、可使用額度五欄；adapter 對 2012-03-19 以前的日子把「今日餘額」當成當日餘額讀，2012-03-19 起再出現舊欄名照樣當成版面變更。FinMind 存的同期值也是舊公式（2012-03-16、2012-03-19 兩天各 790 檔和頁面全同），但新舊公式前後不接續：2012-03-19 頁面的前日餘額和 2012-03-16 的今日餘額，805 檔裡有 212 檔不同。
 - 缺才補，不分股票之後有沒有下市：
   - `daily_chip`：沒有這一列就新增（只有這次補的欄位）；有這一列時，每一欄分開看，空的才補；有值的不動。
   - `daily_valuation`：當天沒有這一列才新增，三個數字都空的不新增。
@@ -434,6 +434,7 @@ uv run python manage.py fill_from_exchange --source <twse|tpex> --fill <fill> --
 - 已有的值和交易所差到公布的最後一位（外資持股比、本益比、淨值比 0.01，殖利率 0.0001；融資券兩邊都是張乘 1,000、借券賣出餘額兩邊都是股，要完全相同）、或界線那天的股數不同時，不改，記在 log 的 `differences`：每種表的筆數、分下市股和現存股的筆數，和前 20 筆 `[代號, 日期, 欄位, 已存值, 交易所值]`（SPEC §8.5）。
 - `etl_run` 的 dataset 是 `fill:holdings`／`fill:valuation`／`fill:margin`／`fill:sbl`，每天和寫入同一個交易記 checkpoint。跑完記一列 `exchange_fill`（info）：`filled` 是每檔補了哪段日期、幾天，`created` 是其中新增整列的部分，`totals` 分下市股和現存股的列數，`span` 是第一次開跑的起點到結尾。
 - 先跑完 FinMind 的 `daily_price`、`shares_outstanding`、`daily_chip`、`daily_valuation` 回補（含 `--retry-rejected`）再跑補缺：`daily_price` 決定補哪些代號、`shares_outstanding` 決定股數的界線（第一次 `holdings` 補缺時就固定）；FinMind 寫 `daily_chip`、`daily_valuation` 時整列已存在就跳過，補缺新增的列會擋掉之後的 FinMind 回補。之後真的要再回補 FinMind，先刪掉補缺新增的列：`daily_chip` 是 `fi_holding_pct`、三個融資券欄和 `sbl_short_balance` 以外都是空的列（幾種補缺可能落在同一列：holdings 新增的列，margin 會當成已存的列補上融資券，所以不能只看其中一次的 `created`；這樣刪也會刪到 FinMind 只有外資持股比、只有融資券、只有借券或只有其中幾種的列，回補 FinMind 時會寫回來）。FinMind 回補完，對同一段日期再跑一次 `holdings`、`margin`、`sbl` 補缺，把補缺填過、FinMind 沒有的格子補回去；`daily_valuation` 的 `created` 只記每檔的日期範圍，範圍內可能夾著 FinMind 的列，要逐日分辨時從兩邊的 raw 重算。
+- 補缺只替當天有價的代號寫列。之後回補某段日期的 `daily_price`，要對同一段日期重跑 `--fill margin` 和 `--fill sbl`（兩者都冪等）：否則新有價的那些股票日，交易所表有抓到、資料庫卻沒有列，會被 SPEC §6 處理步驟 6 算成 PIT 可觀察的缺，蓋掉真正的來源缺。
 - 每個請求約 3.5 秒；一個市場一個 fill 2010-01-04 到 2026-10-21 約 4,130 天、約 4 小時，四個 fill 約 16 小時。可以跑的時段是平日 02:00–15:00 和週末，和每日 ETL（含 02:00 前的重試）錯開；平日 15:00 前沒跑完就停，之後 `--resume`。
 
 ## FinMind 外資持股 0 的覆寫（plan K21）
