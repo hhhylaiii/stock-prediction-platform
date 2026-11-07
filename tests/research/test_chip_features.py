@@ -8,6 +8,7 @@ import pytest
 
 from apps.market.calendar import TradingDays
 from apps.research.features.chip import (
+    SBL_BASIS_BREAKS,
     chip_features,
     holding_changes,
     second_batch_chip_features,
@@ -86,6 +87,23 @@ def test_margin_and_lending_changes_and_ratios() -> None:
     assert at(features, "2330", 9, "chip_short_ratio") == pytest.approx(2_000 / 10_900)
     assert at(features, "2330", 9, "chip_fi_holding_pct") == 30.0
     assert math.isnan(at(features, "2330", 4, "chip_margin_chg_5d"))
+
+
+@pytest.mark.parametrize(("market", "cut"), [("TWSE", True), ("TPEx", False)])
+def test_lending_changes_across_the_twse_basis_break_are_missing(market: str, cut: bool) -> None:
+    panel = listing(
+        "2330", rising(20), start=date(2012, 3, 5), shares=1_000_000.0, market=market
+    ).assign(**chips(20))
+
+    features = chip_features(panel)
+
+    days = panel["date"].tolist()
+    crossed = [days.index(date(2012, 3, 19)) + k for k in range(5)]
+    missing = features["chip_sbl_short_chg_5d"].isna().tolist()
+    assert missing == [k < 5 or (cut and k in crossed) for k in range(20)]
+    assert days[crossed[-1]] == date(2012, 3, 23)
+    assert {"TWSE": date(2012, 3, 19)} == SBL_BASIS_BREAKS
+    assert features["chip_margin_chg_5d"].iloc[5:].notna().all()
 
 
 def test_balances_carry_over_halted_days() -> None:
