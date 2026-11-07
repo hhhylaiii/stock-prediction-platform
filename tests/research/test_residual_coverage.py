@@ -31,7 +31,10 @@ def stocks() -> None:
 
 
 def synthetic(calendar: TradingDays, start: date, end: date) -> pd.DataFrame:
-    """Two stocks a day; 1101 lacks fund_rev_mom in 2016-03 and the holding after 2016-02."""
+    """Two stocks a day; 1101 lacks fund_rev_mom in 2016-03 and the holding after 2016-02.
+
+    In 2016-03 only 1101 has fund_rev_yoy, and it equals the fallback, so it counts as filled.
+    """
     low, high = max(start, calendar.start), min(end, calendar.end)
     days = calendar.between(low, high) if low <= high else ()
     rows: list[tuple[str, date, bool, float | None, float | None, float | None]] = []
@@ -43,9 +46,8 @@ def synthetic(calendar: TradingDays, start: date, end: date) -> pd.DataFrame:
         rows.append(("1101", day, True, None if gone else 0.2, held, 0.3 if gone else None))
     columns = ["fund_rev_mom", "chip_fi_holding_pct", "fund_rev_yoy"]
     frame = pd.DataFrame(rows, columns=["stock_id", "date", "in_universe", *columns])
-    return frame.assign(fund_rev_3m_yoy=frame["fund_rev_yoy"]).astype(
-        dict.fromkeys([*columns, "fund_rev_3m_yoy"], "float64")
-    )
+    copies = dict.fromkeys(["fund_rev_3m_yoy", "fund_rev_yoy_q"], frame["fund_rev_yoy"])
+    return frame.assign(**copies).astype(dict.fromkeys([*columns, *copies], "float64"))
 
 
 @pytest.fixture
@@ -100,10 +102,16 @@ def test_coverage_builds_each_year_unmasked_and_names_the_affected_months(
         "delisted",
         "present_current",
         "present_delisted",
+        "filled_current",
+        "filled_delisted",
+        "rows_current",
+        "rows_delisted",
     ]
+    assert table["filled_current"].isna().all()
     assert len(table) == 48
     march = table[(table["column"] == "fund_rev_mom") & (table["month"] == "2016-03")].iloc[0]
     assert (march["current"], march["delisted"]) == (1.0, 0.0)
+    assert (march["rows_current"], march["rows_delisted"]) == (23, 23)
 
 
 def test_coverage_defaults_to_the_rule_columns_and_refuses_unknown_ones(
@@ -116,6 +124,11 @@ def test_coverage_defaults_to_the_rule_columns_and_refuses_unknown_ones(
     call_command("residual_coverage", start="2016-03-01", end="2016-04-30", stdout=masked)
 
     assert "fund_rev_yoy: 1 of 2 months affected (50%)" in out.getvalue()
+    assert (
+        "fund_rev_yoy: filled from fund_rev_yoy_q in the months left unmasked, "
+        "current 0.00%, delisted 0.00%"
+    ) in out.getvalue()
+    assert "fills still lean" not in out.getvalue()
     assert '    "fund_rev_3m_yoy": frozenset({"2016-03"}),' in out.getvalue()
     assert "chip_fi_holding_pct" not in out.getvalue()
     assert "fund_rev_mom" not in out.getvalue()
@@ -208,3 +221,27 @@ def test_the_basis_warning_needs_both_the_ratio_and_the_gap(
     residual_coverage.Command(stdout=out)._basis("fund_cfo_to_ni", counts)
 
     assert ("warning: these gaps lean" in out.getvalue()) is warned
+
+
+@pytest.mark.parametrize(
+    ("current", "delisted", "warned"),
+    [(0.01, 0.04, True), (0.01, 0.03, False), (0.0, 0.01, True), (0.0, 0.0, False)],
+)
+def test_the_fill_warning_reads_the_months_left_unmasked(
+    current: float, delisted: float, warned: bool
+) -> None:
+    out = StringIO()
+    coverage = pd.DataFrame(
+        {
+            "filled_current": [0.9, current],
+            "filled_delisted": [0.9, delisted],
+            "rows_current": [100, 100],
+            "rows_delisted": [100, 100],
+        },
+        ["2016-03", "2016-04"],
+    )
+
+    residual_coverage.Command(stdout=out)._fills("fund_rev_yoy", coverage, ["2016-03"])
+
+    assert f"current {current:.2%}, delisted {delisted:.2%}" in out.getvalue()
+    assert ("warning: fills still lean on stocks later delisted" in out.getvalue()) is warned
