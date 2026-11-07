@@ -400,7 +400,14 @@ for fill in holdings valuation margin sbl; do
 done
 ```
 
-櫃買把 `--source` 換成 `tpex`。中斷了用 `--resume <run_id>` 接著跑。某一天的頁面固定過不了檢查（`SchemaChangedError`，例如櫃買借券表的逐列餘額檢查）時，`--resume` 會一直停在那天：先看那天的 raw，確定是來源本身的問題，就另開一個 run，`--start` 設成那天的下一個交易日、`--end` 照舊，跳過的那天記進殘餘缺口。
+櫃買把 `--source` 換成 `tpex`。中斷了用 `--resume <run_id>` 接著跑。某一天固定過不了檢查（`SchemaChangedError`，例如櫃買借券表的逐列餘額檢查；raw 會先存，可以查）或固定回沒有資料（`SourceNotReadyError`，不存 raw）時，`--resume` 會一直停在那天。確定是來源本身的問題，就把那個 run 的 checkpoint 推到那一天再續跑，不要另開一個 run（另開的 run 從空的統計開始，卡住之前那段的 `filled`、`differences` 不會寫進 log，holdings 也不會刪掉前一段的重複股數）：
+
+```bash
+uv run python manage.py shell -c "from apps.etl.models import EtlRun; r = EtlRun.objects.get(run_id=<id>); r.checkpoint = {**r.checkpoint, 'last_date': '<卡住的那天>'}; r.save(update_fields=['checkpoint'])"
+uv run python manage.py fill_from_exchange --source <twse|tpex> --fill <fill> --resume <id>
+```
+
+跳過的那天留成缺值，交給 SPEC §6 處理步驟 6 的殘餘缺口規則。櫃買借券表沒有單位檢查（證交所 TWT93U 看「單位：股」、融資券表看「張」）：`sbl` 開跑幾分鐘後看一次 `etl_run.checkpoint->'differences'->'sbl'->'sample'`，已存值和交易所值差 1,000 倍就停下來查。
 
 - `holdings`：證交所 MI_QFIIS、櫃買 insti/qfii，一天一個請求，同一頁補外資持股比率（`daily_chip.fi_holding_pct`）和發行股數（`shares_outstanding`）。`valuation`：證交所 BWIBBU_d、櫃買 peQryDate，補 `daily_valuation`。`margin`：證交所 MI_MARGN、櫃買 margin/balance，補 `daily_chip` 的融資餘額、融資限額、融券餘額（`margin_balance`、`margin_limit`、`short_balance`，張換成股）。頁面上有的股票才補，不在頁面上的（例如還沒有信用交易資格）不補；停止信用交易的股票有的照樣列在頁面上、數字是 0（例如證交所註記 `OX`），照存 0，和每日抓取相同。`sbl`：證交所 TWT93U、櫃買 margin/sbl，補 `daily_chip.sbl_short_balance`（借券賣出當日餘額，單位股），規則和 `margin` 相同。
 - 缺才補，不分股票之後有沒有下市：
