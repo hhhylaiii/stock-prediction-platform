@@ -56,6 +56,23 @@ def test_each_correction_check_is_one_line_with_its_stocks_rows_and_span(
     expect(later.locator("i")).to_have_class("warn")
 
 
+def test_a_correction_written_once_per_run_counts_its_rows_only(
+    page: Page, live_server: LiveServer, seeded: Seed
+) -> None:
+    for day in (date(2026, 11, 2), date(2026, 11, 5)):
+        DataQualityLog.objects.create(
+            date=day,
+            check_name="market_history_rebuilt",
+            severity="info",
+            detail={"changed": 3, "sample": [["2330", "TWSE", "TPEx"]]},
+        )
+
+    page.goto(f"{live_server.url}/#models")
+
+    rebuilt = correction(page, "市場歷史表重建")
+    expect(rebuilt.locator(".muted")).to_have_text("2 列，2026-11-02 至 2026-11-05")
+
+
 def test_corrections_stay_out_of_the_day_and_the_strip(
     page: Page, live_server: LiveServer, seeded: Seed
 ) -> None:

@@ -11,6 +11,7 @@ def test_every_check_that_logs_one_row_per_stock_is_registered() -> None:
         cumulative_margins.MARGIN_CHECK,
         mops_history.MISMATCH_CHECKS[mops_history.STATEMENT_VIEWER],
         zero_holdings.REPLACED_CHECK,
+        "market_history_rebuilt",
     }
 
     assert written == CORRECTION_CHECKS

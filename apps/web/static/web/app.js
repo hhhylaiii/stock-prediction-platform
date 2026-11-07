@@ -26,6 +26,7 @@
     statement_margin_cleared: '清除累計期間的利益率',
     statement_viewer_mismatch: '下市公司財報由 XBRL 檢視頁補',
     fi_holding_zero_replaced: '外資持股 0 值覆寫',
+    market_history_rebuilt: '市場歷史表重建',
     statement_source_mismatch: '財報兩來源數字不同',
     statement_type_mismatch: '財報種類不同',
     revenue_history_mismatch: '月營收由 MOPS 歷史彙總頁補缺',
@@ -821,7 +822,7 @@
   }
 
   const spanText = (first, last) => first === last ? first : first + ' 至 ' + last;
-  const correctionHtml = row => lineHtml(row.check_name, row.severity, fmtInt(row.stocks) + ' 檔、' + fmtInt(row.rows) + ' 列，' + spanText(row.first_date, row.last_date));
+  const correctionHtml = row => lineHtml(row.check_name, row.severity, (row.stocks ? fmtInt(row.stocks) + ' 檔、' : '') + fmtInt(row.rows) + ' 列，' + spanText(row.first_date, row.last_date));
 
   async function renderCorrections() {
     const host = document.getElementById('corrections');
