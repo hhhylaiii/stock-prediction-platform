@@ -121,7 +121,7 @@ def test_valuation_out_of_range_is_dropped_with_a_warning(
 @responses.activate
 @pytest.mark.django_db
 @pytest.mark.parametrize("column", [2, 5, 6], ids=["pe", "yield", "pb"])
-@pytest.mark.parametrize("text", ["虧損", "inf", "-", ""])
+@pytest.mark.parametrize("text", ["虧損", "inf", "-", "", "NULL", "Null"])
 def test_valuation_word_in_a_ratio_column_is_a_schema_change(
     adapter: TpexAdapter, load_fixture: Callable[[str], Any], text: str, column: int
 ) -> None:
