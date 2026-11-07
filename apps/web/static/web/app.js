@@ -29,6 +29,7 @@
     statement_source_mismatch: '財報兩來源數字不同',
     statement_type_mismatch: '財報種類不同',
     revenue_history_mismatch: '月營收由 MOPS 歷史彙總頁補缺',
+    revenue_source_mismatch: '月營收兩來源數字不同',
     statement_history_mismatch: '財報由 MOPS 歷史彙總頁補缺',
     dividend_source_mismatch: '股利兩來源不同',
     exchange_fill: '交易所逐日表補缺',
