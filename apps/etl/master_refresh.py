@@ -25,6 +25,7 @@ from apps.market.calendar import (
     OutsideCalendarError,
     TradingDays,
 )
+from apps.market.market_history import record_markets
 from apps.market.models import DailyPrice, Market, StockMaster
 
 VANISHED_SESSIONS = 5
@@ -148,7 +149,7 @@ def newly_vanished(
 
 
 def refresh_stock_master(day: date, calendar: TradingDays) -> EtlRun:
-    """Apply the day's quotes and recent delistings, then log and alert on vanished codes."""
+    """Apply the day's quotes, recent delistings and market moves; alert on vanished codes."""
     if not calendar.is_trading_day(day):
         raise NotATradingDayError(f"{day} is not a trading day")
     last = (
@@ -173,6 +174,7 @@ def refresh_stock_master(day: date, calendar: TradingDays) -> EtlRun:
         if changes.rows:
             frame = pd.DataFrame(changes.rows, columns=MASTER_COLUMNS)
             run.rows = upsert(StockMaster, frame, ("stock_id",), UPDATED_FIELDS)
+        record_markets(day, {code: market for code, (_, market) in quoted.items()})
         listed = StockMaster.objects.filter(delist_date__isnull=True).values_list(
             "stock_id", flat=True
         )

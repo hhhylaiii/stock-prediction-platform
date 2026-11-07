@@ -9,7 +9,7 @@ from django.core.management.base import CommandError
 
 from apps.etl.models import DataQualityLog, EtlRun, RawTpex, RawTwse
 from apps.etl.raw import store_raw
-from apps.market.models import DailyPrice, Market, StockMaster
+from apps.market.models import DailyPrice, Market, MarketHistory, StockMaster
 
 TWSE_URL = "https://www.twse.com.tw/rwd/zh/company/suspendListing"
 TPEX_URL = "https://www.tpex.org.tw/www/zh-tw/company/deListed"
@@ -92,6 +92,23 @@ def test_the_days_quotes_and_recent_delistings_update_stock_master() -> None:
     assert checkpoint["delisted"] == ["8908"]
     assert "1240" in checkpoint["added"]
     assert checkpoint["listed"] == StockMaster.objects.filter(delist_date__isnull=True).count()
+
+
+@responses.activate
+@pytest.mark.usefixtures("quotes", "delistings", "alerts")
+def test_the_days_quotes_open_market_spans_for_moved_and_new_codes() -> None:
+    _master("3293", Market.TWSE, "鈊象")
+    _master("2330", Market.TWSE, "台積電")
+    for code in ("3293", "2330"):
+        MarketHistory.objects.create(stock_id=code, start_date=date(2010, 1, 4), market=Market.TWSE)
+    call_command("refresh_stock_master", date="2026-10-28")
+    spans = MarketHistory.objects.order_by("stock_id", "start_date")
+    rows = list(spans.values_list("stock_id", "start_date", "end_date", "market"))
+    assert ("3293", date(2010, 1, 4), date(2026, 10, 27), Market.TWSE) in rows
+    assert ("3293", DAY, None, Market.TPEX) in rows
+    assert ("2330", date(2010, 1, 4), None, Market.TWSE) in rows
+    opened = set(spans.filter(end_date__isnull=True).values_list("stock_id", flat=True))
+    assert opened == set(StockMaster.objects.values_list("stock_id", flat=True))
 
 
 @responses.activate
