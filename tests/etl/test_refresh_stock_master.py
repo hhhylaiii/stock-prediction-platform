@@ -278,6 +278,38 @@ def test_skipped_sessions_with_stored_quotes_get_their_market_spans_first(
 
 @responses.activate
 @pytest.mark.usefixtures("delistings", "alerts")
+def test_a_skipped_session_with_unreadable_quotes_is_listed_and_the_day_still_refreshes(
+    load_fixture: Callable[[str], Any],
+) -> None:
+    EtlRun.objects.create(
+        source="stock_master",
+        dataset="stock_master_daily",
+        start_date=date(2026, 10, 22),
+        end_date=date(2026, 10, 22),
+        status=EtlRun.Status.SUCCESS,
+    )
+    broken = load_fixture("twse/daily_price/mi_index_20261028.json")
+    broken["date"] = "20261027"
+    for table in broken["tables"]:
+        if "每日收盤行情" in (table.get("title") or ""):
+            table["fields"] = [
+                "證券簡稱" if name == "證券名稱" else name for name in table["fields"]
+            ]
+    store_raw(RawTwse, "daily_price", {"date": "20261027", "type": "ALLBUT0999"}, broken)
+    tpex = {**load_fixture("tpex/daily_price/otc_20261028.json"), "date": "20261027"}
+    store_raw(RawTpex, "daily_price", {"date": "2026/10/27", "type": "EW"}, tpex)
+    _quotes_for(load_fixture, DAY)
+    call_command("refresh_stock_master", date="2026-10-28")
+    row = DataQualityLog.objects.get(date=DAY, check_name="stock_master")
+    assert (row.severity, row.detail["unquoted"]) == ("warning", ["2026-10-27"])
+    assert (
+        EtlRun.objects.filter(dataset="stock_master_daily", start_date=DAY).get().status
+        == "success"
+    )
+
+
+@responses.activate
+@pytest.mark.usefixtures("delistings", "alerts")
 def test_a_renamed_twse_name_column_is_a_schema_change(
     load_fixture: Callable[[str], Any],
 ) -> None:
