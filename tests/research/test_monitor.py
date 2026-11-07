@@ -48,8 +48,8 @@ VOL = 0.3
 
 @pytest.fixture(autouse=True)
 def calendar_rows() -> None:
-    first = date(2026, 1, 1)
-    days = (first + timedelta(days=n) for n in range(365))
+    first = date(2025, 1, 1)
+    days = (first + timedelta(days=n) for n in range(730))
     TradingCalendar.objects.bulk_create(
         TradingCalendar(date=day, is_trading_day=day.weekday() < 5 and day != HOLIDAY)
         for day in days
