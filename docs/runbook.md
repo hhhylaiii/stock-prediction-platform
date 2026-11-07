@@ -109,6 +109,11 @@ uv run python manage.py check_quality --date 2026-10-28
 - `catchup` 預設補到前一交易日；`--dry-run` 只列出每個 dataset 要抓的日子（`to fetch`：缺的日子，加上當沖要重抓的日子），不發請求。
 - 當沖 T+2 才定案，每晚的批次會重抓前兩個交易日。所以 `catchup` 補當沖時，每個缺的日子連同它前兩個交易日一起重抓，不管那兩天有沒有列。例如連漏兩晚，漏掉之前的那個交易日只抓過初值，要靠這一步換成定案值。`--dry-run` 的清單也包含這些日子。
 - `reprocess` 只用 raw 表重建，不發請求；只支援證交所、櫃買。
+- 手動補完（`catchup`、`fetch`、`reprocess`）後，那天 22:50 稽核寫的 `etl_runs` error 不會自己清：`check_quality` 只重寫五項品質檢查，`catchup` 指令也不重審。要等下一次 15:10 的 `prepare_day` 在回看期（`ETL_CATCHUP_LOOKBACK_DAYS`）內重審；超出回看期或等不及，就手動重審那天：
+
+  ```bash
+  uv run python manage.py shell -c "from datetime import date; from apps.etl.tasks import _reaudit; _reaudit(date(2026, 10, 28))"
+  ```
 
 ## 財報實際公告日回補
 
