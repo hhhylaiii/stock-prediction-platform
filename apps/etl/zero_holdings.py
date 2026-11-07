@@ -2,7 +2,7 @@
 
 import logging
 from collections import defaultdict
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Mapping
 from datetime import date
 from typing import Any, NamedTuple
 
@@ -24,9 +24,15 @@ REPLACED_CHECK = "fi_holding_zero_replaced"
 HOLDING = "fi_holding_pct"
 LONG_RUN = 20
 WRONG_TENTHS = 9
+COVERED_TENTHS = 9
 WHOLE_RUN = "whole_run"
 SHORT_RUN = "short_run"
 MIXED_RUN = "mixed_run"
+THIN_RUN = "thin_run"
+REPLACED_KINDS = (WHOLE_RUN, SHORT_RUN)
+NO_PAGE = "no_page"
+UNREADABLE = "unreadable"
+NOT_LISTED = "not_listed"
 ZERO_RUNS_SQL = """
 select stock_id, date, run from (
     select stock_id, date, fi_holding_pct = 0 as zero,
@@ -57,6 +63,14 @@ class Seen(NamedTuple):
     raw_id: int
 
 
+class Holdings(NamedTuple):
+    """What the stored pages say, the days a market's page is missing, and unreadable days."""
+
+    seen: dict[tuple[str, date], Seen]
+    missing: set[date]
+    unreadable: set[date]
+
+
 class Replacement(NamedTuple):
     stock_id: str
     date: date
@@ -77,20 +91,23 @@ PAGES = (
 
 
 def replace_zero_holdings(dry_run: bool = False) -> dict[str, Any]:
-    """Wrong zero runs and short zeros take the exchange's value; mixed runs are left alone."""
+    """Wrong zero runs and short zeros take the exchange's value; mixed and thin runs stay."""
     runs = zero_runs()
-    seen = exchange_holdings(
-        {day for days in runs.values() for day in days}, {code for code, _ in runs}
-    )
-    found, mixed = classify(runs, seen)
+    wanted: dict[date, set[str]] = defaultdict(set)
+    for (code, _), days in runs.items():
+        for day in days:
+            wanted[day].add(code)
+    holdings = exchange_holdings(wanted)
+    found, kept = classify(runs, holdings.seen)
     written = found if dry_run else _write(found)
-    unchecked = sum((code, day) not in seen for (code, _), days in runs.items() for day in days)
+    left = _tally(kept, lambda row: row.kind)
     return {
         "dry_run": dry_run,
         "replaced": _tally(written, lambda row: f"{row.source}/{row.kind}"),
         "left": {
-            MIXED_RUN: _tally(mixed, lambda row: MIXED_RUN).get(MIXED_RUN, {}),
-            "unchecked": unchecked,
+            MIXED_RUN: left.get(MIXED_RUN, {}),
+            THIN_RUN: left.get(THIN_RUN, {}),
+            "unchecked": _unchecked(runs, holdings),
         },
     }
 
@@ -107,10 +124,12 @@ def zero_runs() -> dict[tuple[str, int], list[date]]:
     return dict(runs)
 
 
-def exchange_holdings(days: Iterable[date], codes: set[str]) -> dict[tuple[str, date], Seen]:
-    """The holdings each day's latest stored exchange page gives the codes asked for."""
+def exchange_holdings(wanted: Mapping[date, set[str]]) -> Holdings:
+    """The holdings each day's latest stored exchange page gives the codes asked for that day."""
     seen: dict[tuple[str, date], Seen] = {}
-    for day in sorted(days):
+    missing: set[date] = set()
+    unreadable: set[date] = set()
+    for day in sorted(wanted):
         for page in PAGES:
             stored = (
                 page.raw_model._default_manager.filter(
@@ -120,6 +139,7 @@ def exchange_holdings(days: Iterable[date], codes: set[str]) -> dict[tuple[str, 
                 .first()
             )
             if stored is None:
+                missing.add(day)
                 continue
             try:
                 frame = standard_rows(
@@ -129,23 +149,24 @@ def exchange_holdings(days: Iterable[date], codes: set[str]) -> dict[tuple[str, 
                 logger.warning(
                     "%s raw %s for %s is unreadable: %s", page.source, stored.pk, day, exc
                 )
+                unreadable.add(day)
                 continue
             for code, value in zip(frame["stock_id"], frame[HOLDING], strict=True):
-                if code in codes and value is not None:
+                if code in wanted[day] and value is not None:
                     seen[(code, day)] = Seen(float(value), page.source, stored.pk)
-    return seen
+    return Holdings(seen, missing, unreadable)
 
 
 def classify(
     runs: Mapping[tuple[str, int], list[date]], seen: Mapping[tuple[str, date], Seen]
 ) -> tuple[list[Replacement], list[Replacement]]:
-    """Replacements, and the mixed runs' contradicted days that stay zero.
+    """Replacements, and the contradicted days of mixed and thin runs that stay zero.
 
-    A run of 20 or more zeros is wrong when the exchange is above zero on 90% of its checked
-    days; a shorter run takes every day the exchange is above zero.
+    A run of 20 or more zeros is wrong when pages cover 90% of its days and the exchange is above
+    zero on 90% of those; a shorter run takes every day the exchange is above zero.
     """
     found: list[Replacement] = []
-    mixed: list[Replacement] = []
+    kept: list[Replacement] = []
     for (code, _), days in runs.items():
         checked = [(day, seen[(code, day)]) for day in days if (code, day) in seen]
         wrong = [(day, hit) for day, hit in checked if hit.value > 0]
@@ -153,15 +174,33 @@ def classify(
             continue
         if len(days) < LONG_RUN:
             kind = SHORT_RUN
-        elif 10 * len(wrong) >= WRONG_TENTHS * len(checked):
-            kind = WHOLE_RUN
-        else:
+        elif 10 * len(wrong) < WRONG_TENTHS * len(checked):
             kind = MIXED_RUN
+        elif 10 * len(checked) < COVERED_TENTHS * len(days):
+            kind = THIN_RUN
+        else:
+            kind = WHOLE_RUN
         rows = [
             Replacement(code, day, hit.value, hit.source, hit.raw_id, kind) for day, hit in wrong
         ]
-        (mixed if kind == MIXED_RUN else found).extend(rows)
-    return found, mixed
+        (found if kind in REPLACED_KINDS else kept).extend(rows)
+    return found, kept
+
+
+def _unchecked(runs: Mapping[tuple[str, int], list[date]], holdings: Holdings) -> dict[str, int]:
+    """Why the zeros without an exchange value have none."""
+    counts = dict.fromkeys((NO_PAGE, UNREADABLE, NOT_LISTED), 0)
+    for (code, _), days in runs.items():
+        for day in days:
+            if (code, day) in holdings.seen:
+                continue
+            if day in holdings.unreadable:
+                counts[UNREADABLE] += 1
+            elif day in holdings.missing:
+                counts[NO_PAGE] += 1
+            else:
+                counts[NOT_LISTED] += 1
+    return counts
 
 
 def _write(found: list[Replacement]) -> list[Replacement]:

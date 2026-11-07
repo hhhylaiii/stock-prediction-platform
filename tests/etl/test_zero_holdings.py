@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 from django.core.management import call_command
+from django.utils import timezone
 
 from apps.etl.models import DataQualityLog, RawTpex, RawTwse
 from apps.etl.zero_holdings import REPLACED_CHECK, replace_zero_holdings
@@ -22,7 +23,9 @@ TWSE_HOLDING = 7
 TPEX_HOLDING = 7
 
 
-def _twse_page(load_fixture: Callable[[str], Any], day: date, values: Mapping[str, float]) -> int:
+def _twse_page(
+    load_fixture: Callable[[str], Any], day: date, values: Mapping[str, float], version: int = 0
+) -> int:
     payload = copy.deepcopy(load_fixture(TWSE_PAGE))
     payload["date"] = f"{day:%Y%m%d}"
     listed = {row[0] for row in payload["data"]}
@@ -33,7 +36,10 @@ def _twse_page(load_fixture: Callable[[str], Any], day: date, values: Mapping[st
         row[TWSE_HOLDING] = values.get(row[0], row[TWSE_HOLDING])
     params = {"date": f"{day:%Y%m%d}", "selectType": "ALLBUT0999", "response": "json"}
     raw = RawTwse.objects.create(
-        dataset="foreign_holding", request_params=params, payload=payload, source_hash=str(day)
+        dataset="foreign_holding",
+        request_params=params,
+        payload=payload,
+        source_hash=f"{day}/{version}",
     )
     return raw.pk
 
@@ -101,7 +107,11 @@ def test_a_wrong_run_and_a_short_zero_are_replaced_and_a_mixed_run_is_left(
         "twse/whole_run": {"stocks": 1, "rows": 23},
         "twse/short_run": {"stocks": 1, "rows": 1},
     }
-    assert report["left"] == {"mixed_run": {"stocks": 1, "rows": 5}, "unchecked": 2}
+    assert report["left"] == {
+        "mixed_run": {"stocks": 1, "rows": 5},
+        "thin_run": {},
+        "unchecked": {"no_page": 2, "unreadable": 0, "not_listed": 0},
+    }
     short = DataQualityLog.objects.get(check_name=REPLACED_CHECK, detail__stock_id="2317")
     assert (short.date, short.severity) == (DAYS[11], DataQualityLog.Severity.INFO)
     assert short.detail == {
@@ -173,7 +183,7 @@ def test_an_unreadable_page_counts_as_unchecked(
     RawTwse.objects.filter(pk=raw_id).update(payload={"stat": "OK", "date": f"{days[1]:%Y%m%d}"})
     report = replace_zero_holdings()
     assert report["replaced"] == {}
-    assert report["left"]["unchecked"] == 1
+    assert report["left"]["unchecked"] == {"no_page": 0, "unreadable": 1, "not_listed": 0}
     assert _holdings("2317")[days[1]] == 0.0
     assert "unreadable" in caplog.text
 
@@ -188,3 +198,53 @@ def test_depositary_receipts_are_left_alone(load_fixture: Callable[[str], Any]) 
     assert replace_zero_holdings()["replaced"] == {}
     assert _holdings("9105")[days[1]] == 0.0
     assert _holdings("2317")[days[1]] == 0.0
+
+
+def test_the_run_length_and_the_two_ninety_percent_bounds(
+    load_fixture: Callable[[str], Any],
+) -> None:
+    days = DAYS[:20]
+    above = {
+        "1301": set(range(10)),
+        "1303": set(range(10)),
+        "1326": set(range(18)),
+        "1402": set(range(17)),
+        "2002": set(range(20)),
+        "2105": set(range(20)),
+    }
+    listed = {"2002": set(range(18)), "2105": set(range(17))}
+    _stored("1301", dict.fromkeys(days[:19], 0.0))
+    for code in ("1303", "1326", "1402", "2002", "2105"):
+        _stored(code, dict.fromkeys(days, 0.0))
+    for index, day in enumerate(days):
+        values = {
+            code: 6.0 if index in hits else 0.0
+            for code, hits in above.items()
+            if index in listed.get(code, set(range(20)))
+        }
+        _twse_page(load_fixture, day, values)
+        _tpex_page(load_fixture, day, {})
+    report = replace_zero_holdings()
+    assert report["replaced"] == {
+        "twse/short_run": {"stocks": 1, "rows": 10},
+        "twse/whole_run": {"stocks": 2, "rows": 36},
+    }
+    assert report["left"] == {
+        "mixed_run": {"stocks": 2, "rows": 27},
+        "thin_run": {"stocks": 1, "rows": 17},
+        "unchecked": {"no_page": 0, "unreadable": 0, "not_listed": 5},
+    }
+    for code in ("1303", "1402", "2105"):
+        assert set(_holdings(code).values()) == {0.0}
+
+
+def test_the_latest_page_of_a_day_is_read(load_fixture: Callable[[str], Any]) -> None:
+    days = DAYS[:3]
+    _stored("2317", {days[0]: 5.0, days[1]: 0.0, days[2]: 5.0})
+    newer = _twse_page(load_fixture, days[1], {"2317": 4.9})
+    older = _twse_page(load_fixture, days[1], {"2317": 3.0}, version=1)
+    RawTwse.objects.filter(pk=older).update(fetched_at=timezone.now() - timedelta(hours=4))
+    replace_zero_holdings()
+    assert _holdings("2317")[days[1]] == pytest.approx(4.9)
+    log = DataQualityLog.objects.get(check_name=REPLACED_CHECK)
+    assert log.detail["raw_id"] == newer
