@@ -17,6 +17,7 @@ from apps.etl.adapters.finmind_datasets import EVENT_COLUMNS
 from apps.etl.errors import SchemaChangedError
 from apps.etl.models import DataQualityLog
 from apps.etl.roc import parse_roc_day
+from apps.market.adjust import ADJ_CHECK
 from apps.market.models import DailyPrice, DividendEvent, StockMaster
 
 EX = date(2026, 11, 3)
@@ -119,6 +120,8 @@ def test_write_events_adds_listed_codes_and_readjusts_earlier_prices() -> None:
     assert event.adj_factor == pytest.approx(0.88)
     factors = dict(DailyPrice.objects.values_list("date", "adj_factor"))
     assert factors == {date(2026, 11, 2): pytest.approx(0.88), EX: 1.0}
+    note = DataQualityLog.objects.get(check_name=ADJ_CHECK)
+    assert note.detail == {"stocks": {"1101": EX.isoformat()}}
 
 
 @pytest.mark.django_db

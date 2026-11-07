@@ -75,16 +75,34 @@ def test_an_unchanged_refresh_notes_nothing() -> None:
     assert notes() == []
 
 
-def test_new_price_rows_take_their_factor_without_a_note() -> None:
-    prices(days=DAYS[:4])
-    event(DAYS[-1] + timedelta(days=3), 0.9)
+def test_new_price_rows_across_an_event_take_their_factors_without_a_note() -> None:
+    prices(days=DAYS[:2])
+    event(DAYS[3], 0.9)
     refresh_adj_factor("2330")
-    prices(days=DAYS[4:])
+    DataQualityLog.objects.all().delete()
+    prices(days=DAYS[2:])
 
-    assert refresh_where_later_events(["2330"], DAYS[4]) == 1
+    assert refresh_where_later_events(["2330"], DAYS[2]) == 1
 
-    assert DailyPrice.objects.get(stock_id="2330", date=DAYS[4]).adj_factor == pytest.approx(0.9)
+    assert DailyPrice.objects.get(stock_id="2330", date=DAYS[2]).adj_factor == pytest.approx(0.9)
     assert notes() == []
+
+
+@pytest.mark.parametrize(("later", "earliest"), [(timedelta(days=7), None), (timedelta(0), 4)])
+def test_rounding_between_earlier_events_is_no_change(
+    later: timedelta, earliest: int | None
+) -> None:
+    prices()
+    for day, factor in ((DAYS[1], 0.9), (DAYS[2], 0.95), (DAYS[3], 0.93)):
+        event(day, factor)
+    refresh_adj_factor("2330")
+    DataQualityLog.objects.all().delete()
+    event(DAYS[-1] + later, 0.97)
+
+    refresh_adj_factor("2330")
+
+    found = [note.detail for note in notes()]
+    assert found == ([] if earliest is None else [{"stocks": {"2330": DAYS[earliest].isoformat()}}])
 
 
 def test_notes_of_a_day_share_one_row_keeping_each_stock_s_earliest_session() -> None:
@@ -103,6 +121,7 @@ def test_past_the_stock_limit_a_note_keeps_only_the_earliest_session_and_a_count
     monkeypatch.setattr(adjust, "ADJ_STOCK_LIMIT", 2)
     note_adj_change("2330", DAYS[3])
     note_adj_change("2317", DAYS[2])
+    assert set(notes()[0].detail["stocks"]) == {"2330", "2317"}
     note_adj_change("2454", DAYS[4])
     note_adj_change("2603", DAYS[0])
 
@@ -110,13 +129,14 @@ def test_past_the_stock_limit_a_note_keeps_only_the_earliest_session_and_a_count
     assert note.detail == {"earliest": DAYS[0].isoformat(), "count": 4}
 
 
-def test_a_rebuilt_note_is_closed_and_a_later_change_opens_another() -> None:
-    note_adj_change("2330", DAYS[3])
-    DataQualityLog.objects.update(detail={"stocks": {"2330": DAYS[3].isoformat()}, "rebuilt": "x"})
+def test_a_note_from_an_earlier_day_is_left_as_it_was() -> None:
+    DataQualityLog.objects.create(
+        date=MONDAY, check_name=ADJ_CHECK, severity="info", detail={"stocks": {"2317": "x"}}
+    )
 
-    note_adj_change("2317", DAYS[4])
+    note_adj_change("2330", DAYS[3])
 
     assert [note.detail for note in notes()] == [
-        {"stocks": {"2330": DAYS[3].isoformat()}, "rebuilt": "x"},
-        {"stocks": {"2317": DAYS[4].isoformat()}},
+        {"stocks": {"2317": "x"}},
+        {"stocks": {"2330": DAYS[3].isoformat()}},
     ]

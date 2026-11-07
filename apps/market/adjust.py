@@ -14,7 +14,6 @@ from apps.market.models import DividendEvent
 
 PRICE_COLUMNS = ("open", "high", "low", "close")
 ADJ_CHECK = "adj_factor_changed"
-REBUILT = "rebuilt"
 ADJ_STOCK_LIMIT = 200
 RATIO_TOLERANCE = 1e-9
 REFRESH_SQL = """
@@ -72,11 +71,11 @@ def refresh_adj_factor(stock_id: str, since: date = date.min, note: bool = True)
         "since": since,
         "tolerance": RATIO_TOLERANCE,
     }
-    with connection.cursor() as cursor:
+    with transaction.atomic(), connection.cursor() as cursor:
         cursor.execute(REFRESH_SQL, params)
         changed, earliest = cursor.fetchone()
-    if note and earliest is not None:
-        note_adj_change(stock_id, earliest)
+        if note and earliest is not None:
+            note_adj_change(stock_id, earliest)
     return int(changed)
 
 
@@ -104,13 +103,12 @@ def _merged(detail: dict[str, Any], stock_id: str, earliest: date) -> dict[str, 
 
 
 def note_adj_change(stock_id: str, earliest: date) -> None:
-    """Add the stock's first moved session to today's open adj_factor_changed row."""
+    """Add the stock's first moved session to today's adj_factor_changed row."""
     today = timezone.localdate()
     with transaction.atomic():
         row = (
             DataQualityLog.objects.select_for_update()
             .filter(date=today, check_name=ADJ_CHECK)
-            .exclude(detail__has_key=REBUILT)
             .order_by("pk")
             .first()
         )
