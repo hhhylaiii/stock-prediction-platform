@@ -181,7 +181,7 @@ def test_every_input_group_reaches_the_frame() -> None:
         announce_date=d("2016-02-24"),
     )
 
-    frame = build_feature_frame(CALENDAR, d("2016-03-01"), d("2016-04-15"))
+    frame = build_feature_frame(CALENDAR, d("2016-03-01"), d("2016-04-15"), masked={})
 
     row = frame[frame["date"] == d("2016-03-02")].iloc[0]
     assert row["chip_fi_net_1d"] == pytest.approx(2_000 / 1_000_000)
@@ -211,7 +211,7 @@ def test_industry_neutral_features_reach_the_frame() -> None:
         for period, announce in quarters
     )
 
-    frame = build_feature_frame(CALENDAR, d("2016-03-01"), d("2016-03-04"))
+    frame = build_feature_frame(CALENDAR, d("2016-03-01"), d("2016-03-04"), masked={})
 
     day = frame[frame["date"] == d("2016-03-02")].set_index("stock_id")
 
@@ -240,7 +240,7 @@ def test_monthly_revenue_growth_falls_back_to_the_quarterly_growth_in_the_frame(
         ]
     )
 
-    frame = build_feature_frame(CALENDAR, d("2016-03-01"), d("2016-03-04"))
+    frame = build_feature_frame(CALENDAR, d("2016-03-01"), d("2016-03-04"), masked={})
 
     row = frame[frame["date"] == d("2016-03-02")].iloc[0]
     assert row["fund_rev_yoy_q"] == pytest.approx(0.2)
@@ -269,7 +269,7 @@ def test_monthly_revenue_growth_left_missing_on_record_takes_no_fallback() -> No
         for month in range(1, 13)
     )
 
-    frame = build_feature_frame(CALENDAR, d("2016-03-01"), d("2016-03-04"))
+    frame = build_feature_frame(CALENDAR, d("2016-03-01"), d("2016-03-04"), masked={})
 
     row = frame[frame["date"] == d("2016-03-02")].iloc[0]
     assert row["fund_rev_yoy_q"] == pytest.approx(0.2)
@@ -303,7 +303,9 @@ def test_monthly_revenue_takes_the_quarter_only_once_it_goes_stale() -> None:
         for month in range(1, 13)
     )
 
-    frame = build_feature_frame(CALENDAR, d("2016-03-10"), d("2016-03-15")).set_index("date")
+    frame = build_feature_frame(CALENDAR, d("2016-03-10"), d("2016-03-15"), masked={}).set_index(
+        "date"
+    )
 
     assert frame["fund_rev_yoy"].loc[d("2016-03-11")] == pytest.approx(0.1)
     assert frame["fund_rev_mom"].loc[d("2016-03-11")] == pytest.approx(0.1)
@@ -316,9 +318,10 @@ def test_the_fallback_waits_for_its_statement_and_ignores_later_delisting() -> N
     listed("2330", "2015-06-01", "2016-03-31")
     quarterly_growth("2016-03-03")
 
-    frame = build_feature_frame(CALENDAR, d("2016-03-01"), d("2016-03-04")).set_index("date")
+    days = (d("2016-03-01"), d("2016-03-04"))
+    frame = build_feature_frame(CALENDAR, *days, masked={}).set_index("date")
     StockMaster.objects.filter(stock_id="2330").update(delist_date=d("2016-06-30"))
-    delisted = build_feature_frame(CALENDAR, d("2016-03-01"), d("2016-03-04")).set_index("date")
+    delisted = build_feature_frame(CALENDAR, *days, masked={}).set_index("date")
 
     assert math.isnan(frame["fund_rev_yoy"].loc[d("2016-03-02")])
     assert frame["fund_rev_yoy"].loc[d("2016-03-03")] == pytest.approx(0.2)
@@ -336,7 +339,7 @@ def test_month_masks_reach_any_column_of_the_frame_after_the_fallbacks() -> None
     )
     masked = {"fund_rev_yoy_q": frozenset({"2016-03"}), "tech_vol_20d": frozenset({"2016-04"})}
 
-    plain = build_feature_frame(CALENDAR, d("2016-03-28"), d("2016-04-04"))
+    plain = build_feature_frame(CALENDAR, d("2016-03-28"), d("2016-04-04"), masked={})
     frame = build_feature_frame(CALENDAR, d("2016-03-28"), d("2016-04-04"), masked=masked)
 
     march = frame["date"] < d("2016-04-01")
@@ -805,7 +808,7 @@ def test_observable_gaps_mark_formula_and_industry_gaps_but_not_missing_inputs()
         for source in ("twse", "tpex")
     )
 
-    frame = build_feature_frame(CALENDAR, d("2016-03-01"), d("2016-03-04"))
+    frame = build_feature_frame(CALENDAR, d("2016-03-01"), d("2016-03-04"), masked={})
     gaps = observable_frame(CALENDAR, d("2016-03-01"), d("2016-03-04"))
 
     keys = ["stock_id", "date"]
@@ -838,13 +841,17 @@ def test_observable_gaps_mark_formula_and_industry_gaps_but_not_missing_inputs()
     shown = gaps[(gaps["date"] == d("2016-03-03")) & (gaps["stock_id"] == "1101")]
     assert shown[observable_name("chip_short_ratio")].tolist() == [True]
     assert set(SOURCED_CHIPS) <= set(CHECKED)
-    now = observable_frame(CALENDAR, d("2016-03-01"), d("2016-03-04"), current=True)
+    now = observable_frame(CALENDAR, d("2016-03-01"), d("2016-03-04"), current=True, masked={})
     both = frame.merge(now, on=keys)
     assert len(both) == len(frame)
     for name in CHECKED:
         pd.testing.assert_series_equal(both[name], both[current_name(name)], check_names=False)
     assert all(both[name].notna().any() for name in SOURCED_CHIPS)
-    hidden = {name: frozenset({"2016-03"}) for name in SOURCED_CHIPS}
+    outside = ["ind_ep_neutral", "fund_days_to_ex_date"]
+    hidden = {name: frozenset({"2016-03"}) for name in [*SOURCED_CHIPS, *outside]}
+    assert not set(outside) & set(CHECKED)
+    decided = observable_frame(CALENDAR, d("2016-03-01"), d("2016-03-04"), current=True)
+    assert list(decided.columns) == list(now.columns)
     masked = build_feature_frame(CALENDAR, d("2016-03-01"), d("2016-03-04"), masked=hidden)
     later = observable_frame(CALENDAR, d("2016-03-01"), d("2016-03-04"), True, hidden)
     paired = masked.merge(later, on=keys)

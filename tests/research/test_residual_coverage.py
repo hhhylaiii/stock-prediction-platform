@@ -51,6 +51,7 @@ def synthetic(calendar: TradingDays, start: date, end: date) -> pd.DataFrame:
 @pytest.fixture
 def built(monkeypatch: pytest.MonkeyPatch) -> list[tuple[date, date, Any]]:
     stocks()
+    monkeypatch.setattr(residual_coverage, "MASKED_MONTHS", {})
     calls: list[tuple[date, date, Any]] = []
 
     def build(calendar: TradingDays, start: date, end: date, masked: Any) -> pd.DataFrame:
@@ -106,16 +107,19 @@ def test_coverage_builds_each_year_unmasked_and_names_the_affected_months(
 
 
 def test_coverage_defaults_to_the_rule_columns_and_refuses_unknown_ones(
-    built: list[tuple[date, date, Any]],
+    built: list[tuple[date, date, Any]], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    out = StringIO()
+    out, masked = StringIO(), StringIO()
 
     call_command("residual_coverage", start="2016-03-01", end="2016-04-30", stdout=out)
+    monkeypatch.setattr(residual_coverage, "MASKED_MONTHS", {"fund_rev_mom": frozenset()})
+    call_command("residual_coverage", start="2016-03-01", end="2016-04-30", stdout=masked)
 
     assert "fund_rev_yoy: 1 of 2 months affected (50%)" in out.getvalue()
     assert '    "fund_rev_3m_yoy": frozenset({"2016-03"}),' in out.getvalue()
     assert "chip_fi_holding_pct" not in out.getvalue()
     assert "fund_rev_mom" not in out.getvalue()
+    assert "fund_rev_mom: 1 of 2 months affected (50%)" in masked.getvalue()
     with pytest.raises(CommandError, match="not feature columns"):
         call_command("residual_coverage", columns="fwd_rank_pct", stdout=StringIO())
     with pytest.raises(CommandError, match="after"):
