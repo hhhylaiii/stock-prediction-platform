@@ -264,3 +264,23 @@ def test_a_raw_value_run_listing_a_feature_no_model_takes_is_refused() -> None:
         model_inputs(
             run, {"booster": booster, "market_bins": {}}, rows.assign(date=DAY, in_universe=True)
         )
+
+
+def test_a_rank_run_listing_a_feature_no_model_takes_is_refused() -> None:
+    features = ["fund_ep", "fund_rev_mom"]
+    rng = np.random.default_rng(1)
+    rows = pd.DataFrame({name: rng.normal(size=50) for name in features})
+    booster = lgb.train(
+        {"objective": "regression", "verbose": -1},
+        lgb.Dataset(rows, rng.normal(size=50)),
+        num_boost_round=2,
+    )
+    run = ModelRun(
+        run_id="old-rank",
+        model_type=MODEL_TYPE,
+        objective=ModelObjective.RANK,
+        feature_list=features,
+    )
+
+    with pytest.raises(ValueError, match=r"stock-level features only, not \['fund_rev_mom'\]"):
+        model_inputs(run, booster, rows.assign(date=DAY, in_universe=True))
