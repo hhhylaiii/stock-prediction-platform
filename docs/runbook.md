@@ -398,6 +398,13 @@ uv run python manage.py fill_industry --source tpex --start 2009-10-01 --end 202
 - 補完後產業類特徵的歷史值會變：`uv run python manage.py build_features --start 2010-01-01 --end <最新價日>`（不帶範圍只重算最近 60 個交易日）。中性化 IC 直接讀 `stock_master`，補完當下就會變，補完前產出的 Phase 4 報表要重算才能比。
 - 2026-11-07 的 twp：3,065 檔裡 483 檔是空的，2010 年後下市或還在掛牌的 73 檔（櫃買 62、證交所 11），其餘 410 檔在 2010 年前下市，研究期間用不到。
 
+## 模型監控與換模
+
+- `monitor --date D` 判的是 D 當天服務中的 run（D 在該 horizon 有 `prediction` 列的 run，依 API 的順序）。slot 當天沒有 `prediction` 列就不判，停機或 predict 失敗的那幾天監控會暫停；補跑時先補 `predict --date D`，再補 `monitor --date D`。
+- `model_alert` 每筆帶 `mode`：`judged` 會把 active 的 run 降級；`grace`（換模後 5 個交易日）與 `reset`（`restore_run` 之後、窗口還沒累積滿 60 列）只告警。`mostly_predecessors` 為 true 表示窗口多為前任 run 的列，人工恢復前先看這個。
+- 換模：`promote --run-key K`，門檻沒過時舊模型續用並寫 `model_promotion` 告警；要強制換模用 `--force --reason "<原因>"`。晚幾天才換模時，`--date` 預設會取 slot 已有列的最後一天。
+- 恢復：`restore_run --run-id R --date D --reason "<原因>"`，只接受 degraded 的 run，D 不早於它最後一個預測日、不晚於今天。
+
 ## 告警
 
 warning 與 error 一律寫 log；`.env` 設了 `ALERT_WEBHOOK_URL` 就另外 POST JSON：
