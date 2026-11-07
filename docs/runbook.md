@@ -82,7 +82,7 @@ docker compose logs -f worker
 ## 重試與失敗
 
 - 每個「來源／dataset／日期」是獨立的 task，一個失敗不擋其他。
-- 來源還沒公布、或 limiter 自己退避完仍連不上（逾時、斷線、5xx）：30 分鐘後重試，最多 6 次（`ETL_NOT_READY_COUNTDOWN`、`ETL_NOT_READY_RETRIES`）。用完寫 error log `etl gave up …`。
+- 來源還沒公布、或 limiter 自己退避完仍連不上（逾時、斷線、5xx）：30 分鐘後重試，最多 6 次（`ETL_NOT_READY_COUNTDOWN`、`ETL_NOT_READY_RETRIES`）。用完寫 error log `etl gave up …`。重試抓的是第一次排到的那一天，不再看時鐘：22:40 那次掃描的重試過了午夜，抓的仍是前一個交易日。
 - 格式改變、4xx 等其他錯誤不重試，寫 error log `etl failed …`；`etl_run` 記 failed，隔天 15:10 的 catchup 會再補。
 - 被限流（429）時 limiter 會在同一個請求上冷卻 15 分鐘、最多 4 次，最壞讓唯一的 worker 卡住 1 小時，後面的 task 跟著延後；冷卻完仍被限流就當天放棄、不再重試（再打只會延長封鎖），隔天 catchup 補。22:40 之後才被限流，22:50 的檢查可能拖過午夜而被略過（`etl skipped`），由隔天 15:10 補跑。
 - Redis 的 `visibility_timeout` 是 12 小時（`CELERY_VISIBILITY_TIMEOUT`），要大於最長的 task（補抓日加倍）與重試間隔，否則 `acks_late` 的 task 會被重送。
