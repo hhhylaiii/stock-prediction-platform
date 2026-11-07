@@ -30,16 +30,20 @@ def stocks() -> None:
 
 def synthetic(calendar: TradingDays, start: date, end: date) -> pd.DataFrame:
     """Two stocks a day; 1101 lacks fund_rev_mom in 2016-03 and the holding after 2016-02."""
-    days = calendar.between(start, end)
-    rows: list[tuple[str, date, bool, float | None, float | None]] = []
+    low, high = max(start, calendar.start), min(end, calendar.end)
+    days = calendar.between(low, high) if low <= high else ()
+    rows: list[tuple[str, date, bool, float | None, float | None, float | None]] = []
     for day in days:
         month = day.strftime("%Y-%m")
-        rows.append(("2330", day, True, 0.1, 0.5))
+        rows.append(("2330", day, True, 0.1, 0.5, None))
         gone = month == "2016-03"
-        rows.append(("1101", day, True, None if gone else 0.2, 0.4 if month < "2016-03" else None))
-    return pd.DataFrame(
-        rows, columns=["stock_id", "date", "in_universe", "fund_rev_mom", "chip_fi_holding_pct"]
-    ).astype({"fund_rev_mom": "float64", "chip_fi_holding_pct": "float64"})
+        held = 0.4 if month < "2016-03" else None
+        rows.append(("1101", day, True, None if gone else 0.2, held, 0.3 if gone else None))
+    columns = ["fund_rev_mom", "chip_fi_holding_pct", "fund_rev_yoy"]
+    frame = pd.DataFrame(rows, columns=["stock_id", "date", "in_universe", *columns])
+    return frame.assign(fund_rev_3m_yoy=frame["fund_rev_yoy"]).astype(
+        dict.fromkeys([*columns, "fund_rev_3m_yoy"], "float64")
+    )
 
 
 @pytest.fixture
@@ -95,8 +99,24 @@ def test_coverage_defaults_to_the_masked_columns_and_refuses_unknown_ones(
     call_command("residual_coverage", start="2016-03-01", end="2016-04-30", stdout=out)
 
     assert "fund_rev_mom: 1 of 2 months affected (50%)" in out.getvalue()
+    assert "fund_rev_yoy: 1 of 2 months affected (50%)" in out.getvalue()
+    assert '    "fund_rev_3m_yoy": frozenset({"2016-03"}),' in out.getvalue()
     assert "chip_fi_holding_pct" not in out.getvalue()
     with pytest.raises(CommandError, match="not feature columns"):
         call_command("residual_coverage", columns="fwd_rank_pct", stdout=StringIO())
     with pytest.raises(CommandError, match="after"):
         call_command("residual_coverage", start="2017-01-01", end="2016-01-01", stdout=StringIO())
+
+
+def test_coverage_reads_2010_to_2020_by_default_and_names_an_empty_period(
+    built: list[tuple[date, date, Any]],
+) -> None:
+    out, empty = StringIO(), StringIO()
+
+    call_command("residual_coverage", stdout=out)
+    call_command("residual_coverage", start="2018-01-01", end="2018-12-31", stdout=empty)
+
+    assert [start for start, _, _ in built[:11]] == [date(year, 1, 1) for year in range(2010, 2021)]
+    assert built[10][1] == date(2020, 12, 31)
+    assert "fund_rev_mom: 1 of 24 months affected (4%)" in out.getvalue()
+    assert "fund_rev_mom: no universe rows in the period" in empty.getvalue()
