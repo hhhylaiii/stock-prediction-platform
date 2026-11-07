@@ -839,7 +839,13 @@
   function rebuildText(d) {
     if (d.error) return '重建失敗：' + d.error;
     const span = fmtInt(d.stocks || 0) + ' 檔，自 ' + (d.earliest || '—') + ' 起';
-    return has(d.limit) ? '超過 ' + d.limit + ' 個交易日，未自動重建：' + span : '重建 ' + span;
+    const days = has(d.limit_days) ? d.limit_days : '—';
+    switch (d.handled) {
+      case 'by_hand': return '最近 ' + days + ' 個交易日以外，未自動重建：' + span;
+      case 'covered': return '已由每晚 ' + days + ' 日重算涵蓋';
+      case 'rebuilt': return '已重建 ' + span;
+      default: return has(d.limit) ? '超過上限，未自動重建：' + span : '重建 ' + span;
+    }
   }
 
   function modelCheckState(check, alertShare, date) {
