@@ -160,6 +160,7 @@ def test_the_batches_place_each_dataset_after_its_publication() -> None:
         "tpex/daily_price",
         "twse/index_daily",
         "tpex/index_daily",
+        "twse/return_index",
     }
     assert {"twse/sbl", "tpex/sbl", "twse/margin", "tpex/margin"} <= keys("night")
     assert keys("qfii") == {"tpex/foreign_holding", "tpex/shares_outstanding"}
@@ -838,6 +839,7 @@ def test_research_waits_for_the_gate_datasets_and_the_quality_gate() -> None:
         "full_delivery",
         "shares_outstanding",
         "day_trade",
+        "return_index",
     }
     landed(DAY, gate)
     assert tasks.etl_complete(DAY)

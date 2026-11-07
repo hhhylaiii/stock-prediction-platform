@@ -103,7 +103,7 @@ Oct 29, 2026 · @Owen Lai
 | `weekly_holding` | stock\_id, data\_date, level | level（1–15）、holders、shares、pct、publish\_date | 集保 | publish\_date（data\_date 隔日） |
 | `monthly_revenue` | stock\_id, period（YYYY-MM） | revenue、yoy、mom | MOPS | announce\_date |
 | `financial_statement` | stock\_id, period（YYYY-Qn）, fin\_type | eps、revenue、gross\_margin、op\_margin、net\_income、roe、debt\_ratio、operating\_cf | MOPS | announce\_date |
-| `index_daily` | index\_id, date | close、volume；index\_id 含 TAIEX、TPEX、SOX、TSM\_ADR、USDTWD | 證交所、yfinance | date |
+| `index_daily` | index\_id, date | close、volume；index\_id 含 TAIEX、TAIEX\_TR（發行量加權股價報酬指數，含息）、TPEX、SOX、TSM\_ADR、USDTWD | 證交所、yfinance | date |
 | `macro_indicator` | indicator\_id, period | value | data.gov.tw | announce\_date |
 | `shares_outstanding` | stock\_id, effective\_date | shares、reason（增資、減資、庫藏股註銷） | 證交所、櫃買中心 | effective\_date |
 | `daily_valuation` | stock\_id, date | pe、pb、dividend\_yield（交易所每日公布的本益比、股價淨值比、殖利率） | 證交所、櫃買中心；歷史用 FinMind | date |
@@ -160,7 +160,7 @@ Oct 29, 2026 · @Owen Lai
 | 時間 | 工作 | 來源 | 頻率 |
 | --- | --- | --- | --- |
 | 15:10 | 更正交易日曆；補抓前 14 天到前一交易日漏掉的日子，並補跑那些日子的品質檢查 | 證交所、櫃買中心 | 每交易日 |
-| 15:30 | 日成交價量、加權與櫃買指數 | 證交所、櫃買中心 | 每交易日 |
+| 15:30 | 日成交價量、加權與櫃買指數、加權股價報酬指數 | 證交所、櫃買中心 | 每交易日 |
 | 16:00 | 以當日行情更新 `stock_master` | 證交所、櫃買中心 | 每交易日 |
 | 16:30 | 三大法人買賣超、本益比與淨值比、注意與處置名單、全額交割名單；證交所的外資持股與流通股數變動 | 證交所、櫃買中心 | 每交易日 |
 | 18:30 | 櫃買的外資持股與流通股數變動（櫃買每日 18:00、22:00 更新） | 櫃買中心 | 每交易日 |
@@ -187,7 +187,7 @@ Oct 29, 2026 · @Owen Lai
 - daily\_price、daily\_chip、daily\_valuation 的當日缺值比例超過 1% 就告警（收盤價用 5%，因為有停牌與無成交）；缺值只算普通股。
 - 日期必須存在於 `trading_calendar`，否則整批拒收；歷史回補只拒收該檔（見歷史回補）。
 - 結果寫入 `data_quality_log`，severity 為 error 時不執行當日預測。
-- 研究閘門：研究層的每日任務要等兩個交易所的日價量、指數、三大法人、融資融券、借券、外資持股、本益比與淨值比這些當日快照都有成功的 `etl_run`，且當日品質檢查沒有 error；注意、處置、全額交割、流通股數變動、當沖不擋，漏一天只是晚一天反映，隔日補抓。
+- 研究閘門：研究層的每日任務要等兩個交易所的日價量、指數、三大法人、融資融券、借券、外資持股、本益比與淨值比這些當日快照都有成功的 `etl_run`，且當日品質檢查沒有 error；注意、處置、全額交割、流通股數變動、當沖、加權股價報酬指數不擋，漏一天只是晚一天反映，隔日補抓；報酬指數目前沒有特徵或 label 讀它。
 
 **失敗處理**
 

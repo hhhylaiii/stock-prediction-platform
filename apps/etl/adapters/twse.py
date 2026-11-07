@@ -41,6 +41,8 @@ from apps.etl.adapters.exchange_tables import (
 from apps.etl.adapters.twse_tables import (
     TABLES,
     check_answer,
+    return_index_frame,
+    return_index_rows,
     taiex_frame,
     taiex_rows,
 )
@@ -60,6 +62,7 @@ DAILY_QUOTES_PATH = "/rwd/zh/afterTrading/MI_INDEX"
 SUSPEND_LISTING_PATH = "/rwd/zh/company/suspendListing"
 HOLIDAY_SCHEDULE_PATH = "/rwd/zh/holidaySchedule/holidaySchedule"
 MONTHLY_TRADING_PATH = "/rwd/zh/afterTrading/FMTQIK"
+RETURN_INDEX_PATH = "/rwd/zh/TAIEX/MFI94U"
 STOCK_DAY_PATH = "/rwd/zh/afterTrading/STOCK_DAY"
 NOTICE_PATH = "/rwd/zh/announcement/notice"
 PUNISH_PATH = "/rwd/zh/announcement/punish"
@@ -81,6 +84,7 @@ DAILY_QUOTES_COLUMNS = {
 }
 DAILY_PRICE = "daily_price"
 INDEX_DAILY = "index_daily"
+RETURN_INDEX = "return_index"
 INSTITUTIONAL = "institutional"
 SHARES_OUTSTANDING = "shares_outstanding"
 DAY_TRADE = "day_trade"
@@ -158,8 +162,8 @@ class TwseClient(SourceClient):
 class TwseAdapter(BaseAdapter):
     source = "twse"
     raw_model = RawTwse
-    datasets = frozenset({DAILY_PRICE, INDEX_DAILY, *TABLES, *EVENT_DATASETS})
-    monthly_datasets = frozenset({INDEX_DAILY, ATTENTION, DISPOSITION})
+    datasets = frozenset({DAILY_PRICE, INDEX_DAILY, RETURN_INDEX, *TABLES, *EVENT_DATASETS})
+    monthly_datasets = frozenset({INDEX_DAILY, RETURN_INDEX, ATTENTION, DISPOSITION})
 
     def __init__(
         self,
@@ -186,6 +190,8 @@ class TwseAdapter(BaseAdapter):
             return self._normalize_quotes(raw_df)
         if dataset == INDEX_DAILY:
             return taiex_frame(raw_df)
+        if dataset == RETURN_INDEX:
+            return return_index_frame(raw_df)
         table = TABLES[dataset]
         frame = standard_rows(raw_df, table)
         if table.model is DailyChip:
@@ -205,7 +211,7 @@ class TwseAdapter(BaseAdapter):
             return upsert_events(frame)
         if dataset == DAILY_PRICE:
             return upsert_daily_prices(frame)
-        if dataset == INDEX_DAILY:
+        if dataset in (INDEX_DAILY, RETURN_INDEX):
             return upsert_index_rows(frame)
         table = TABLES[dataset]
         rows = upsert(
@@ -218,6 +224,8 @@ class TwseAdapter(BaseAdapter):
     def _fetch_span(self, dataset: str, first: date, last: date) -> pd.DataFrame:
         if dataset == INDEX_DAILY:
             return self._fetch_taiex(first, last)
+        if dataset == RETURN_INDEX:
+            return self._fetch_return_index(first, last)
         if dataset == ATTENTION:
             return self._fetch_attention(first, last)
         if dataset == DISPOSITION:
@@ -244,6 +252,15 @@ class TwseAdapter(BaseAdapter):
         self.save_raw(INDEX_DAILY, params, payload)
         days = self.calendar.between(first, last)
         return pd.concat([taiex_rows(payload, day) for day in days], ignore_index=True)
+
+    def _fetch_return_index(self, first: date, last: date) -> pd.DataFrame:
+        """MFI94U rows of the span's trading days from one monthly request."""
+        params = {"date": f"{first:%Y%m}01", "response": "json"}
+        payload = self.client.get_json(RETURN_INDEX_PATH, params)
+        check_published(payload, "TWSE MFI94U", last)
+        self.save_raw(RETURN_INDEX, params, payload)
+        days = self.calendar.between(first, last)
+        return pd.concat([return_index_rows(payload, day) for day in days], ignore_index=True)
 
     def _fetch_attention(self, first: date, last: date) -> pd.DataFrame:
         """Attention notices announced in the span or on the session before it."""
