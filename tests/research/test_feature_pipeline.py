@@ -19,6 +19,7 @@ from apps.market.models import (
     DividendEvent,
     FinancialStatement,
     IndexDaily,
+    MonthlyRevenue,
     SharesOutstanding,
     StockMaster,
     TradingCalendar,
@@ -26,7 +27,13 @@ from apps.market.models import (
 )
 from apps.research.features.build import FEATURE_COLUMNS, FRAME_COLUMNS, build_feature_frame
 from apps.research.features.registry import feature_names
-from apps.research.features.store import export_year, read_partitions, write_features
+from apps.research.features.residual import rules_signature
+from apps.research.features.store import (
+    export_year,
+    partition_rules,
+    read_partitions,
+    write_features,
+)
 from apps.research.models import FeatureDaily
 from apps.research.universe import load_universe_panel
 from tests.research.conftest import weekday_calendar
@@ -229,6 +236,59 @@ def test_monthly_revenue_growth_falls_back_to_the_quarterly_growth_in_the_frame(
     assert math.isnan(row["fund_rev_mom"])
 
 
+def test_monthly_revenue_growth_left_missing_on_record_takes_no_fallback() -> None:
+    listed("2330", "2015-06-01", "2016-03-31")
+    FinancialStatement.objects.bulk_create(
+        FinancialStatement(stock_id="2330", period=period, revenue=revenue, announce_date=d(day))
+        for period, revenue, day in [
+            ("2014-Q3", 1_000, "2014-11-14"),
+            ("2015-Q3", 1_200, "2015-11-16"),
+        ]
+    )
+    MonthlyRevenue.objects.bulk_create(
+        MonthlyRevenue(
+            stock_id="2330",
+            period=f"{year}-{month:02d}",
+            revenue=0 if (year, month) == (2014, 12) else 100,
+            announce_date=date(year, month, 10) + timedelta(days=31),
+        )
+        for year in (2014, 2015)
+        for month in range(1, 13)
+    )
+
+    frame = build_feature_frame(CALENDAR, d("2016-03-01"), d("2016-03-04"))
+
+    row = frame[frame["date"] == d("2016-03-02")].iloc[0]
+    assert row["fund_rev_yoy_q"] == pytest.approx(0.2)
+    assert math.isnan(row["fund_rev_yoy"])
+    assert row["fund_rev_3m_yoy"] == pytest.approx(300 / 200 - 1)
+    assert row["fund_rev_mom"] == pytest.approx(0.0)
+
+
+def test_month_masks_reach_any_column_of_the_frame_after_the_fallbacks() -> None:
+    listed("2330", "2015-06-01", "2016-04-29")
+    FinancialStatement.objects.bulk_create(
+        FinancialStatement(stock_id="2330", period=period, revenue=revenue, announce_date=d(day))
+        for period, revenue, day in [
+            ("2014-Q3", 1_000, "2014-11-14"),
+            ("2015-Q3", 1_200, "2015-11-16"),
+        ]
+    )
+    masked = {"fund_rev_yoy_q": frozenset({"2016-03"}), "tech_vol_20d": frozenset({"2016-04"})}
+
+    plain = build_feature_frame(CALENDAR, d("2016-03-28"), d("2016-04-04"))
+    frame = build_feature_frame(CALENDAR, d("2016-03-28"), d("2016-04-04"), masked=masked)
+
+    march = frame["date"] < d("2016-04-01")
+    assert frame.loc[march, "fund_rev_yoy_q"].isna().all()
+    assert frame.loc[~march, "fund_rev_yoy_q"].notna().all()
+    assert frame["fund_rev_yoy"].tolist() == pytest.approx([0.2] * len(frame))
+    assert frame.loc[~march, "tech_vol_20d"].isna().all()
+    assert frame.loc[march, "tech_vol_20d"].tolist() == plain.loc[march, "tech_vol_20d"].tolist()
+    others = [name for name in FRAME_COLUMNS if name not in masked]
+    pd.testing.assert_frame_equal(frame[others], plain[others])
+
+
 def test_a_later_start_gives_the_same_features() -> None:
     listed("2330", "2013-01-02", "2016-03-31")
     listed("1101", "2014-06-02", "2016-03-31", step=-0.05)
@@ -280,6 +340,20 @@ def test_the_year_partition_matches_the_table(tmp_path: Path) -> None:
 
     assert path == tmp_path / "year=2016" / "part-0.parquet"
     pd.testing.assert_frame_equal(pd.read_parquet(path), stored())
+    assert partition_rules(tmp_path, 2016) == rules_signature()
+
+
+def test_a_partition_written_without_the_rules_stamp_reads_as_unstamped(tmp_path: Path) -> None:
+    listed("2330", "2015-06-01", "2016-03-31")
+    frame = build_feature_frame(CALENDAR, d("2016-03-01"), d("2016-03-31"))
+    write_features(frame, d("2016-03-01"), d("2016-03-31"))
+    path = export_year(2016, tmp_path)
+    assert path is not None
+    pd.read_parquet(path).to_parquet(path, index=False)
+
+    assert partition_rules(tmp_path, 2016) is None
+    with pytest.raises(FileNotFoundError, match="no feature partition for 2015"):
+        partition_rules(tmp_path, 2015)
 
 
 def test_a_month_without_values_of_a_feature_exports_without_warnings(tmp_path: Path) -> None:

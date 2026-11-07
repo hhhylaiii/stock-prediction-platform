@@ -1,40 +1,50 @@
-"""Rules for source gaps left after backfill, so missing values never mark a stock to be delisted.
+"""Source-gap rules applied alike to every stock, so missing values never mark a later delisting."""
 
-C: a feature whose source is missing takes a second source for every stock alike.
-A: a feature without a second source is masked for every stock in the months its source covers
-only stocks that are still listed (delisted coverage under COVERAGE_FLOOR of the listed one).
-"""
-
+import json
 from collections.abc import Mapping
 from types import MappingProxyType
 
 import pandas as pd
 
-COVERAGE_FLOOR = 0.9
+from apps.research.features.fundamental import sourced_name
+
+ACCEPT_RATIO = 1.5
+ACCEPT_GAP = 0.05
+MAX_MASKED_SHARE = 0.2
+SHARE_DIGITS = 12
 FALLBACKS: Mapping[str, str] = MappingProxyType(
     {"fund_rev_yoy": "fund_rev_yoy_q", "fund_rev_3m_yoy": "fund_rev_yoy_q"}
 )
 MASKED_MONTHS: Mapping[str, frozenset[str]] = MappingProxyType({"fund_rev_mom": frozenset()})
 GROUPS = {True: "delisted", False: "current"}
+RULES_KEY = b"residual_rules"
 
 
 def _months(dates: pd.Series) -> pd.Series:
     return pd.to_datetime(dates).dt.strftime("%Y-%m")
 
 
-def apply_residual_rules(
-    features: pd.DataFrame,
-    fallbacks: Mapping[str, str] = FALLBACKS,
-    masked: Mapping[str, frozenset[str]] = MASKED_MONTHS,
+def apply_fallbacks(
+    features: pd.DataFrame, sourcing: pd.DataFrame, fallbacks: Mapping[str, str] = FALLBACKS
 ) -> pd.DataFrame:
-    """New frame with C fallbacks filled, then A months masked, the same way for every stock."""
-    filled = {name: features[name].fillna(features[source]) for name, source in fallbacks.items()}
-    ruled = features.assign(**filled)
-    if not any(masked.values()):
-        return ruled
-    months = _months(ruled["date"])
-    return ruled.assign(
-        **{name: ruled[name].mask(months.isin(list(hidden))) for name, hidden in masked.items()}
+    """New frame where a missing feature whose source months are off record takes its fallback."""
+    filled = {
+        name: features[name].fillna(features[source].where(sourcing[sourced_name(name)].ne(1.0)))
+        for name, source in fallbacks.items()
+    }
+    return features.assign(**filled)
+
+
+def mask_months(
+    frame: pd.DataFrame, masked: Mapping[str, frozenset[str]] = MASKED_MONTHS
+) -> pd.DataFrame:
+    """New frame with each listed column missing for every stock in its affected months."""
+    hidden = {name: months for name, months in masked.items() if months}
+    if not hidden:
+        return frame
+    months = _months(frame["date"])
+    return frame.assign(
+        **{name: frame[name].mask(months.isin(sorted(chosen))) for name, chosen in hidden.items()}
     )
 
 
@@ -47,9 +57,22 @@ def monthly_coverage(rows: pd.DataFrame, column: str, delisted: pd.Series) -> pd
     return shares.reindex(columns=list(GROUPS.values())).rename_axis(index=None, columns=None)
 
 
-def affected_months(coverage: pd.DataFrame, floor: float = COVERAGE_FLOOR) -> list[str]:
-    """Months whose delisted coverage is under floor times the listed coverage."""
-    if not 0 < floor <= 1:
-        raise ValueError(f"floor {floor} must be in (0, 1]")
-    short = coverage["delisted"] < floor * coverage["current"]
-    return sorted(str(month) for month in coverage.index[short.fillna(False)])
+def affected_months(coverage: pd.DataFrame) -> list[str]:
+    """Months failing the acceptance alone: delisted missing share over 1.5x and 5 points above."""
+    current, delisted = 1 - coverage["current"], 1 - coverage["delisted"]
+    gap = (delisted - current).round(SHARE_DIGITS) > ACCEPT_GAP
+    ratio = (delisted - ACCEPT_RATIO * current).round(SHARE_DIGITS) > 0
+    return sorted(str(month) for month in coverage.index[gap & ratio])
+
+
+def rules_signature(
+    fallbacks: Mapping[str, str] = FALLBACKS,
+    masked: Mapping[str, frozenset[str]] = MASKED_MONTHS,
+) -> str:
+    """The rules as stable JSON, stamped on each exported partition."""
+    rules = {
+        "fallbacks": dict(sorted(fallbacks.items())),
+        "masked": {name: sorted(months) for name, months in sorted(masked.items())},
+        "fills": "off_record",
+    }
+    return json.dumps(rules, sort_keys=True)

@@ -21,6 +21,7 @@ from apps.research.features.build import (
     FRAME_COLUMNS,
     FRAME_TYPES,
 )
+from apps.research.features.residual import RULES_KEY, rules_signature
 from apps.research.models import FeatureDaily
 from apps.research.ranges import months, years
 
@@ -86,6 +87,12 @@ def existing_partition(directory: Path, year: int) -> Path:
     return path
 
 
+def partition_rules(directory: Path, year: int) -> str | None:
+    """Source-gap rules stamped on the year's partition when exported; None for an older file."""
+    stamp = (pq.read_schema(existing_partition(directory, year)).metadata or {}).get(RULES_KEY)
+    return None if stamp is None else stamp.decode()
+
+
 def read_partitions(
     start: date, end: date, directory: Path, columns: Sequence[str] = FIRST_BATCH_COLUMNS
 ) -> pd.DataFrame:
@@ -137,6 +144,8 @@ def export_year(year: int, directory: Path) -> Path | None:
         shutil.rmtree(target.parent, ignore_errors=True)
         return None
     table = pa.Table.from_pandas(frame, preserve_index=False)
+    stamp = {**(table.schema.metadata or {}), RULES_KEY: rules_signature().encode()}
+    table = table.replace_schema_metadata(stamp)
     target.parent.mkdir(parents=True, exist_ok=True)
     handle, temporary = tempfile.mkstemp(dir=target.parent, prefix=".part-", suffix=".tmp")
     os.close(handle)
