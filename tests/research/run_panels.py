@@ -11,6 +11,7 @@ import pandas as pd
 from apps.market.calendar import TradingDays
 from apps.market.models import IndexDaily, TradingCalendar
 from apps.research.features.store import export_year
+from apps.research.holdout import claim_holdout
 from apps.research.models import FeatureDaily, LabelDaily, ModelRun
 from apps.research.runs import SCREENING_MODEL
 from apps.research.training import linear_features
@@ -125,3 +126,13 @@ def store_taiex() -> None:
         IndexDaily(index_id="TAIEX", date=day, close=round(100 * (1 + 0.1 * math.sin(k / 6)), 4))
         for k, day in enumerate(weekdays())
     )
+
+
+def panel_calendar() -> TradingDays:
+    days = weekdays()
+    return TradingDays(days, days[0], days[-1])
+
+
+def claim_all() -> None:
+    for scope in ("rank", "return", "interval"):
+        claim_holdout(scope, f"{scope}-final", weekdays()[-1])

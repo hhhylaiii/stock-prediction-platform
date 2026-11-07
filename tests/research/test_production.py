@@ -16,7 +16,6 @@ from apps.research import (
     holdout,
     lgbm_runs,
     monitor_refs,
-    prediction_cache,
     production,
 )
 from apps.research.baseline_runs import BASELINE
@@ -46,7 +45,15 @@ from apps.research.walkforward import (
     generate_folds,
     oos_start,
 )
-from tests.research.run_panels import CONFIG, KEPT, UNSCREENED, research, weekdays
+from tests.research.run_panels import (
+    CONFIG,
+    KEPT,
+    UNSCREENED,
+    claim_all,
+    panel_calendar,
+    research,
+    weekdays,
+)
 
 AS_OF = date(2026, 10, 30)
 SPEC = WalkForwardConfig()
@@ -118,11 +125,6 @@ def test_production_folds_refuse_a_window_before_the_data(long_calendar: Trading
         production_fold(long_calendar, date(2012, 6, 29), SPEC)
     with pytest.raises(WalkForwardError, match="before data_start"):
         shadow_fold(long_calendar, date(2013, 3, 29), SPEC)
-
-
-def panel_calendar() -> TradingDays:
-    days = weekdays()
-    return TradingDays(days, days[0], days[-1])
 
 
 @pytest.fixture
@@ -294,33 +296,6 @@ def test_a_shadow_fold_is_evaluated_on_its_labelled_months(frozen: Path) -> None
     cached = load_fold_predictions("rank-prod-shadow", MODEL, fold)
     assert cached["date"].min() == fold.test_start
     assert cached["date"].max() == fold.test_end
-
-
-@pytest.fixture
-def researched(run_panel: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Research caches of a rank and an interval walk-forward, then the panel's holdout start.
-
-    The panel's research folds hold fewer than 60 IC days, so the rolling window is 5 here.
-    """
-    monkeypatch.setattr(lgbm_runs, "MAX_ROUNDS", 80)
-    chosen = [fold for fold in research() if fold.research]
-    masked = Variant(masked=("tech_ret_60d",))
-    lgbm_runs.run_folds("rank", chosen, "rank-wf1", run_panel, variant=masked)
-    baseline_runs.run_folds("interval", chosen, "interval-wf1", run_panel)
-    monkeypatch.setattr(holdout, "SPEC_HOLDOUT_START", CONFIG.holdout_start)
-    monkeypatch.setattr(prediction_cache, "SPEC_HOLDOUT_START", CONFIG.holdout_start)
-    rolling = monitor_refs.rolling_ic_threshold
-    monkeypatch.setattr(monitor_refs, "rolling_ic_threshold", lambda ic: rolling(ic, 5))
-    monkeypatch.setattr(production, "SHADOW_MONTHS", 4)
-    monkeypatch.setattr(production, "BAGS", 2)
-    designs = {scope: Design(config=CONFIG) for scope in ("rank", "return", "interval")}
-    monkeypatch.setattr(production, "DESIGNS", {**designs, "rank": Design(CONFIG, masked)})
-    return run_panel
-
-
-def claim_all() -> None:
-    for scope in ("rank", "return", "interval"):
-        claim_holdout(scope, f"{scope}-final", weekdays()[-1])
 
 
 @pytest.mark.django_db
