@@ -203,3 +203,26 @@ def test_twse_par_value_restarts_read_the_recorded_answer(
             PAR_VALUE_CHANGE,
         ),
     ]
+
+
+def test_twse_capital_reductions_read_the_recorded_answer(
+    load_fixture: Callable[[str], Any],
+) -> None:
+    reduction = TWSE_RESTARTS[0]
+    actions = restart_actions(
+        load_fixture(f"{TWSE}/twtauu_202609_10.json"),
+        reduction,
+        (date(2026, 9, 1), date(2026, 10, 31)),
+    )
+    assert len(actions) == 11
+    assert {action.table for action in actions} == {CAPITAL_REDUCTION}
+    by_code = {action.stock_id: action for action in actions}
+    assert by_code["2323"] == Action(
+        "2323",
+        date(2026, 10, 12),
+        Decimal("0"),
+        Decimal("0"),
+        _ratio("10.88", "11.00"),
+        CAPITAL_REDUCTION,
+    )
+    assert by_code["6550"].adj_factor == _ratio("19.09", "9.92")
