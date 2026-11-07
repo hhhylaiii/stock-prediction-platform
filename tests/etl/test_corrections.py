@@ -1,4 +1,11 @@
-from apps.etl import cumulative_margins, filings, mops_history, statement_overwrite, zero_holdings
+from apps.etl import (
+    cumulative_margins,
+    filings,
+    market_history,
+    mops_history,
+    statement_overwrite,
+    zero_holdings,
+)
 from apps.etl.corrections import CORRECTION_CHECKS
 
 
@@ -11,7 +18,7 @@ def test_every_correction_check_is_registered() -> None:
         cumulative_margins.MARGIN_CHECK,
         mops_history.MISMATCH_CHECKS[mops_history.STATEMENT_VIEWER],
         zero_holdings.REPLACED_CHECK,
-        "market_history_rebuilt",
+        market_history.REBUILT_CHECK,
     }
 
     assert written == CORRECTION_CHECKS

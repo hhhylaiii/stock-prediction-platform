@@ -1,5 +1,6 @@
 """stock_master kept current from each day's exchange quotes and the official delisting lists."""
 
+import logging
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -14,7 +15,7 @@ from apps.etl.adapters.tpex import TpexClient
 from apps.etl.adapters.tpex_tables import quoted_names
 from apps.etl.adapters.twse import TwseClient, is_foreign_currency_etf, quotes_frame
 from apps.etl.alerts import dispatch
-from apps.etl.errors import SchemaChangedError, SourceNotReadyError
+from apps.etl.errors import SchemaChangedError, SourceError, SourceNotReadyError
 from apps.etl.models import DataQualityLog, EtlRun, RawRecord, RawTpex, RawTwse
 from apps.etl.runs import tracked_run
 from apps.etl.stock_master import MASTER_COLUMNS, tpex_delistings, twse_delistings
@@ -25,8 +26,10 @@ from apps.market.calendar import (
     OutsideCalendarError,
     TradingDays,
 )
+from apps.market.market_history import record_markets
 from apps.market.models import DailyPrice, Market, StockMaster
 
+logger = logging.getLogger(__name__)
 VANISHED_SESSIONS = 5
 DELISTING_WINDOW = timedelta(days=90)
 CHECK_NAME = "stock_master"
@@ -148,7 +151,7 @@ def newly_vanished(
 
 
 def refresh_stock_master(day: date, calendar: TradingDays) -> EtlRun:
-    """Apply the day's quotes and recent delistings, then log and alert on vanished codes."""
+    """Apply the day's quotes, recent delistings and market moves; alert on vanished codes."""
     if not calendar.is_trading_day(day):
         raise NotATradingDayError(f"{day} is not a trading day")
     last = (
@@ -173,6 +176,8 @@ def refresh_stock_master(day: date, calendar: TradingDays) -> EtlRun:
         if changes.rows:
             frame = pd.DataFrame(changes.rows, columns=MASTER_COLUMNS)
             run.rows = upsert(StockMaster, frame, ("stock_id",), UPDATED_FIELDS)
+        unquoted = _record_skipped(after, day, calendar)
+        record_markets(day, _markets(quoted))
         listed = StockMaster.objects.filter(delist_date__isnull=True).values_list(
             "stock_id", flat=True
         )
@@ -184,16 +189,38 @@ def refresh_stock_master(day: date, calendar: TradingDays) -> EtlRun:
             "relisted": changes.relisted,
             "delisted": changes.delisted,
             "vanished": vanished,
+            "unquoted": unquoted,
         }
     dispatch([_log(day, run.checkpoint)])
     return run
 
 
+def _markets(quoted: Mapping[str, Listing]) -> dict[str, str]:
+    return {code: market for code, (_, market) in quoted.items()}
+
+
+def _record_skipped(after: date | None, day: date, calendar: TradingDays) -> list[str]:
+    """Sessions since the last refresh get their market spans from stored quotes, in order.
+
+    A session whose quotes are missing or unreadable is listed and skipped, so it cannot block
+    every later refresh.
+    """
+    if after is None or after >= day:
+        return []
+    unquoted: list[str] = []
+    for session in (s for s in calendar.between(after, day) if after < s < day):
+        try:
+            record_markets(session, _markets(quoted_listings(session)))
+        except SourceError as exc:
+            logger.warning("market spans for %s skipped: %s", session, exc)
+            unquoted.append(session.isoformat())
+    return unquoted
+
+
 def _log(day: date, found: dict[str, Any]) -> DataQualityLog:
-    """One row per day: warning when codes vanished without a delisting, else info."""
-    severity = (
-        DataQualityLog.Severity.WARNING if found["vanished"] else DataQualityLog.Severity.INFO
-    )
+    """One row per day: warning when codes vanished or skipped sessions had no quotes, else info."""
+    alerting = found["vanished"] or found["unquoted"]
+    severity = DataQualityLog.Severity.WARNING if alerting else DataQualityLog.Severity.INFO
     detail = {key: value for key, value in found.items() if key != "listed"}
     with transaction.atomic():
         DataQualityLog.objects.filter(date=day, check_name=CHECK_NAME).delete()

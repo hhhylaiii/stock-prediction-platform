@@ -9,7 +9,7 @@ from django.core.management.base import CommandError
 
 from apps.etl.models import DataQualityLog, EtlRun, RawTpex, RawTwse
 from apps.etl.raw import store_raw
-from apps.market.models import DailyPrice, Market, StockMaster
+from apps.market.models import DailyPrice, Market, MarketHistory, StockMaster
 
 TWSE_URL = "https://www.twse.com.tw/rwd/zh/company/suspendListing"
 TPEX_URL = "https://www.tpex.org.tw/www/zh-tw/company/deListed"
@@ -92,6 +92,23 @@ def test_the_days_quotes_and_recent_delistings_update_stock_master() -> None:
     assert checkpoint["delisted"] == ["8908"]
     assert "1240" in checkpoint["added"]
     assert checkpoint["listed"] == StockMaster.objects.filter(delist_date__isnull=True).count()
+
+
+@responses.activate
+@pytest.mark.usefixtures("quotes", "delistings", "alerts")
+def test_the_days_quotes_open_market_spans_for_moved_and_new_codes() -> None:
+    _master("3293", Market.TWSE, "鈊象")
+    _master("2330", Market.TWSE, "台積電")
+    for code in ("3293", "2330"):
+        MarketHistory.objects.create(stock_id=code, start_date=date(2010, 1, 4), market=Market.TWSE)
+    call_command("refresh_stock_master", date="2026-10-28")
+    spans = MarketHistory.objects.order_by("stock_id", "start_date")
+    rows = list(spans.values_list("stock_id", "start_date", "end_date", "market"))
+    assert ("3293", date(2010, 1, 4), date(2026, 10, 27), Market.TWSE) in rows
+    assert ("3293", DAY, None, Market.TPEX) in rows
+    assert ("2330", date(2010, 1, 4), None, Market.TWSE) in rows
+    opened = set(spans.filter(end_date__isnull=True).values_list("stock_id", flat=True))
+    assert opened == set(StockMaster.objects.values_list("stock_id", flat=True))
 
 
 @responses.activate
@@ -231,6 +248,64 @@ def test_codes_gone_quiet_on_a_skipped_day_are_still_reported_once(
     call_command("refresh_stock_master", date="2026-10-29")
     row = DataQualityLog.objects.get(date=date(2026, 10, 29), check_name="stock_master")
     assert row.detail["vanished"] == ["5552", "5553"]
+
+
+@responses.activate
+@pytest.mark.usefixtures("delistings", "alerts")
+def test_skipped_sessions_with_stored_quotes_get_their_market_spans_first(
+    load_fixture: Callable[[str], Any],
+) -> None:
+    EtlRun.objects.create(
+        source="stock_master",
+        dataset="stock_master_daily",
+        start_date=date(2026, 10, 21),
+        end_date=date(2026, 10, 21),
+        status=EtlRun.Status.SUCCESS,
+    )
+    _master("3293", Market.TWSE)
+    MarketHistory.objects.create(stock_id="3293", start_date=date(2010, 1, 4), market=Market.TWSE)
+    _quotes_for(load_fixture, date(2026, 10, 27))
+    _quotes_for(load_fixture, DAY)
+    call_command("refresh_stock_master", date="2026-10-28")
+    spans = MarketHistory.objects.filter(stock_id="3293").order_by("start_date")
+    assert list(spans.values_list("start_date", "end_date", "market")) == [
+        (date(2010, 1, 4), date(2026, 10, 26), Market.TWSE),
+        (date(2026, 10, 27), None, Market.TPEX),
+    ]
+    row = DataQualityLog.objects.get(date=DAY, check_name="stock_master")
+    assert (row.severity, row.detail["unquoted"]) == ("warning", ["2026-10-22"])
+
+
+@responses.activate
+@pytest.mark.usefixtures("delistings", "alerts")
+def test_a_skipped_session_with_unreadable_quotes_is_listed_and_the_day_still_refreshes(
+    load_fixture: Callable[[str], Any],
+) -> None:
+    EtlRun.objects.create(
+        source="stock_master",
+        dataset="stock_master_daily",
+        start_date=date(2026, 10, 22),
+        end_date=date(2026, 10, 22),
+        status=EtlRun.Status.SUCCESS,
+    )
+    broken = load_fixture("twse/daily_price/mi_index_20261028.json")
+    broken["date"] = "20261027"
+    for table in broken["tables"]:
+        if "每日收盤行情" in (table.get("title") or ""):
+            table["fields"] = [
+                "證券簡稱" if name == "證券名稱" else name for name in table["fields"]
+            ]
+    store_raw(RawTwse, "daily_price", {"date": "20261027", "type": "ALLBUT0999"}, broken)
+    tpex = {**load_fixture("tpex/daily_price/otc_20261028.json"), "date": "20261027"}
+    store_raw(RawTpex, "daily_price", {"date": "2026/10/27", "type": "EW"}, tpex)
+    _quotes_for(load_fixture, DAY)
+    call_command("refresh_stock_master", date="2026-10-28")
+    row = DataQualityLog.objects.get(date=DAY, check_name="stock_master")
+    assert (row.severity, row.detail["unquoted"]) == ("warning", ["2026-10-27"])
+    assert (
+        EtlRun.objects.filter(dataset="stock_master_daily", start_date=DAY).get().status
+        == "success"
+    )
 
 
 @responses.activate
