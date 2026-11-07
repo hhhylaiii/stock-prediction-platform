@@ -121,8 +121,10 @@ def test_missing_margin_rows_are_added_and_only_blank_margin_columns_filled(
     adapter: TwseAdapter, load_fixture: Callable[[str], Any]
 ) -> None:
     serve(load_fixture, "/marginTrading/MI_MARGN", MARGIN)
-    priced("1101", "1213", "2317", "2603", "2609")
+    priced("1101", "1213", "2317", "2330", "2603", "2609")
     DailyChip.objects.create(stock_id="1101", date=DAY, fi_holding_pct=13.36)
+    stored = dict(zip(MARGINS, (35_332_000, 6_483_092_000, 5_000), strict=True))
+    DailyChip.objects.create(stock_id="2330", date=DAY, **stored)
     DailyChip.objects.create(stock_id="2317", date=DAY, margin_balance=5)
     DailyChip.objects.create(stock_id="2609", date=DAY, fi_net=1)
     run = fill_missing(adapter, "margin", DAY, DAY)
@@ -131,6 +133,7 @@ def test_missing_margin_rows_are_added_and_only_blank_margin_columns_filled(
     assert margins("2317") == (5, 3_518_936_000, 471_000)
     assert margins("1213") == (0, 0, 0)
     assert margins("2609") == (None, None, None)
+    assert margins("2330") == tuple(stored.values())
     assert not DailyChip.objects.filter(stock_id__in=["0050", "2603"]).exists()
     (log,) = DataQualityLog.objects.filter(check_name=FILL_CHECK)
     assert sorted(log.detail["filled"]["margin"]) == ["1101", "1213", "2317"]
