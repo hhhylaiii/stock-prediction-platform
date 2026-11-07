@@ -85,6 +85,22 @@ def observable_gaps(
     return panel[["stock_id", "date"]].assign(**observed)
 
 
+def masked_as_observable(
+    frame: pd.DataFrame, masked: Mapping[str, frozenset[str]] = MASKED_MONTHS
+) -> pd.DataFrame:
+    """New frame where gaps in a column's masked months also count as having a known cause."""
+    months = _months(frame["date"])
+    marked = {
+        observable_name(name): frame.get(observable_name(name), pd.Series(False, index=frame.index))
+        .eq(True)
+        .astype(bool)
+        | months.isin(sorted(chosen))
+        for name, chosen in masked.items()
+        if chosen
+    }
+    return frame.assign(**marked)
+
+
 def monthly_coverage(rows: pd.DataFrame, column: str, delisted: pd.Series) -> pd.DataFrame:
     """Share of universe rows with a value, or an observable gap, per month and later fate."""
     inside = rows[rows["in_universe"].astype(bool)]

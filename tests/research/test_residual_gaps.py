@@ -17,6 +17,7 @@ from apps.research.features.residual import (
     affected_months,
     apply_fallbacks,
     mask_months,
+    masked_as_observable,
     monthly_coverage,
     observable_gaps,
     observable_name,
@@ -196,7 +197,7 @@ def test_a_gap_is_observable_only_when_every_input_its_value_reads_is_on_record(
             "date": [d("2017-03-01")] * 4,
             "industry": ["半導體業", "金融業", "水泥工業", None],
             **{sourced_name(name): [1.0, 0.0, NAN, 0.0] for name in STATEMENT_INPUTS},
-            sourced_name("fund_rev_yoy"): [1.0, 0.0, NAN, 0.0],
+            sourced_name("fund_rev_yoy"): [1.0, 1.0, NAN, 0.0],
             sourced_name("fund_rev_3m_yoy"): [0.0, 0.0, 0.0, 1.0],
         }
     )
@@ -220,7 +221,7 @@ def test_a_gap_is_observable_only_when_every_input_its_value_reads_is_on_record(
         assert column(name) == [True, False, False, False]
     for name in MARGINS:
         assert column(name) == [True, True, False, False]
-    assert column("fund_rev_yoy") == [True, False, False, True]
+    assert column("fund_rev_yoy") == [True, True, False, True]
     assert column("fund_rev_3m_yoy") == [True, False, False, True]
 
 
@@ -244,3 +245,23 @@ def test_monthly_coverage_counts_an_observable_gap_as_covered() -> None:
     assert observed.loc["2017-03", "delisted"] == 0.5
     assert plain.loc["2017-03", "delisted"] == 0.0
     assert observed.loc["2017-03", "current"] == 1.0
+
+
+def test_masked_months_count_as_gaps_with_a_known_cause() -> None:
+    rows = pd.DataFrame(
+        {
+            "stock_id": ["2330", "1101", "2330"],
+            "date": [d("2017-03-01"), d("2017-03-01"), d("2017-04-03")],
+            "fund_eps_yoy": [NAN, NAN, NAN],
+            "chip_short_ratio": [NAN, NAN, NAN],
+            observable_name("fund_eps_yoy"): [True, None, False],
+        }
+    )
+    masked = {"fund_eps_yoy": frozenset({"2017-03"}), "chip_short_ratio": frozenset({"2017-04"})}
+
+    marked = masked_as_observable(rows, masked)
+
+    assert marked[observable_name("fund_eps_yoy")].tolist() == [True, True, False]
+    assert marked[observable_name("chip_short_ratio")].tolist() == [False, False, True]
+    assert rows[observable_name("fund_eps_yoy")].tolist() == [True, None, False]
+    pd.testing.assert_frame_equal(masked_as_observable(rows, {}), rows)
