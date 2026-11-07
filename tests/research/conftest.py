@@ -38,3 +38,13 @@ def rank_caches(run_panel: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     baseline_runs.run_folds("rank", folds, "rank-wf1", run_panel)
     lgbm_runs.run_folds("rank", folds, "rank-wf1", run_panel)
     return run_panel
+
+
+@pytest.fixture
+def served_runs(run_panel: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Two-seed rank, return and interval runs of the panel's last research fold, as candidates."""
+    monkeypatch.setattr(lgbm_runs, "MAX_ROUNDS", 60)
+    last = [fold for fold in research() if fold.research][-1]
+    for scope in ("rank", "return", "interval"):
+        lgbm_runs.run_folds(scope, [last], f"{scope}-live", run_panel, bags=2)
+    return run_panel
