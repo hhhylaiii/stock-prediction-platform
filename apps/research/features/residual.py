@@ -96,8 +96,7 @@ def observable_gaps(
 ) -> pd.DataFrame:
     """Per row, whether each OBSERVABLE or LISTING_WINDOWS gap has a cause known on its day.
 
-    Inputs all on record or an industry without the item explain an OBSERVABLE gap, a fallback
-    left NaN by a report-basis switch does not; a listing younger than the window explains one.
+    Momentum gaps are known while the listing's age is below its LISTING_WINDOWS window.
     """
     industry = canonical_industry(panel["industry"])
     observed = {}
