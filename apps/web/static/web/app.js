@@ -22,7 +22,9 @@
     output_odds_vs_q50: '機率與中位數矛盾',
     monitor_unscored: '到期預測缺 label',
     model_alert: '模型告警',
-    model_promotion: '換模'
+    model_promotion: '換模',
+    research_evening: '研究晚間排程',
+    research_morning: '研究早盤排程'
   };
   const ALERT_REASONS = { below_threshold: '低於門檻', outside_range: '超出範圍', above_baseline: '輸給 baseline', missing_reference: '缺參考值' };
   const ALERT_METRICS = { ic: 'IC', coverage: '覆蓋率', brier: 'Brier' };
@@ -848,15 +850,23 @@
       shown.map(line => '<div class="muted small' + runClass + '">' + esc(line) + '</div>').join('') + '</div></div>';
   }
 
+  function latestPromotions(data) {
+    const all = data.flatMap(entry => (entry.model_checks || []).filter(check => check.check_name === 'model_promotion').reverse().map(check => ({ date: entry.date, check: check })));
+    const runKey = item => (item.check.detail || {}).run_key;
+    const latest = all.filter(item => item.date === all[0].date);
+    return { total: all.length, shown: latest.filter((item, i) => latest.findIndex(other => runKey(other) === runKey(item)) === i) };
+  }
+
   function renderModelChecks(data, meta) {
     const sub = document.getElementById('model-checks-sub'), host = document.getElementById('model-checks');
-    const day = data.find(entry => (entry.model_checks || []).length);
+    const day = data.find(entry => (entry.model_checks || []).some(check => check.check_name !== 'model_promotion'));
     const share = meta.output_alert_share;
     sub.textContent = day ? '最近一次寫入的交易日：' + day.date + '；區間寬度比與機率矛盾的標記超過 ' + Math.round(share * 100) + '% 才算警告。' : '';
-    const promotions = data.flatMap(entry => (entry.model_checks || []).filter(check => check.check_name === 'model_promotion').map(check => ({ date: entry.date, check: check })));
-    const pinned = promotions.length ? modelCheckHtml(promotions[0].check, share, promotions[0].date, promotions[0].date + (promotions.length > 1 ? '，近 ' + data.length + ' 個交易日共 ' + promotions.length + ' 筆' : '')) : '';
-    const rest = day ? day.model_checks.filter(check => check.check_name !== 'model_promotion') : [];
-    host.innerHTML = day ? pinned + rest.map(check => modelCheckHtml(check, share, day.date)).join('') : '<p class="placeholder">還沒有模型輸出檢查。</p>';
+    const promotions = latestPromotions(data);
+    const count = promotions.total > promotions.shown.length ? '，近 ' + data.length + ' 個交易日共 ' + promotions.total + ' 筆' : '';
+    const pinned = promotions.shown.map(item => modelCheckHtml(item.check, share, item.date, item.date + count)).join('');
+    const rest = day ? day.model_checks.filter(check => check.check_name !== 'model_promotion').map(check => modelCheckHtml(check, share, day.date)).join('') : '';
+    host.innerHTML = pinned + rest || '<p class="placeholder">還沒有模型輸出檢查。</p>';
   }
 
   async function renderQuality() {
