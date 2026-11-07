@@ -3,6 +3,7 @@
 from bisect import bisect_right
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from datetime import date, timedelta
 from operator import itemgetter
 from typing import NamedTuple
@@ -21,7 +22,7 @@ class Span(NamedTuple):
     market: str
 
 
-def market_spans(listings: Iterable[tuple[date, Mapping[str, frozenset[str]]]]) -> list[Span]:
+def market_spans(listings: Iterable[tuple[date, Mapping[str, AbstractSet[str]]]]) -> list[Span]:
     """Spans from the markets listing each code each day; a day listed on both keeps the old one.
 
     The exchanges list a stock the day before it first trades there, so the day both list it is
