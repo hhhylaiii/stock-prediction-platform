@@ -1,6 +1,7 @@
 """Ex-dividend, ex-rights, capital reduction and par value change days (plan 2.7)."""
 
 import logging
+import math
 from collections.abc import Iterable, Mapping
 from datetime import date
 from decimal import Decimal
@@ -67,15 +68,16 @@ def action_frame(actions: Iterable[Action]) -> pd.DataFrame:
 
 
 def events_from(frame: pd.DataFrame) -> pd.DataFrame:
-    """One event per stock and day; factors multiply and amounts add up across tables."""
+    """One event per stock and day; factors multiply and amounts add up across tables.
+
+    A day with any table's factor blank keeps its factor blank rather than a partial product.
+    """
     events = []
     for (stock_id, ex_date), rows in frame.groupby(["stock_id", "ex_date"], sort=True):
         if len(rows) > 1:
             logger.warning("%s %s: %s on one day", stock_id, ex_date, ", ".join(rows["table"]))
-        factors = [factor for factor in rows["adj_factor"] if factor is not None]
-        product = None
-        for factor in factors:
-            product = factor if product is None else product * factor
+        factors = list(rows["adj_factor"])
+        product = None if any(factor is None for factor in factors) else math.prod(factors)
         events.append(
             {
                 "ex_date": ex_date,
@@ -141,10 +143,15 @@ def _stored(records: list[dict[str, Any]]) -> dict[tuple[str, date], DividendEve
     return {(row.stock_id, row.ex_date): row for row in rows}
 
 
+def _plain(value: Decimal) -> str:
+    """An amount written out in full, so 70 never reads 7E+1."""
+    return format(value.normalize(), "f")
+
+
 def _differences(row: DividendEvent, record: Mapping[str, Any]) -> dict[str, list[Any]]:
     """Stored against the exchange's figure, for each amount or factor that differs."""
     fields: dict[str, list[Any]] = {
-        name: [str(getattr(row, name).normalize()), str(record[name])]
+        name: [_plain(getattr(row, name)), _plain(record[name])]
         for name in AMOUNTS
         if getattr(row, name).quantize(DIVIDEND_PLACES) != record[name].quantize(DIVIDEND_PLACES)
     }

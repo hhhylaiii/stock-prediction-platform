@@ -58,14 +58,28 @@ def test_events_from_multiplies_the_factors_of_one_day_and_adds_the_amounts() ->
         [
             Action("1101", EX, Decimal("1.5"), Decimal("0"), 0.9, "ex_rights"),
             Action("1101", EX, Decimal("0"), Decimal("0"), 0.5, "capital_reduction"),
+            Action("1101", EX, Decimal("0.25"), Decimal("0.3"), 1.0, "ex_rights_detail"),
             Action("2330", EX, Decimal("0"), Decimal("0"), None, "par_value_change"),
         ]
     )
     events = events_from(frame).set_index("stock_id")
     assert events.loc["1101", "adj_factor"] == pytest.approx(0.45)
-    assert events.loc["1101", "cash_dividend"] == Decimal("1.5")
+    assert events.loc["1101", "cash_dividend"] == Decimal("1.75")
+    assert events.loc["1101", "stock_dividend"] == Decimal("0.3")
     assert events.loc["2330", "adj_factor"] is None
     assert events["announce_date"].isna().all()
+
+
+def test_events_from_leaves_the_factor_blank_when_any_table_of_the_day_has_none() -> None:
+    frame = action_frame(
+        [
+            Action("1101", EX, Decimal("1.5"), Decimal("0"), 0.9, "ex_rights"),
+            Action("1101", EX, Decimal("0"), Decimal("0"), None, "capital_reduction"),
+        ]
+    )
+    events = events_from(frame).set_index("stock_id")
+    assert events.loc["1101", "adj_factor"] is None
+    assert events.loc["1101", "cash_dividend"] == Decimal("1.5")
 
 
 def test_events_from_an_empty_frame_has_the_event_columns() -> None:
@@ -119,11 +133,11 @@ def test_write_events_fills_a_blank_factor_and_logs_but_keeps_different_figures(
         announce_date=date(2026, 10, 20),
     )
     DividendEvent.objects.create(
-        stock_id="2330", ex_date=EX, cash_dividend=Decimal("5"), adj_factor=0.99
+        stock_id="2330", ex_date=EX, cash_dividend=Decimal("70"), adj_factor=0.99
     )
     frame = _events(
         Action("1101", EX, Decimal("1.2"), Decimal("0"), 0.88, "ex_rights"),
-        Action("2330", EX, Decimal("5.5"), Decimal("0"), 0.98, "ex_rights"),
+        Action("2330", EX, Decimal("70.5"), Decimal("0"), 0.98, "ex_rights"),
     )
     assert write_events(frame, "twse", date(2026, 11, 2)) == 1
     kept = {row.stock_id: row for row in DividendEvent.objects.all()}
@@ -132,7 +146,7 @@ def test_write_events_fills_a_blank_factor_and_logs_but_keeps_different_figures(
     factors = dict(DailyPrice.objects.values_list("date", "adj_factor"))
     assert factors == {date(2026, 11, 2): pytest.approx(0.88), EX: 1.0}
     assert kept["2330"].adj_factor == pytest.approx(0.99)
-    assert kept["2330"].cash_dividend == Decimal("5")
+    assert kept["2330"].cash_dividend == Decimal("70")
     log = DataQualityLog.objects.get(check_name=MISMATCH_CHECK)
     assert log.date == date(2026, 11, 2)
     assert log.severity == DataQualityLog.Severity.INFO
@@ -142,7 +156,7 @@ def test_write_events_fills_a_blank_factor_and_logs_but_keeps_different_figures(
             {
                 "stock_id": "2330",
                 "ex_date": "2026-11-03",
-                "fields": {"cash_dividend": ["5", "5.5"], "adj_factor": [0.99, 0.98]},
+                "fields": {"cash_dividend": ["70", "70.5"], "adj_factor": [0.99, 0.98]},
             }
         ],
     }
