@@ -116,11 +116,16 @@ def _failed(checked: list[SlotGates]) -> list[dict[str, Any]]:
 
 
 def _note(
-    day: date, run_key: str, failed: list[dict[str, Any]], reason: str, promoted: bool
+    day: date,
+    scope: str,
+    run_key: str,
+    failed: list[dict[str, Any]],
+    reason: str,
+    promoted: bool,
 ) -> DataQualityLog:
     """The row of one promotion: info when every gate passed, else a warning to send."""
     detail = {
-        "scope": _scope(run_key),
+        "scope": scope,
         "run_key": run_key,
         "forced": bool(failed and reason),
         "reason": (reason or None) if failed else None,
@@ -179,20 +184,21 @@ def promote(
         raise RunError("--force needs a --reason saying why the failed gates are overridden")
     if reason and not force:
         raise RunError("--reason goes with --force only")
-    granted = production_pass(_scope(run_key))
+    scope = _scope(run_key)
+    granted = production_pass(scope)
     _trading(day)
     with transaction.atomic():
         runs = _check_build(run_key, day, granted.frozen_by)
         checked = check_gates(run_key, directory)
         failed = _failed(checked)
         if failed and not force:
-            note = _note(day, run_key, failed, "", promoted=False)
+            note = _note(day, scope, run_key, failed, "", promoted=False)
             result = Promoted(False, checked, failed=failed)
         else:
             retired = _swap(runs, checked, day, failed, reason)
             _refuse_later_rows(run_key, runs, day)
             written = predict(day, directory, replace=True, slots=list(runs)).written
-            note = _note(day, run_key, failed, reason, promoted=True)
+            note = _note(day, scope, run_key, failed, reason, promoted=True)
             result = Promoted(True, checked, retired, written, failed)
     if note.severity == DataQualityLog.Severity.WARNING:
         dispatch([note])
