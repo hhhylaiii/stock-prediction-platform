@@ -21,6 +21,7 @@ from apps.etl.company_revenue import (
     company_frame,
     company_months,
     listed_months,
+    no_longer_public,
     parse_company_revenue,
     without_query_time,
 )
@@ -84,7 +85,15 @@ SUMMARY_PATH = "/mops/web/ajax_"
 VIEWER_PATH = "/server-java/t164sb01"
 COMPANY_REVENUE_PATH = "/mops/api/t05st10_ifrs"
 REVENUE_DATA_TYPE = "2"
-NOTES = ("incomplete", "stock_id", "absent", "stored_absent", "no_revenue", "stored_no_revenue")
+NOTES = (
+    "incomplete",
+    "stock_id",
+    "absent",
+    "not_public",
+    "stored_absent",
+    "no_revenue",
+    "stored_no_revenue",
+)
 SUMMARY_ENCODING = "utf-8"
 EXPORT_NAME = re.compile(r"name='filename' value='[^']*'")
 LISTING_PATH = "/server-java/t57sb01"
@@ -567,25 +576,33 @@ class MopsAdapter(BaseAdapter):
     def _company_revenue(self, stock_id: str, start: date, end: date) -> pd.DataFrame:
         """Listed months FinMind lacks, one answer each; months MOPS holds nothing for are noted.
 
-        The span ends at the last listed month; once the daily scan has taken over that month no
-        longer moves, so a rerun on any day keeps the same log.
+        Only the delisting month may come back as no longer public, else the stock is rejected.
+        The span ends at the last listed month, fixed once the daily scan has taken over.
         """
         today, days_after = timezone.localdate(), int(settings.REVENUE_SCAN_DAYS_AFTER)
         scanned = self.scanned_from(REVENUE_COMPANY)
         months = listed_months(stock_id, start, end, today, days_after, scanned)
         found: dict[str, CompanyFigures] = {}
         absent: list[str] = []
+        not_public: list[str] = []
         for period in company_months(stock_id, start, end, today, days_after, scanned):
             params, payload = self.summaries.company_revenue(stock_id, period)
             self.save_raw(REVENUE_COMPANY, params, payload, without_query_time(payload))
+            if no_longer_public(payload):
+                not_public.append(period)
+                continue
             figures = parse_company_revenue(payload, period)
             if figures is None:
                 absent.append(period)
             else:
                 found[period] = figures
+        if not_public and not_public != months[-1:]:
+            raise SchemaChangedError(f"MOPS t05st10_ifrs {stock_id} not public in {not_public}")
         frame = company_frame(stock_id, found)
         last = _month_end(months[-1]) if months else end
-        frame.attrs.update(start=start, end=last, stock_id=stock_id, absent=absent)
+        frame.attrs.update(
+            start=start, end=last, stock_id=stock_id, absent=absent, not_public=not_public
+        )
         return frame
 
     def scanned_from(self, dataset: str) -> str | None:

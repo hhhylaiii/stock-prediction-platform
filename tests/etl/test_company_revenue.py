@@ -12,8 +12,8 @@ from django.conf import settings
 from responses import matchers
 
 from apps.etl.adapters.mops import COMPANY_REVENUE_PATH, MopsAdapter
-from apps.etl.company_revenue import company_months, parse_company_revenue
-from apps.etl.errors import SchemaChangedError
+from apps.etl.company_revenue import company_months, no_longer_public, parse_company_revenue
+from apps.etl.errors import RejectedStocksError, SchemaChangedError
 from apps.etl.models import DataQualityLog, EtlRun, RawMops
 from apps.etl.mops_history import (
     MISMATCH_CHECKS,
@@ -62,6 +62,15 @@ def test_a_company_mops_finds_no_match_for_that_month_reads_as_none(
     answer: Callable[[str], dict[str, Any]],
 ) -> None:
     assert parse_company_revenue(answer("1258_112_5"), "2023-05") is None
+
+
+def test_a_month_after_the_company_stopped_being_public_is_told_apart(
+    answer: Callable[[str], dict[str, Any]],
+) -> None:
+    assert no_longer_public(answer("1258_112_6"))
+    assert not no_longer_public(answer("1258_112_5"))
+    assert not no_longer_public({"code": 500, "result": None, "message": "查詢過量"})
+    assert not no_longer_public({**answer("1258_112_6"), "code": 406})
 
 
 @pytest.mark.parametrize(
@@ -158,7 +167,7 @@ def adapter(fake_sleep: Callable[[float], None]) -> MopsAdapter:
 
 @pytest.fixture
 def delisted() -> None:
-    listed("5349", date(2010, 1, 4), date(2014, 3, 10))
+    listed("5349", date(2010, 1, 4), date(2014, 4, 10))
     MonthlyRevenue.objects.create(
         stock_id="5349", period="2013-12", revenue=700_000_000, announce_date=date(2014, 1, 13)
     )
@@ -180,6 +189,7 @@ def answers(answer: Callable[[str], dict[str, Any]]) -> dict[str, dict[str, Any]
         "1": january,
         "2": month_of(january, "10302", "600,000"),
         "3": month_of(answer("5349_102_1"), "10303"),
+        "4": answer("1258_112_6"),
     }
 
 
@@ -233,17 +243,30 @@ def test_missing_months_are_added_at_the_conservative_date_from_mops_figures_onl
     assert february.mom == pytest.approx(600_000 / 644_212 - 1)
     assert not MonthlyRevenue.objects.filter(period="2014-03").exists()
     assert MonthlyRevenue.objects.get(period="2013-12").revenue == 700_000_000
-    assert RawMops.objects.filter(dataset=REVENUE_COMPANY).count() == 3
+    assert RawMops.objects.filter(dataset=REVENUE_COMPANY).count() == 4
     logged = DataQualityLog.objects.get(check_name=MISMATCH_CHECKS[REVENUE_COMPANY])
     assert (logged.detail["stock_id"], logged.detail["span"]) == (
         "5349",
-        ["2013-01-01", "2014-03-31"],
+        ["2013-01-01", "2014-04-30"],
     )
     assert logged.detail["added"] == [
         {"stock_id": "5349", "period": "2014-01"},
         {"stock_id": "5349", "period": "2014-02"},
     ]
-    assert logged.detail["absent"] == ["2014-03"]
+    assert (logged.detail["absent"], logged.detail["not_public"]) == (["2014-03"], ["2014-04"])
+
+
+@pytest.mark.django_db
+@responses.activate
+@pytest.mark.usefixtures("delisted")
+def test_a_company_refused_as_not_public_before_its_delisting_month_is_rejected(
+    adapter: MopsAdapter, answer: Callable[[str], dict[str, Any]]
+) -> None:
+    replies = answers(answer)
+    serve({**{m: fixed(replies[m]) for m in ("1", "2", "4")}, "3": fixed(replies["4"])})
+    with pytest.raises(RejectedStocksError, match="not public"):
+        backfill(adapter)
+    assert not MonthlyRevenue.objects.filter(period__gte="2014-01").exists()
 
 
 @pytest.mark.django_db
@@ -259,13 +282,14 @@ def test_a_rerun_asks_only_for_the_months_still_missing_and_keeps_one_raw_per_an
             "1": fixed(replies["1"]),
             "2": fixed(replies["2"]),
             "3": lambda: {**replies["3"], "datetime": next(times)},
+            "4": fixed(replies["4"]),
         }
     )
     backfill(adapter)
     assert backfill(adapter).rows == 0
     asked = [json.loads(call.request.body or "{}")["month"] for call in responses.calls]
-    assert asked == ["1", "2", "3", "3"]
-    assert RawMops.objects.filter(dataset=REVENUE_COMPANY).count() == 3
+    assert asked == ["1", "2", "3", "4", "3", "4"]
+    assert RawMops.objects.filter(dataset=REVENUE_COMPANY).count() == 4
     logged = DataQualityLog.objects.get(check_name=MISMATCH_CHECKS[REVENUE_COMPANY])
     assert [entry["period"] for entry in logged.detail["added"]] == ["2014-01", "2014-02"]
 
