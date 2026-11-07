@@ -54,6 +54,14 @@ def test_a_name_matches_anywhere_in_it_after_the_code_matches(client: Client) ->
     assert [row["stock_id"] for row in found(client, "投控")] == ["3711"]
 
 
+def test_an_exact_name_leads_the_other_name_matches(client: Client) -> None:
+    add_stock("2211", "長榮鋼")
+    add_stock("2603", "長榮")
+    add_stock("2618", "長榮航")
+
+    assert [row["stock_id"] for row in found(client, "長榮")] == ["2603", "2211", "2618"]
+
+
 def test_letters_match_without_regard_to_case(client: Client) -> None:
     add_stock("00631L", "元大台灣50正2")
     add_stock("2412", "中華電")

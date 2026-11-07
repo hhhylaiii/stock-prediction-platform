@@ -80,10 +80,11 @@ def require_stock(stock_id: str) -> StockMaster:
 
 
 def search(text: str) -> list[dict[str, Any]]:
-    """Code-prefix matches by code, so an exact code leads, then name matches by code."""
+    """Code-prefix matches by code, so an exact code leads, then an exact name, then the rest."""
     rank = Case(
         When(stock_id__istartswith=text, then=Value(0)),
-        default=Value(1),
+        When(name__iexact=text, then=Value(1)),
+        default=Value(2),
         output_field=IntegerField(),
     )
     stocks = (
