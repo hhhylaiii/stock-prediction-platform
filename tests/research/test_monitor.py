@@ -356,6 +356,30 @@ def test_consistency_without_flags_is_logged_as_info_and_without_inputs_not_at_a
     assert dispatched == []
 
 
+def test_a_recheck_rewrites_only_the_day_s_output_rows_and_sends_their_alerts(
+    dispatched: list[DataQualityLog],
+) -> None:
+    seed_today(narrow=0, against=6)
+    stale = {"share": 0.5, "flagged": 20, "n_stocks": 40, "stocks": []}
+    DataQualityLog.objects.bulk_create(
+        [
+            DataQualityLog(date=DAY, check_name=WIDTH_CHECK, severity="warning", detail=stale),
+            DataQualityLog(date=DAY, check_name=UNSCORED_CHECK, severity="warning", detail={}),
+            DataQualityLog(
+                date=DAY - timedelta(days=1), check_name=WIDTH_CHECK, severity="warning"
+            ),
+        ]
+    )
+
+    monitor.recheck_outputs(DAY)
+
+    assert logged(WIDTH_CHECK).detail["flagged"] == 0
+    assert logged(ODDS_CHECK).detail["flagged"] == 6
+    assert logged(UNSCORED_CHECK).detail == {}
+    assert DataQualityLog.objects.filter(date=DAY - timedelta(days=1)).count() == 1
+    assert [row.check_name for row in dispatched] == [ODDS_CHECK]
+
+
 def serves(run: ModelRun, horizon: int, day: date = DAY) -> None:
     """One out-of-universe row marking the run as the one serving the slot that day."""
     Prediction.objects.get_or_create(

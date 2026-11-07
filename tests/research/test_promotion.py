@@ -154,6 +154,28 @@ def test_a_promotion_retires_the_serving_runs_and_replaces_their_rows(
 
 
 @pytest.mark.django_db
+def test_a_promotion_rechecks_the_outputs_it_rewrote_and_a_kept_build_does_not(
+    researched: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs = built("rank", "rank-wf1", researched)
+    passed(LAST)
+    serving_copies(runs, monkeypatch)
+    rechecked: list[date] = []
+    monkeypatch.setattr(promotion, "recheck_outputs", rechecked.append)
+    default = gates.MIN_DAYS
+    monkeypatch.setattr(gates, "MIN_DAYS", 500)
+
+    promote("rank-prod", LAST, researched)
+
+    assert rechecked == []
+    monkeypatch.setattr(gates, "MIN_DAYS", default)
+
+    promote("rank-prod", LAST, researched)
+
+    assert rechecked == [LAST]
+
+
+@pytest.mark.django_db
 def test_failed_gates_keep_the_serving_runs_and_alert(
     researched: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

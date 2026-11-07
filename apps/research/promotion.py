@@ -19,7 +19,13 @@ from apps.research.gates import SAMPLE_UNITS, SlotGates, build_runs, check_gates
 from apps.research.holdout import production_pass
 from apps.research.lock import locked
 from apps.research.models import ModelRun, ModelStatus, Prediction
-from apps.research.monitor import DEGRADED_ON, DEGRADED_WINDOW, PROMOTED_ON, RESTORED_ON
+from apps.research.monitor import (
+    DEGRADED_ON,
+    DEGRADED_WINDOW,
+    PROMOTED_ON,
+    RESTORED_ON,
+    recheck_outputs,
+)
 from apps.research.predict import SERVING, Slot, predict, serving_run
 from apps.research.runs import PRODUCTION, SCREENING_MODEL, RunError
 
@@ -202,6 +208,8 @@ def promote(
             result = Promoted(True, checked, retired, written, failed)
     if note.severity == DataQualityLog.Severity.WARNING:
         dispatch([note])
+    if result.promoted:
+        recheck_outputs(day)
     return result
 
 
