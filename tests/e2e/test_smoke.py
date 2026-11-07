@@ -200,7 +200,7 @@ def test_a_bad_stock_hash_keeps_the_nav_on_the_last_good_stock(
     expect(page.locator("[data-nav=stock]")).to_have_attribute("href", "#stock-2330")
 
 
-def test_unknown_stock_shows_the_api_error(
+def test_unknown_stock_says_it_is_not_found(
     page: Page, live_server: LiveServer, seeded: Seed
 ) -> None:
     page.goto(f"{live_server.url}/#stock-0000")

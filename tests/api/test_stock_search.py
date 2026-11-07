@@ -30,6 +30,12 @@ def test_a_code_prefix_lists_the_exact_code_first_then_the_rest_by_code(client: 
     assert [row["stock_id"] for row in found(client, "230")] == ["2303"]
 
 
+def test_a_code_matches_from_its_start_only(client: Client) -> None:
+    add_stock("2330", "台積電")
+
+    assert found(client, "330") == []
+
+
 def test_each_row_carries_the_code_name_market_and_delisting(client: Client) -> None:
     add_stock("6488", "環球晶", market=Market.TPEX)
 
