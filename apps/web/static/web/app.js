@@ -239,15 +239,20 @@
 
   const findStocks = async text => (await api.get('stocks', { q: text.slice(0, SEARCH_MAX) })).data;
 
-  async function loadGoto(token) {
+  const goto = { text: '', ticket: 0 };
+
+  async function loadGoto() {
     const text = state.q.trim();
+    if (text === goto.text) return;
+    goto.text = text;
+    const mine = ++goto.ticket;
     gotoEl.hidden = true;
     gotoEl.innerHTML = '';
     if (!STOCK_CODE.test(text)) return;
     let hits;
-    try { hits = await findStocks(text); } catch (err) { hits = []; }
+    try { hits = await findStocks(text); } catch (err) { hits = []; if (mine === goto.ticket) goto.text = null; }
     const hit = hits.find(row => row.stock_id.toLowerCase() === text.toLowerCase());
-    if (token !== state.todayToken || !hit) return;
+    if (mine !== goto.ticket || !hit) return;
     gotoEl.innerHTML = '<a href="#stock-' + encodeURIComponent(hit.stock_id) + '">查看 ' + esc(hit.stock_id) + ' ' + esc(hit.name) + ' 個股頁</a>';
     gotoEl.hidden = false;
   }
@@ -255,7 +260,7 @@
   async function loadToday() {
     const token = ++state.todayToken;
     controls();
-    loadGoto(token);
+    loadGoto();
     prevBtn.disabled = nextBtn.disabled = true;
     let result;
     try {

@@ -24,6 +24,17 @@ def hits(page: Page) -> Locator:
     return page.locator("#stock-hits a")
 
 
+def asked_stocks(page: Page) -> list[str]:
+    """URLs of the stock lookups the page sends from now on."""
+    asked: list[str] = []
+    page.on("request", lambda request: asked.append(request.url))
+    return asked
+
+
+def looked_up(asked: list[str]) -> list[str]:
+    return [url for url in asked if "/api/stocks?" in url]
+
+
 def test_a_code_typed_on_the_stock_page_goes_to_that_stock(
     page: Page, live_server: LiveServer, listed: Seed
 ) -> None:
@@ -193,13 +204,37 @@ def test_a_partial_code_or_name_on_today_adds_no_link(
     page: Page, live_server: LiveServer, listed: Seed
 ) -> None:
     page.goto(f"{live_server.url}/#today")
-
-    page.locator("#q").fill("648")
     expect(page.locator("#rows .empty")).to_be_visible()
+    asked = asked_stocks(page)
+
+    with page.expect_response(lambda response: response.url.endswith("/api/stocks?q=648")) as got:
+        page.locator("#q").fill("648")
+    got.value.finished()
+    page.evaluate("() => new Promise(done => setTimeout(done, 100))")
+    expect(page.locator("#today-goto")).to_be_hidden()
+
+    with page.expect_response(lambda response: "/api/predictions?" in response.url):
+        page.locator("#q").fill("環球晶")
+    assert len(looked_up(asked)) == 1
     expect(page.locator("#today-goto")).to_be_hidden()
 
     page.locator("#q").fill("6488")
     expect(page.locator("#today-goto a")).to_be_visible()
     page.locator("#q").fill("")
     expect(page.locator("#today-goto")).to_be_hidden()
+
+
+def test_paging_or_switching_today_keeps_the_link_without_looking_it_up_again(
+    page: Page, live_server: LiveServer, listed: Seed
+) -> None:
+    page.goto(f"{live_server.url}/#today")
+    asked = asked_stocks(page)
+    page.locator("#q").fill("6488")
+    expect(page.locator("#today-goto a")).to_be_visible()
+
+    with page.expect_response(lambda response: "horizon=5" in response.url):
+        page.locator("[data-h='5']").click()
+
+    expect(page.locator("#today-goto a")).to_have_text("查看 6488 環球晶 個股頁")
+    assert len(looked_up(asked)) == 1
 
