@@ -83,14 +83,18 @@ docker compose logs -f worker
 
 ### 研究排程
 
-`.env` 設 `RESEARCH_SCHEDULE_ENABLED=true` 才跑；預設關閉，`research.evening`、`research.morning` 觸發了也直接結束（正式 run 上線後再打開）。
+`.env` 設 `RESEARCH_SCHEDULE_ENABLED=true` 才跑；預設關閉，`research.evening`、`research.morning`、`research.retrain` 觸發了也直接結束（正式 run 上線後再打開）。
 
 - 23:00（`RESEARCH_AT_EVENING`，要晚於 22:50 的品質檢查）：當天是交易日、`ready_for_research` 通過時，用一條 Celery chain 依序跑 `build_features --date D`、`build_labels --end D`（最近 60 個交易日）。閘門沒過就 30 分鐘後重試，最多 6 次（同 ETL），用完寫 warning；重試帶著 D，過了午夜仍是 D 的工作。
 - 06:00（`RESEARCH_AT_MORNING`，要晚於 05:30 的 `us_close`）：D 是今天之前最後一個交易日，閘門沒過就不預測、寫 warning。D 的 `us_close` 還沒寫就 5 分鐘後再看，最多 6 次（`RESEARCH_US_CLOSE_COUNTDOWN`、`RESEARCH_US_CLOSE_RETRIES`）；等不到照跑，市場特徵沿用前一個美股收盤，完成紀錄記 warning。chain 依序跑：（D 的 23:00 沒有成功時先補 label）→ `build_features --date D` → `predict` → `monitor`，前一步成功才跑下一步。
 - 每條 chain 跑完寫一列 `data_quality_log`（`research_evening`、`research_morning`，`date` 是 D）：成功是 info，`detail.steps` 依序列出每一步的輸出；有一步失敗是 warning，`detail` 寫哪一步、錯誤與已完成的步驟，後面的步驟不跑，並送告警。D 已經有 info 那列就不重跑，所以週六早上跑過週五後，週日、週一早上不會重複；失敗的 D 會在下一個早上（還是同一個 D 時，例如週末）重跑。
-- 每月重訓：每月前 5 個交易日裡，第一條成功的 06:00 chain（D）跑完後排一個 `research.retrain(D)`，每月一次（看那個月有沒有 `research_retrain` 列）。每個 scope 各自處理：`production.DESIGNS[scope].research_run_key` 是 None（設計還沒凍結）就拒建；`label_daily` 還沒建到 D 就全部拒建；否則 `build_run`，run_key 是 `<scope>-YYYY-MM`。結果寫一列 `research_retrain`（`date` 是 D）：全部建好是 info，有拒建或失敗是 warning 並告警，`detail` 有 `built`、`refused`、`failed`。重訓不取研究鎖，但會佔住唯一的 worker 好幾個小時。
-- 換模：下一個早上起，06:00 的 chain 在 monitor 之後多一步 `promote`，把當月 `research_retrain` 建好、還沒有 `model_promotion` 列的 run_key 一個個 `promote`（`--date` 取預設）。門檻沒過就舊模型續用並告警（`model_promotion` warning），之後由人決定要不要 `--force`；`promote` 報錯時其他 scope 照跑，這一步記 warning，隔天早上再試。設計凍結的那支 PR 要在 `DESIGNS` 填 `research_run_key`（不放環境變數）；填了之後，`build_run` 拒絕其他研究 run。
-- 漏跑告警：beat 觸發的 06:00 若發現前一個交易日沒有任何 `research_morning` 列（開關打開後跑過），就替那天記一列 warning（`reason: missed`）並告警，不自動補跑。
+- 每月重訓：每月前 5 個交易日裡，第一條在 09:00（`RESEARCH_RETRAIN_BEFORE`）前跑完的 06:00 chain（D，info 或缺美股收盤的 warning 都算）之後排一個 `research.retrain(D)`；晚於 09:00 才跑完的留給下一個早上，以免重訓壓到 15:10 的 ETL。每月一次：那個月已有 `research_retrain` 列就不排，排重了也不會重跑。前 5 個交易日都沒排成時，第 6 個交易日起第一條跑完的 chain 寫一列 warning（三個 scope 都是 `no morning chain finished before the cutoff ...`）並告警，當月不再自動重訓，要的話手動 `build_run` 再 `promote`。月中第一次打開開關時也會記這一列。
+  - 開始前看可用記憶體（worker 容器讀 `/proc/meminfo`）：低於 `RESEARCH_RETRAIN_MIN_FREE`（50%）就 30 分鐘後再看，最多 6 次（`RESEARCH_RETRAIN_COUNTDOWN`、`RESEARCH_RETRAIN_RETRIES`），用完記 warning、全部拒建。讀不到就照跑。
+  - 每個 scope 各自處理：`production.DESIGNS[scope].research_run_key` 是 None（設計還沒凍結）就拒建；`label_daily` 還沒建到 D 就全部拒建；那個月已經手動建過（有 `<scope>-` 開頭、`params.production.as_of` 在當月的 run）就拒建（`already built this month`）；否則 `build_run`，run_key 是 `<scope>-YYYY-MM`。
+  - 結果寫一列 `research_retrain`（`date` 是 D）：全部建好是 info，有拒建或失敗是 warning 並告警。`detail` 有 `built`、`refused`、`failed`、`free_percent`（開始時的可用記憶體 %）與 `runs`（每個 scope 的 `elapsed_s` 與當時 worker 的 `peak_rss_mb`）。
+  - 重訓不取研究鎖，但會佔住唯一的 worker 好幾個小時（真資料上的時間還沒量過）。那段時間不要手動重建特徵或 label、不要停 worker（`acks_late`：中斷的重訓要等 12 小時的 `CELERY_VISIBILITY_TIMEOUT` 才重新投遞），並讓 Mac 醒到這列寫完：清晨的 caffeinate 只到 08:00，重訓那天手動再跑一次 `caffeinate -i -t 36000`，或確認能源選項的「顯示器關閉時避免自動進入睡眠」已開。
+- 換模：下一個早上起，06:00 的 chain 在 monitor 之後多一步 `promote`，把當月 `research_retrain` 建好、還沒試過的 run_key 一個個 `promote`，`--date` 取 D 與預設日（slot 已有列的最後一天）較晚的一天，所以第一次上線的 scope 也從 D 起服務。門檻沒過就舊模型續用並告警（`model_promotion` warning），之後由人決定要不要 `--force`。`promote` 報錯時其他 scope 照跑，chain 照常完成，另寫一列 `research_promote` warning（`detail.failed` 是 run_key 對錯誤、`detail.done` 是其他 scope 的結果）並告警；報錯的 run_key 不再自動重試，修好後手動 `promote`。有 `model_promotion` 或 `research_promote` 列的 run_key 都算試過。設計凍結的那支 PR 要在 `DESIGNS` 填 `research_run_key`（不放環境變數）；填了之後，`build_run` 拒絕其他研究 run。
+- 漏跑告警：beat 觸發的 06:00 若發現前一個交易日沒有任何 `research_morning` 列，而再往前 5 個交易日內有過（排程在跑），就替那天記一列 warning（`reason: missed`）並告警，不自動補跑。關掉開關不到 5 個交易日又打開時，第一個早上也會記這一列。
 - 研究鎖：`predict`、`monitor`、`promote`、`restore_run` 與研究排程的每一步共用一把 Postgres advisory lock，同時只會有一個在跑（同一個工作內可重入，例如 `promote` 內部的 `predict`）。排程的步驟拿不到就 10 分鐘後重試，最多 6 次（`RESEARCH_LOCK_COUNTDOWN`、`RESEARCH_LOCK_RETRIES`），用完算失敗。手動指令拿不到會直接報錯，寫出持有者，例如 `the research lock is held by 'research 10-29 06:01 predict 2026-10-28' (pid 123)`（取得時間在前；Postgres 只留標籤前 63 個字元，太長的 run_id 尾巴會被截掉）；等它跑完再重跑。行程中斷時鎖隨連線釋放，不會卡住。
 - 看狀態：
 
@@ -465,7 +469,7 @@ uv run python manage.py fill_industry --source tpex --start 2009-10-01 --end 202
 - `model_alert` 每筆帶 `mode`：`judged` 會把 active 的 run 降級（`reason` 是 `missing_reference` 時只告警）；`grace`（上線日之前補寫的日子，以及換模後 5 個交易日）與 `reset`（`restore_run` 之後、該 slot（目標 × horizon）的窗口還沒累積滿 60 列，之後換上的 run 沿用；h20 約要 80 個交易日、h5 約 65 個）只告警。被判 run 自己的恢復日晚於告警日時（恢復後補跑之前的日子），`reset_rows` 是 0。`mostly_predecessors` 為 true 表示窗口多為前任 run 的列，人工恢復前先看這個。
 - `monitor`、`predict`、`promote`、`restore_run` 共用研究鎖，一次只跑一個（見「研究排程」）；手動指令拿不到鎖會報錯並寫出持有者，等它跑完再重跑。
 - 換模日落在交易日曆最後 4 個交易日內時，寬限結束日算不出來（log 會有 warning）；12 月換模前先照「交易日曆延伸」延伸日曆。
-- 換模：`promote --run-key K`，門檻沒過時舊模型續用並寫 `model_promotion` 告警；要強制換模用 `--force --reason "<原因>"`。門檻判斷後正常結束的 promote（換上或被擋）都寫一列 `model_promotion`；在那之前或之後任何一步報錯（例如非交易日、claim 不符、寫預測失敗），整筆回復、不寫。`detail.scope` 是 rank／return／interval（一次 promote 只處理一個 scope），`detail.promoted` 表示換了沒有：門檻全過是 info（不告警），沒過與強制換模是 warning。同一個 scope 依 id（寫入順序）最新的那一列，就是最後一次換模嘗試的結果；`promoted` 是 false 時服務中的仍是前一個 build，restore 與降級不寫這一列。`data_quality` 門檻的 reason 只寫摘要（幾天有 error、最近一天是哪些檢查），完整清單在 N 的 `params["gates"]` 那一項的 `errors`（新到舊，最多 200 筆）與 `errors_total`。晚幾天才換模時，`--date` 預設會取 slot 已有列的最後一天。
+- 換模：`promote --run-key K`，門檻沒過時舊模型續用並寫 `model_promotion` 告警；要強制換模用 `--force --reason "<原因>"`。門檻判斷後正常結束的 promote（換上或被擋）都寫一列 `model_promotion`；在那之前或之後任何一步報錯（例如非交易日、claim 不符、寫預測失敗），整筆回復、不寫。`detail.scope` 是 rank／return／interval（一次 promote 只處理一個 scope），`detail.promoted` 表示換了沒有：門檻全過是 info（不告警），沒過與強制換模是 warning。同一個 scope 依 id（寫入順序）最新的那一列，就是最後一次換模嘗試的結果；`promoted` 是 false 時服務中的仍是前一個 build，restore 與降級不寫這一列。`data_quality` 門檻的 reason 只寫摘要（幾天有 error、最近一天是哪些檢查），完整清單在 N 的 `params["gates"]` 那一項的 `errors`（新到舊，最多 200 筆）與 `errors_total`。晚幾天才換模時，`--date` 預設會取 slot 已有列的最後一天。換上之後，promote 會重算那天的 `output_width_ratio` 與 `output_odds_vs_q50`（換模重寫了那天的預測），超標照樣告警。
 - 恢復：`restore_run --run-id R --date D --reason "<原因>"`，只接受 degraded 的 run，D 不早於它最後一個預測日、不晚於今天。
 
 ## 告警
