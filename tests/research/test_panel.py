@@ -3,7 +3,7 @@ from datetime import date
 import pandas as pd
 import pytest
 
-from apps.market.models import DailyPrice, StockMaster
+from apps.market.models import DailyPrice, MarketHistory, StockMaster
 from apps.research.panel import (
     PANEL_COLUMNS,
     REUSE_GAP,
@@ -49,6 +49,34 @@ def bars(stock_id: str, when: tuple[date, ...], close: float = 10.0, adj: float 
 
 def panel_of(stock_id: str, frame: pd.DataFrame) -> pd.DataFrame:
     return frame[frame["stock_id"] == stock_id].reset_index(drop=True)
+
+
+def test_each_row_takes_its_market_and_listing_on_the_day_from_the_market_history() -> None:
+    stock("3092")
+    stock("2330")
+    for stock_id in ("3092", "2330"):
+        bars(stock_id, days("2013-01-02", "2013-03-29"))
+    MarketHistory.objects.bulk_create(
+        [
+            MarketHistory(
+                stock_id="3092", start_date=d("2010-01-04"), end_date=d("2013-02-28"), market="TPEx"
+            ),
+            MarketHistory(stock_id="3092", start_date=d("2013-03-01"), market="TWSE"),
+        ]
+    )
+
+    panel = load_price_panel(CALENDAR, d("2013-01-02"), d("2013-03-29"))
+
+    moved = panel_of("3092", panel)
+    switched = moved["date"].ge(d("2013-03-01"))
+    assert moved.loc[~switched, "market"].eq("TPEx").all()
+    assert moved.loc[switched, "market"].eq("TWSE").all()
+    assert switched.any()
+    assert not switched.all()
+    assert moved["listed"].all()
+    unknown = panel_of("2330", panel)
+    assert unknown["market"].eq("TWSE").all()
+    assert not unknown["listed"].any()
 
 
 def test_adjusted_prices_are_floats_times_the_factor() -> None:

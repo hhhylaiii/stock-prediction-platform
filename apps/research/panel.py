@@ -12,6 +12,7 @@ from django.db import connection
 
 from apps.market.calendar import NotATradingDayError, TradingDays
 from apps.market.common_stock import COMMON_STOCK_PATTERN, DEPOSITARY_INDUSTRY, DEPOSITARY_PREFIX
+from apps.research.markets import load_market_history, markets_on
 
 REUSE_GAP = 250
 PRICE_COLUMNS = ("open", "high", "low", "close")
@@ -21,6 +22,7 @@ PANEL_COLUMNS = (
     "segment",
     "age",
     "market",
+    "listed",
     "industry",
     "has_bar",
     *PRICE_COLUMNS,
@@ -213,5 +215,6 @@ def load_price_panel(
         panel[f"adj_{column}"] = panel[column] * panel["adj_factor"]
     panel["segment"] = panel["segment"].astype("int64")
     panel["age"] = panel["age"].astype("int64")
+    panel[["market", "listed"]] = markets_on(panel, load_market_history(stock_ids))
     ordered = panel.sort_values(["stock_id", "date"], ignore_index=True)
     return ordered.loc[:, list(PANEL_COLUMNS)]
