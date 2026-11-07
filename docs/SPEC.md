@@ -96,6 +96,7 @@ Oct 29, 2026 · @Owen Lai
 | 表名 | 主鍵 | 核心欄位 | primary 來源 | PIT 欄位 |
 | --- | --- | --- | --- | --- |
 | `stock_master` | stock\_id | name、market（TWSE/TPEx）、industry、list\_date、delist\_date | 證交所、櫃買中心 | — |
+| `market_history` | id；唯一鍵 stock\_id, start\_date | end\_date（含當天；每檔最後一段留空，代表到目前）、market（TWSE/TPEx）；同一檔的區間連續、不重疊 | 證交所、櫃買中心（歷史：每日外資持股頁；每日：當天報價） | start\_date、end\_date |
 | `trading_calendar` | date | is\_trading\_day、note（補班、颱風假） | 證交所 | — |
 | `daily_price` | stock\_id, date | open、high、low、close、volume（股）、turnover（元）、adj\_factor | 證交所、櫃買中心 | date |
 | `dividend_event` | stock\_id, ex\_date | cash\_dividend、stock\_dividend、adj\_factor、announce\_date（除權息日第一次公開的交易日，22:40 以後公告的算下一個交易日；沒有公告日的留空）；減資、分割、面額變更存成只帶 adj\_factor 的列（現金、股票股利為 0） | FinMind（歷史）；證交所、櫃買中心（每日） | ex\_date、announce\_date |
