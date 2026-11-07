@@ -34,6 +34,7 @@ from apps.research.features.market import (
 )
 from apps.research.features.registry import FEATURES, Group, feature_names
 from apps.research.features.residual import (
+    LISTING_WINDOWS,
     MASKED_MONTHS,
     OBSERVABLE,
     apply_fallbacks,
@@ -133,14 +134,14 @@ def observable_frame(
     current: bool = False,
     masked: Mapping[str, frozenset[str]] = MASKED_MONTHS,
 ) -> pd.DataFrame:
-    """Per listed stock and day in [start, end], which OBSERVABLE gaps have a known cause.
+    """Per stock and day in [start, end], whether each OBSERVABLE or LISTING_WINDOWS gap is known.
 
     With current, also each CHECKED feature as today's database gives it, masked.
     """
     keys = [
         "stock_id",
         "date",
-        *map(observable_name, OBSERVABLE),
+        *map(observable_name, [*OBSERVABLE, *LISTING_WINDOWS]),
         *map(crossed_name, BASIS_SIGNALS),
     ]
     columns = [*keys, *(map(current_name, CHECKED) if current else ())]

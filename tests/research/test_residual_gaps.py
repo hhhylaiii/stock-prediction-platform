@@ -17,6 +17,7 @@ from apps.research.features.residual import (
     ACCEPT_GAP,
     ACCEPT_RATIO,
     FALLBACKS,
+    LISTING_WINDOWS,
     MASKED_MONTHS,
     MAX_MASKED_SHARE,
     OBSERVABLE,
@@ -30,6 +31,7 @@ from apps.research.features.residual import (
     observable_name,
     rules_signature,
 )
+from apps.research.features.technical import MOMENTUM_DAYS
 
 NAN = math.nan
 COLUMNS = ["fund_rev_yoy", "fund_rev_3m_yoy", "fund_rev_mom", "fund_rev_yoy_q"]
@@ -211,6 +213,7 @@ def test_a_gap_is_observable_only_when_every_input_its_value_reads_is_on_record(
             "stock_id": ["2330", "2881", "1101", "1102"],
             "date": [d("2017-03-01")] * 4,
             "industry": ["半導體業", "金融業", "水泥工業", None],
+            "age": MOMENTUM_DAYS,
             **{sourced_name(name): [1.0, 0.0, NAN, 0.0] for name in STATEMENT_INPUTS},
             **{
                 sourced_name(name): [float(k == row) for k in range(4)]
@@ -233,10 +236,12 @@ def test_a_gap_is_observable_only_when_every_input_its_value_reads_is_on_record(
         "stock_id",
         "date",
         *map(observable_name, OBSERVABLE),
+        *map(observable_name, LISTING_WINDOWS),
         *map(crossed_name, BASIS_SIGNALS),
     ]
     assert gaps[crossed_name("fund_cfo_to_ni")].tolist() == [False, True, False, False]
     assert set(OBSERVABLE) <= set(MODEL_COLUMNS)
+    assert not set(OBSERVABLE) & set(LISTING_WINDOWS)
     assert set(OBSERVABLE) == {
         *(name for name in STATEMENT_INPUTS if name != "eps_ttm"),
         "fund_ep",
@@ -255,6 +260,28 @@ def test_a_gap_is_observable_only_when_every_input_its_value_reads_is_on_record(
     assert column("fund_rev_yoy") == [True, True, False, False]
     assert column("fund_rev_3m_yoy") == [True, False, False, True]
     assert column("fund_rev_yoy_q") == [True, False, False, True]
+
+
+def test_momentum_gaps_of_a_listing_younger_than_its_window_have_a_known_cause() -> None:
+    signals = {signal for names in OBSERVABLE.values() for signal in names}
+    ages = [0, MOMENTUM_DAYS - 1, MOMENTUM_DAYS, MOMENTUM_DAYS + 1]
+    panel = pd.DataFrame(
+        {
+            "stock_id": ["6488"] * 4,
+            "date": [d("2017-03-01"), d("2017-03-02"), d("2017-03-03"), d("2017-03-06")],
+            "industry": "半導體業",
+            "age": ages,
+            **{sourced_name(name): 1.0 for name in signals},
+            **{crossed_name(name): 0.0 for name in BASIS_SIGNALS},
+        }
+    )
+
+    gaps = observable_gaps(panel)
+
+    assert LISTING_WINDOWS == {"tech_mom_250_20": MOMENTUM_DAYS, "ind_mom_neutral": MOMENTUM_DAYS}
+    assert set(LISTING_WINDOWS) <= set(MODEL_COLUMNS)
+    for name in LISTING_WINDOWS:
+        assert gaps[observable_name(name)].tolist() == [True, True, False, False]
 
 
 def test_monthly_coverage_counts_an_observable_gap_as_covered() -> None:

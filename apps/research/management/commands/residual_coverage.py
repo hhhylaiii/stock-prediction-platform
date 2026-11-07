@@ -1,6 +1,6 @@
 """Monthly coverage of features for stocks later delisted and the rest, before any month mask.
 
-A gap whose cause is known on its day (residual.OBSERVABLE) counts as covered.
+A gap whose cause is known on its day (residual.OBSERVABLE, LISTING_WINDOWS) counts as covered.
 """
 
 from argparse import ArgumentParser
