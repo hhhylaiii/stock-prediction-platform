@@ -313,6 +313,7 @@ class FinancialStatement(models.Model):
 
 class IndexId(models.TextChoices):
     TAIEX = "TAIEX", "加權指數"
+    TAIEX_TR = "TAIEX_TR", "發行量加權股價報酬指數"
     TPEX = "TPEX", "櫃買指數"
     SOX = "SOX", "費城半導體指數"
     TSM_ADR = "TSM_ADR", "台積電 ADR"
