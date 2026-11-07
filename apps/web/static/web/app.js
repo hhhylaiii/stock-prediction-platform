@@ -834,11 +834,7 @@
     }
   }
 
-  function checkHtml(check) {
-    const sev = SEVERITY[check.severity] || [check.severity, 'idle'];
-    return '<div class="check"><i class="' + (check.severity === 'info' ? '' : sev[1]) + '"></i><div><div>' + esc(CHECKS[check.check_name] || check.check_name) + '（' + esc(sev[0]) + '）</div>' +
-      '<div class="muted small">' + esc(checkSummary(check)) + '</div></div></div>';
-  }
+  const checkHtml = check => lineHtml(check.check_name, check.severity, checkSummary(check));
 
   const metricText = (metric, v) => metric === 'coverage' ? (v * 100).toFixed(1) + '%' : Number(v).toFixed(3);
 
