@@ -1,13 +1,21 @@
 """TPEx OTC-market client and adapter using whole-market daily endpoints (SPEC §3, §8.6)."""
 
+from collections.abc import Mapping
 from datetime import date
-from typing import Any
+from typing import Any, ClassVar
 
 import pandas as pd
 import requests
 from django.conf import settings
 
 from apps.etl.adapters.base import BaseAdapter
+from apps.etl.adapters.corporate_actions import (
+    DIVIDEND_EVENT,
+    EX_RIGHTS,
+    action_frame,
+    events_from,
+    write_events,
+)
 from apps.etl.adapters.dispositions import (
     ATTENTION,
     DISPOSITION,
@@ -17,6 +25,12 @@ from apps.etl.adapters.dispositions import (
     previous_session,
     standard_events,
     upsert_events,
+)
+from apps.etl.adapters.exchange_actions import (
+    TPEX_RESTARTS,
+    restart_actions,
+    tpex_ex_rights,
+    tpex_table,
 )
 from apps.etl.adapters.exchange_tables import (
     check_published,
@@ -62,6 +76,7 @@ INDEX_PATH = "/www/zh-tw/indexInfo/inx"
 ATTENTION_PATH = "/www/zh-tw/bulletin/attention"
 DISPOSAL_PATH = "/www/zh-tw/bulletin/disposal"
 ALTERED_PATH = "/www/zh-tw/afterTrading/chtm"
+EX_RIGHTS_PATH = "/www/zh-tw/bulletin/exDailyQ"
 WHOLE_MARKET = {"type": "all", "code": "", "cate": ""}
 QUOTED_TYPE = "EW"
 DAILY_PRICE = "daily_price"
@@ -160,8 +175,14 @@ def _range_form(first: date, last: date) -> dict[str, str]:
 class TpexAdapter(BaseAdapter):
     source = "tpex"
     raw_model = RawTpex
-    datasets = frozenset({DAILY_PRICE, INDEX_DAILY, *TABLES, *EVENT_DATASETS})
+    datasets = frozenset({DAILY_PRICE, INDEX_DAILY, DIVIDEND_EVENT, *TABLES, *EVENT_DATASETS})
     monthly_datasets = frozenset({INDEX_DAILY, ATTENTION, DISPOSITION})
+    raw_pages: ClassVar[Mapping[str, Mapping[str, str]]] = {
+        DIVIDEND_EVENT: {
+            EX_RIGHTS_PATH: EX_RIGHTS,
+            **{table.path: table.raw for table in TPEX_RESTARTS},
+        }
+    }
 
     def __init__(
         self,
@@ -178,10 +199,16 @@ class TpexAdapter(BaseAdapter):
         self.require_dataset(dataset)
         spans = self.units(dataset, start, end)
         frames = [self._fetch_span(dataset, first, last) for first, last in spans]
-        return pd.concat(frames, ignore_index=True)
+        frame = pd.concat(frames, ignore_index=True)
+        frame.attrs["day"] = start
+        return frame
 
     def normalize(self, dataset: str, raw_df: pd.DataFrame) -> pd.DataFrame:
         self.require_dataset(dataset)
+        if dataset == DIVIDEND_EVENT:
+            events = events_from(raw_df)
+            events.attrs["day"] = raw_df.attrs["day"]
+            return events
         if dataset in EVENT_DATASETS:
             return standard_events(raw_df)
         if dataset == DAILY_PRICE:
@@ -203,6 +230,8 @@ class TpexAdapter(BaseAdapter):
 
     def upsert(self, dataset: str, frame: pd.DataFrame) -> int:
         self.require_dataset(dataset)
+        if dataset == DIVIDEND_EVENT:
+            return write_events(frame, self.source, frame.attrs["day"])
         if dataset in EVENT_DATASETS:
             return upsert_events(frame)
         if dataset == DAILY_PRICE:
@@ -239,7 +268,26 @@ class TpexAdapter(BaseAdapter):
             }
             payload = self._answered(dataset, DISPOSAL_PATH, form)
             return event_frame(disposal_events(payload, (first, last)))
+        if dataset == DIVIDEND_EVENT:
+            return self._fetch_actions(first)
         return self._fetch_day(dataset, first)
+
+    def _fetch_actions(self, day: date) -> pd.DataFrame:
+        """Ex-rights and restart days of this session and the next, published a session ahead.
+
+        exDailyQ is asked one day at a time: a range answer stops at 100 rows.
+        """
+        span = (day, self.next_session(day))
+        actions = []
+        for ex_date in sorted(set(span)):
+            form = {**_range_form(ex_date, ex_date), "response": "json"}
+            payload = self._answered(EX_RIGHTS, EX_RIGHTS_PATH, form)
+            actions.extend(tpex_ex_rights(payload, (ex_date, ex_date)))
+        form = {**_range_form(*span), "response": "json"}
+        for table in TPEX_RESTARTS:
+            payload = self._answered(table.raw, table.path, form)
+            actions.extend(restart_actions(tpex_table(payload, table.label), table, span))
+        return action_frame(actions)
 
     def _fetch_day(self, dataset: str, day: date) -> pd.DataFrame:
         if dataset == FULL_DELIVERY:

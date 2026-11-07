@@ -1,14 +1,24 @@
 """TWSE listed-market adapter using whole-market daily endpoints (SPEC §3, §8.6)."""
 
 import logging
+from collections.abc import Mapping
 from datetime import date
-from typing import Any
+from decimal import Decimal
+from typing import Any, ClassVar
 
 import pandas as pd
 import requests
 from django.conf import settings
 
 from apps.etl.adapters.base import BaseAdapter
+from apps.etl.adapters.corporate_actions import (
+    DIVIDEND_EVENT,
+    EX_RIGHTS,
+    EX_RIGHTS_DETAIL,
+    action_frame,
+    events_from,
+    write_events,
+)
 from apps.etl.adapters.dispositions import (
     ATTENTION,
     DISPOSITION,
@@ -22,6 +32,15 @@ from apps.etl.adapters.dispositions import (
     previous_session,
     standard_events,
     upsert_events,
+)
+from apps.etl.adapters.exchange_actions import (
+    CASH_ONLY,
+    TWSE_RESTARTS,
+    ExRight,
+    restart_actions,
+    twse_action,
+    twse_detail,
+    twse_ex_rights,
 )
 from apps.etl.adapters.exchange_tables import (
     NO_DATA_STAT,
@@ -68,6 +87,8 @@ NOTICE_PATH = "/rwd/zh/announcement/notice"
 PUNISH_PATH = "/rwd/zh/announcement/punish"
 FULL_DELIVERY_PATH = "/exchangeReport/TWT85U"
 BUSY_STAT = "系統忙碌"
+EX_RIGHTS_PATH = "/rwd/zh/exRight/TWT49U"
+EX_RIGHTS_DETAIL_PATH = "/rwd/zh/exRight/TWT49UDetail"
 NOTICE_FIELDS = ("證券代號", "日期")
 PUNISH_FIELDS = ("證券代號", "公布日期", "處置起迄時間")
 CODE_FIELD = "證券代號"
@@ -163,8 +184,17 @@ class TwseClient(SourceClient):
 class TwseAdapter(BaseAdapter):
     source = "twse"
     raw_model = RawTwse
-    datasets = frozenset({DAILY_PRICE, INDEX_DAILY, RETURN_INDEX, *TABLES, *EVENT_DATASETS})
+    datasets = frozenset(
+        {DAILY_PRICE, INDEX_DAILY, RETURN_INDEX, DIVIDEND_EVENT, *TABLES, *EVENT_DATASETS}
+    )
     monthly_datasets = frozenset({INDEX_DAILY, RETURN_INDEX, ATTENTION, DISPOSITION})
+    raw_pages: ClassVar[Mapping[str, Mapping[str, str]]] = {
+        DIVIDEND_EVENT: {
+            EX_RIGHTS_PATH: EX_RIGHTS,
+            EX_RIGHTS_DETAIL_PATH: EX_RIGHTS_DETAIL,
+            **{table.path: table.raw for table in TWSE_RESTARTS},
+        }
+    }
 
     def __init__(
         self,
@@ -181,10 +211,16 @@ class TwseAdapter(BaseAdapter):
         self.require_dataset(dataset)
         spans = self.units(dataset, start, end)
         frames = [self._fetch_span(dataset, first, last) for first, last in spans]
-        return pd.concat(frames, ignore_index=True)
+        frame = pd.concat(frames, ignore_index=True)
+        frame.attrs["day"] = start
+        return frame
 
     def normalize(self, dataset: str, raw_df: pd.DataFrame) -> pd.DataFrame:
         self.require_dataset(dataset)
+        if dataset == DIVIDEND_EVENT:
+            events = events_from(raw_df)
+            events.attrs["day"] = raw_df.attrs["day"]
+            return events
         if dataset in EVENT_DATASETS:
             return standard_events(raw_df)
         if dataset == DAILY_PRICE:
@@ -208,6 +244,8 @@ class TwseAdapter(BaseAdapter):
 
     def upsert(self, dataset: str, frame: pd.DataFrame) -> int:
         self.require_dataset(dataset)
+        if dataset == DIVIDEND_EVENT:
+            return write_events(frame, self.source, frame.attrs["day"])
         if dataset in EVENT_DATASETS:
             return upsert_events(frame)
         if dataset == DAILY_PRICE:
@@ -231,7 +269,37 @@ class TwseAdapter(BaseAdapter):
             return self._fetch_attention(first, last)
         if dataset == DISPOSITION:
             return self._fetch_disposition(first, last)
+        if dataset == DIVIDEND_EVENT:
+            return self._fetch_actions(first)
         return self._fetch_day(dataset, first)
+
+    def _fetch_actions(self, day: date) -> pd.DataFrame:
+        """Ex-rights and restart days of this session and the next, published a session ahead."""
+        span = (day, self.next_session(day))
+        params = {
+            "startDate": f"{span[0]:%Y%m%d}",
+            "endDate": f"{span[1]:%Y%m%d}",
+            "response": "json",
+        }
+        body = self._listed(EX_RIGHTS, EX_RIGHTS_PATH, params)
+        rows = twse_ex_rights(body, span) if body is not None else []
+        actions = [twse_action(row, self._detail(row)) for row in rows]
+        for table in TWSE_RESTARTS:
+            body = self._listed(table.raw, table.path, params)
+            actions.extend(restart_actions(body, table, span) if body is not None else [])
+        return action_frame(actions)
+
+    def _detail(self, row: ExRight) -> tuple[Decimal, Decimal] | None:
+        """Cash per share and bonus shares per thousand from TWT49UDetail, for non-cash rows."""
+        if row.kind == CASH_ONLY:
+            return None
+        params = {"STK_NO": row.stock_id, "T1": f"{row.ex_date:%Y%m%d}", "response": "json"}
+        body = self._listed(EX_RIGHTS_DETAIL, EX_RIGHTS_DETAIL_PATH, params)
+        if body is None:
+            raise SchemaChangedError(
+                f"TWSE TWT49UDetail has nothing for {row.stock_id} {row.ex_date}"
+            )
+        return twse_detail(body, row.stock_id)
 
     def _fetch_day(self, dataset: str, day: date) -> pd.DataFrame:
         if dataset == DAILY_PRICE:
