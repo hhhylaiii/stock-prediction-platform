@@ -10,7 +10,7 @@ from django.db import models
 from apps.market.calendar import TradingDays
 from apps.market.models import DailyValuation, FinancialStatement, FinType, MonthlyRevenue
 from apps.research.features.common import carried, feature_frame, ratio
-from apps.research.features.registry import Group, feature_names
+from apps.research.features.registry import UNUSED, Group, feature_names
 from apps.research.panel import require_sorted
 
 TTM_QUARTERS = 4
@@ -219,7 +219,7 @@ def fundamental_features(panel: pd.DataFrame) -> pd.DataFrame:
         "fund_bp": pd.Series(1.0 / panel["pb"].where(panel["pb"] > 0), index=panel.index),
         "fund_dividend_yield": panel["dividend_yield"],
     }
-    names = feature_names(Group.FUNDAMENTAL)
+    names = [*feature_names(Group.FUNDAMENTAL), *feature_names(Group.FUNDAMENTAL, batch=UNUSED)]
     return feature_frame(panel, {name: columns[name].astype(np.float64) for name in names}, names)
 
 

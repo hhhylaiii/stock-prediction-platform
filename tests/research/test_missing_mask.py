@@ -55,12 +55,12 @@ def first_batch(group: Group) -> set[str]:
 
 def test_the_masked_groups_are_the_sources_delisted_stocks_lack() -> None:
     assert list(MASKED_GROUPS) == ["財報", "月營收", "每日估值", "籌碼", "股本", "產業"]
-    assert len(MASKED) == len(set(MASKED)) == 33
+    assert len(MASKED) == len(set(MASKED)) == 32
     assert set(MASKED) <= set(STOCK_LEVEL)
     assert set(MASKED_GROUPS["籌碼"]) == first_batch(Group.CHIP)
     fundamentals = {*MASKED_GROUPS["財報"], *MASKED_GROUPS["月營收"], *MASKED_GROUPS["每日估值"]}
     assert fundamentals == first_batch(Group.FUNDAMENTAL)
-    assert MASKED_GROUPS["月營收"] == ("fund_rev_yoy", "fund_rev_3m_yoy", "fund_rev_mom")
+    assert MASKED_GROUPS["月營收"] == ("fund_rev_yoy", "fund_rev_3m_yoy")
     assert MASKED_GROUPS["每日估值"] == ("fund_bp", "fund_dividend_yield")
     assert MASKED_GROUPS["股本"] == ("size_log_mcap", "tech_turnover_rate_5d")
     assert MASKED_GROUPS["產業"] == ("ind_sector_ret_20d", "ind_rel_ret_20d")
@@ -414,9 +414,9 @@ def test_the_report_flags_a_clear_rise_of_the_soon_delisted_scores() -> None:
     table = delisting_summary(mask_experiment(SPEC_LAYOUT), scores)
     assert text.startswith("# 缺值遮蔽檢查（rank-mask）\n")
     assert "- masked：rolling 36 個月" in text
-    assert "，遮掉 33 個特徵" in text
-    assert "- 遮掉下市股缺值偏高的 6 類特徵，共 33 個，篩選後實際用到 2 個" in text
-    assert "  - 月營收：fund_rev_yoy、fund_rev_3m_yoy、fund_rev_mom" in text
+    assert "，遮掉 32 個特徵" in text
+    assert "- 遮掉下市股缺值偏高的 6 類特徵，共 32 個，篩選後實際用到 2 個" in text
+    assert "  - 月營收：fund_rev_yoy、fund_rev_3m_yoy" in text
     assert "這是診斷，不是採用判定" in text
     assert "倖存者樣本（SPEC §8 第 3 條），不做" in text
     assert "| base | 0.0600 | 0.0600 | 0.0600 | — |" in text

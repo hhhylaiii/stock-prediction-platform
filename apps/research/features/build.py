@@ -22,7 +22,7 @@ from apps.research.features.market import (
     attach_market_features,
     load_market_features,
 )
-from apps.research.features.registry import feature_names
+from apps.research.features.registry import FEATURES, feature_names
 from apps.research.features.residual import MASKED_MONTHS, apply_fallbacks, mask_months
 from apps.research.features.size_risk import (
     industry_risk_features,
@@ -34,7 +34,8 @@ from apps.research.features.technical import (
     technical_features,
 )
 
-FEATURE_COLUMNS = [*feature_names(batch=1), *feature_names(batch=2)]
+FEATURE_COLUMNS = [spec.name for spec in FEATURES]
+MODEL_COLUMNS = [*feature_names(batch=1), *feature_names(batch=2)]
 FRAME_COLUMNS = ["stock_id", "date", "in_universe", *FEATURE_COLUMNS]
 FIRST_BATCH_COLUMNS = ["stock_id", "date", "in_universe", *feature_names(batch=1)]
 FRAME_TYPES: dict[str, str] = {"in_universe": "bool", **dict.fromkeys(FEATURE_COLUMNS, "float64")}

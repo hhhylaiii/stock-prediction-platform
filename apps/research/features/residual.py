@@ -15,7 +15,7 @@ SHARE_DIGITS = 12
 FALLBACKS: Mapping[str, str] = MappingProxyType(
     {"fund_rev_yoy": "fund_rev_yoy_q", "fund_rev_3m_yoy": "fund_rev_yoy_q"}
 )
-MASKED_MONTHS: Mapping[str, frozenset[str]] = MappingProxyType({"fund_rev_mom": frozenset()})
+MASKED_MONTHS: Mapping[str, frozenset[str]] = MappingProxyType({})
 GROUPS = {True: "delisted", False: "current"}
 RULES_KEY = b"residual_rules"
 

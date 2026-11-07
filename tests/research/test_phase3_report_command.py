@@ -8,7 +8,7 @@ from django.core.management import call_command
 from django.core.management.base import CommandError
 
 from apps.market.models import StockMaster
-from apps.research.features.build import FEATURE_COLUMNS
+from apps.research.features.build import MODEL_COLUMNS
 from apps.research.features.store import existing_partition, export_year
 from apps.research.management.commands import phase3_report
 from apps.research.models import FeatureDaily, ModelRun
@@ -67,7 +67,7 @@ def test_the_report_covers_gaps_fallbacks_and_monthly_ic(stored: Path) -> None:
     assert "### 20 日" in text
     after = pd.read_csv(stored / "appendix" / "missing-after.csv", index_col=0)
     assert list(after.columns) == TABLE_COLUMNS
-    assert list(after.index) == FEATURE_COLUMNS
+    assert list(after.index) == MODEL_COLUMNS
     assert after["rows_delisted"].iloc[0] > 0
     assert after["rows_current"].iloc[0] > after["rows_delisted"].iloc[0]
     before = pd.read_csv(stored / "appendix" / "missing-before.csv", index_col=0)

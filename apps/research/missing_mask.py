@@ -48,7 +48,7 @@ MASKED_GROUPS: dict[str, tuple[str, ...]] = {
         "fund_days_since_fs",
         "fund_rev_yoy_q",
     ),
-    "月營收": ("fund_rev_yoy", "fund_rev_3m_yoy", "fund_rev_mom"),
+    "月營收": ("fund_rev_yoy", "fund_rev_3m_yoy"),
     "每日估值": ("fund_bp", "fund_dividend_yield"),
     "籌碼": (
         "chip_fi_net_1d",
