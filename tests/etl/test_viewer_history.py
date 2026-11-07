@@ -1,3 +1,4 @@
+import contextlib
 from collections.abc import Callable
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -11,9 +12,11 @@ from django.conf import settings
 from responses import matchers
 
 from apps.etl.adapters.mops import MopsAdapter
-from apps.etl.models import DataQualityLog, RawMops
+from apps.etl.errors import RejectedStocksError
+from apps.etl.models import DataQualityLog, EtlRun, RawMops
 from apps.etl.mops_history import MISMATCH_CHECKS, STATEMENT_VIEWER, insert_missing_history
 from apps.etl.ratelimit import RateLimit, RateLimiter
+from apps.etl.statement_overwrite import viewer_frame_from_raw
 from apps.etl.statement_scan import SCAN_COLUMNS
 from apps.etl.viewer_history import KINDS, viewer_frame, viewer_periods
 from apps.market.calendar import TradingDays
@@ -86,12 +89,25 @@ def test_every_missing_quarter_is_its_year_to_date_less_the_one_before(
     assert frame.attrs["absent"] == []
 
 
-def test_a_stored_quarter_is_read_only_to_convert_the_next(pages: dict[str, str]) -> None:
+def test_stored_quarters_are_read_and_compared_too(pages: dict[str, str]) -> None:
     page, asked = served(pages)
-    frame = viewer_frame("6211", YEAR, {"2013-Q1", "2013-Q2"}, page, COLUMNS)
-    assert list(frame["period"]) == ["2013-Q3", "2013-Q4"]
-    assert frame.iloc[0]["revenue"] == 96_580_000
-    assert [period for period, _ in asked] == ["2013-Q2", "2013-Q3", "2013-Q4"]
+    frame = viewer_frame("6211", YEAR, set(YEAR), page, COLUMNS)
+    assert list(frame["period"]) == YEAR
+    assert frame.set_index("period").loc["2013-Q3", "revenue"] == 96_580_000
+    assert [period for period, _ in asked] == YEAR
+    assert frame.attrs["absent"] == []
+
+
+def test_a_stored_quarter_after_one_never_filed_keeps_only_its_balances(
+    pages: dict[str, str],
+) -> None:
+    answers = {(p, "C"): pages[p] for p in ("2013-Q1", "2013-Q3", "2013-Q4")}
+    page, _ = served(pages, answers)
+    frame = viewer_frame("6211", YEAR, set(YEAR), page, [*COLUMNS, "debt_ratio"])
+    q3 = frame.set_index("period").loc["2013-Q3"]
+    assert (q3["revenue"], q3["operating_cf"]) == (None, None)
+    assert q3["debt_ratio"] is not None
+    assert frame.attrs["absent"] == []
 
 
 def test_a_quarter_never_filed_is_noted_and_its_successor_has_no_flows(
@@ -104,6 +120,37 @@ def test_a_quarter_never_filed_is_noted_and_its_successor_has_no_flows(
     q4 = frame.set_index("period").loc["2013-Q4"]
     assert (q4["revenue"], q4["operating_cf"]) == (None, None)
     assert ("2013-Q3", "A") in asked
+
+
+@pytest.mark.django_db
+def test_figures_the_viewer_could_not_work_out_are_not_logged_as_differences(
+    pages: dict[str, str],
+) -> None:
+    answers = {(p, "C"): pages[p] for p in ("2013-Q1", "2013-Q3", "2013-Q4")}
+    page, _ = served(pages, answers)
+    FinancialStatement.objects.create(
+        stock_id="6211",
+        period="2013-Q3",
+        fin_type="consolidated",
+        revenue=96_580_000,
+        debt_ratio=0.99,
+        announce_date=date(2013, 12, 3),
+    )
+    frame = viewer_frame("6211", YEAR, {"2013-Q3"}, page, SCAN_COLUMNS)
+    span = (date(2013, 1, 1), date(2013, 12, 31))
+    insert_missing_history(
+        STATEMENT_VIEWER, frame, lambda period: date(2014, 6, 3), span, {"stock_id": "6211"}
+    )
+    logged = DataQualityLog.objects.get(check_name=MISMATCH_CHECKS[STATEMENT_VIEWER])
+    (row,) = logged.detail["rows"]
+    assert set(row["fields"]) == {"debt_ratio"}
+
+
+def test_a_stored_quarter_the_viewer_lacks_is_listed_apart(pages: dict[str, str]) -> None:
+    answers = {(p, "C"): pages[p] for p in ("2013-Q1", "2013-Q3", "2013-Q4")}
+    page, _ = served(pages, answers)
+    frame = viewer_frame("6211", YEAR, {"2013-Q2"}, page, COLUMNS)
+    assert (frame.attrs["absent"], frame.attrs["stored_absent"]) == ([], ["2013-Q2"])
 
 
 def test_an_individual_filer_is_asked_for_that_kind_first_afterwards(
@@ -287,13 +334,12 @@ def test_a_first_quarter_takes_its_roe_against_the_last_year_end(pages: dict[str
 
     def page(period: str, kind: str) -> str:
         asked.append(period)
-        return served[period] if kind == "C" else NOT_FILED
+        return served.get(period, NOT_FILED) if kind == "C" else NOT_FILED
 
     frame = viewer_frame("6211", ["2013-Q4", "2014-Q1"], {"2013-Q4"}, page, SCAN_COLUMNS)
-    (row,) = frame.to_dict("records")
-    assert row["period"] == "2014-Q1"
+    row = frame.set_index("period").loc["2014-Q1"].to_dict()
     assert row["roe"] == pytest.approx(48_155 / ((700_768 + 704_935) / 2))
-    assert asked == ["2013-Q4", "2014-Q1"]
+    assert asked == ["2013-Q3", "2013-Q3", "2013-Q4", "2014-Q1"]
 
 
 def test_a_quarter_without_revenue_is_noted(pages: dict[str, str]) -> None:
@@ -342,3 +388,47 @@ def test_the_log_names_quarters_whose_revenue_was_not_recognised(
     backfill(adapter)
     logged = DataQualityLog.objects.get(check_name=MISMATCH_CHECKS[STATEMENT_VIEWER])
     assert logged.detail["no_revenue"] == ["2013-Q3"]
+
+
+@pytest.mark.django_db
+@responses.activate
+@pytest.mark.usefixtures("delisted")
+def test_a_stored_quarter_the_viewer_lacks_is_logged_apart(
+    adapter: MopsAdapter, pages: dict[str, str]
+) -> None:
+    FinancialStatement.objects.create(
+        stock_id="6211", period="2013-Q4", fin_type="consolidated", announce_date=date(2014, 3, 31)
+    )
+    serve(pages, unfiled=("2013-Q4",))
+    backfill(adapter)
+    logged = DataQualityLog.objects.get(check_name=MISMATCH_CHECKS[STATEMENT_VIEWER])
+    assert (logged.detail["absent"], logged.detail["stored_absent"]) == ([], ["2013-Q4"])
+
+
+@pytest.mark.django_db
+@responses.activate
+@pytest.mark.usefixtures("delisted")
+def test_a_page_fetched_again_after_a_blank_one_is_the_one_read_back(
+    adapter: MopsAdapter, pages: dict[str, str]
+) -> None:
+    blank = "<html><body><h4>blank</h4></body></html>"
+    for hours, second in ((0, pages["2013-Q2"]), (1, blank), (2, pages["2013-Q2"])):
+        responses.reset()
+        serve({**pages, "2013-Q2": second})
+        with (
+            time_machine.travel(TODAY + timedelta(hours=hours), tick=False),
+            contextlib.suppress(RejectedStocksError),
+        ):
+            adapter.backfill(STATEMENT_VIEWER, ["6211"], *SPAN, guard_streaks=False)
+    rejected = EtlRun.objects.order_by("run_id").values_list("checkpoint__rejected", flat=True)
+    assert [bool(found) for found in rejected] == [False, True, False]
+    assert viewer_frame_from_raw(["6211"]).attrs["unreadable"] == []
+
+
+def test_a_stored_quarter_without_a_known_revenue_account_is_listed(
+    pages: dict[str, str],
+) -> None:
+    renamed = {**pages, "2013-Q2": pages["2013-Q2"].replace("營業收入合計", "收入合計")}
+    page, _ = served(renamed)
+    frame = viewer_frame("6211", YEAR, {"2013-Q2"}, page, COLUMNS)
+    assert (frame.attrs["no_revenue"], frame.attrs["stored_no_revenue"]) == ([], ["2013-Q2"])

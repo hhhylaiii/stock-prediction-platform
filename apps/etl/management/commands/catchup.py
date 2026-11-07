@@ -25,7 +25,7 @@ class Command(BaseCommand):
         parser.add_argument(
             "--dry-run",
             action="store_true",
-            help="list the days each dataset misses, fetch nothing",
+            help="list the days each dataset would fetch, fetch nothing",
         )
 
     def handle(self, *args: Any, **options: Any) -> None:
@@ -54,6 +54,6 @@ class Command(BaseCommand):
 
     def _print_plan(self, planned: dict[str, list[str]]) -> None:
         for key, days in planned.items():
-            self.stdout.write(f"missing {key}: {', '.join(days)}")
+            self.stdout.write(f"to fetch {key}: {', '.join(days)}")
         if not planned:
             self.stdout.write(NOTHING)

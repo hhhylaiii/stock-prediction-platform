@@ -30,6 +30,7 @@ dev = [
     "pytest-cov>=5",
     "pytest-django>=4.9",
     "pytest-playwright>=0.5",
+    "pytest-xdist>=3.6",
     "responses>=0.25",
     "ruff>=0.7",
     "time-machine>=2.15",

@@ -326,6 +326,45 @@ def test_boost_with_bags_probes_once_and_refits_each_seed_for_the_same_rounds(
     assert len({tuple(member.predict(test[FEATURES][:5])) for member in members}) == 3
 
 
+def test_boost_refits_for_at_least_min_rounds_but_keeps_the_probe_best(
+    train_calls: list[dict[str, Any]],
+) -> None:
+    window = fold()
+    rows = panel(window.train_start, window.train_end, signal=0.0)
+
+    plain = boost(rows, window, FEATURES, LABEL, seed=1, feval=DailyRankIC, max_rounds=2000)
+    floor = plain.rounds + 50
+    floored = boost(
+        rows, window, FEATURES, LABEL, seed=1, feval=DailyRankIC, max_rounds=2000, min_rounds=floor
+    )
+    below = boost(rows, window, FEATURES, LABEL, seed=1, feval=DailyRankIC, min_rounds=1)
+
+    refits = [call["_rounds"] for call in train_calls if not call["_probe"]]
+    assert refits == [plain.rounds, floor, plain.rounds]
+    assert isinstance(floored.booster, lgb.Booster)
+    assert floored.rounds == floored.booster.num_trees() == floor
+    assert floored.valid_score == plain.valid_score
+    np.testing.assert_array_equal(floored.valid_scores, plain.valid_scores)
+    assert below.rounds == plain.rounds
+    assert floored.best == below.best == plain.best == plain.rounds
+
+
+def test_boost_with_fixed_rounds_refits_exactly_that_many(
+    train_calls: list[dict[str, Any]],
+) -> None:
+    rows, window = training_window(), fold()
+
+    plain = boost(rows, window, FEATURES, LABEL, seed=1, feval=DailyRankIC, max_rounds=400)
+    fixed = boost(
+        rows, window, FEATURES, LABEL, seed=1, feval=DailyRankIC, max_rounds=400, fixed_rounds=7
+    )
+
+    assert [call["_rounds"] for call in train_calls if not call["_probe"]] == [plain.rounds, 7]
+    assert fixed.rounds == 7
+    assert fixed.best == plain.best == plain.rounds
+    assert fixed.valid_score == plain.valid_score
+
+
 def test_boost_with_one_bag_returns_the_booster_lightgbm_trains_directly() -> None:
     rows, window = training_window(), fold()
 
@@ -340,3 +379,93 @@ def test_boost_with_one_bag_returns_the_booster_lightgbm_trains_directly() -> No
     np.testing.assert_array_equal(
         one.booster.predict(rows[FEATURES]), direct.predict(rows[FEATURES])
     )
+
+
+def day_sizes(part: pd.DataFrame) -> np.ndarray:
+    return part.groupby("date", sort=False).size().to_numpy()
+
+
+@pytest.fixture
+def datasets(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """Rows, weights and groups of every training and validation set lgb.train receives."""
+    seen: list[dict[str, Any]] = []
+    train = lgb.train
+
+    def describe(data: lgb.Dataset) -> dict[str, Any]:
+        return {"rows": data.data, "weight": data.weight, "group": data.group}
+
+    def spy(params: dict[str, Any], train_set: lgb.Dataset, **kwargs: Any) -> lgb.Booster:
+        valid = kwargs.get("valid_sets")
+        seen.append({"fit": describe(train_set), "valid": valid and describe(valid[0])})
+        return train(params, train_set, **kwargs)
+
+    monkeypatch.setattr(gbdt.lgb, "train", spy)
+    return seen
+
+
+def test_sampled_keeps_every_nth_day_counted_back_from_the_last() -> None:
+    frame = panel(date(2011, 3, 1), date(2011, 3, 14), stocks=3)
+    days = sorted(frame["date"].unique())
+
+    kept = gbdt.sampled(frame, 5)
+
+    assert sorted(kept["date"].unique()) == [days[-6], days[-1]]
+    assert len(kept) == 2 * 3
+    assert gbdt.sampled(frame, 1) is frame
+    with pytest.raises(ValueError, match="at least 1"):
+        gbdt.sampled(frame, 0)
+
+
+def test_boost_samples_fit_and_refit_rows_but_stops_on_every_validation_day(
+    datasets: list[dict[str, Any]],
+) -> None:
+    window, rows = fold(), training_window()
+
+    boost(rows, window, FEATURES, LABEL, seed=1, max_rounds=30, layout=gbdt.Layout(every=5))
+
+    probe, final = datasets
+    fit, valid = split_validation(rows, window)
+    kept = gbdt.sampled(rows, 5)
+    assert 0 < len(kept) < len(rows)
+    assert list(probe["fit"]["rows"].index) == list(kept.index.intersection(fit.index))
+    assert list(probe["valid"]["rows"].index) == list(valid.index)
+    assert list(final["fit"]["rows"].index) == list(kept.index)
+    assert final["valid"] is None
+
+
+def test_boost_weights_fit_and_refit_rows_only(datasets: list[dict[str, Any]]) -> None:
+    window = fold()
+    rows = training_window()
+    rows = rows.assign(weight=np.linspace(0.1, 1.0, len(rows)))
+
+    boost(rows, window, FEATURES, LABEL, seed=1, max_rounds=30, layout=gbdt.Layout(weight="weight"))
+
+    probe, final = datasets
+    fit, _ = split_validation(rows, window)
+    np.testing.assert_array_equal(probe["fit"]["weight"], fit["weight"].to_numpy())
+    assert probe["valid"]["weight"] is None
+    np.testing.assert_array_equal(final["fit"]["weight"], rows["weight"].to_numpy())
+
+
+def test_boost_groups_each_set_by_date_for_ranking_objectives(
+    datasets: list[dict[str, Any]],
+) -> None:
+    window, rows = fold(), training_window()
+    rows = rows.assign(level=np.minimum((rows[LABEL] * 10).astype(int), 9))
+
+    boost(
+        rows,
+        window,
+        FEATURES,
+        "level",
+        seed=1,
+        params={"objective": "lambdarank"},
+        max_rounds=30,
+        layout=gbdt.Layout(group=True),
+    )
+
+    probe, final = datasets
+    fit, valid = split_validation(rows, window)
+    np.testing.assert_array_equal(probe["fit"]["group"], day_sizes(fit))
+    np.testing.assert_array_equal(probe["valid"]["group"], day_sizes(valid))
+    np.testing.assert_array_equal(final["fit"]["group"], day_sizes(rows))

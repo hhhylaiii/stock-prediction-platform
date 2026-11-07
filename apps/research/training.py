@@ -31,9 +31,11 @@ def linear_features(kept: Sequence[str]) -> list[str]:
     return [*kept, *(f"{name}_missing" for name in kept)]
 
 
-def load_labels(start: date, end: date, horizon: int) -> pd.DataFrame:
+def load_labels(
+    start: date, end: date, horizon: int, fields: Sequence[str] = LABEL_FIELDS
+) -> pd.DataFrame:
     """label_daily rows of one horizon dated in [start, end], read a month at a time."""
-    columns = [*KEYS, *LABEL_FIELDS]
+    columns = [*KEYS, *fields]
     parts = []
     for low, high in months(start, end):
         rows = LabelDaily.objects.filter(date__range=(low, high), horizon=horizon)

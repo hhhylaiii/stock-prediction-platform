@@ -58,7 +58,8 @@ ANNOUNCE_DATE = {
     "mkt_business_signal",
 }
 PUBLISH_DATE = {"chip_big_holder_pct_chg_1w", "chip_holder_count_chg_1w"}
-US_CLOSE = {"mkt_sox_ret_5d", "mkt_tsm_adr_gap", "mkt_usdtwd_chg_20d"}
+US_CLOSE = {"mkt_sox_ret_5d", "mkt_tsm_adr_gap"}
+LONDON_PRIOR_CLOSE = {"mkt_usdtwd_chg_20d"}
 
 
 def test_first_batch_has_the_63_spec_features_and_quarterly_revenue_growth() -> None:
@@ -98,10 +99,11 @@ def test_availability_follows_the_spec_table() -> None:
         Availability.ANNOUNCE_DATE: ANNOUNCE_DATE,
         Availability.PUBLISH_DATE: PUBLISH_DATE,
         Availability.US_CLOSE: US_CLOSE,
+        Availability.LONDON_PRIOR_CLOSE: LONDON_PRIOR_CLOSE,
     }
     for availability, names in by_time.items():
         assert {spec.name for spec in FEATURES if spec.availability is availability} == names
-    others = ANNOUNCE_DATE | PUBLISH_DATE | US_CLOSE
+    others = ANNOUNCE_DATE | PUBLISH_DATE | US_CLOSE | LONDON_PRIOR_CLOSE
     assert all(
         spec.availability is Availability.TW_CLOSE for spec in FEATURES if spec.name not in others
     )
