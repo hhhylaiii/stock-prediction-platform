@@ -252,6 +252,32 @@ def test_codes_gone_quiet_on_a_skipped_day_are_still_reported_once(
 
 @responses.activate
 @pytest.mark.usefixtures("delistings", "alerts")
+def test_skipped_sessions_with_stored_quotes_get_their_market_spans_first(
+    load_fixture: Callable[[str], Any],
+) -> None:
+    EtlRun.objects.create(
+        source="stock_master",
+        dataset="stock_master_daily",
+        start_date=date(2026, 10, 21),
+        end_date=date(2026, 10, 21),
+        status=EtlRun.Status.SUCCESS,
+    )
+    _master("3293", Market.TWSE)
+    MarketHistory.objects.create(stock_id="3293", start_date=date(2010, 1, 4), market=Market.TWSE)
+    _quotes_for(load_fixture, date(2026, 10, 27))
+    _quotes_for(load_fixture, DAY)
+    call_command("refresh_stock_master", date="2026-10-28")
+    spans = MarketHistory.objects.filter(stock_id="3293").order_by("start_date")
+    assert list(spans.values_list("start_date", "end_date", "market")) == [
+        (date(2010, 1, 4), date(2026, 10, 26), Market.TWSE),
+        (date(2026, 10, 27), None, Market.TPEX),
+    ]
+    row = DataQualityLog.objects.get(date=DAY, check_name="stock_master")
+    assert (row.severity, row.detail["unquoted"]) == ("warning", ["2026-10-22"])
+
+
+@responses.activate
+@pytest.mark.usefixtures("delistings", "alerts")
 def test_a_renamed_twse_name_column_is_a_schema_change(
     load_fixture: Callable[[str], Any],
 ) -> None:

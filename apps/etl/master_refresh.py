@@ -174,7 +174,8 @@ def refresh_stock_master(day: date, calendar: TradingDays) -> EtlRun:
         if changes.rows:
             frame = pd.DataFrame(changes.rows, columns=MASTER_COLUMNS)
             run.rows = upsert(StockMaster, frame, ("stock_id",), UPDATED_FIELDS)
-        record_markets(day, {code: market for code, (_, market) in quoted.items()})
+        unquoted = _record_skipped(after, day, calendar)
+        record_markets(day, _markets(quoted))
         listed = StockMaster.objects.filter(delist_date__isnull=True).values_list(
             "stock_id", flat=True
         )
@@ -186,16 +187,33 @@ def refresh_stock_master(day: date, calendar: TradingDays) -> EtlRun:
             "relisted": changes.relisted,
             "delisted": changes.delisted,
             "vanished": vanished,
+            "unquoted": unquoted,
         }
     dispatch([_log(day, run.checkpoint)])
     return run
 
 
+def _markets(quoted: Mapping[str, Listing]) -> dict[str, str]:
+    return {code: market for code, (_, market) in quoted.items()}
+
+
+def _record_skipped(after: date | None, day: date, calendar: TradingDays) -> list[str]:
+    """Sessions since the last refresh get their market spans from stored quotes, in order."""
+    if after is None or after >= day:
+        return []
+    unquoted: list[str] = []
+    for session in (s for s in calendar.between(after, day) if after < s < day):
+        try:
+            record_markets(session, _markets(quoted_listings(session)))
+        except SourceNotReadyError:
+            unquoted.append(session.isoformat())
+    return unquoted
+
+
 def _log(day: date, found: dict[str, Any]) -> DataQualityLog:
-    """One row per day: warning when codes vanished without a delisting, else info."""
-    severity = (
-        DataQualityLog.Severity.WARNING if found["vanished"] else DataQualityLog.Severity.INFO
-    )
+    """One row per day: warning when codes vanished or skipped sessions had no quotes, else info."""
+    alerting = found["vanished"] or found["unquoted"]
+    severity = DataQualityLog.Severity.WARNING if alerting else DataQualityLog.Severity.INFO
     detail = {key: value for key, value in found.items() if key != "listed"}
     with transaction.atomic():
         DataQualityLog.objects.filter(date=day, check_name=CHECK_NAME).delete()
