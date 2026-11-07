@@ -1,5 +1,6 @@
 """Production runs (SPEC §7): the frozen design fit through the latest labels, and its shadow."""
 
+import json
 import math
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
@@ -23,7 +24,13 @@ from apps.research.lgbm_runs import (
     target_note,
     variant_note,
 )
-from apps.research.models import OUTPUT_HORIZONS, HoldoutScope, ModelObjective, ModelRun
+from apps.research.models import (
+    OUTPUT_HORIZONS,
+    HoldoutScope,
+    ModelObjective,
+    ModelRun,
+    ModelStatus,
+)
 from apps.research.monitor import BRIER_BASELINE, IC_THRESHOLD, WINDOW
 from apps.research.monitor_refs import research_brier, research_ic_thresholds
 from apps.research.rank_model import SPEC_RECIPE, Variant
@@ -158,17 +165,34 @@ def _check_keys(scope: str, run_key: str, research_run_key: str, granted: Produc
     keys = (run_key, shadow_key(run_key))
     for key in (*keys, research_run_key):
         check_run_key(scope, key)
+    if run_key.endswith(f"-{SHADOW}"):
+        raise RunError(f"{run_key} names a shadow; a production run_key does not end in -{SHADOW}")
     if research_run_key in keys:
         raise RunError(f"{research_run_key} is the research run; production needs its own run_key")
     for key in keys:
         authorize_production(key, granted)
         if ModelRun.objects.filter(run_key=key).exclude(params__has_key=PRODUCTION).exists():
             raise RunError(f"{key} holds runs that are not a production build")
+    settled = ModelRun.objects.filter(run_key__in=keys).exclude(status=ModelStatus.CANDIDATE)
+    if (run := settled.first()) is not None:
+        raise RunError(f"{run.run_id} is {run.status}; a new production build takes a new run_key")
     research = ModelRun.objects.filter(run_key=research_run_key)
     if not research.exists():
         raise RunError(f"no model_run of the research run {research_run_key}")
     if research.filter(params__has_key=PRODUCTION).exists():
         raise RunError(f"{research_run_key} is a production build, not a research run")
+
+
+def _check_research(scope: str, research_run_key: str, design: Design, features: list[str]) -> None:
+    """Refuse rank thresholds from a research run fit on another variant or feature list."""
+    if scope != HoldoutScope.RANK:
+        return
+    variant = json.loads(json.dumps(variant_note(design.variant)))
+    fits = ModelRun.objects.filter(run_key=research_run_key, model_type=MODEL)
+    if not fits.exists() or any(
+        run.params.get("variant") != variant or run.feature_list != features for run in fits
+    ):
+        raise RunError(f"{research_run_key} was not fit on the frozen rank design")
 
 
 def _fit(
@@ -210,8 +234,9 @@ def build_run(
     check_design(scope, design.variant, design.target)
     calendar = TradingDays.from_db()
     research = [fold for fold in generate_folds(calendar, as_of, design.config) if fold.research]
-    references = _references(scope, research_run_key, research)
     features = design_features(scope, design.variant, design.target)
+    _check_research(scope, research_run_key, design, features)
+    references = _references(scope, research_run_key, research)
     shared = {
         "as_of": as_of.isoformat(),
         "frozen_by": granted.frozen_by,

@@ -21,7 +21,7 @@ from apps.research import (
 )
 from apps.research.holdout import HoldoutError, claim_holdout, production_pass
 from apps.research.lgbm_runs import MODEL, run_fold, run_id
-from apps.research.models import ModelRun
+from apps.research.models import ModelRun, ModelStatus
 from apps.research.monitor_refs import research_brier, research_ic_thresholds
 from apps.research.prediction_cache import (
     MissingFoldsError,
@@ -39,7 +39,6 @@ from apps.research.production import (
 from apps.research.rank_model import SPEC_RECIPE, Variant
 from apps.research.runs import RunError
 from apps.research.walkforward import (
-    Fold,
     WalkForwardConfig,
     WalkForwardError,
     add_months,
@@ -129,9 +128,13 @@ def frozen(run_panel: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 @pytest.mark.django_db
 def test_a_production_fold_past_the_holdout_start_needs_the_pass(frozen: Path) -> None:
     fold = production_fold(panel_calendar(), weekdays()[-1], CONFIG)
+    cached = fold_path("rank-prod", MODEL, fold.index)
+    cached.parent.mkdir(parents=True)
+    cached.write_bytes(b"kept")
 
-    with pytest.raises(HoldoutError, match="holdout"):
+    with pytest.raises(HoldoutError, match=f"fold {fold.index} is holdout"):
         run_fold("rank", fold, "rank-prod", frozen, KEPT, 0)
+    assert cached.read_bytes() == b"kept"
     assert not ModelRun.objects.filter(run_key="rank-prod").exists()
 
 
@@ -234,7 +237,8 @@ def researched(run_panel: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """
     monkeypatch.setattr(lgbm_runs, "MAX_ROUNDS", 80)
     chosen = [fold for fold in research() if fold.research]
-    lgbm_runs.run_folds("rank", chosen, "rank-wf1", run_panel)
+    masked = Variant(masked=("tech_ret_60d",))
+    lgbm_runs.run_folds("rank", chosen, "rank-wf1", run_panel, variant=masked)
     baseline_runs.run_folds("interval", chosen, "interval-wf1", run_panel)
     monkeypatch.setattr(holdout, "SPEC_HOLDOUT_START", CONFIG.holdout_start)
     monkeypatch.setattr(prediction_cache, "SPEC_HOLDOUT_START", CONFIG.holdout_start)
@@ -242,7 +246,6 @@ def researched(run_panel: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(monitor_refs, "rolling_ic_threshold", lambda ic: rolling(ic, 5))
     monkeypatch.setattr(production, "SHADOW_MONTHS", 4)
     monkeypatch.setattr(production, "BAGS", 2)
-    masked = Variant(masked=("tech_ret_60d",))
     designs = {scope: Design(config=CONFIG) for scope in ("rank", "return", "interval")}
     monkeypatch.setattr(production, "DESIGNS", {**designs, "rank": Design(CONFIG, masked)})
     return run_panel
@@ -385,6 +388,8 @@ def research_row(run_key: str, **params: Any) -> ModelRun:
         ("rank", "rank-wf1", "rank-wf1-shadow", "is the research run"),
         ("rank", "rank-final", "rank-wf1", "rank-final is a holdout run"),
         ("rank", "rank-used", "rank-wf1", "not a production build"),
+        ("rank", "rank-y", "rank-wf1", "rank-y-shadow holds runs that are not a production"),
+        ("rank", "rank-wf1-shadow", "rank-wf2", "names a shadow"),
         ("rank", "rank-prod", "rank-made", "is a production build"),
     ],
 )
@@ -393,6 +398,7 @@ def test_build_run_checks_its_keys_before_fitting(
 ) -> None:
     claim_all()
     research_row("rank-used")
+    research_row("rank-y-shadow")
     research_row("rank-made", production={"role": "model"})
     rows = {run.run_id: run.params for run in ModelRun.objects.all()}
     cached = sorted(path.name for path in fold_path("rank-wf1", MODEL, 0).parent.iterdir())
@@ -405,9 +411,53 @@ def test_build_run_checks_its_keys_before_fitting(
 
 
 @pytest.mark.django_db
+def test_build_run_refuses_a_shadow_key_that_is_a_holdout_run(researched: Path) -> None:
+    claim_holdout("rank", "rank-x-shadow", weekdays()[-1])
+
+    with pytest.raises(HoldoutError, match="rank-x-shadow is a holdout run"):
+        build_run("rank", "rank-x", "rank-wf1", weekdays()[-1], researched)
+
+    assert not ModelRun.objects.filter(run_key__startswith="rank-x").exists()
+
+
+@pytest.mark.django_db
+def test_build_run_leaves_a_settled_build_and_its_shadow_alone(researched: Path) -> None:
+    claim_all()
+    research_row("rank-prod", production={"role": "model"})
+    research_row("rank-prod-shadow", production={"role": "shadow"})
+    ModelRun.objects.filter(run_key="rank-prod").update(status=ModelStatus.ACTIVE)
+    cached = fold_path("rank-prod-shadow", MODEL, 0)
+    cached.parent.mkdir(parents=True)
+    cached.write_bytes(b"evidence")
+    rows = {run.run_id: (run.status, run.params) for run in ModelRun.objects.all()}
+
+    with pytest.raises(RunError, match=r"rank-prod\.lightgbm\.h20\.f000 is active"):
+        build_run("rank", "rank-prod", "rank-wf1", weekdays()[-1], researched)
+
+    assert {run.run_id: (run.status, run.params) for run in ModelRun.objects.all()} == rows
+    assert cached.read_bytes() == b"evidence"
+
+
+@pytest.mark.django_db
+def test_build_run_takes_rank_thresholds_only_from_the_frozen_design(
+    researched: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    claim_all()
+    monkeypatch.setitem(production.DESIGNS, "rank", Design(CONFIG))
+
+    with pytest.raises(RunError, match="rank-wf1 was not fit on the frozen rank design"):
+        build_run("rank", "rank-prod", "rank-wf1", weekdays()[-1], researched)
+
+    assert not ModelRun.objects.filter(run_key__startswith="rank-prod").exists()
+
+
+@pytest.mark.django_db
 def test_build_run_needs_the_research_caches_before_fitting(researched: Path) -> None:
     claim_all()
-    research_row("rank-wf2")
+    fitted = ModelRun.objects.filter(run_key="rank-wf1", model_type=MODEL).first()
+    assert fitted is not None
+    research_row("rank-wf2", variant=fitted.params["variant"])
+    ModelRun.objects.filter(run_key="rank-wf2").update(feature_list=fitted.feature_list)
 
     with pytest.raises(MissingFoldsError):
         build_run("rank", "rank-prod", "rank-wf2", weekdays()[-1], researched)
@@ -459,21 +509,22 @@ def test_a_failed_build_leaves_an_annotated_shadow_and_builds_again(
 ) -> None:
     claim_all()
     last = weekdays()[-1]
-    fold = production.production_fold
+    save = lgbm_runs.save_fold_predictions
 
-    def broken(*args: Any) -> Fold:
-        raise WalkForwardError("model N's window is gone")
+    def broken(*args: Any, **kwargs: Any) -> Path:
+        raise OSError("the cache disk is full")
 
-    monkeypatch.setattr(production, "production_fold", broken)
-    with pytest.raises(WalkForwardError, match="window is gone"):
+    monkeypatch.setattr(lgbm_runs, "save_fold_predictions", broken)
+    with pytest.raises(OSError, match="disk is full"):
         build_run("rank", "rank-prod", "rank-wf1", last, researched)
 
     shadow = list(ModelRun.objects.filter(run_key="rank-prod-shadow"))
     assert shadow
     assert all(production_note(run)["role"] == "shadow" for run in shadow)
+    assert all(run.params["research_run_key"] == "rank-wf1" for run in shadow)
     assert not ModelRun.objects.filter(run_key="rank-prod").exists()
 
-    monkeypatch.setattr(production, "production_fold", fold)
+    monkeypatch.setattr(lgbm_runs, "save_fold_predictions", save)
     built = build_run("rank", "rank-prod", "rank-wf1", last, researched)
 
     assert len(built.model) == 2
