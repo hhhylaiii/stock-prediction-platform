@@ -474,6 +474,24 @@ def test_research_schedule_checks_sit_with_the_model_checks(
     expect(page.locator("#status")).to_contain_text("品質檢查通過（1 項警告）")
 
 
+def test_the_monthly_retrain_stays_pinned_beside_the_day_s_checks(
+    page: Page, live_server: LiveServer, seeded: Seed
+) -> None:
+    log(seeded, "research_retrain", "warning", {}, back=15)
+    clean = {"share": 0.0, "flagged": 0, "n_stocks": 1842, "stocks": []}
+    log(seeded, "output_width_ratio", "info", clean)
+
+    page.goto(f"{live_server.url}/#models")
+
+    checks = page.locator("#model-checks .check")
+    expect(checks).to_have_count(2)
+    expect(checks.nth(0)).to_contain_text("每月重訓")
+    expect(checks.nth(0).locator(".pinned")).to_have_text(seeded.sessions[-15].isoformat())
+    expect(checks.nth(0).locator("i")).to_have_class("warn")
+    expect(checks.nth(1)).to_contain_text("區間寬度比異常")
+    expect(page.locator("#model-checks-sub")).to_contain_text(seeded.last_session.isoformat())
+
+
 def test_model_output_checks_leave_the_data_verdict_alone(
     page: Page, live_server: LiveServer, checked: Seed
 ) -> None:

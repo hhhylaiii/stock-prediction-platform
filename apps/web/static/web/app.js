@@ -24,7 +24,8 @@
     model_alert: '模型告警',
     model_promotion: '換模',
     research_evening: '研究晚間排程',
-    research_morning: '研究早盤排程'
+    research_morning: '研究早盤排程',
+    research_retrain: '每月重訓'
   };
   const ALERT_REASONS = { below_threshold: '低於門檻', outside_range: '超出範圍', above_baseline: '輸給 baseline', missing_reference: '缺參考值' };
   const ALERT_METRICS = { ic: 'IC', coverage: '覆蓋率', brier: 'Brier' };

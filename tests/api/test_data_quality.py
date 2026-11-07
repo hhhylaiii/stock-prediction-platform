@@ -116,6 +116,7 @@ def test_research_schedule_checks_sit_with_the_model_checks(client: Client) -> N
     log_all(OCT_30)
     log(OCT_30, "research_morning", Severity.WARNING, step="predict")
     log(OCT_30, "research_evening", Severity.INFO)
+    log(OCT_30, "research_retrain", Severity.WARNING, refused=["rank"])
 
     day = envelope_of(client.get("/api/data-quality", {"days": 1}))["data"][0]
     quality = envelope_of(client.get("/api/status"))["data"]["quality"]
@@ -123,6 +124,7 @@ def test_research_schedule_checks_sit_with_the_model_checks(client: Client) -> N
     assert [check["check_name"] for check in day["model_checks"]] == [
         "research_evening",
         "research_morning",
+        "research_retrain",
     ]
     assert not [check for check in day["checks"] if check["check_name"].startswith("research_")]
     assert (day["worst"], quality["worst"], quality["warnings"]) == ("info", "info", 0)
