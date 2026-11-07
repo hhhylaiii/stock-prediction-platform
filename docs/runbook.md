@@ -401,7 +401,9 @@ uv run python manage.py fill_industry --source tpex --start 2009-10-01 --end 202
 ## 模型監控與換模
 
 - `monitor --date D` 判的是 D 當天服務中的 run（D 在該 horizon 有 `prediction` 列的 run，依 API 的順序）。slot 當天沒有 `prediction` 列就不判，停機或 predict 失敗的那幾天監控會暫停；補跑時先補 `predict --date D`，再補 `monitor --date D`。
-- `model_alert` 每筆帶 `mode`：`judged` 會把 active 的 run 降級；`grace`（換模後 5 個交易日）與 `reset`（`restore_run` 之後、窗口還沒累積滿 60 列）只告警。`mostly_predecessors` 為 true 表示窗口多為前任 run 的列，人工恢復前先看這個。
+- `model_alert` 每筆帶 `mode`：`judged` 會把 active 的 run 降級（`reason` 是 `missing_reference` 時只告警）；`grace`（上線日之前補寫的日子，以及換模後 5 個交易日）與 `reset`（`restore_run` 之後、該 slot（目標 × horizon）的窗口還沒累積滿 60 列，之後換上的 run 沿用；h20 約要 80 個交易日、h5 約 65 個）只告警。被判 run 自己的恢復日晚於告警日時（恢復後補跑之前的日子），`reset_rows` 是 0。`mostly_predecessors` 為 true 表示窗口多為前任 run 的列，人工恢復前先看這個。
+- `monitor` 不要和 `predict`、`promote` 同時跑：三者都會鎖服務中的 run，重疊時可能互等，Postgres 會中止其中一個（整筆回復，重跑即可）。
+- 換模日落在交易日曆最後 4 個交易日內時，寬限結束日算不出來（log 會有 warning）；12 月換模前先照「交易日曆延伸」延伸日曆。
 - 換模：`promote --run-key K`，門檻沒過時舊模型續用並寫 `model_promotion` 告警；要強制換模用 `--force --reason "<原因>"`。晚幾天才換模時，`--date` 預設會取 slot 已有列的最後一天。
 - 恢復：`restore_run --run-id R --date D --reason "<原因>"`，只接受 degraded 的 run，D 不早於它最後一個預測日、不晚於今天。
 
