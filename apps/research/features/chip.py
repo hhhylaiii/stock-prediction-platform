@@ -86,14 +86,20 @@ def _change(panel: pd.DataFrame, column: str) -> pd.Series:
     return ratio(balance - shifted(balance, panel, CHANGE_DAYS), panel["shares"])
 
 
+def _read_days(panel: pd.DataFrame, column: str) -> pd.Series:
+    """Day of the balance each row reads: its own, or on a halted day the one it carries."""
+    own = pd.to_datetime(panel["date"]).where(panel[column].notna())
+    return own.where(panel["has_bar"].astype(bool), carried(own, panel))
+
+
 def _across_breaks(panel: pd.DataFrame, breaks: Mapping[str, date] = SBL_BASIS_BREAKS) -> pd.Series:
-    """Rows whose change window reads lending balances from both sides of their market's break."""
-    days = pd.to_datetime(panel["date"])
-    earlier = pd.to_datetime(shifted(panel["date"], panel, CHANGE_DAYS))
+    """Rows whose change reads one lending balance from before their market's break, one after."""
+    read = _read_days(panel, "sbl_short_balance")
+    earlier = shifted(read, panel, CHANGE_DAYS)
     crossed = pd.Series(False, index=panel.index)
     for market, day in breaks.items():
         cut = pd.Timestamp(day)
-        crossed = crossed | (panel["market"].eq(market) & days.ge(cut) & earlier.lt(cut))
+        crossed = crossed | (panel["market"].eq(market) & read.ge(cut) & earlier.lt(cut))
     return crossed
 
 

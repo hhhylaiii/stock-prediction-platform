@@ -106,6 +106,22 @@ def test_lending_changes_across_the_twse_basis_break_are_missing(market: str, cu
     assert features["chip_margin_chg_5d"].iloc[5:].notna().all()
 
 
+def test_a_halt_across_the_basis_break_cuts_the_changes_reading_both_sides() -> None:
+    closes = rising(20)
+    panel = listing("2330", closes, start=date(2012, 3, 5), shares=1_000_000.0)
+    halted = panel["date"].isin([date(2012, 3, 19), date(2012, 3, 20)])
+    lent = [NAN if gone else 5_000.0 + 10 * k for k, gone in enumerate(halted)]
+    panel = panel.assign(**chips(20, sbl_short_balance=lent))
+    panel = panel.assign(close=panel["close"].mask(halted), has_bar=~halted)
+
+    features = chip_features(panel)
+
+    days = panel["date"].tolist()
+    missing = features["chip_sbl_short_chg_5d"].isna().tolist()
+    cut = [date(2012, 3, d) for d in (21, 22, 23, 26, 27)]
+    assert [day for k, day in enumerate(days) if missing[k] and k >= 5] == cut
+
+
 def test_balances_carry_over_halted_days() -> None:
     closes = rising(8)
     closes[2] = NAN
