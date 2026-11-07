@@ -5,6 +5,7 @@ from itertools import groupby
 from operator import itemgetter
 from typing import Any, NoReturn
 
+from django.conf import settings
 from django.core.cache import cache
 from django.db.models import Case, Count, IntegerField, Max, Min, QuerySet, Value, When
 from django.db.models.fields.json import KeyTextTransform
@@ -30,7 +31,6 @@ CHECK_FIELDS = ("check_name", "severity", "detail")
 MODEL_CHECK_FIELDS = ("id", *CHECK_FIELDS)
 MODEL_CHECK_PREFIXES = ("output_", "monitor_", "model_", "research_")
 CORRECTIONS_CACHE_KEY = "api:data-quality:corrections"
-CORRECTIONS_CACHE_SECONDS = 60
 
 
 class EtlRunSerializer(serializers.ModelSerializer[EtlRun]):
@@ -152,8 +152,9 @@ def corrections() -> list[dict[str, Any]]:
 
 class CorrectionsView(ReadOnlyView):
     def get(self, request: Request) -> Response:
-        data = cache.get_or_set(CORRECTIONS_CACHE_KEY, corrections, CORRECTIONS_CACHE_SECONDS)
-        meta = {"checks": sorted(CORRECTION_CHECKS), "cache_seconds": CORRECTIONS_CACHE_SECONDS}
+        seconds = settings.API_CORRECTIONS_CACHE_SECONDS
+        data = cache.get_or_set(CORRECTIONS_CACHE_KEY, corrections, seconds)
+        meta = {"checks": sorted(CORRECTION_CHECKS), "cache_seconds": seconds}
         return envelope(data, meta)
 
 

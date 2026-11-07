@@ -46,10 +46,7 @@ class Timing:
 
 
 def timed(client: Client, path: str, repeat: int) -> tuple[str, list[float]]:
-    """Statuses of a warm-up call and the repeats, then the milliseconds of each repeat.
-
-    A cached endpoint drops its own key before each repeat, so a repeat times the query.
-    """
+    """Statuses of a warm-up call and the repeats, then each repeat's ms on a cold cache."""
     first = client.get(path).status_code
     others: Counter[int] = Counter()
     spent = []
