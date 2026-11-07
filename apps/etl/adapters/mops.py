@@ -3,9 +3,9 @@
 import logging
 import re
 from collections.abc import Callable, Iterator, Sequence
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from html.parser import HTMLParser
-from typing import NamedTuple
+from typing import Any, NamedTuple
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -16,6 +16,14 @@ from django.utils import timezone
 
 from apps.etl.adapters.base import BaseAdapter
 from apps.etl.client import SourceClient
+from apps.etl.company_revenue import Figures as CompanyFigures
+from apps.etl.company_revenue import (
+    company_frame,
+    company_months,
+    listed_months,
+    parse_company_revenue,
+    without_query_time,
+)
 from apps.etl.deadlines import (
     revenue_deadline,
     revenue_visible_from,
@@ -28,7 +36,9 @@ from apps.etl.models import EtlRun, RawMops
 from apps.etl.mops_history import (
     HISTORIES,
     IFRS_FROM,
+    REVENUE_COMPANY,
     REVENUE_HISTORY,
+    REVENUES,
     STATEMENT_HISTORY,
     STATEMENT_VIEWER,
     insert_missing_history,
@@ -72,6 +82,8 @@ SCANS = frozenset({STATEMENT_SCAN, REVENUE_SCAN})
 REVENUE_PATH = "/nas/t21"
 SUMMARY_PATH = "/mops/web/ajax_"
 VIEWER_PATH = "/server-java/t164sb01"
+COMPANY_REVENUE_PATH = "/mops/api/t05st10_ifrs"
+REVENUE_DATA_TYPE = "2"
 NOTES = ("incomplete", "stock_id", "absent", "stored_absent", "no_revenue", "stored_no_revenue")
 SUMMARY_ENCODING = "utf-8"
 EXPORT_NAME = re.compile(r"name='filename' value='[^']*'")
@@ -201,6 +213,18 @@ class MopsSummaryClient(SourceClient):
         body = self.get_content(f"{self.base_url}{VIEWER_PATH}", params)
         return params, body.decode(PAGE_ENCODING, errors="replace")
 
+    def company_revenue(self, stock_id: str, period: str) -> tuple[dict[str, str], dict[str, Any]]:
+        """One company's month from the new site's API, which still answers for delisted ones."""
+        body = {
+            "companyId": stock_id,
+            "dataType": REVENUE_DATA_TYPE,
+            "year": str(int(period[:4]) - ROC_OFFSET),
+            "month": str(int(period[5:])),
+            "subsidiaryCompanyId": "",
+        }
+        url = f"{str(settings.MOPS_API_BASE_URL).rstrip('/')}{COMPANY_REVENUE_PATH}"
+        return body, self.post_json_body(url, body)
+
 
 class _Rows(HTMLParser):
     """Text of every table cell, row by row, each row tagged with the table it sits in."""
@@ -320,7 +344,7 @@ def _uploaded_at(text: str, code: str, roc_year: int) -> datetime:
 class MopsAdapter(BaseAdapter):
     source = "mops"
     raw_model = RawMops
-    datasets = frozenset({STATEMENT_FILING, STATEMENT_VIEWER, *SCANS, *HISTORIES})
+    datasets = frozenset({STATEMENT_FILING, STATEMENT_VIEWER, REVENUE_COMPANY, *SCANS, *HISTORIES})
     per_stock = True
 
     def __init__(
@@ -336,7 +360,7 @@ class MopsAdapter(BaseAdapter):
     def run(self, dataset: str, start: date, end: date, stock_id: str | None = None) -> EtlRun:
         """Scans read today's pages; filing dates go stock by stock through backfill."""
         self.require_dataset(dataset)
-        if dataset in (STATEMENT_FILING, STATEMENT_VIEWER):
+        if dataset in (STATEMENT_FILING, STATEMENT_VIEWER, REVENUE_COMPANY):
             raise ValueError(f"{self.source}/{dataset} goes stock by stock; use manage.py backfill")
         today = timezone.localdate()
         if dataset in SCANS and (start, end) != (today, today):
@@ -354,6 +378,10 @@ class MopsAdapter(BaseAdapter):
             pending = unsettled(dataset, start, end, today, days_after)
             if pending:
                 raise ValueError(f"{self.source}/{dataset} leaves {pending} to the daily scan")
+            scanned = self.scanned_from(dataset)
+            dated = [p for p in periods_between(dataset, start, end) if scanned and p >= scanned]
+            if dated:
+                raise ValueError(f"{self.source}/{dataset}: the daily scan dated {dated} itself")
         return super().run(dataset, start, end, stock_id)
 
     def units(self, dataset: str, start: date, end: date) -> Iterator[tuple[date, date]]:
@@ -380,6 +408,8 @@ class MopsAdapter(BaseAdapter):
             raise ValueError(f"{self.source}/{dataset} goes stock by stock; give a stock")
         if dataset == STATEMENT_VIEWER:
             return self._viewer(stock_id, start, end)
+        if dataset == REVENUE_COMPANY:
+            return self._company_revenue(stock_id, start, end)
         filings: list[Filing] = []
         for year in _statement_years(stock_id, start, end):
             params, page = self.client.listing(stock_id, year - ROC_OFFSET)
@@ -397,7 +427,7 @@ class MopsAdapter(BaseAdapter):
             kept = raw_df[raw_df[VALUE_COLUMNS].notna().any(axis=1)].reset_index(drop=True)
             kept.attrs.update(raw_df.attrs)
             return kept
-        if dataset in (REVENUE_SCAN, REVENUE_HISTORY):
+        if dataset in (REVENUE_SCAN, *REVENUES):
             return raw_df
         records = []
         for key, group in raw_df.groupby(["stock_id", "period", "fin_type"], sort=True):
@@ -412,7 +442,7 @@ class MopsAdapter(BaseAdapter):
             session = scan_session(timezone.now(), self.calendar)
             insert = insert_new_statements if dataset == STATEMENT_SCAN else insert_new_revenues
             return insert(frame, timezone.localdate(), session)
-        if dataset in HISTORIES or dataset == STATEMENT_VIEWER:
+        if dataset in HISTORIES or dataset in (STATEMENT_VIEWER, REVENUE_COMPANY):
             span = (frame.attrs["start"], frame.attrs["end"])
             notes = {name: frame.attrs[name] for name in NOTES if name in frame.attrs}
             return insert_missing_history(dataset, frame, self._conservative(dataset), span, notes)
@@ -518,6 +548,8 @@ class MopsAdapter(BaseAdapter):
         listed = StockMaster.objects.filter(stock_id=stock_id).values_list("delist_date", flat=True)
         days_after = int(settings.STATEMENT_SCAN_DAYS_AFTER)
         periods = viewer_periods(start, end, timezone.localdate(), days_after, listed.first())
+        scanned = self.scanned_from(STATEMENT_VIEWER)
+        periods = [period for period in periods if scanned is None or period < scanned]
         kept = FinancialStatement.objects.filter(stock_id=stock_id, period__in=periods)
         stored = set(kept.values_list("period", flat=True))
 
@@ -532,9 +564,53 @@ class MopsAdapter(BaseAdapter):
         frame.attrs.update(start=start, end=last, stock_id=stock_id)
         return frame
 
+    def _company_revenue(self, stock_id: str, start: date, end: date) -> pd.DataFrame:
+        """Listed months FinMind lacks, one answer each; months MOPS holds nothing for are noted.
+
+        The span ends at the last listed month; once the daily scan has taken over that month no
+        longer moves, so a rerun on any day keeps the same log.
+        """
+        today, days_after = timezone.localdate(), int(settings.REVENUE_SCAN_DAYS_AFTER)
+        scanned = self.scanned_from(REVENUE_COMPANY)
+        months = listed_months(stock_id, start, end, today, days_after, scanned)
+        found: dict[str, CompanyFigures] = {}
+        absent: list[str] = []
+        for period in company_months(stock_id, start, end, today, days_after, scanned):
+            params, payload = self.summaries.company_revenue(stock_id, period)
+            self.save_raw(REVENUE_COMPANY, params, payload, without_query_time(payload))
+            figures = parse_company_revenue(payload, period)
+            if figures is None:
+                absent.append(period)
+            else:
+                found[period] = figures
+        frame = company_frame(stock_id, found)
+        last = _month_end(months[-1]) if months else end
+        frame.attrs.update(start=start, end=last, stock_id=stock_id, absent=absent)
+        return frame
+
+    def scanned_from(self, dataset: str) -> str | None:
+        """The first period the daily scan dated itself; a fill there would guess too early a date.
+
+        A late filer the scan never saw within its window has no row, and its deadline-based date
+        would come before its real filing.
+        """
+        revenue = dataset in REVENUES
+        runs = EtlRun.objects.filter(
+            source=self.source,
+            dataset=REVENUE_SCAN if revenue else STATEMENT_SCAN,
+            status=EtlRun.Status.SUCCESS,
+        )
+        first = runs.order_by("start_date").values_list("start_date", flat=True).first()
+        if first is None:
+            return None
+        if revenue:
+            return open_months(first, int(settings.REVENUE_SCAN_DAYS_AFTER))[0]
+        periods = open_periods(first, int(settings.STATEMENT_SCAN_DAYS_AFTER))
+        return periods[0] if periods else None
+
     def _conservative(self, dataset: str) -> Callable[[str], date]:
         """The deadline-based date FinMind rows carry, for periods first seen long after."""
-        if dataset == REVENUE_HISTORY:
+        if dataset in REVENUES:
             return lambda period: revenue_visible_from(period, self.calendar)
         return lambda period: visible_from(statement_deadline(period), self.calendar)
 
@@ -584,3 +660,8 @@ def _reapply_stock(adapter: MopsAdapter, code: str, raw_ids: list[int]) -> int:
     frame = adapter.normalize(STATEMENT_FILING, pd.DataFrame(filings, columns=FILING_COLUMNS))
     with transaction.atomic():
         return adapter.upsert(STATEMENT_FILING, frame)
+
+
+def _month_end(month: str) -> date:
+    following = date(int(month[:4]) + int(month[5:]) // 12, int(month[5:]) % 12 + 1, 1)
+    return following - timedelta(days=1)

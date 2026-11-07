@@ -8,6 +8,7 @@ CORRECTION_CHECKS = frozenset(
         "statement_overwritten",
         "statement_margin_cleared",
         "statement_viewer_mismatch",
+        "revenue_company_mismatch",
         "fi_holding_zero_replaced",
         "market_history_rebuilt",
     }

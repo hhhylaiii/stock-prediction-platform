@@ -17,6 +17,7 @@ def test_every_correction_check_is_registered() -> None:
         statement_overwrite.OVERWRITE_CHECK,
         cumulative_margins.MARGIN_CHECK,
         mops_history.MISMATCH_CHECKS[mops_history.STATEMENT_VIEWER],
+        mops_history.MISMATCH_CHECKS[mops_history.REVENUE_COMPANY],
         zero_holdings.REPLACED_CHECK,
         market_history.REBUILT_CHECK,
     }
