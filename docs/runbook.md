@@ -290,7 +290,7 @@ uv run python manage.py fetch --source mops --dataset revenue_history --start 20
 uv run python manage.py fetch --source mops --dataset statement_history --start 2026-01-01 --end 2026-06-30
 ```
 
-- 一次執行逐個日曆年處理，每年記一次 checkpoint。區間裡沒有 2013 年以後的期別就拒絕；只要有每日掃描還在看的期別（截止日加上 `REVENUE_SCAN_DAYS_AFTER`／`STATEMENT_SCAN_DAYS_AFTER` 還沒過），整次就拒絕。那些期別的公告日由每日掃描用第一次看到的 session 決定。月營收從 2013-01 起，更早的頁面是另一種版面；財報從 2013-Q1（IFRS）起，這一季不抓前一季，所以 ROE 是空的。
+- 一次執行逐個日曆年處理，每年記一次 checkpoint。區間裡沒有 2013 年以後的期別就拒絕；只要有每日掃描還在看的期別（截止日加上 `REVENUE_SCAN_DAYS_AFTER`／`STATEMENT_SCAN_DAYS_AFTER` 還沒過），整次就拒絕；區間裡有每日掃描接手之後的期別（第一次成功的 `revenue_scan`／`statement_scan` 那天還在看的最早一期起），也整次拒絕。那些期別的公告日由每日掃描用第一次看到的 session 決定；過了申報期還沒有列的，是晚交或沒交的公司，用保守公告日補會比實際申報日早。月營收從 2013-01 起，更早的頁面是另一種版面；財報從 2013-Q1（IFRS）起，這一季不抓前一季，所以 ROE 是空的。
 - 只寫入 standard 表還沒有的（股票, 期別）；財報只要同一期已有任何一種報表種類就不寫。公告日用保守值，和 FinMind 回補相同：月營收是 `revenue_visible_from`，財報是保守截止日的下一個交易日。
 - 每個年度區間記一列 info：`revenue_history_mismatch`、`statement_history_mismatch`。`date` 是區間的最後一天，重跑同一個區間（不論哪天跑）會取代那一列，沒有任何內容就不留。`detail` 有：
   - `added`：這個區間補進來的（股票, 期別），重跑會累積保留。standard 表沒有來源欄，這是哪些列由 MOPS 補進來的唯一紀錄。
@@ -306,7 +306,7 @@ uv run python manage.py fetch --source mops --dataset statement_history --start 
 
   `test -s` 讓清單是空的時候不會變成全市場回補。
 
-- 兩種頁面都是 MOPS 現在的狀態：彙總表只列現在還公開發行的公司，2013 年起的月營收頁也是 2026-11-04 重新產生的，所以下市公司不會出現在裡面。下市公司的財報要另外用 XBRL 檢視頁補（K17b）；月營收找不到來源（K19）。
+- 兩種頁面都是 MOPS 現在的狀態：彙總表只列現在還公開發行的公司，2013 年起的月營收頁也是 2026-11-04 重新產生的，所以下市公司不會出現在裡面。下市公司的財報要另外用 XBRL 檢視頁補（K17b），月營收用新站的單一公司查詢補（見「缺的月營收」，2014-01 起）。
 - 每年約 48 個月營收請求、24 到 30 個財報請求，6 秒一次。避開 19:00 和 22:40 前後，那兩個時段 worker 的每日掃描也在打 mopsov。
 
 ### 下市公司的財報（plan K17b）
@@ -318,7 +318,7 @@ uv run python manage.py shell -v 0 -c "from apps.market.models import StockMaste
 test -s delisted.txt && sed 's/^/--stock /' delisted.txt | xargs uv run python manage.py backfill --source mops --dataset statement_viewer --from 2013-01-01
 ```
 
-- 只看 2013-Q1 起、在下市日之前結束、而且每日掃描已經不看的季別。先問合併報表（`REPORT_ID=C`），沒有就問個別報表（`A`）；同一家公司上一季回答的種類下一季先問。
+- 只看 2013-Q1 起、在下市日之前結束、每日掃描已經不看、而且在每日財報掃描接手之前的季別。先問合併報表（`REPORT_ID=C`），沒有就問個別報表（`A`）；同一家公司上一季回答的種類下一季先問。
 - 每一季都抓（Q1 也抓前一年 Q4，ROE 才算得出來）：standard 表沒有的季別寫入，已存的季別拿來對照、不改，之後由 K18 的 `overwrite_statements` 從 raw 改成 MOPS 的數字。單季值和彙總表用同一套換算（`statement_rows`）。前一季沒申報的，MOPS 只換算得出負債比和 Q1 除 ROE 以外的各項；其他欄位換算不出來，不比，也不記進 `statement_viewer_mismatch`。
 - 寫入和 log 跟彙總表歷史相同：保守公告日，`statement_viewer_mismatch` 每檔股票一列（`detail.stock_id`），區間結尾是最後一季的季底，所以重跑到哪一天都是同一列。另外 `absent` 列出 standard 表沒有、兩種報表也都查不到的季別（檢視頁回「檔案不存在」或「查無資料」的查詢表單），例如下市前停止申報的公司，或 2013 年後才上市的公司在上市前沒有申報的季別；已存的季別查不到則列在 `stored_absent`，這些列 K18 沒得改；`no_revenue` 列出認不得營收科目的季別（已存的季別列在 `stored_no_revenue`），毛利率、營益率也會跟著是空的，要人工看那家公司的科目名稱。證券商的「收益合計」不當營收，和 FinMind、彙總表一致（證券、銀行的 revenue 都是空的）。重跑時沒有重讀的季別，上次記下的 `rows`、`types` 照留。
 - 保守公告日對晚申報的公司偏早，下市公司又常晚申報，所以補完一定要接著跑 `statement_filing`，換成實際上傳日（doc.twse 查得到下市公司）：
@@ -340,12 +340,14 @@ test -s delisted.txt && sed 's/^/--stock /' delisted.txt | xargs uv run python m
 uv run python manage.py backfill --source mops --dataset revenue_company --from 2014-01-01
 ```
 
-- 走過 `--from` 之後還在上市的每一檔，只問普通股（不含 91 開頭與存託憑證）上市期間 `monthly_revenue` 沒有的月份：從上市月（沒有 `list_date` 就用第一個收盤日的月份）到下市月，而且每日掃描已經不看。沒有缺的股票不發請求。
-- 從 2014-01 起：新站 2013 年的月份回「查詢成功」但沒有 data（2026-11-08 測 5349、6238、2847 與 2330 的 2013 月份都一樣），所以不問。
-- 每 6 秒一個請求（MOPS 的速率上限），避開交易日 19:00 的每日掃描。2026-11-08 在 twp 試算：走過 2,579 檔，159 檔有缺、4,177 個請求，約 7 小時。
-- 數字取新台幣欄（KY 公司另有功能性貨幣欄），單位千元，乘 1,000 存成元；2026-11-08 抽 5347、4137（KY）、2823（下市）和 FinMind 已有的列比，逐位相同。yoy 用回應裡的去年同期，mom 用前一個月已存或這次查到的營收。只寫 standard 表沒有的列，FinMind 已有的列不改；公告日用保守值 `revenue_visible_from`，和 FinMind 回補相同。
+- 走過 `--from` 之後還在上市的每一檔，只問普通股（不含 91 開頭與存託憑證）上市期間 `monthly_revenue` 沒有的月份：從上市月（沒有 `list_date` 就用第一個收盤日的月份）到下市月，每日掃描已經不看，而且在每日月營收掃描接手之前（第一次成功的 `revenue_scan` 那天還在看的最早月份起都不問；twp 是 2026-11-05，所以到 2026-09）。接手之後過了申報期還沒有列的，是晚交或沒交的公司，用保守公告日補會比實際申報日早。沒有缺的股票不發請求。
+- 從 2014-01 起，`--from` 再早也不問：新站 2013 年的月份回「查詢成功」但沒有 data（2026-11-08 測 5349、6238、2847 與 2330 的 2013 月份都一樣）。
+- 每 6 秒一個請求（MOPS 的速率上限），避開交易日 19:00 和 22:40 前後的每日掃描。2026-11-08 在 twp 試算：走過 2,579 檔，159 檔有缺、4,177 個請求，約 7 小時。
+- 數字取新台幣欄（KY 公司另有功能性貨幣欄），單位千元，乘 1,000 存成元；2026-11-08 抽 5347、4137（KY）、2823（下市）和 FinMind 已有的列比，逐位相同。yoy 用回應裡的去年同期；回應沒有上月，mom 只在前一個月也是這次查到的時候算，不拿 FinMind 的列當分母，否則留空（研究層的特徵只讀 `revenue`）。只寫 standard 表沒有的列，FinMind 已有的列不改；公告日用保守值 `revenue_visible_from`，和 FinMind 回補相同。
 - raw 存在 `raw_mops`，dataset `revenue_company`；回應裡的查詢時間（`datetime`）不算，同樣的回答只存一份。
-- log 和下市公司的財報相同：`revenue_company_mismatch` 每檔一列（`detail.stock_id`），區間結尾是最後一個上市月的月底，所以重跑到哪一天都是同一列。`added` 是補進來的月份；`absent` 是查了但沒有數字的月份，例如下市前停止申報。
+- log 和下市公司的財報相同：`revenue_company_mismatch` 每檔一列（`detail.stock_id`），區間結尾是最後一個可以問的月份的月底；下市股，以及每日掃描接手之後的上市股，這個月份不再移動，所以重跑到哪一天都是同一列。`added` 是補進來的月份；`absent` 是查了但沒有數字的月份，例如下市前停止申報。只問沒有列的月份，所以不會有 `rows`、`types`。
+- 一個月的回答讀不懂（不是問的月份、沒有新台幣欄、本月沒有數字，或 code 不是 200），整檔不寫、記成 rejected，和檢視頁相同；raw 已存，但沒有從 raw 重套的指令，修好之後用 `--retry-rejected` 重問。
+- 連續被拒的守門（`ETL_MAX_CONSECUTIVE_REJECTIONS`）在這裡幾乎不會觸發：沒有缺的股票不發請求、算成功，會把連續次數歸零。來源擋住時，HTTP 429 或 5xx 會讓整次停下，用 `--resume` 接著跑；回 200 但 code 不是 200 的，只會一檔一檔變成 rejected，跑完是 failed，用 `--retry-rejected` 重問。
 - 中斷後用 `--resume` 從停下的股票之後接著跑；整個重跑會再問一次還缺的月份，包含上次 `absent` 的。
 
 ## FinMind 財報改用 MOPS 原始數字（plan K18）
