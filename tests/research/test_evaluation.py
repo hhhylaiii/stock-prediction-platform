@@ -9,12 +9,13 @@ import pytest
 from apps.market.calendar import TradingDays
 from apps.research import evaluation
 from apps.research.evaluation import (
+    ShuffleCheck,
     band_width,
     consistency_report,
     coverage_report,
     decile_report,
     importance_drift,
-    leaks,
+    leak_flags,
     rank_report,
 )
 from apps.research.metrics.deciles import top_liquidity, tranche_summary
@@ -213,27 +214,83 @@ def test_liquidity_terciles_and_neutralized_ic() -> None:
     assert flat.neutralized.n_days == 0
 
 
-@pytest.mark.parametrize(
-    ("horizon", "mean", "flagged"),
-    [
-        (20, 0.151, True),
-        (20, 0.15, False),
-        (5, 0.101, True),
-        (5, 0.1, False),
-        (20, math.nan, False),
-    ],
-)
-def test_leak_limits_by_horizon(horizon: int, mean: float, flagged: bool) -> None:
-    assert leaks(horizon, mean) is flagged
+def test_leak_flags_need_the_model_ahead_of_the_baseline_by_the_gap() -> None:
+    paired = pd.Series([0.20, 0.15, 0.10, math.nan, 0.30, -0.01, 0.0999])
+    compared = pd.Series([0.14, 0.10, 0.06, 0.10, math.nan, -0.07, 0.05])
+
+    flags = leak_flags(paired, compared)
+
+    assert flags.tolist()[:3] == [True, True, False]
+    assert pd.isna(flags[3])
+    assert pd.isna(flags[4])
+    assert flags[5]
+    assert not flags[6]
+    assert str(flags.dtype) == "boolean"
 
 
-def test_a_score_equal_to_its_label_is_flagged_as_a_leak() -> None:
+def test_a_research_fold_far_ahead_of_its_baseline_is_flagged_as_a_leak() -> None:
+    frame = panel()
+    ahead = research()[1]
+    chosen = inside(frame, [ahead])
+    frame["ridge"] = frame["score"].where(~chosen, frame["ridge"])
+
+    report = rank_report(frame, "score", 20, folds(), baseline="ridge")
+
+    assert report.leak_folds == (ahead.index,)
+    assert report.unjudged_folds == ()
+    assert report.by_fold.loc[ahead.index, "leak"]
+
+
+def test_leak_is_judged_on_rows_both_score() -> None:
+    frame = panel()
+    unshared = frame["stock_id"].isin(STOCKS[:40])
+    frame["ridge"] = frame["score"].mask(unshared)
+    frame.loc[unshared, "score"] = frame.loc[unshared, "fwd_ret_open"]
+
+    report = rank_report(frame, "score", 20, folds(), baseline="ridge")
+
+    assert report.leak_folds == ()
+    assert report.unjudged_folds == ()
+
+
+def test_an_equal_baseline_clears_every_research_fold() -> None:
+    frame = panel()
+    tuning = next(fold for fold in folds() if fold.tuning)
+    frame["ridge"] = frame["score"]
+    noise = np.random.default_rng(4).normal(size=len(frame))
+    early = inside(frame, [tuning])
+    frame.loc[early, "ridge"] = noise[early.to_numpy()]
+
+    report = rank_report(frame, "score", 5, folds(), baseline="ridge")
+
+    assert report.leak_folds == ()
+    assert report.unjudged_folds == ()
+    assert report.by_fold.loc[tuning.index, "leak"]
+
+
+def test_research_folds_without_a_baseline_are_unjudged_not_cleared() -> None:
     frame = panel()
     copied = frame.assign(score=frame["fwd_rank_pct"])
+    missing = research()[2]
+    copied.loc[inside(copied, [missing]), "ridge"] = np.nan
 
-    assert rank_report(copied, "score", 20, folds()).leak
-    noise = frame.assign(score=np.random.default_rng(9).normal(size=len(frame)))
-    assert not rank_report(noise, "score", 5, folds()).leak
+    alone = rank_report(copied, "score", 20, folds())
+    compared = rank_report(copied, "score", 20, folds(), baseline="ridge")
+
+    assert alone.leak_folds == ()
+    assert alone.unjudged_folds == tuple(fold.index for fold in research())
+    assert compared.unjudged_folds == (missing.index,)
+    assert compared.leak_folds == tuple(
+        fold.index for fold in research() if fold.index != missing.index
+    )
+
+
+@pytest.mark.parametrize(
+    ("ic", "flagged"),
+    [(0.0199, False), (-0.0199, False), (0.02, True), (-0.031, True), (math.nan, None)],
+)
+def test_a_shuffle_check_flags_an_absolute_ic_at_the_limit(ic: float, flagged: bool | None) -> None:
+    assert ShuffleCheck(fold=3, horizon=20, ic=ic, limit=0.02).leak is flagged
 
 
 def test_importance_drift_ranks_top_features_and_counts_overlap() -> None:

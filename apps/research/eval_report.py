@@ -12,9 +12,10 @@ from django.db import transaction
 from apps.etl.upsert import upsert
 from apps.research.evaluation import (
     ALERT_SHARE,
-    LEAK_LIMITS,
+    LEAK_GAP,
     ImportanceDrift,
     RankReport,
+    ShuffleCheck,
 )
 from apps.research.models import BacktestMetric, MetricGrain, ModelObjective
 
@@ -77,21 +78,29 @@ def _compared(report: RankReport) -> bool:
     return "baseline_mean" in report.by_fold
 
 
+def _leak_cell(row: pd.Series) -> str:
+    if row["tuning"] or row["holdout"]:
+        return "—"
+    leak = row["leak"]
+    return "未判定" if pd.isna(leak) else "是" if leak else "否"
+
+
 def _verdict(row: pd.Series) -> str:
-    """Comparison cells of a fold: model and baseline IC on shared rows, and who won."""
+    """Comparison cells of a fold: model and baseline IC on shared rows, who won, and the leak."""
     beats = row["beats"]
     won = "—" if pd.isna(beats) else "是" if beats else "否"
-    return f" {_cell(row['paired_mean'], 4)} | {_cell(row['baseline_mean'], 4)} | {won} |"
+    paired, baseline = _cell(row["paired_mean"], 4), _cell(row["baseline_mean"], 4)
+    return f" {paired} | {baseline} | {won} | {_leak_cell(row)} |"
 
 
 def _fold_table(report: RankReport) -> list[str]:
     compared = _compared(report)
-    extra = " 共同列 IC | baseline IC | 贏 baseline |" if compared else ""
+    extra = " 共同列 IC | baseline IC | 贏 baseline | 洩漏 |" if compared else ""
     lines = [
         "### 每摺",
         "",
         f"| 摺 | 類別 | 測試期 {SUMMARY_HEADER}{extra}",
-        SUMMARY_RULE + " --- | --- |" + (" --- | --- | --- |" if compared else ""),
+        SUMMARY_RULE + " --- | --- |" + (" --- | --- | --- | --- |" if compared else ""),
     ]
     for fold, row in report.by_fold.iterrows():
         period = f"{row['test_start']}–{row['eval_end']}"
@@ -100,7 +109,45 @@ def _fold_table(report: RankReport) -> list[str]:
     return [*lines, ""]
 
 
-def _rank_section(report: RankReport, deciles: pd.DataFrame | None) -> list[str]:
+def _folds(indices: Sequence[int]) -> str:
+    return "、".join(str(index) for index in indices)
+
+
+def _shuffle_line(shuffled: ShuffleCheck | None) -> str:
+    if shuffled is None:
+        return "- 打亂 label：這次沒跑，未判定"
+    name = f"打亂 label（{shuffled.horizon} 日 Ridge）"
+    if shuffled.leak is None:
+        return f"- {name}：第 {shuffled.fold} 摺沒有 OOS 日，未判定"
+    measured = f"第 {shuffled.fold} 摺的 OOS rank IC {shuffled.ic:.4f}"
+    if shuffled.leak:
+        return f"- 🔴 洩漏警訊：{name}後{measured}，絕對值達 {shuffled.limit}，先當成洩漏追查"
+    return f"- {name}：{measured}，絕對值低於 {shuffled.limit}"
+
+
+def _leak_lines(report: RankReport, shuffled: ShuffleCheck | None) -> list[str]:
+    """SPEC §7 leak warnings: folds far ahead of their baseline, unjudged folds, the shuffle."""
+    lines = []
+    if report.leak_folds:
+        lines.append(
+            f"- 🔴 洩漏警訊：第 {_folds(report.leak_folds)} 摺比同摺 baseline 的 IC "
+            f"高 {LEAK_GAP} 以上，先當成洩漏追查"
+        )
+    unjudged = report.unjudged_folds
+    if not any(fold.research for fold in report.folds):
+        lines.append("- 洩漏未判定：沒有研究摺")
+    elif unjudged and not _compared(report):
+        lines.append(f"- 洩漏未判定：沒有 baseline，{len(unjudged)} 個研究摺都不能比")
+    elif unjudged:
+        lines.append(f"- 洩漏未判定：第 {_folds(unjudged)} 摺沒有同摺 baseline 的 IC 可比")
+    elif not report.leak_folds:
+        lines.append(f"- 洩漏判定：每個研究摺比同摺 baseline 的 IC 都高不到 {LEAK_GAP}")
+    return [*lines, _shuffle_line(shuffled)]
+
+
+def _rank_section(
+    report: RankReport, deciles: pd.DataFrame | None, shuffled: ShuffleCheck | None
+) -> list[str]:
     horizon, total, neutral = report.horizon, report.total, report.neutralized
     lines = [
         f"## 排名 {horizon} 日",
@@ -117,11 +164,7 @@ def _rank_section(report: RankReport, deciles: pd.DataFrame | None) -> list[str]
             f"- 贏 baseline 的研究摺比例：{_share(report.beat_share)}"
             f"（{report.compared_folds}／{research} 摺可比）"
         )
-    if report.leak:
-        lines.append(
-            f"- 🔴 洩漏警訊：{horizon} 日研究期 IC 均值 {total.mean:.4f} 高於 "
-            f"{LEAK_LIMITS[horizon]}，先當成洩漏追查"
-        )
+    lines += _leak_lines(report, shuffled)
     lines += ["", *_fold_table(report), "### 每年", "", f"| 年 {SUMMARY_HEADER}", SUMMARY_RULE]
     lines += [_summary(year, row) for year, row in report.by_year.iterrows()]
     lines += ["", "### 成交金額三分位", "", f"| 組 {SUMMARY_HEADER}", SUMMARY_RULE]
@@ -203,11 +246,12 @@ def render_report(
     importance: ImportanceDrift | None = None,
     coverage: pd.DataFrame | None = None,
     consistency: pd.DataFrame | None = None,
+    shuffled: ShuffleCheck | None = None,
 ) -> str:
     """Markdown report of the sections given; sections left out are skipped."""
     lines = [f"# 評估報表：{title}", ""]
     for report in ranks:
-        lines += _rank_section(report, (deciles or {}).get(report.horizon))
+        lines += _rank_section(report, (deciles or {}).get(report.horizon), shuffled)
     if importance is not None:
         lines += _importance_section(importance)
     if coverage is not None:

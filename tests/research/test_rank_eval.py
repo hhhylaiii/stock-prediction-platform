@@ -21,7 +21,13 @@ from apps.market.calendar import TradingDays
 from apps.market.models import DailyPrice, StockMaster, TradingCalendar
 from apps.research import baseline_runs, lgbm_runs, rank_eval
 from apps.research.eval_report import render_report
-from apps.research.evaluation import RankReport, decile_report, importance_drift, rank_report
+from apps.research.evaluation import (
+    RankReport,
+    ShuffleCheck,
+    decile_report,
+    importance_drift,
+    rank_report,
+)
 from apps.research.features.store import export_year, read_columns, read_partitions
 from apps.research.management.commands import evaluate_rank
 from apps.research.metrics.ic import ICSummary, daily_rank_ic
@@ -328,6 +334,33 @@ def test_report_renders_each_horizon_with_deciles_and_importance(caches: Path) -
         assert section in text
         assert rank_eval._gates(horizon, evaluated) in text
     assert text.index("（5 日）") < text.index("（20 日）")
+    check = ShuffleCheck(fold=chosen[0].index, horizon=20, ic=0.0312, limit=0.02)
+    shuffled = rank_eval.report(RUN_KEY, evaluations, shuffled=check)
+    for horizon in (5, 20):
+        evaluated = evaluations[horizon]
+        section = render_report(
+            f"{RUN_KEY}（{horizon} 日）",
+            [evaluated.model],
+            {horizon: evaluated.deciles},
+            evaluated.importance,
+            shuffled=check,
+        )
+        assert section in shuffled
+    assert shuffled.count("打亂 label（20 日 Ridge）後") == 2
+
+
+def test_shuffle_result_checks_the_first_research_fold_against_the_limit(
+    caches: Path, settings: Any
+) -> None:
+    settings.SHUFFLE_IC_LIMIT = 0.5
+    first = next(fold for fold in research() if fold.research)
+
+    check = rank_eval.shuffle_result(research(), caches, 2)
+
+    ic = baseline_runs.shuffle_check(first, caches, 2)
+    assert check == ShuffleCheck(fold=first.index, horizon=20, ic=ic, limit=0.5)
+    with pytest.raises(ValueError, match="no research folds"):
+        rank_eval.shuffle_result([fold for fold in research() if fold.tuning], caches, 2)
 
 
 @pytest.fixture
@@ -346,6 +379,39 @@ def test_evaluate_rank_writes_the_report_and_metrics(command: Path, tmp_path: Pa
     assert output.read_text() == rank_eval.report(RUN_KEY, evaluations)
     assert f"wrote {output}" in out.getvalue()
     assert BacktestMetric.objects.filter(run_key=RUN_KEY, model_type="ridge").exists()
+
+
+def test_evaluate_rank_runs_the_shuffle_check_into_the_report_when_asked(
+    command: Path, tmp_path: Path
+) -> None:
+    output = tmp_path / "rank.md"
+
+    call_command(
+        "evaluate_rank",
+        run_key=RUN_KEY,
+        output=str(output),
+        shuffle_check=True,
+        seed=2,
+        stdout=StringIO(),
+    )
+
+    evaluations = rank_eval.evaluate_run(RUN_KEY, research(), command, calendar())
+    check = rank_eval.shuffle_result(research(), command, 2)
+    assert output.read_text() == rank_eval.report(RUN_KEY, evaluations, shuffled=check)
+    assert "這次沒跑" not in output.read_text()
+
+
+def test_evaluate_rank_writes_nothing_when_the_shuffle_check_fails(
+    command: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(*args: Any) -> float:
+        raise ValueError("no training rows")
+
+    monkeypatch.setattr(rank_eval, "shuffle_check", broken)
+
+    with pytest.raises(CommandError, match="shuffle check: no training rows"):
+        call_command("evaluate_rank", run_key=RUN_KEY, shuffle_check=True, stdout=StringIO())
+    assert not BacktestMetric.objects.exists()
 
 
 def test_evaluate_rank_writes_nothing_when_the_report_cannot_be_written(

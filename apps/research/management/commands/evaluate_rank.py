@@ -10,12 +10,13 @@ from apps.etl.management.options import as_date
 from apps.market.calendar import CalendarError, TradingDays
 from apps.research.baseline_runs import check_run_key
 from apps.research.ensemble import write_report
+from apps.research.evaluation import ShuffleCheck
 from apps.research.holdout import is_holdout
 from apps.research.labels import latest_price_date
 from apps.research.models import HoldoutScope
 from apps.research.prediction_cache import FoldMismatchError, MissingFoldsError
-from apps.research.rank_eval import evaluate_run, report, write_metrics
-from apps.research.walkforward import WalkForwardConfig, WalkForwardError, generate_folds
+from apps.research.rank_eval import evaluate_run, report, shuffle_result, write_metrics
+from apps.research.walkforward import Fold, WalkForwardConfig, WalkForwardError, generate_folds
 
 DEFAULT_CONFIG = WalkForwardConfig()
 
@@ -31,6 +32,21 @@ class Command(BaseCommand):
         parser.add_argument("--run-key", required=True)
         parser.add_argument("--last-date")
         parser.add_argument("--output", help="Markdown file to write; prints when left out.")
+        parser.add_argument(
+            "--shuffle-check",
+            action="store_true",
+            help="Refit the SPEC §8 shuffled-label Ridge on the first research fold and report "
+            "its IC; left out, the report marks the shuffle check unjudged.",
+        )
+        parser.add_argument("--seed", type=int, default=0, help="Seed of the shuffle check.")
+
+    def _shuffled(self, folds: list[Fold], options: dict[str, Any]) -> ShuffleCheck | None:
+        if not options["shuffle_check"]:
+            return None
+        try:
+            return shuffle_result(folds, settings.FEATURE_PARQUET_DIR, options["seed"])
+        except (ValueError, FileNotFoundError, RuntimeError) as error:
+            raise CommandError(f"shuffle check: {error}") from error
 
     def handle(self, *args: Any, **options: Any) -> None:
         run_key = options["run_key"]
@@ -46,7 +62,8 @@ class Command(BaseCommand):
                 if not is_holdout(fold)
             ]
             evaluations = evaluate_run(run_key, folds, settings.FEATURE_PARQUET_DIR, calendar)
-            text = report(run_key, evaluations)
+            shuffled = self._shuffled(folds, options)
+            text = report(run_key, evaluations, shuffled)
             written = write_report(text, options["output"])
         except (
             ValueError,
