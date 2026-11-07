@@ -143,6 +143,10 @@ def test_monthly_coverage_splits_universe_rows_by_later_delisting() -> None:
         (1.00, 0.95, False),
         (1.00, 0.94, True),
         (0.99, NAN, False),
+        (0.00, 0.10, True),
+        (0.02, 0.10, True),
+        (0.00, 0.05, False),
+        (0.90, 0.99, False),
     ],
 )
 def test_a_month_is_affected_when_it_fails_the_acceptance_on_its_own(

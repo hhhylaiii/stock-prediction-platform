@@ -57,12 +57,17 @@ def monthly_coverage(rows: pd.DataFrame, column: str, delisted: pd.Series) -> pd
     return shares.reindex(columns=list(GROUPS.values())).rename_axis(index=None, columns=None)
 
 
+def _apart(more: pd.Series, less: pd.Series) -> pd.Series:
+    """Whether one share is over ACCEPT_RATIO times the other and more than ACCEPT_GAP above it."""
+    gap = (more - less).round(SHARE_DIGITS) > ACCEPT_GAP
+    return gap & ((more - ACCEPT_RATIO * less).round(SHARE_DIGITS) > 0)
+
+
 def affected_months(coverage: pd.DataFrame) -> list[str]:
-    """Months failing the acceptance alone: delisted missing share over 1.5x and 5 points above."""
-    current, delisted = 1 - coverage["current"], 1 - coverage["delisted"]
-    gap = (delisted - current).round(SHARE_DIGITS) > ACCEPT_GAP
-    ratio = (delisted - ACCEPT_RATIO * current).round(SHARE_DIGITS) > 0
-    return sorted(str(month) for month in coverage.index[gap & ratio])
+    """Months where, on their own, the delisted group is missing or present far more often."""
+    current, delisted = coverage["current"], coverage["delisted"]
+    affected = _apart(1 - delisted, 1 - current) | _apart(delisted, current)
+    return sorted(str(month) for month in coverage.index[affected])
 
 
 def rules_signature(

@@ -25,6 +25,7 @@ from apps.market.models import (
     TradingCalendar,
     WeeklyHolding,
 )
+from apps.research.features import store
 from apps.research.features.build import FEATURE_COLUMNS, FRAME_COLUMNS, build_feature_frame
 from apps.research.features.registry import feature_names
 from apps.research.features.residual import rules_signature
@@ -263,6 +264,53 @@ def test_monthly_revenue_growth_left_missing_on_record_takes_no_fallback() -> No
     assert math.isnan(row["fund_rev_yoy"])
     assert row["fund_rev_3m_yoy"] == pytest.approx(300 / 200 - 1)
     assert row["fund_rev_mom"] == pytest.approx(0.0)
+
+
+def quarterly_growth(announced: str = "2015-11-16") -> None:
+    """2015-Q3 revenue 20% above 2014-Q3, the later quarter announced on the given day."""
+    FinancialStatement.objects.bulk_create(
+        FinancialStatement(stock_id="2330", period=period, revenue=revenue, announce_date=d(day))
+        for period, revenue, day in [
+            ("2014-Q3", 1_000, "2014-11-14"),
+            ("2015-Q3", 1_200, announced),
+        ]
+    )
+
+
+def test_monthly_revenue_takes_the_quarter_only_once_it_goes_stale() -> None:
+    listed("2330", "2015-06-01", "2016-04-29")
+    quarterly_growth()
+    MonthlyRevenue.objects.bulk_create(
+        MonthlyRevenue(
+            stock_id="2330",
+            period=f"{year}-{month:02d}",
+            revenue=110 if (year, month) == (2015, 12) else 100,
+            announce_date=date(year, month, 10) + timedelta(days=31),
+        )
+        for year in (2014, 2015)
+        for month in range(1, 13)
+    )
+
+    frame = build_feature_frame(CALENDAR, d("2016-03-10"), d("2016-03-15")).set_index("date")
+
+    assert frame["fund_rev_yoy"].loc[d("2016-03-11")] == pytest.approx(0.1)
+    assert frame["fund_rev_mom"].loc[d("2016-03-11")] == pytest.approx(0.1)
+    assert frame["fund_rev_yoy"].loc[d("2016-03-14")] == pytest.approx(0.2)
+    assert frame["fund_rev_3m_yoy"].loc[d("2016-03-14")] == pytest.approx(0.2)
+    assert math.isnan(frame["fund_rev_mom"].loc[d("2016-03-14")])
+
+
+def test_the_fallback_waits_for_its_statement_and_ignores_later_delisting() -> None:
+    listed("2330", "2015-06-01", "2016-03-31")
+    quarterly_growth("2016-03-03")
+
+    frame = build_feature_frame(CALENDAR, d("2016-03-01"), d("2016-03-04")).set_index("date")
+    StockMaster.objects.filter(stock_id="2330").update(delist_date=d("2016-06-30"))
+    delisted = build_feature_frame(CALENDAR, d("2016-03-01"), d("2016-03-04")).set_index("date")
+
+    assert math.isnan(frame["fund_rev_yoy"].loc[d("2016-03-02")])
+    assert frame["fund_rev_yoy"].loc[d("2016-03-03")] == pytest.approx(0.2)
+    pd.testing.assert_frame_equal(delisted, frame)
 
 
 def test_month_masks_reach_any_column_of_the_frame_after_the_fallbacks() -> None:
@@ -547,6 +595,35 @@ def test_the_command_works_year_by_year(
     ]
     december = pd.read_parquet(tmp_path / "year=2015" / "part-0.parquet")
     assert set(december["date"]) == set(CALENDAR.between(d("2015-12-28"), d("2015-12-31")))
+    assert partition_rules(tmp_path, 2015) == rules_signature()
+
+
+def test_a_partial_rebuild_keeps_the_stamp_only_while_the_rules_are_unchanged(
+    tmp_path: Path, settings: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings.FEATURE_PARQUET_DIR = tmp_path
+    calendar_rows()
+    listed("2330", "2015-06-01", "2016-03-31")
+    call_command("build_features", start=d("2016-03-01"), end=d("2016-03-31"))
+    call_command("build_features", date=d("2016-03-02"))
+    assert partition_rules(tmp_path, 2016) == rules_signature()
+
+    monkeypatch.setattr(store, "rules_signature", lambda: "changed")
+    call_command("build_features", date=d("2016-03-02"))
+    assert partition_rules(tmp_path, 2016) is None
+    call_command("build_features", start=d("2016-01-01"), end=d("2016-03-31"))
+    assert partition_rules(tmp_path, 2016) == "changed"
+
+
+def test_an_export_without_a_rebuild_range_stamps_the_current_rules(tmp_path: Path) -> None:
+    listed("2330", "2015-06-01", "2016-03-31")
+    frame = build_feature_frame(CALENDAR, d("2016-03-01"), d("2016-03-31"))
+    write_features(frame, d("2016-03-01"), d("2016-03-31"))
+
+    export_year(2016, tmp_path, rebuilt=(d("2016-03-10"), d("2016-03-31")))
+    assert partition_rules(tmp_path, 2016) is None
+    export_year(2016, tmp_path)
+    assert partition_rules(tmp_path, 2016) == rules_signature()
 
 
 def test_each_year_is_exported_before_the_next_is_built(

@@ -56,5 +56,5 @@ class Command(BaseCommand):
         rows = 0
         for low, high in years(start, end):
             rows += write_features(build_feature_frame(calendar, low, high), low, high)
-            export_year(low.year, settings.FEATURE_PARQUET_DIR)
+            export_year(low.year, settings.FEATURE_PARQUET_DIR, rebuilt=(low, high))
         self.stdout.write(f"feature_daily: {rows} rows for {start}..{end}")

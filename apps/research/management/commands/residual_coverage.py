@@ -12,6 +12,7 @@ from apps.market.calendar import TradingDays
 from apps.market.models import StockMaster
 from apps.research.features.build import FEATURE_COLUMNS, build_feature_frame
 from apps.research.features.residual import (
+    FALLBACKS,
     MASKED_MONTHS,
     MAX_MASKED_SHARE,
     affected_months,
@@ -36,22 +37,24 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser: ArgumentParser) -> None:
         parser.add_argument(
-            "--columns", help="Comma list of feature columns; defaults to MASKED_MONTHS'."
+            "--columns", help="Comma list of feature columns; defaults to the rules' columns."
         )
         parser.add_argument("--start", help=f"First day; defaults to {DEFAULT_START}.")
         parser.add_argument("--end", help=f"Last day; defaults to {DEFAULT_END}.")
         parser.add_argument("--output", help="CSV of the monthly coverage of every column.")
 
     def _columns(self, text: str | None) -> list[str]:
-        columns = (
-            list(MASKED_MONTHS) if text is None else [part.strip() for part in text.split(",")]
-        )
+        chosen = [*MASKED_MONTHS, *FALLBACKS] if text is None else text.split(",")
+        columns = list(dict.fromkeys(part.strip() for part in chosen))
         unknown = [name for name in columns if name not in FEATURE_COLUMNS]
         if unknown:
             raise CommandError(f"{unknown} are not feature columns")
         return columns
 
     def _report(self, column: str, coverage: pd.DataFrame) -> None:
+        if coverage.empty:
+            self.stdout.write(f"{column}: no universe rows in the period")
+            return
         affected = affected_months(coverage)
         share = len(affected) / len(coverage)
         self.stdout.write(
