@@ -17,12 +17,7 @@ from apps.etl.models import EtlRun, RawRecord
 from apps.etl.ratelimit import RateLimiter
 from apps.etl.raw import store_raw
 from apps.etl.runs import fail_on_rejections, stop_on_streak, tracked_run
-from apps.market.calendar import (
-    CalendarError,
-    NotATradingDayError,
-    OutsideCalendarError,
-    TradingDays,
-)
+from apps.market.calendar import CalendarError, NotATradingDayError, TradingDays
 
 logger = logging.getLogger(__name__)
 
@@ -88,13 +83,6 @@ class BaseAdapter(ABC):
         if not days:
             raise CalendarError(f"no trading days between {start} and {end}")
         return days
-
-    def next_session(self, day: date) -> date:
-        """The session after day, or day itself at the calendar's end."""
-        try:
-            return self.calendar.shift(day, 1)
-        except OutsideCalendarError:
-            return day
 
     def units(self, dataset: str, start: date, end: date) -> Iterator[tuple[date, date]]:
         """Spans fetched in one go: a trading day each, or a month for monthly datasets."""

@@ -274,8 +274,8 @@ class TwseAdapter(BaseAdapter):
         return self._fetch_day(dataset, first)
 
     def _fetch_actions(self, day: date) -> pd.DataFrame:
-        """Ex-rights and restart days of this session and the next, published a session ahead."""
-        span = (day, self.next_session(day))
+        """Ex-rights and restart days of this session, whose tables are out before it opens."""
+        span = (day, day)
         params = {
             "startDate": f"{span[0]:%Y%m%d}",
             "endDate": f"{span[1]:%Y%m%d}",

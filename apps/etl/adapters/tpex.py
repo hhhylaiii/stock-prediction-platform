@@ -273,17 +273,11 @@ class TpexAdapter(BaseAdapter):
         return self._fetch_day(dataset, first)
 
     def _fetch_actions(self, day: date) -> pd.DataFrame:
-        """Ex-rights and restart days of this session and the next, published a session ahead.
-
-        exDailyQ is asked one day at a time: a range answer stops at 100 rows.
-        """
-        span = (day, self.next_session(day))
-        actions = []
-        for ex_date in sorted(set(span)):
-            form = {**_range_form(ex_date, ex_date), "response": "json"}
-            payload = self._answered(EX_RIGHTS, EX_RIGHTS_PATH, form)
-            actions.extend(tpex_ex_rights(payload, (ex_date, ex_date)))
+        """Ex-rights and restart days of this session, whose tables are out before it opens."""
+        span = (day, day)
         form = {**_range_form(*span), "response": "json"}
+        payload = self._answered(EX_RIGHTS, EX_RIGHTS_PATH, form)
+        actions = tpex_ex_rights(payload, span)
         for table in TPEX_RESTARTS:
             payload = self._answered(table.raw, table.path, form)
             actions.extend(restart_actions(tpex_table(payload, table.label), table, span))

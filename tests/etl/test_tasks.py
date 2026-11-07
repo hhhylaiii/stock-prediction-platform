@@ -161,9 +161,10 @@ def test_the_batches_place_each_dataset_after_its_publication() -> None:
         "twse/index_daily",
         "tpex/index_daily",
         "twse/return_index",
+        "twse/dividend_event",
+        "tpex/dividend_event",
     }
     assert {"twse/sbl", "tpex/sbl", "twse/margin", "tpex/margin"} <= keys("night")
-    assert {"twse/dividend_event", "tpex/dividend_event"} <= keys("night")
     assert "dividend_event" in tasks.GATE_DATASETS
     assert keys("qfii") == {"tpex/foreign_holding", "tpex/shares_outstanding"}
     assert keys("notices") == {
