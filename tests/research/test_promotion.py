@@ -176,6 +176,27 @@ def test_a_promotion_rechecks_the_outputs_it_rewrote_and_a_kept_build_does_not(
 
 
 @pytest.mark.django_db
+def test_a_recheck_that_fails_after_the_swap_is_logged_and_the_swap_stands(
+    researched: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    runs = built("rank", "rank-wf1", researched)
+    passed(LAST)
+    serving_copies(runs, monkeypatch)
+
+    def broken(day: date) -> list[DataQualityLog]:
+        raise RuntimeError("no outputs frame")
+
+    monkeypatch.setattr(promotion, "recheck_outputs", broken)
+
+    result = promote("rank-prod", LAST, researched)
+
+    assert result.promoted is True
+    assert {fresh(run).status for run in runs} == {ModelStatus.ACTIVE}
+    assert "rank-prod" in caplog.text
+    assert "no outputs frame" in caplog.text
+
+
+@pytest.mark.django_db
 def test_failed_gates_keep_the_serving_runs_and_alert(
     researched: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

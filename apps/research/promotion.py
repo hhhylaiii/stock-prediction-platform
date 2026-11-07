@@ -1,5 +1,6 @@
 """Model swaps (SPEC §7 每月重訓): promote a build past its gates, restore a degraded run."""
 
+import logging
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import date
@@ -29,6 +30,7 @@ from apps.research.monitor import (
 from apps.research.predict import SERVING, Slot, predict, serving_run
 from apps.research.runs import PRODUCTION, SCREENING_MODEL, RunError
 
+logger = logging.getLogger(__name__)
 PROMOTION = "promotion"
 ALERT_PERIODS = "alert_periods"
 PROMOTION_CHECK = "model_promotion"
@@ -209,8 +211,16 @@ def promote(
     if note.severity == DataQualityLog.Severity.WARNING:
         dispatch([note])
     if result.promoted:
-        recheck_outputs(day)
+        _recheck(run_key, day)
     return result
+
+
+def _recheck(run_key: str, day: date) -> None:
+    """Redo the day's output checks after a swap; a failure there leaves the swap standing."""
+    try:
+        recheck_outputs(day)
+    except Exception:
+        logger.exception("promoted %s, but rechecking the outputs of %s failed", run_key, day)
 
 
 def _active_in(slot: Slot, run_id: str) -> list[str]:
