@@ -24,7 +24,7 @@ from apps.research.lock import ResearchBusyError, research_lock
 from apps.research.models import HoldoutScope, LabelDaily, ModelRun
 from apps.research.monitor import run_monitor
 from apps.research.predict import predict
-from apps.research.production import DESIGNS, build_run
+from apps.research.production import DESIGNS, build_run, shadow_key
 from apps.research.promotion import PROMOTION_CHECK, first_day, promote
 from apps.research.resources import free_percent, peak_rss_mb
 from apps.research.runs import PRODUCTION
@@ -226,15 +226,22 @@ def _retrain_detail(
     }
 
 
+def _retrain_hours() -> bool:
+    """From the morning slot to the retrain cutoff, the hours a retrain may start in."""
+    now = timezone.localtime().time()
+    start = time.fromisoformat(settings.RESEARCH_AT["MORNING"])
+    return start <= now < time.fromisoformat(settings.RESEARCH_RETRAIN_BEFORE)
+
+
 def _retrain_after(day: date) -> None:
-    """Queue the month's one retrain from an early enough morning in its first sessions."""
+    """Queue the month's one retrain from a morning done in time among its first sessions."""
     if _month(RETRAIN_CHECK, day).exists():
         return
     opening = TradingDays.from_db().between(day.replace(day=1), day)
     if len(opening) > RETRAIN_WINDOW:
         skipped = _retrain_detail(dict.fromkeys(HoldoutScope.values, SKIPPED))
         _record(day, RETRAIN_CHECK, Severity.WARNING, skipped)
-    elif timezone.localtime().time() < time.fromisoformat(settings.RESEARCH_RETRAIN_BEFORE):
+    elif _retrain_hours():
         retrain.delay(day.isoformat())
 
 
@@ -246,6 +253,9 @@ def retrain(self: Task[Any, Any], day: str) -> str:
     session = date.fromisoformat(day)
     if _month(RETRAIN_CHECK, session).exists():
         return "done"
+    if not _retrain_hours():
+        logger.warning("research retrain %s not started: outside its hours", day)
+        return "late"
     free = free_percent()
     if free is not None and free < settings.RESEARCH_RETRAIN_MIN_FREE:
         if self.request.retries < settings.RESEARCH_RETRAIN_RETRIES:
@@ -262,8 +272,14 @@ def retrain(self: Task[Any, Any], day: str) -> str:
 
 
 def _built_this_month(scope: str, day: date) -> bool:
-    as_of = {f"params__{PRODUCTION}__as_of__startswith": f"{day:%Y-%m}"}
-    return ModelRun.objects.filter(run_key__startswith=f"{scope}-", **as_of).exists()
+    """A production build of scope made this month under a key other than this retrain's."""
+    own = retrain_key(scope, day)
+    made = ModelRun.objects.filter(
+        run_key__startswith=f"{scope}-",
+        params__has_key=PRODUCTION,
+        created_at__date__gte=day.replace(day=1),
+    )
+    return made.exclude(run_key__in=[own, shadow_key(own)]).exists()
 
 
 def _build_all(day: date, free: float | None) -> dict[str, Any]:

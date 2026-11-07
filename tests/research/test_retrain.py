@@ -1,6 +1,6 @@
 from collections.abc import Callable, Iterator
 from dataclasses import replace
-from datetime import date, time, timedelta
+from datetime import date, datetime, time, timedelta
 from itertools import count
 from pathlib import Path
 from typing import Any
@@ -18,6 +18,7 @@ from apps.research.promotion import PROMOTION_CHECK, Promoted
 from apps.research.runs import RunError
 from tests.research.run_panels import claim_all
 from tests.research.test_tasks import (
+    TAIPEI,
     WEDNESDAY,
     Severity,
     calendar_rows,
@@ -52,6 +53,12 @@ def memory(monkeypatch: pytest.MonkeyPatch) -> list[float | None]:
     monkeypatch.setattr(tasks, "peak_rss_mb", lambda: 512.0)
     monkeypatch.setattr(tasks, "monotonic", lambda: float(next(clock)))
     return readings
+
+
+@pytest.fixture(autouse=True)
+def retrain_hours(now: Callable[[date, time], None]) -> None:
+    """A clock inside the hours a retrain may start in, unless a test sets its own."""
+    now(FIRST + timedelta(days=1), time(6, 30))
 
 
 @pytest.fixture
@@ -107,7 +114,7 @@ def tried(run_key: str) -> None:
     )
 
 
-def go_live_build(run_key: str, as_of: date) -> None:
+def go_live_build(run_key: str, as_of: date, made: date) -> None:
     ModelRun.objects.create(
         run_id=f"{run_key}.lightgbm.h5",
         run_key=run_key,
@@ -119,6 +126,7 @@ def go_live_build(run_key: str, as_of: date) -> None:
         lib_versions={},
         feature_hash="f",
         params={"production": {"as_of": as_of.isoformat()}},
+        created_at=datetime.combine(made, time(10, 0), tzinfo=TAIPEI),
     )
 
 
@@ -251,8 +259,9 @@ def test_a_scope_built_by_hand_this_month_is_not_built_again(
     frozen: None, builds: list[tuple[str, str, str, date, Path]]
 ) -> None:
     labelled(FIRST)
-    go_live_build("rank-go-live", FIRST - timedelta(days=1))
-    go_live_build("return-go-live", FIRST - timedelta(days=3))
+    friday = FIRST - timedelta(days=3)
+    go_live_build("rank-go-live", friday, FIRST)
+    go_live_build("return-go-live", friday, friday)
 
     retrain(FIRST)
 
@@ -261,6 +270,34 @@ def test_a_scope_built_by_hand_this_month_is_not_built_again(
         "rank": tasks.ALREADY_BUILT,
         "interval": tasks.NOT_FROZEN,
     }
+
+
+def test_a_retrain_cut_short_builds_its_own_keys_again(
+    frozen: None, builds: list[tuple[str, str, str, date, Path]]
+) -> None:
+    labelled(FIRST)
+    go_live_build("rank-2026-11-shadow", FIRST, FIRST + timedelta(days=1))
+    go_live_build("rank-2026-11", FIRST, FIRST + timedelta(days=1))
+
+    retrain(FIRST)
+
+    assert [scope for scope, *_ in builds] == ["rank", "return"]
+
+
+@pytest.mark.parametrize("at", [time(5, 59), time(9, 0), time(23, 30)])
+def test_a_retrain_outside_its_hours_leaves_the_month_to_the_next_morning(
+    frozen: None,
+    builds: list[tuple[str, str, str, date, Path]],
+    now: Callable[[date, time], None],
+    at: time,
+) -> None:
+    labelled(FIRST)
+    now(FIRST + timedelta(days=1), at)
+
+    retrain(FIRST)
+
+    assert builds == []
+    assert not DataQualityLog.objects.exists()
 
 
 def test_a_month_retrains_once_however_often_its_retrain_is_queued(
@@ -386,6 +423,24 @@ def test_a_morning_done_after_the_cutoff_leaves_the_retrain_to_the_next_one(
     tasks.morning.apply().get()
 
     assert queued == [second.isoformat()]
+
+
+@pytest.mark.parametrize(("on", "at"), [(1, time(23, 30)), (2, time(0, 30))])
+def test_a_morning_done_late_at_night_queues_no_retrain(
+    now: Callable[[date, time], None],
+    gate: list[bool],
+    ran: list[tuple[str, date, bool]],
+    queued: list[str],
+    on: int,
+    at: time,
+) -> None:
+    morning_of(FIRST, now)
+    now(FIRST + timedelta(days=on), at)
+
+    tasks.morning.apply(args=(FIRST.isoformat(),)).get()
+
+    assert marker(FIRST, tasks.MORNING_CHECK).severity == Severity.INFO
+    assert queued == []
 
 
 def test_the_evening_queues_no_retrain(
