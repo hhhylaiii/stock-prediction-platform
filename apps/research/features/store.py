@@ -21,6 +21,7 @@ from apps.research.features.build import (
     FRAME_COLUMNS,
     FRAME_TYPES,
 )
+from apps.research.features.residual import RULES_KEY, rules_signature
 from apps.research.models import FeatureDaily
 from apps.research.ranges import months, years
 
@@ -86,15 +87,17 @@ def existing_partition(directory: Path, year: int) -> Path:
     return path
 
 
-def read_partitions(
-    start: date, end: date, directory: Path, columns: Sequence[str] = FIRST_BATCH_COLUMNS
-) -> pd.DataFrame:
-    """Rows dated in [start, end] from the yearly partitions; the first batch unless asked."""
-    wanted = list(columns)
-    parts = []
-    for low, high in years(start, end):
-        path = existing_partition(directory, low.year)
-        stored = set(pq.read_schema(path).names)
+def partition_rules(directory: Path, year: int) -> str | None:
+    """Source-gap rules stamped on the year's partition when exported; None for an older file."""
+    stamp = (pq.read_schema(existing_partition(directory, year)).metadata or {}).get(RULES_KEY)
+    return None if stamp is None else stamp.decode()
+
+
+def _read_partition(directory: Path, low: date, high: date, wanted: list[str]) -> pd.DataFrame:
+    """Rows of low..high from one yearly partition, schema and table read through one handle."""
+    path = existing_partition(directory, low.year)
+    with path.open("rb") as handle:
+        stored = set(pq.ParquetFile(handle).schema_arrow.names)
         missing = [name for name in wanted if name not in stored]
         if missing:
             raise ValueError(
@@ -102,7 +105,16 @@ def read_partitions(
                 f"run build_features --start {low.year}-01-01 --end {low.year}-12-31"
             )
         dated = [("date", ">=", low), ("date", "<=", high)]
-        parts.append(pq.read_table(path, columns=wanted, filters=dated).to_pandas())
+        frame: pd.DataFrame = pq.read_table(handle, columns=wanted, filters=dated).to_pandas()
+    return frame
+
+
+def read_partitions(
+    start: date, end: date, directory: Path, columns: Sequence[str] = FIRST_BATCH_COLUMNS
+) -> pd.DataFrame:
+    """Rows dated in [start, end] from the yearly partitions; the first batch unless asked."""
+    wanted = list(columns)
+    parts = [_read_partition(directory, low, high, wanted) for low, high in years(start, end)]
     return _typed(parts, wanted)
 
 
@@ -113,30 +125,45 @@ def read_columns(start: date, end: date, directory: Path, columns: Sequence[str]
         raise ValueError(f"{unknown} are not feature columns")
     wanted = [*KEYS, *columns]
     types = dict.fromkeys(columns, "float64")
-    parts: list[pd.DataFrame] = []
-    for low, high in years(start, end):
-        path = existing_partition(directory, low.year)
-        missing = [name for name in wanted if name not in pq.read_schema(path).names]
-        if missing:
-            raise ValueError(
-                f"feature partition for {low.year} in {directory} lacks {', '.join(missing)}; "
-                f"run build_features --start {low.year}-01-01 --end {low.year}-12-31"
-            )
-        dated = [("date", ">=", low), ("date", "<=", high)]
-        parts.append(pq.read_table(path, columns=wanted, filters=dated).to_pandas().astype(types))
+    parts = [
+        _read_partition(directory, low, high, wanted).astype(types)
+        for low, high in years(start, end)
+    ]
     if not parts:
         return pd.DataFrame(columns=wanted).astype(types)
     return pd.concat(parts, ignore_index=True)
 
 
-def export_year(year: int, directory: Path) -> Path | None:
-    """Rewrite one year's partition from feature_daily; a year without rows has no partition."""
+def _stamp(
+    directory: Path, year: int, frame: pd.DataFrame, rebuilt: tuple[date, date] | None
+) -> str | None:
+    """Current rules if every row was just rebuilt or the partition already had them, else none."""
+    current = rules_signature()
+    if rebuilt is None or (rebuilt[0] <= frame["date"].min() and frame["date"].max() <= rebuilt[1]):
+        return current
+    if not partition_path(directory, year).exists():
+        return None
+    return current if partition_rules(directory, year) == current else None
+
+
+def export_year(
+    year: int, directory: Path, rebuilt: tuple[date, date] | None = None
+) -> Path | None:
+    """Rewrite one year's partition from feature_daily; a year without rows has no partition.
+
+    rebuilt is the range just built; rows outside it keep the stamp only if the rules match.
+    """
     target = partition_path(directory, year)
     frame = read_features(date(year, 1, 1), date(year, 12, 31))
     if frame.empty:
         shutil.rmtree(target.parent, ignore_errors=True)
         return None
+    stamp = _stamp(directory, year, frame, rebuilt)
     table = pa.Table.from_pandas(frame, preserve_index=False)
+    metadata = {**(table.schema.metadata or {})}
+    if stamp is not None:
+        metadata[RULES_KEY] = stamp.encode()
+    table = table.replace_schema_metadata(metadata)
     target.parent.mkdir(parents=True, exist_ok=True)
     handle, temporary = tempfile.mkstemp(dir=target.parent, prefix=".part-", suffix=".tmp")
     os.close(handle)

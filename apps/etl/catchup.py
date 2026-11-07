@@ -147,6 +147,7 @@ def _exchange_jobs(
 
 JOBS: tuple[Job, ...] = (
     *_exchange_jobs("twse", Market.TWSE.value, IndexId.TAIEX.value, TWSE_TABLES),
+    Job("twse", "return_index", index_present(IndexId.TAIEX_TR.value)),
     *_exchange_jobs("tpex", Market.TPEX.value, IndexId.TPEX.value, TPEX_TABLES),
     *(Job("yahoo", dataset) for dataset in SERIES),
 )

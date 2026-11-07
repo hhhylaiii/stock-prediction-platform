@@ -79,7 +79,7 @@ Oct 29, 2026 · @Owen Lai
 - 每類資料指定一個 primary source；其他來源只做比對驗證，不混用。
 - 價量 primary：證交所與櫃買中心；籌碼 primary：證交所與櫃買中心；財報與月營收 primary：MOPS；股權分散 primary：集保。
 - FinMind 是回補與驗證來源，每日增量不依賴它，避免非商業授權與維護時間影響正式流程。
-- FinMind 對 2016 到 2020 年下市的股票缺財報、月營收、股本與部分籌碼，這些缺口只補缺的列：財報與月營收用 MOPS 歷史彙總頁（下市公司不在彙總頁上，財報改讀 XBRL 檢視頁），股本與籌碼用證交所、櫃買每日表（交易所每日表補缺尚未實作）。下市公司的月營收沒有免費官方來源，維持缺值，由第 6 節的季營收年增率提供營收訊號。
+- FinMind 對 2016 到 2020 年下市的股票缺財報、月營收、股本與部分籌碼，這些缺口只補缺的列：財報與月營收用 MOPS 歷史彙總頁（下市公司不在彙總頁上，財報改讀 XBRL 檢視頁），股本與籌碼用證交所、櫃買每日表（交易所每日表補缺尚未實作）。下市公司的月營收沒有免費官方來源，standard 表維持缺值；特徵層的 `fund_rev_yoy`、`fund_rev_3m_yoy` 在月營收來源缺時改用季營收年增率（第 6 節處理步驟 6 的殘餘缺口規則）。
 
 ## 4. 資料模型與儲存
 
@@ -103,7 +103,7 @@ Oct 29, 2026 · @Owen Lai
 | `weekly_holding` | stock\_id, data\_date, level | level（1–15）、holders、shares、pct、publish\_date | 集保 | publish\_date（data\_date 隔日） |
 | `monthly_revenue` | stock\_id, period（YYYY-MM） | revenue、yoy、mom | MOPS | announce\_date |
 | `financial_statement` | stock\_id, period（YYYY-Qn）, fin\_type | eps、revenue、gross\_margin、op\_margin、net\_income、roe、debt\_ratio、operating\_cf | MOPS | announce\_date |
-| `index_daily` | index\_id, date | close、volume；index\_id 含 TAIEX、TPEX、SOX、TSM\_ADR、USDTWD | 證交所、yfinance | date |
+| `index_daily` | index\_id, date | close、volume；index\_id 含 TAIEX、TAIEX\_TR（發行量加權股價報酬指數，含息）、TPEX、SOX、TSM\_ADR、USDTWD | 證交所、yfinance | date |
 | `macro_indicator` | indicator\_id, period | value | data.gov.tw | announce\_date |
 | `shares_outstanding` | stock\_id, effective\_date | shares、reason（增資、減資、庫藏股註銷） | 證交所、櫃買中心 | effective\_date |
 | `daily_valuation` | stock\_id, date | pe、pb、dividend\_yield（交易所每日公布的本益比、股價淨值比、殖利率） | 證交所、櫃買中心；歷史用 FinMind | date |
@@ -113,7 +113,7 @@ Oct 29, 2026 · @Owen Lai
 
 | 表名 | 主鍵 | 核心欄位 | 說明 |
 | --- | --- | --- | --- |
-| `feature_daily` | stock\_id, date | 欄位命名 `<group>_<name>_<window>`，例如 `tech_ret_20d`、`chip_fi_net_5d`、`fund_rev_yoy`；另有 `in_universe` 旗標 | 寬表，只存原值與 in\_universe；winsorize、z-score、填值在管線做，不落表；也同步輸出 Parquet 供訓練 |
+| `feature_daily` | stock\_id, date | 欄位命名 `<group>_<name>_<window>`，例如 `tech_ret_20d`、`chip_fi_net_5d`、`fund_rev_yoy`；另有 `in_universe` 旗標 | 寬表，只存原值與 in\_universe（原值是套過第 6 節殘餘缺口規則的值）；winsorize、z-score、填值在管線做，不落表；也同步輸出 Parquet 供訓練 |
 | `label_daily` | stock\_id, date, horizon | fwd\_ret、fwd\_ret\_open、fwd\_rank\_pct、fwd\_vol\_20d、fwd\_up\_5pct、untradable\_t1 | 還原價計算；horizon 為 5 或 20；fwd\_ret\_open 以 t+1 還原開盤價進場，是訓練、評估與回測一律使用的版本，fwd\_ret 只供對照；fwd\_vol\_20d 為未來 20 日日報酬標準差；fwd\_up\_5pct 為 20 日漲幅是否超過 5%；horizon 內下市以最後成交價結算，列保留 |
 | `model_run` | run\_id | run\_key、model\_type、objective（rank、regression、quantile、volatility、classification）、version、train\_start、train\_end、params（JSON）、feature\_list、seed、lib\_versions、feature\_hash、status、ic\_mean、icir、created\_at | 每次訓練一列；同一次 walk-forward 的各摺、各模型共用一個 run\_key |
 | `prediction` | run\_id, stock\_id, date, horizon | score、rank、pct、ret\_pred、q10、q50、q90、vol\_pred、prob\_up\_5pct、in\_universe | API 讀這張表；每列只存該列 run 產出的欄位，其他為 NULL，API 依 (stock\_id, date) 合併各角色當天服務的 run，波動率兩個 horizon 都讀 20 日 run；同類有多個 run 時依 active、degraded、retired 的順序，再取最新的；預測價與價格區間在 API 層用當日收盤價換算，不存進表 |
@@ -160,7 +160,7 @@ Oct 29, 2026 · @Owen Lai
 | 時間 | 工作 | 來源 | 頻率 |
 | --- | --- | --- | --- |
 | 15:10 | 更正交易日曆；補抓前 14 天到前一交易日漏掉的日子，並補跑那些日子的品質檢查 | 證交所、櫃買中心 | 每交易日 |
-| 15:30 | 日成交價量、加權與櫃買指數 | 證交所、櫃買中心 | 每交易日 |
+| 15:30 | 日成交價量、加權與櫃買指數、加權股價報酬指數 | 證交所、櫃買中心 | 每交易日 |
 | 16:00 | 以當日行情更新 `stock_master` | 證交所、櫃買中心 | 每交易日 |
 | 16:30 | 三大法人買賣超、本益比與淨值比、注意與處置名單、全額交割名單；證交所的外資持股與流通股數變動 | 證交所、櫃買中心 | 每交易日 |
 | 18:30 | 櫃買的外資持股與流通股數變動（櫃買每日 18:00、22:00 更新） | 櫃買中心 | 每交易日 |
@@ -187,7 +187,7 @@ Oct 29, 2026 · @Owen Lai
 - daily\_price、daily\_chip、daily\_valuation 的當日缺值比例超過 1% 就告警（收盤價用 5%，因為有停牌與無成交）；缺值只算普通股。
 - 日期必須存在於 `trading_calendar`，否則整批拒收；歷史回補只拒收該檔（見歷史回補）。
 - 結果寫入 `data_quality_log`，severity 為 error 時不執行當日預測。
-- 研究閘門：研究層的每日任務要等兩個交易所的日價量、指數、三大法人、融資融券、借券、外資持股、本益比與淨值比這些當日快照都有成功的 `etl_run`，且當日品質檢查沒有 error；注意、處置、全額交割、流通股數變動、當沖不擋，漏一天只是晚一天反映，隔日補抓。
+- 研究閘門：研究層的每日任務要等兩個交易所的日價量、指數、三大法人、融資融券、借券、外資持股、本益比與淨值比這些當日快照都有成功的 `etl_run`，且當日品質檢查沒有 error；注意、處置、全額交割、流通股數變動、當沖、加權股價報酬指數不擋，漏一天只是晚一天反映，隔日補抓；報酬指數目前沒有特徵或 label 讀它。
 
 **失敗處理**
 
@@ -224,7 +224,7 @@ Oct 29, 2026 · @Owen Lai
 | 籌碼面 | `chip_margin_chg_5d` `chip_margin_usage` `chip_short_ratio` | daily\_chip、shares\_outstanding | t 日晚間 | 融資餘額 5 日變化 / 流通股數；融資使用率 = 融資餘額 / 融資限額；券資比 |
 | 籌碼面 | `chip_fi_holding_pct` `chip_sbl_short_chg_5d` | daily\_chip、shares\_outstanding | t 日晚間 | 外資持股比；借券賣出餘額 5 日變化 / 流通股數，用借券賣出餘額而非借券餘額 |
 | 籌碼面 | `chip_big_holder_pct_chg_1w` `chip_holder_count_chg_1w` | weekly\_holding | publish\_date，即 data\_date 隔日 | 400 張以上級距占比週變化、總股東人數週變化；取 publish\_date ≤ t 的最近一期；level 16、17 排除 |
-| 基本面 | `fund_rev_yoy` `fund_rev_3m_yoy` `fund_rev_mom` | monthly\_revenue | announce\_date | 單月 yoy、近 3 個月合計 yoy、mom；最近一期月營收可見超過 62 天（日曆日）沒有新一期時為 NaN |
+| 基本面 | `fund_rev_yoy` `fund_rev_3m_yoy` `fund_rev_mom` | monthly\_revenue；來源缺時 financial\_statement | announce\_date | 單月 yoy、近 3 個月合計 yoy、mom。月營收來源缺（最近一期月營收可見超過 62 天（日曆日）沒有新一期，或要讀的月份沒有紀錄）時，`fund_rev_yoy`、`fund_rev_3m_yoy` 改用同一天的 `fund_rev_yoy_q`，`fund_rev_mom` 為 NaN；月份都有紀錄但讀到 2013-01 兩側或去年同期營收 ≤ 0 時照舊為 NaN，不補 |
 | 基本面 | `fund_ep` `fund_eps_yoy` | financial\_statement、daily\_price | announce\_date | E/P = EPS TTM / 收盤價，虧損為負值，不用本益比；EPS TTM 為 PIT 最近四季合計，Q4 由年報減前三季；EPS yoy 為 TTM 年增，分母取去年 TTM 絕對值，去年為負或零時 NaN；最近一期財報可見超過 200 天（日曆日）沒有新一期時為 NaN |
 | 基本面 | `fund_bp` `fund_dividend_yield` | daily\_valuation | t 日晚間 | 證交所、櫃買每日公布的股價淨值比與殖利率；B/P = 1 / 股價淨值比 |
 | 基本面 | `fund_roe_ttm` `fund_gross_margin` `fund_op_margin` `fund_debt_ratio` | financial\_statement | announce\_date | 以 announce\_date 對齊；過期上限 200 天，同 `fund_ep` |
@@ -251,7 +251,7 @@ Oct 29, 2026 · @Owen Lai
 3. 極值處理：個股層級特徵以當日 universe 內 1% / 99% 分位 winsorize；某一側的截斷界會讓 universe 全部變成同值時（稀疏的 0/1 與計數特徵），那一側改用 universe 的極值當界；市場層級特徵與 `ind_sector_id` 不做。
 4. 標準化：個股層級特徵做當日橫截面 z-score，均值與標準差只用 universe 內的股票算。Ridge 與 logistic baseline 一律用 z-score 值；排名模型的 LightGBM 也用 z-score 值，原值跨年度有漂移，樹模型看不出相對當日市場的高低；絕對報酬、區間、波動、機率模型的 LightGBM 用原值並加入市場層級特徵，市場層級特徵進模型前先在訓練窗內依分位切成 5 級，見第 7 節模型表。市場層級特徵與 `ind_sector_id` 不做橫截面 z-score，市場層級特徵排名模型不使用。當日 universe 沒有離散度時 z 為 0，不是 NaN。
 5. 缺值：Ridge 與 logistic 填當日中位數並加 `_missing` 旗標；LightGBM 保留 NaN。
-6. 寫入 `feature_daily`，只存 winsorize 前的原值與 `in_universe`，同時輸出 Parquet 分區檔（依年份）。步驟 3 到 5 的 winsorize、z-score、填值與 `_missing` 旗標在訓練與推論管線按日重算，不落表，參數一律由同一天的訓練 universe 算出。每日重算最近 60 個交易日的特徵與已可結算的 label，以 upsert 覆蓋，處理除權息與財報延遲入庫造成的歷史錯值。
+6. 寫入前先套殘餘缺口規則：回補後仍只缺在之後會下市的股票上的欄位，對所有股票一律處理，不看個股之後是否下市。C：有第二來源的欄位，主來源缺時改用第二來源；目前是 `fund_rev_yoy`、`fund_rev_3m_yoy` 在月營收來源缺時改用財報算出的單季營收年增率 `fund_rev_yoy_q`。A：沒有第二來源的欄位，在受影響月份對所有股票遮成 NaN；受影響月份是單看那個月，下市組的缺值比例或有值比例高於現存組的 1.5 倍、而且多出超過 5 個百分點的月份（兩個方向都算：缺得多會透露下市，C 只補到缺月營收的股票時，有值也會透露；剛好 1.5 倍或剛好 5 個百分點不算），用 `residual_coverage` 在遮罩前的特徵上判定一次後寫死，任一欄被遮的月份超過所查期間的 20% 時先回報再定。C、A 都是特徵層的衍生值，套用後的值當原值寫入；standard 表仍各自只有一個來源，第二來源不寫回 standard 表，不違反第 8 節第 5 點。Phase 3 報表列出每個 C 欄位下市組與現存組的補值比例，以及 A 的遮罩月份。寫入 `feature_daily`，只存 winsorize 前的原值與 `in_universe`，同時輸出 Parquet 分區檔（依年份）。步驟 3 到 5 的 winsorize、z-score、填值與 `_missing` 旗標在訓練與推論管線按日重算，不落表，參數一律由同一天的訓練 universe 算出。每日重算最近 60 個交易日的特徵與已可結算的 label，以 upsert 覆蓋，處理除權息與財報延遲入庫造成的歷史錯值。
 7. 特徵驗收：Phase 3 產出每個特徵的單因子 rank IC，只用調參摺（測試期落在 2014 到 2015 年的摺，與第 7 節調參同一組）的訓練窗計算，篩選窗從第一個調參摺的訓練起點到最後一個調參摺的訓練終點，之後不再用新資料重篩；單因子 rank IC 對 5 日與 20 日的 `fwd_rank_pct` 各算一次；成對相關取日橫截面 Spearman 的平均，特徵依兩個 horizon 中較大的單因子 IC 絕對值由高到低保留，與已保留特徵的相關絕對值高於 0.95 的剔除；訊號型特徵在兩個 horizon 的 rank IC 絕對值都低於 0.005 才剔除，任一 horizon 的 IC 有值天數不到篩選窗一半時不判定、保留並記錄；條件型特徵（`size_*`、`liq_*`、`tech_vol_*`、`risk_*`、`fund_days_since_fs`、`ind_sector_id`、`*_days_to_*`）不受 IC 門檻約束。市場層級特徵不篩選，記在同一列 `model_run` 的 params.unscreened，非排名模型照第 4 步加回。保留清單寫入 `model_run.feature_list`；剔除清單在 Phase 4 定案後不得依 2025 年起的 holdout 結果再改。第二批特徵每加一組重跑同一套篩選與 walk-forward，總體 OOS rank IC 沒有提高就不留。
 
 **Label 定義**

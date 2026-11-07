@@ -7,6 +7,8 @@ import pytest
 from apps.research.features.fundamental import (
     fundamental_features,
     revenue_signals,
+    revenue_sourcing,
+    sourced_name,
     statement_signals,
 )
 from apps.research.features.registry import Group, feature_names
@@ -86,6 +88,35 @@ def test_revenue_growth_needs_a_positive_base_and_a_complete_history() -> None:
     assert math.isnan(one(revenue_signals(revenue), "2016-01")["fund_rev_yoy"])
     assert math.isnan(one(revenue_signals(holed), "2016-01")["fund_rev_mom"])
     assert one(revenue_signals(holed), "2016-02")["fund_rev_mom"] == pytest.approx(0.0)
+
+
+def test_revenue_sourcing_marks_signals_whose_months_are_all_on_record() -> None:
+    revenue = months("2015-01", [0.0] + [100.0] * 19)
+    holed = revenue[revenue["period"] != "2015-04"]
+
+    full = revenue_sourcing(revenue)
+    gaps = revenue_sourcing(holed)
+
+    assert set(full["signal"]) == {sourced_name(name) for name in REVENUE_READS}
+    assert one(full, "2016-01")[sourced_name("fund_rev_yoy")] == 1.0
+    assert math.isnan(one(revenue_signals(revenue), "2016-01")["fund_rev_yoy"])
+    assert one(full, "2016-03")[sourced_name("fund_rev_3m_yoy")] == 1.0
+    assert one(gaps, "2016-04")[sourced_name("fund_rev_yoy")] == 0.0
+    assert one(gaps, "2016-04")[sourced_name("fund_rev_mom")] == 1.0
+    assert one(gaps, "2015-05")[sourced_name("fund_rev_mom")] == 0.0
+    assert one(gaps, "2016-03")[sourced_name("fund_rev_yoy")] == 1.0
+    assert one(gaps, "2016-03")[sourced_name("fund_rev_3m_yoy")] == 1.0
+    assert one(gaps, "2016-06")[sourced_name("fund_rev_3m_yoy")] == 0.0
+
+
+def test_revenue_sourcing_holds_months_masked_across_2013_as_on_record() -> None:
+    revenue = months("2012-01", [100.0] * 12 + [400.0] * 15)
+
+    sourcing = revenue_sourcing(revenue)
+
+    assert math.isnan(one(revenue_signals(revenue), "2013-06")["fund_rev_yoy"])
+    assert one(sourcing, "2013-06")[sourced_name("fund_rev_yoy")] == 1.0
+    assert one(sourcing, "2012-06")[sourced_name("fund_rev_yoy")] == 0.0
 
 
 REVENUE_READS = {

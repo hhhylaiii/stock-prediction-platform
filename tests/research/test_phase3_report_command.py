@@ -1,0 +1,200 @@
+from datetime import date
+from io import StringIO
+from pathlib import Path
+
+import pandas as pd
+import pytest
+from django.core.management import call_command
+from django.core.management.base import CommandError
+
+from apps.market.models import StockMaster
+from apps.research.features.build import FEATURE_COLUMNS
+from apps.research.features.store import existing_partition, export_year
+from apps.research.management.commands import phase3_report
+from apps.research.models import FeatureDaily, ModelRun
+from apps.research.phase3_report import TABLE_COLUMNS
+from tests.research.test_screening import STOCKS, stored
+
+pytestmark = pytest.mark.django_db
+__all__ = ["stored"]
+
+
+def before_table(path: Path) -> Path:
+    table = pd.DataFrame(
+        {
+            "current": 0.0,
+            "delisted": 0.5,
+            "rows_current": 100,
+            "rows_delisted": 10,
+            "ratio": float("nan"),
+            "gap_pp": 50.0,
+            "flag": True,
+        },
+        index=pd.Index(["fund_ep"], name="feature"),
+    )
+    table.to_csv(path)
+    return path
+
+
+def test_the_report_covers_gaps_fallbacks_and_monthly_ic(stored: Path) -> None:
+    StockMaster.objects.create(
+        stock_id=STOCKS[0],
+        name="x",
+        market="TWSE",
+        industry="水泥工業",
+        delist_date=date(2018, 1, 2),
+    )
+    call_command("ic_report", run_key="screen1", output=str(stored / "ic.md"), stdout=StringIO())
+    out = StringIO()
+
+    call_command(
+        "phase3_report",
+        run_key="screen1",
+        before=str(before_table(stored / "before.csv")),
+        start="2016-01-01",
+        end="2016-12-31",
+        output=str(stored / "data.md"),
+        appendix=str(stored / "appendix"),
+        stdout=out,
+    )
+
+    text = (stored / "data.md").read_text()
+    assert "screen1.screening" in text
+    assert "`before.csv`" in text
+    assert "--start/--end differ" in out.getvalue()
+    assert "| fund_ep | 50.0%／0.0% |" in text
+    assert "### 5 日" in text
+    assert "### 20 日" in text
+    after = pd.read_csv(stored / "appendix" / "missing-after.csv", index_col=0)
+    assert list(after.columns) == TABLE_COLUMNS
+    assert list(after.index) == FEATURE_COLUMNS
+    assert after["rows_delisted"].iloc[0] > 0
+    assert after["rows_current"].iloc[0] > after["rows_delisted"].iloc[0]
+    before = pd.read_csv(stored / "appendix" / "missing-before.csv", index_col=0)
+    assert list(before.columns) == TABLE_COLUMNS
+    assert list(before.index) == ["fund_ep"]
+    monthly = pd.read_csv(stored / "appendix" / "monthly-ic.csv")
+    assert set(monthly["horizon"]) == {5, 20}
+    kept = ModelRun.objects.get(run_id="screen1.screening").feature_list
+    header = next(line for line in text.splitlines() if line.startswith("| 月份 |"))
+    assert set(header.strip("| ").split(" | ")[1:]) <= set(kept)
+    fills = pd.read_csv(stored / "appendix" / "fills.csv", index_col=0)
+    assert list(fills.index) == ["fund_rev_yoy", "fund_rev_3m_yoy"]
+    assert "screen1.screening" in out.getvalue()
+
+
+def test_the_report_needs_a_recorded_screening_and_a_complete_before_table(stored: Path) -> None:
+    with pytest.raises(CommandError, match="run ic_report first"):
+        call_command(
+            "phase3_report", run_key="none", before=str(stored / "x.csv"), stdout=StringIO()
+        )
+    call_command("ic_report", run_key="screen1", output=str(stored / "ic.md"), stdout=StringIO())
+    broken = stored / "broken.csv"
+    pd.DataFrame({"current": [0.0]}, index=["fund_ep"]).to_csv(broken)
+
+    with pytest.raises(CommandError, match="lacks delisted"):
+        call_command("phase3_report", run_key="screen1", before=str(broken), stdout=StringIO())
+
+
+def test_the_report_refuses_features_rebuilt_after_the_screening(stored: Path) -> None:
+    call_command("ic_report", run_key="screen1", output=str(stored / "ic.md"), stdout=StringIO())
+    partition = existing_partition(stored / "features", 2016)
+    partition.write_bytes(partition.read_bytes() + b"\0")
+
+    with pytest.raises(CommandError, match="features changed since the screening"):
+        call_command(
+            "phase3_report",
+            run_key="screen1",
+            before=str(before_table(stored / "before.csv")),
+            stdout=StringIO(),
+        )
+
+
+def test_the_report_adds_up_years_and_lists_every_screened_feature(stored: Path) -> None:
+    january = list(FeatureDaily.objects.filter(date__month=1).values())
+    FeatureDaily.objects.bulk_create(
+        FeatureDaily(**(row | {"date": row["date"].replace(year=2015)})) for row in january
+    )
+    export_year(2015, stored / "features")
+    call_command("ic_report", run_key="screen1", output=str(stored / "ic.md"), stdout=StringIO())
+
+    call_command(
+        "phase3_report",
+        run_key="screen1",
+        before=str(before_table(stored / "before.csv")),
+        start="2015-01-01",
+        end="2016-12-31",
+        output=str(stored / "data.md"),
+        appendix=str(stored / "appendix"),
+        stdout=StringIO(),
+    )
+
+    after = pd.read_csv(stored / "appendix" / "missing-after.csv", index_col=0)
+    universe = FeatureDaily.objects.filter(in_universe=True).count()
+    assert (after["rows_current"] + after["rows_delisted"]).eq(universe).all()
+    monthly = pd.read_csv(stored / "appendix" / "monthly-ic.csv")
+    screened = ModelRun.objects.get(run_id="screen1.screening").params["ic"]
+    assert set(monthly["feature"]) == set(screened)
+
+
+def test_the_report_refuses_partitions_exported_without_the_source_gap_rules(
+    stored: Path,
+) -> None:
+    partition = existing_partition(stored / "features", 2016)
+    pd.read_parquet(partition).to_parquet(partition, index=False)
+    call_command("ic_report", run_key="screen1", output=str(stored / "ic.md"), stdout=StringIO())
+
+    with pytest.raises(CommandError, match="2016 partition was exported under other source-gap"):
+        call_command(
+            "phase3_report",
+            run_key="screen1",
+            before=str(before_table(stored / "before.csv")),
+            start="2016-01-01",
+            end="2016-12-31",
+            output=str(stored / "data.md"),
+            appendix=str(stored / "appendix"),
+            stdout=StringIO(),
+        )
+    assert not (stored / "data.md").exists()
+
+
+def test_the_report_refuses_partitions_stamped_with_other_rules(
+    stored: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    call_command("ic_report", run_key="screen1", output=str(stored / "ic.md"), stdout=StringIO())
+    monkeypatch.setattr(phase3_report, "rules_signature", lambda: "{}")
+
+    with pytest.raises(CommandError, match="rebuild features"):
+        call_command(
+            "phase3_report",
+            run_key="screen1",
+            before=str(before_table(stored / "before.csv")),
+            start="2016-01-01",
+            end="2016-12-31",
+            output=str(stored / "data.md"),
+            appendix=str(stored / "appendix"),
+            stdout=StringIO(),
+        )
+    assert not (stored / "data.md").exists()
+
+
+def test_the_report_checks_the_rules_of_the_gap_years_and_the_screening_window(
+    stored: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    call_command("ic_report", run_key="screen1", output=str(stored / "ic.md"), stdout=StringIO())
+    seen: list[tuple[date, date]] = []
+    monkeypatch.setattr(phase3_report, "_ruled", lambda start, end: seen.append((start, end)))
+
+    call_command(
+        "phase3_report",
+        run_key="screen1",
+        before=str(before_table(stored / "before.csv")),
+        start="2016-01-01",
+        end="2016-06-30",
+        output=str(stored / "data.md"),
+        appendix=str(stored / "appendix"),
+        stdout=StringIO(),
+    )
+
+    run = ModelRun.objects.get(run_id="screen1.screening")
+    assert seen == [(date(2016, 1, 1), date(2016, 6, 30)), (run.train_start, run.train_end)]
