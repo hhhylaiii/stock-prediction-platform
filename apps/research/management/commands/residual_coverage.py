@@ -1,4 +1,7 @@
-"""Monthly coverage of features for stocks later delisted and the rest, before any month mask."""
+"""Monthly coverage of features for stocks later delisted and the rest, before any month mask.
+
+A gap whose cause is known on its day (residual.OBSERVABLE) counts as covered.
+"""
 
 from argparse import ArgumentParser
 from datetime import date
@@ -10,7 +13,7 @@ from django.core.management.base import BaseCommand, CommandError
 from apps.etl.management.options import as_date
 from apps.market.calendar import TradingDays
 from apps.market.models import StockMaster
-from apps.research.features.build import FEATURE_COLUMNS, build_feature_frame
+from apps.research.features.build import FEATURE_COLUMNS, build_feature_frame, observable_frame
 from apps.research.features.residual import (
     FALLBACKS,
     MASKED_MONTHS,
@@ -77,7 +80,9 @@ class Command(BaseCommand):
         calendar, delisted = TradingDays.from_db(), _delisted()
         parts: dict[str, list[pd.DataFrame]] = {column: [] for column in columns}
         for low, high in years(start, end):
-            frame = build_feature_frame(calendar, low, high, masked={})
+            built = build_feature_frame(calendar, low, high, masked={})
+            gaps = observable_frame(calendar, low, high)
+            frame = built.merge(gaps, on=["stock_id", "date"], how="left")
             for column in columns:
                 parts[column].append(monthly_coverage(frame, column, delisted))
         tables = {column: pd.concat(chunks) for column, chunks in parts.items()}

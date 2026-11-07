@@ -6,7 +6,8 @@ from types import MappingProxyType
 
 import pandas as pd
 
-from apps.research.features.fundamental import sourced_name
+from apps.research.features.fundamental import STATEMENT_INPUTS, sourced_name
+from apps.research.features.size_risk import canonical_industry
 
 ACCEPT_RATIO = 1.5
 ACCEPT_GAP = 0.05
@@ -17,6 +18,22 @@ FALLBACKS: Mapping[str, str] = MappingProxyType(
 )
 MASKED_MONTHS: Mapping[str, frozenset[str]] = MappingProxyType({})
 GROUPS = {True: "delisted", False: "current"}
+OBSERVED = "_observable"
+OBSERVABLE: Mapping[str, tuple[str, ...]] = MappingProxyType(
+    {
+        "fund_ep": ("eps_ttm",),
+        "ind_ep_neutral": ("eps_ttm",),
+        **{name: (name,) for name in STATEMENT_INPUTS if name != "eps_ttm"},
+        "fund_rev_yoy": ("fund_rev_yoy", "fund_rev_yoy_q"),
+        "fund_rev_3m_yoy": ("fund_rev_3m_yoy", "fund_rev_yoy_q"),
+    }
+)
+NO_MARGINS = MappingProxyType(
+    dict.fromkeys(
+        ["fund_gross_margin", "fund_op_margin", "fund_gm_yoy_chg", "fund_opm_yoy_chg"],
+        frozenset({"金融保險"}),
+    )
+)
 RULES_KEY = b"residual_rules"
 
 
@@ -48,12 +65,35 @@ def mask_months(
     )
 
 
+def observable_name(name: str) -> str:
+    """Column that is True when a missing value of the feature has a cause known on its day."""
+    return f"{name}{OBSERVED}"
+
+
+def observable_gaps(
+    panel: pd.DataFrame, exempt: Mapping[str, frozenset[str]] = NO_MARGINS
+) -> pd.DataFrame:
+    """Per row, whether each OBSERVABLE gap reads only inputs on record or its industry lacks it.
+
+    A value read from inputs all on record is missing by its formula, not by the source.
+    """
+    industry = canonical_industry(panel["industry"])
+    observed = {}
+    for name, signals in OBSERVABLE.items():
+        recorded = panel[[sourced_name(signal) for signal in signals]].eq(1.0).any(axis=1)
+        observed[observable_name(name)] = recorded | industry.isin(exempt.get(name, frozenset()))
+    return panel[["stock_id", "date"]].assign(**observed)
+
+
 def monthly_coverage(rows: pd.DataFrame, column: str, delisted: pd.Series) -> pd.DataFrame:
-    """Share of universe rows with a value per month, for stocks later delisted and the rest."""
+    """Share of universe rows with a value, or an observable gap, per month and later fate."""
     inside = rows[rows["in_universe"].astype(bool)]
     group = inside["stock_id"].map(delisted).eq(True).map(GROUPS)
-    known = inside[column].notna().astype("float64")
-    shares = known.groupby([_months(inside["date"]), group]).mean().unstack()
+    known = inside[column].notna()
+    observed = observable_name(column)
+    if observed in inside:
+        known = known | inside[observed].eq(True)
+    shares = known.astype("float64").groupby([_months(inside["date"]), group]).mean().unstack()
     return shares.reindex(columns=list(GROUPS.values())).rename_axis(index=None, columns=None)
 
 

@@ -10,6 +10,7 @@ from django.core.management.base import CommandError
 
 from apps.market.calendar import TradingDays
 from apps.market.models import StockMaster, TradingCalendar
+from apps.research.features.residual import observable_name
 from apps.research.management.commands import residual_coverage
 from tests.research.conftest import weekday_calendar
 
@@ -56,7 +57,12 @@ def built(monkeypatch: pytest.MonkeyPatch) -> list[tuple[date, date, Any]]:
         return synthetic(calendar, start, end)
 
     monkeypatch.setattr(residual_coverage, "build_feature_frame", build)
+    monkeypatch.setattr(residual_coverage, "observable_frame", lambda *_: unexplained())
     return calls
+
+
+def unexplained() -> pd.DataFrame:
+    return pd.DataFrame(columns=["stock_id", "date", observable_name("fund_rev_yoy")])
 
 
 def test_coverage_builds_each_year_unmasked_and_names_the_affected_months(
@@ -120,3 +126,28 @@ def test_coverage_reads_2010_to_2020_by_default_and_names_an_empty_period(
     assert built[10][1] == date(2020, 12, 31)
     assert "fund_rev_yoy: 1 of 24 months affected (4%)" in out.getvalue()
     assert "fund_rev_yoy: no universe rows in the period" in empty.getvalue()
+
+
+def test_coverage_counts_a_gap_with_a_known_cause_as_covered(
+    built: list[tuple[date, date, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asked: list[tuple[date, date]] = []
+
+    def explained(calendar: TradingDays, start: date, end: date) -> pd.DataFrame:
+        asked.append((start, end))
+        low, high = max(start, calendar.start), min(end, calendar.end)
+        days = calendar.between(low, high) if low <= high else ()
+        rows = [(stock, day, True) for day in days for stock in ("2330", "1101")]
+        return pd.DataFrame(rows, columns=["stock_id", "date", observable_name("fund_rev_yoy")])
+
+    monkeypatch.setattr(residual_coverage, "observable_frame", explained)
+    out = StringIO()
+
+    call_command("residual_coverage", columns="fund_rev_yoy,fund_rev_3m_yoy", stdout=out)
+
+    assert asked[:2] == [
+        (date(2010, 1, 1), date(2010, 12, 31)),
+        (date(2011, 1, 1), date(2011, 12, 31)),
+    ]
+    assert "fund_rev_yoy: 0 of 24 months affected (0%)" in out.getvalue()
+    assert "fund_rev_3m_yoy: 1 of 24 months affected (4%)" in out.getvalue()

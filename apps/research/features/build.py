@@ -23,7 +23,14 @@ from apps.research.features.market import (
     load_market_features,
 )
 from apps.research.features.registry import FEATURES, feature_names
-from apps.research.features.residual import MASKED_MONTHS, apply_fallbacks, mask_months
+from apps.research.features.residual import (
+    MASKED_MONTHS,
+    OBSERVABLE,
+    apply_fallbacks,
+    mask_months,
+    observable_gaps,
+    observable_name,
+)
 from apps.research.features.size_risk import (
     industry_risk_features,
     second_batch_industry_features,
@@ -33,6 +40,7 @@ from apps.research.features.technical import (
     second_batch_technical_features,
     technical_features,
 )
+from apps.research.universe import load_universe_panel
 
 FEATURE_COLUMNS = [spec.name for spec in FEATURES]
 MODEL_COLUMNS = [*feature_names(batch=1), *feature_names(batch=2)]
@@ -98,3 +106,15 @@ def build_feature_frame(
     features = compute_features(_with_inputs(panel, calendar, end), masked)
     inside = features[features["date"].between(start, end)]
     return inside.sort_values(["date", "stock_id"], ignore_index=True)[FRAME_COLUMNS]
+
+
+def observable_frame(calendar: TradingDays, start: date, end: date) -> pd.DataFrame:
+    """Per listed stock and day in [start, end], which OBSERVABLE gaps have a known cause."""
+    columns = ["stock_id", "date", *map(observable_name, OBSERVABLE)]
+    low, high = max(start, calendar.start), min(end, calendar.end)
+    panel = load_universe_panel(calendar, start, end) if low <= high else pd.DataFrame()
+    if panel.empty:
+        return pd.DataFrame(columns=columns)
+    attached = attach_fundamentals(panel, calendar, panel["date"].min(), end)
+    gaps = observable_gaps(attached)
+    return gaps[gaps["date"].between(start, end)].reset_index(drop=True)[columns]

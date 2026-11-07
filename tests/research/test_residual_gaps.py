@@ -5,17 +5,21 @@ from datetime import date
 import pandas as pd
 import pytest
 
-from apps.research.features.fundamental import sourced_name
+from apps.research.features.build import MODEL_COLUMNS
+from apps.research.features.fundamental import STATEMENT_INPUTS, sourced_name
 from apps.research.features.residual import (
     ACCEPT_GAP,
     ACCEPT_RATIO,
     FALLBACKS,
     MASKED_MONTHS,
     MAX_MASKED_SHARE,
+    OBSERVABLE,
     affected_months,
     apply_fallbacks,
     mask_months,
     monthly_coverage,
+    observable_gaps,
+    observable_name,
     rules_signature,
 )
 
@@ -180,3 +184,63 @@ def test_the_rules_signature_names_the_fallbacks_and_the_masked_months() -> None
     }
     assert rules_signature() == rules_signature(FALLBACKS, MASKED_MONTHS)
     assert rules_signature() != rules_signature(FALLBACKS, {"fund_rev_mom": frozenset({"2017-03"})})
+
+
+MARGINS = ["fund_gross_margin", "fund_op_margin", "fund_gm_yoy_chg", "fund_opm_yoy_chg"]
+
+
+def test_a_gap_is_observable_only_when_every_input_its_value_reads_is_on_record() -> None:
+    panel = pd.DataFrame(
+        {
+            "stock_id": ["2330", "2881", "1101", "1102"],
+            "date": [d("2017-03-01")] * 4,
+            "industry": ["半導體業", "金融業", "水泥工業", None],
+            **{sourced_name(name): [1.0, 0.0, NAN, 0.0] for name in STATEMENT_INPUTS},
+            sourced_name("fund_rev_yoy"): [1.0, 0.0, NAN, 0.0],
+            sourced_name("fund_rev_3m_yoy"): [0.0, 0.0, 0.0, 1.0],
+        }
+    )
+    panel.loc[[0, 3], sourced_name("fund_rev_yoy_q")] = 1.0
+
+    gaps = observable_gaps(panel)
+
+    def column(name: str) -> list[bool]:
+        return gaps[observable_name(name)].tolist()
+
+    assert list(gaps.columns) == ["stock_id", "date", *map(observable_name, OBSERVABLE)]
+    assert set(OBSERVABLE) <= set(MODEL_COLUMNS)
+    assert set(OBSERVABLE) == {
+        *(name for name in STATEMENT_INPUTS if name != "eps_ttm"),
+        "fund_ep",
+        "ind_ep_neutral",
+        "fund_rev_yoy",
+        "fund_rev_3m_yoy",
+    }
+    for name in ("fund_ep", "ind_ep_neutral", "fund_eps_yoy", "fund_debt_ratio", "fund_cfo_to_ni"):
+        assert column(name) == [True, False, False, False]
+    for name in MARGINS:
+        assert column(name) == [True, True, False, False]
+    assert column("fund_rev_yoy") == [True, False, False, True]
+    assert column("fund_rev_3m_yoy") == [True, False, False, True]
+
+
+def test_monthly_coverage_counts_an_observable_gap_as_covered() -> None:
+    rows = pd.DataFrame(
+        {
+            "stock_id": ["2330", "1101", "2330", "1101"],
+            "date": [d("2017-03-01")] * 2 + [d("2017-03-02")] * 2,
+            "in_universe": True,
+            "fund_eps_yoy": [0.1, NAN, 0.1, NAN],
+            observable_name("fund_eps_yoy"): [False, True, False, None],
+        }
+    )
+    delisted = pd.Series({"2330": False, "1101": True})
+
+    observed = monthly_coverage(rows, "fund_eps_yoy", delisted)
+    plain = monthly_coverage(
+        rows.drop(columns=observable_name("fund_eps_yoy")), "fund_eps_yoy", delisted
+    )
+
+    assert observed.loc["2017-03", "delisted"] == 0.5
+    assert plain.loc["2017-03", "delisted"] == 0.0
+    assert observed.loc["2017-03", "current"] == 1.0
