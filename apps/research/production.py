@@ -233,7 +233,7 @@ def _run_ids(key: str) -> list[str]:
 def build_run(
     scope: str, run_key: str, research_run_key: str, as_of: date, directory: Path, seed: int = 0
 ) -> Built:
-    """Fit shadow N′, then N, on scope's frozen design through as_of; N carries the references."""
+    """Fit shadow N′ with its return or interval baselines, then N; N carries the references."""
     granted = production_pass(scope)
     _check_keys(scope, run_key, research_run_key, granted)
     design = DESIGNS[scope]

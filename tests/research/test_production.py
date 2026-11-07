@@ -395,6 +395,9 @@ def test_build_run_command_gives_the_probability_model_the_research_brier(
     assert not ModelRun.objects.filter(run_key="interval-prod", model_type="logistic").exists()
     assert not fold_path("interval-prod", BASELINE, 0).exists()
     assert f"Brier baseline from interval-wf1: {brier:.4f}" in out.getvalue()
+    listed = list(shadow.order_by("run_id").values_list("run_id", flat=True))
+    assert f"interval-prod-shadow: {', '.join(listed)}" in out.getvalue()
+    assert "interval-prod-shadow.logistic.h20.f000" in listed
     assert "rolling IC" not in out.getvalue()
 
 

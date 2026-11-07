@@ -21,7 +21,8 @@ from apps.research.walkforward import WalkForwardError
 class Command(BaseCommand):
     help = (
         "Fit a scope's production model through --as-of and its shadow on the months before, "
-        "as candidates; only once the scope's holdout has been claimed."
+        "with the shadow's baselines for return and interval, as candidates; only once the "
+        "scope's holdout has been claimed."
     )
 
     def add_arguments(self, parser: ArgumentParser) -> None:
