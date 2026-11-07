@@ -416,14 +416,14 @@ for fill in holdings valuation margin sbl; do
 done
 ```
 
-櫃買把 `--source` 換成 `tpex`。中斷了用 `--resume <run_id>` 接著跑。某一天固定過不了檢查（`SchemaChangedError`，例如櫃買借券表有 4 列以上餘額對不上；raw 會先存，可以查）或固定回沒有資料（`SourceNotReadyError`，不存 raw）時，`--resume` 會一直停在那天。確定是來源本身的問題，就把那個 run 的 checkpoint 推到那一天再續跑，不要另開一個 run（另開的 run 從空的統計開始，卡住之前那段的 `filled`、`differences` 不會寫進 log，holdings 也不會刪掉前一段的重複股數）：
+櫃買把 `--source` 換成 `tpex`，`sbl` 的 `--start` 改成 2012-10-02（櫃買借券表從那天才有資料）。中斷了用 `--resume <run_id>` 接著跑。某一天固定過不了檢查（`SchemaChangedError`，例如櫃買借券表有 4 列以上餘額對不上；raw 會先存，可以查）或固定回沒有資料（`SourceNotReadyError`，不存 raw）時，`--resume` 會一直停在那天。確定是來源本身的問題，就把那個 run 的 checkpoint 推到那一天再續跑，不要另開一個 run（另開的 run 從空的統計開始，卡住之前那段的 `filled`、`differences` 不會寫進 log，holdings 也不會刪掉前一段的重複股數）：
 
 ```bash
 uv run python manage.py shell -c "from apps.etl.models import EtlRun; r = EtlRun.objects.get(run_id=<id>); r.checkpoint = {**r.checkpoint, 'last_date': '<卡住的那天>'}; r.save(update_fields=['checkpoint'])"
 uv run python manage.py fill_from_exchange --source <twse|tpex> --fill <fill> --resume <id>
 ```
 
-跳過的那天留成缺值，交給 SPEC §6 處理步驟 6 的殘餘缺口規則。`margin`、`sbl` 跳過的那天仍在 run 的 checkpoint 範圍內，Phase 3 的 `covered_days` 會把它算成交易所表已寫入，那天沒有列的股票會被當成交易所沒列它（PIT 可觀察），所以跳過前把那天和原因記下來交給 Phase 3，當成來源缺處理。櫃買借券表每列都檢查融券、借券賣出的前日餘額加減當日變動等於當日餘額；一頁最多 3 列對不上時照頁面的數字存、記 warning（例如 2013-07-31 的 6177：借券前日 124,000、當日沒有賣出或還券、當日餘額 0，FinMind 也存 0；2026-11-07 前抓過的 213 頁只有這一列），4 列以上才當成版面變更。櫃買借券表沒有單位檢查（證交所 TWT93U 看「單位：股」、融資券表看「張」）：`sbl` 開跑幾分鐘後看一次 `etl_run.checkpoint->'differences'->'sbl'->'sample'`，已存值和交易所值差 1,000 倍就停下來查。
+跳過的那天留成缺值，交給 SPEC §6 處理步驟 6 的殘餘缺口規則。`margin`、`sbl` 跳過的那天仍在 run 的 checkpoint 範圍內，Phase 3 的 `covered_days` 會把它算成交易所表已寫入，那天沒有列的股票會被當成交易所沒列它（PIT 可觀察），所以跳過前把那天和原因記下來交給 Phase 3，當成來源缺處理。櫃買借券表每列都檢查融券、借券賣出的前日餘額加減當日變動等於當日餘額；一頁最多 3 列對不上時照頁面的數字存、記 warning（例如 2013-07-31 的 6177：借券前日 124,000、當日沒有賣出或還券、當日餘額 0，FinMind 也存 0；2026-11-07 前抓過的 213 頁只有這一列），4 列以上才當成版面變更。每日抓取用的是同一個檢查：1 到 3 列對不上照存，研究閘門照常放行，只在 worker 的 log 留 warning（不寫 `data_quality_log`）；4 列以上那天的 tpex/sbl 失敗，閘門擋下當天。櫃買借券表沒有單位檢查（證交所 TWT93U 看「單位：股」、融資券表看「張」）：`sbl` 開跑幾分鐘後看一次 `etl_run.checkpoint->'differences'->'sbl'->'sample'`，已存值和交易所值差 1,000 倍就停下來查。
 
 - `holdings`：證交所 MI_QFIIS、櫃買 insti/qfii，一天一個請求，同一頁補外資持股比率（`daily_chip.fi_holding_pct`）和發行股數（`shares_outstanding`）。`valuation`：證交所 BWIBBU_d、櫃買 peQryDate，補 `daily_valuation`。`margin`：證交所 MI_MARGN、櫃買 margin/balance，補 `daily_chip` 的融資餘額、融資限額、融券餘額（`margin_balance`、`margin_limit`、`short_balance`，張換成股）。頁面上有的股票才補，不在頁面上的（例如還沒有信用交易資格）不補；停止信用交易的股票有的照樣列在頁面上、數字是 0（例如證交所註記 `OX`），照存 0，和每日抓取相同。`sbl`：證交所 TWT93U、櫃買 margin/sbl，補 `daily_chip.sbl_short_balance`（借券賣出當日餘額，單位股），規則和 `margin` 相同。櫃買借券表 2012-10-02 才開始有資料，之前每天都回沒有資料，櫃買 `sbl` 從 2012-10-02 起跑。證交所 TWT93U 自 2012-03-19 起改用新公式（頁面註明「自101年3月19日起借券賣出餘額採用新公式計算及資訊揭露」），之前的頁面借券賣出只有前日餘額、賣出、庫存異動、今日餘額、可使用額度五欄；adapter 對 2012-03-19 以前的日子把「今日餘額」當成當日餘額讀，2012-03-19 起再出現舊欄名照樣當成版面變更。FinMind 存的同期值也是舊公式（2012-03-16、2012-03-19 兩天各 790 檔和頁面全同），但新舊公式前後不接續：2012-03-19 頁面的前日餘額和 2012-03-16 的今日餘額，805 檔裡有 212 檔不同。
 - 缺才補，不分股票之後有沒有下市：
