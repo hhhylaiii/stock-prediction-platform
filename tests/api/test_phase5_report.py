@@ -12,13 +12,14 @@ import pytest
 from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.db import DatabaseError, connection, transaction
+from django.test import Client
 
 from apps.api.management.commands import phase5_report
 from apps.api.management.commands.measure_api import ENDPOINTS, Timing
 from apps.api.status import StatusView
 from apps.market.models import StockMaster
-from apps.research.models import Prediction, PredictionContrib
-from tests.api.conftest import OCT_30, Runs, add_predictions, seed_market
+from apps.research.models import FeatureDaily, Prediction, PredictionContrib
+from tests.api.conftest import OCT_30, Runs, add_bars, add_predictions, seed_market
 
 pytestmark = pytest.mark.django_db
 
@@ -36,6 +37,7 @@ CHECKS = [
 ]
 TIMED = CHECKS[-2:]
 URL = "http://127.0.0.1:8000"
+NOV_2 = date(2026, 11, 2)
 
 
 @pytest.fixture
@@ -51,6 +53,7 @@ def complete(runs: Runs, calendar_in_db: list[date]) -> Runs:
         position=1,
         contrib=0.02,
     )
+    FeatureDaily.objects.create(stock_id="2330", date=OCT_30, in_universe=True, tech_ret_5d=-0.012)
     return runs
 
 
@@ -92,10 +95,10 @@ def test_every_check_passes_when_each_field_is_served(complete: Runs, tmp_path: 
     assert list(checks) == CHECKS
     assert {result for result, _ in checks.values()} == {"通過"}
     assert checks["最新交易日有預測"][1] == "price_date 2026-10-30，prediction_date 2026-10-30"
-    assert checks["20 日排名"][1] == "date 2026-10-30，第 1 頁 3 檔，universe 3，缺排名 0 檔"
+    assert checks["20 日排名"][1] == "缺 0 檔；date 2026-10-30，3 檔，universe 3"
     assert checks["20 日價格區間"][1] == "缺 0 檔；來源 quantile 3"
     assert checks["2330 個股頁兩個期間"][1] == "齊全的期間 5、20"
-    assert checks["2330 的特徵"][1] == "date 2026-10-30，1 項貢獻，0 項有原始值"
+    assert checks["2330 的特徵"][1] == "date 2026-10-30，1 項貢獻，1 項有原始值"
     assert sum(line.startswith("| `/api/") for line in text.splitlines()) == len(ENDPOINTS)
 
 
@@ -106,7 +109,7 @@ def test_the_volume_counts_each_table_and_the_stock(complete: Runs, tmp_path: Pa
     assert section.splitlines() == [
         "- stock_master 4 檔。",
         "- daily_price 8 列，到 2026-10-30；2330 有 2 列。",
-        "- feature_daily 0 列，到 無；2330 的 label_daily 有 0 列。",
+        "- feature_daily 1 列，到 2026-10-30；2330 的 label_daily 有 0 列。",
         "- model_run 6 筆：active 6。",
         "- prediction 24 列，2 個預測日，到 2026-10-30；prediction_contrib 1 列。",
         "- model_monitor 0 列，backtest_metric 0 列。",
@@ -141,6 +144,62 @@ def test_a_stock_missing_its_twenty_day_odds_lacks_that_horizon(
 
     assert failed(text) == {"20 日上漲機率", "2330 個股頁兩個期間"}
     assert checks_of(text)["2330 個股頁兩個期間"][1] == "齊全的期間 5"
+
+
+def test_predictions_a_session_behind_the_prices_are_not_the_latest(
+    complete: Runs, tmp_path: Path
+) -> None:
+    for code, close in {"2330": 1010.0, "2317": 201.0, "6488": 505.0, "8299": 810.0}.items():
+        add_bars(code, [NOV_2], [close])
+
+    _, text = failing(tmp_path)
+
+    assert failed(text) == set(CHECKS) - set(TIMED)
+    assert (
+        checks_of(text)["最新交易日有預測"][1]
+        == "price_date 2026-11-02，prediction_date 2026-10-30"
+    )
+    assert checks_of(text)["20 日預測價格"][1] == "沒有最新交易日的表"
+    assert checks_of(text)["2330 個股頁兩個期間"][1] == "齊全的期間 無"
+
+
+def test_features_without_a_raw_value_fail(complete: Runs, tmp_path: Path) -> None:
+    FeatureDaily.objects.all().delete()
+
+    _, text = failing(tmp_path)
+
+    assert failed(text) == {"2330 的特徵"}
+    assert checks_of(text)["2330 的特徵"][1] == "date 2026-10-30，1 項貢獻，0 項有原始值"
+
+
+def test_every_page_of_the_table_is_checked(complete: Runs, tmp_path: Path, settings: Any) -> None:
+    settings.API_MAX_PAGE_SIZE = 2
+    Prediction.objects.filter(run=complete.quantile, stock_id="2317").delete()
+
+    _, text = failing(tmp_path)
+
+    assert failed(text) == {"20 日預測價格"}
+    assert checks_of(text)["20 日預測價格"][1] == "缺 1 檔"
+    assert checks_of(text)["20 日排名"][1] == "缺 0 檔；date 2026-10-30，3 檔，universe 3"
+
+
+def test_a_throttled_check_says_to_raise_the_rate(
+    complete: Runs, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_get = Client.get
+
+    def throttled(self: Client, path: str, *args: Any, **kwargs: Any) -> Any:
+        response = real_get(self, path, *args, **kwargs)
+        if path == "/api/status":
+            response.status_code = 429
+        return response
+
+    monkeypatch.setattr(Client, "get", throttled)
+
+    with pytest.raises(
+        CommandError, match=r"^/api/status 被 throttle 擋下（429）；.*API_THROTTLE_RATE"
+    ):
+        report(tmp_path)
 
 
 def test_prices_without_predictions_fail_every_prediction_check(

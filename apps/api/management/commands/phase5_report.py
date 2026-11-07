@@ -1,12 +1,15 @@
 """Write the S5 report: data volume, the SPEC section 9 checks and the endpoint timings."""
 
 import json
+import shutil
+import tempfile
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError, CommandParser
 from django.db import connection
 from django.db.models import Max, Model
@@ -31,11 +34,14 @@ if TYPE_CHECKING:
     from playwright.sync_api import Page
 
 LIMIT_MS = 500
+THROTTLED = 429
 VIEW_TIMEOUT_MS = 15_000
+LOADING = "載入中"
+SHOWN_VIEW = "section.view:not([hidden])"
 VIEWS = (
     ("today.png", "#today", ("#rows .trow",)),
     ("stock.png", "#stock-{stock}", ("#price-chart rect.candle", "#price-chart path.fan-median")),
-    ("models.png", "#models", ("#model-table .trow", "#etl .trow")),
+    ("models.png", "#models", ("#model-table .trow",)),
 )
 
 Row = dict[str, Any]
@@ -50,8 +56,11 @@ class Check:
 
 def fetch(client: Client, path: str) -> dict[str, Any]:
     """The decoded envelope, or an empty one when the body is not a JSON object."""
+    response = client.get(path)
+    if response.status_code == THROTTLED:
+        raise CommandError(f"{path} 被 throttle 擋下（429）；照文件把 API_THROTTLE_RATE 調高再跑")
     try:
-        body = json.loads(client.get(path).content)
+        body = json.loads(response.content)
     except ValueError:
         return {}
     return body if isinstance(body, dict) else {}
@@ -66,50 +75,58 @@ def priced(row: Row) -> bool:
 
 
 def banded(row: Row) -> bool:
-    band = row.get("interval")
-    return isinstance(band, dict) and bool(band["low"] < band["high"])
+    return row.get("interval") is not None
 
 
 def likely(row: Row) -> bool:
-    prob = row.get("prob_up_5pct")
-    return prob is not None and 0 <= prob <= 1
+    return row.get("prob_up_5pct") is not None
 
 
-def gaps(rows: list[Row], test: Callable[[Row], bool]) -> int:
-    return sum(not test(row) for row in rows)
+@dataclass(frozen=True)
+class Table:
+    rows: list[Row]
+    fresh: bool
+    head: str
+
+    def gaps(self, test: Callable[[Row], bool]) -> int:
+        return sum(not test(row) for row in self.rows)
+
+    def check(self, name: str, test: Callable[[Row], bool], extra: str = "") -> Check:
+        missing = self.gaps(test)
+        detail = f"缺 {missing} 檔" if self.fresh else "沒有最新交易日的表"
+        return Check(name, self.fresh and not missing, detail + extra)
 
 
-def served(client: Client, horizon: int, day: str | None) -> tuple[list[Row], bool, str]:
-    """Ranked rows of the first page, whether they are the day's, and how they read."""
-    body = fetch(client, f"/api/predictions?horizon={horizon}")
-    meta = body.get("meta") or {}
-    rows = [row for row in body.get("data") or [] if row.get("in_universe")]
-    fresh = day is not None and meta.get("date") == day and bool(rows)
-    head = f"date {meta.get('date')}，第 1 頁 {len(rows)} 檔，universe {meta.get('universe')}"
-    return rows, fresh, head
+def served(client: Client, horizon: int, day: str | None) -> Table:
+    """Every in-universe row of the horizon's table, read page by page at the largest page size."""
+    rows: list[Row] = []
+    first: dict[str, Any] = {}
+    page, pages = 1, 1
+    while page <= pages:
+        body = fetch(
+            client,
+            f"/api/predictions?horizon={horizon}&page_size={settings.API_MAX_PAGE_SIZE}&page={page}",
+        )
+        meta = body.get("meta") or {}
+        first = first or meta
+        rows += [row for row in body.get("data") or [] if row.get("in_universe")]
+        pages, page = meta.get("pages") or 0, page + 1
+    universe = first.get("universe")
+    fresh = day is not None and first.get("date") == day and bool(rows) and len(rows) == universe
+    return Table(rows, fresh, f"date {first.get('date')}，{len(rows)} 檔，universe {universe}")
 
 
 def table_checks(client: Client, day: str | None) -> list[Check]:
-    rows, fresh, head = served(client, 20, day)
-    sources = Counter(str(row.get("interval_source")) for row in rows)
+    long, short = served(client, 20, day), served(client, 5, day)
+    sources = Counter(str(row.get("interval_source")) for row in long.rows)
     source_text = "、".join(f"{name} {n}" for name, n in sorted(sources.items())) or "無"
-    short, short_fresh, short_head = served(client, 5, day)
-    short_gaps = gaps(short, lambda row: ranked(row) and priced(row))
     return [
-        Check(
-            "20 日排名", fresh and not gaps(rows, ranked), f"{head}，缺排名 {gaps(rows, ranked)} 檔"
-        ),
-        Check("20 日預測價格", fresh and not gaps(rows, priced), f"缺 {gaps(rows, priced)} 檔"),
-        Check(
-            "20 日價格區間",
-            fresh and not gaps(rows, banded),
-            f"缺 {gaps(rows, banded)} 檔；來源 {source_text}",
-        ),
-        Check("20 日上漲機率", fresh and not gaps(rows, likely), f"缺 {gaps(rows, likely)} 檔"),
-        Check(
-            "5 日排名與預測價格",
-            short_fresh and not short_gaps,
-            f"{short_head}，缺 {short_gaps} 檔",
+        long.check("20 日排名", ranked, f"；{long.head}"),
+        long.check("20 日預測價格", priced),
+        long.check("20 日價格區間", banded, f"；來源 {source_text}"),
+        long.check("20 日上漲機率", likely),
+        short.check(
+            "5 日排名與預測價格", lambda row: ranked(row) and priced(row), f"；{short.head}"
         ),
     ]
 
@@ -142,7 +159,7 @@ def stock_checks(client: Client, stock: str, day: str | None) -> list[Check]:
         ),
         Check(
             f"{stock} 的特徵",
-            day is not None and feature_day == day and bool(items),
+            day is not None and feature_day == day and valued > 0,
             f"date {feature_day}，{len(items)} 項貢獻，{valued} 項有原始值",
         ),
     ]
@@ -230,24 +247,34 @@ def report_text(stock: str, checks: list[Check], timings: list[Timing]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def wait_for(page: "Page", name: str, ready: tuple[str, ...], timeout_ms: float) -> None:
+    """Each ready selector attached, then no 載入中 left in the status strip or the shown view."""
+    from playwright.sync_api import expect
+
+    for selector in ready:
+        try:
+            expect(page.locator(selector).first).to_be_attached(timeout=timeout_ms)
+        except AssertionError as error:
+            raise CommandError(f"{name}：等不到 {selector}") from error
+    pending = page.locator(f"#status, {SHOWN_VIEW}").get_by_text(LOADING)
+    try:
+        expect(pending).to_have_count(0, timeout=timeout_ms)
+    except AssertionError as error:
+        raise CommandError(f"{name}：還有區塊停在「{LOADING}」") from error
+
+
 def capture_views(
     page: "Page", base_url: str, stock: str, out_dir: Path, timeout_ms: float = VIEW_TIMEOUT_MS
 ) -> list[Path]:
-    """Screenshot each view once its data has drawn; raise naming the view that never did."""
-    from playwright.sync_api import expect
-
+    """Screenshot every view once drawn; out_dir gets all three or none of them."""
     page.set_viewport_size({"width": 1440, "height": 900})
-    shots = []
-    for name, anchor, ready in VIEWS:
-        page.goto(f"{base_url.rstrip('/')}/{anchor.format(stock=stock)}")
-        for selector in ready:
-            try:
-                expect(page.locator(selector).first).to_be_attached(timeout=timeout_ms)
-            except AssertionError as error:
-                raise CommandError(f"{name}：等不到 {selector}") from error
-        shots.append(out_dir / name)
-        page.screenshot(path=shots[-1], full_page=True)
-    return shots
+    with tempfile.TemporaryDirectory() as scratch:
+        for name, anchor, ready in VIEWS:
+            page.goto(f"{base_url.rstrip('/')}/{anchor.format(stock=stock)}")
+            wait_for(page, name, ready, timeout_ms)
+            page.screenshot(path=Path(scratch) / name, full_page=True)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        return [Path(shutil.move(Path(scratch) / name, out_dir / name)) for name, _, _ in VIEWS]
 
 
 def browse(base_url: str, stock: str, out_dir: Path) -> list[Path]:

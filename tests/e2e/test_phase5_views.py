@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Any
 
 import pytest
 from django.core.management.base import CommandError
@@ -38,4 +39,35 @@ def test_a_stock_without_a_forecast_is_not_captured(
     with pytest.raises(CommandError, match=r"^stock\.png：等不到 #price-chart path\.fan-median$"):
         capture_views(page, live_server.url, "1101", tmp_path, timeout_ms=1_000)
 
-    assert [shot.name for shot in tmp_path.iterdir()] == ["today.png"]
+    assert list(tmp_path.iterdir()) == []
+
+
+SLOW_SECTIONS = """
+const real = window.fetch;
+window.fetch = (url, options) => /features|history|ic-monthly|data-quality/.test(String(url))
+  ? new Promise(done => setTimeout(done, 1500)).then(() => real(url, options))
+  : real(url, options);
+"""
+
+
+def test_no_view_is_captured_while_a_section_is_still_loading(
+    page: Page,
+    live_server: LiveServer,
+    predicted: Seed,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen = []
+    real_screenshot = page.screenshot
+
+    def screenshot(**kwargs: Any) -> bytes:
+        seen.append(" ".join(page.locator("#status, section.view:not([hidden])").all_inner_texts()))
+        return real_screenshot(**kwargs)
+
+    monkeypatch.setattr(page, "screenshot", screenshot)
+    page.add_init_script(SLOW_SECTIONS)
+
+    capture_views(page, live_server.url, "2330", tmp_path)
+
+    assert len(seen) == 3
+    assert not [text for text in seen if "載入中" in text]
