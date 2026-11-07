@@ -63,6 +63,14 @@ def retries_run_in_place() -> Iterator[None]:
     app.conf.CELERY_TASK_EAGER_PROPAGATES = before
 
 
+@pytest.fixture(autouse=True)
+def retrains(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """The monthly retrains a finished morning queues, kept from running in these tests."""
+    days: list[str] = []
+    monkeypatch.setattr(tasks.retrain, "delay", lambda day: days.append(day))
+    return days
+
+
 @pytest.fixture
 def now(monkeypatch: pytest.MonkeyPatch) -> Callable[[date, time], None]:
     def _set(day: date, at: time) -> None:

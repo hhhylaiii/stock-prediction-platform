@@ -92,11 +92,12 @@ def shadow_fold(calendar: TradingDays, as_of: date, config: WalkForwardConfig) -
 
 @dataclass(frozen=True)
 class Design:
-    """A scope's frozen design: walk-forward layout, rank variant and target variant."""
+    """A scope's frozen design: walk-forward layout, variants, and the research run it froze."""
 
     config: WalkForwardConfig = field(default_factory=WalkForwardConfig)
     variant: Variant = SPEC_RECIPE
     target: TargetVariant = TARGET_RECIPE
+    research_run_key: str | None = None
 
 
 @dataclass(frozen=True)
@@ -243,6 +244,11 @@ def build_run(
 ) -> Built:
     """Fit shadow N′ with its return or interval baselines, then N; N carries the references."""
     granted = production_pass(scope)
+    frozen = DESIGNS[scope].research_run_key
+    if frozen is not None and research_run_key != frozen:
+        raise RunError(
+            f"{scope}'s frozen design takes its references from {frozen}, not {research_run_key}"
+        )
     _check_keys(scope, run_key, research_run_key, granted)
     design = DESIGNS[scope]
     check_design(scope, design.variant, design.target)

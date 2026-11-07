@@ -12,19 +12,27 @@ from celery import Task, chain, shared_task
 from django.conf import settings
 from django.core.management import call_command
 from django.db import transaction
+from django.db.models import Max
 from django.utils import timezone
 
 from apps.etl.alerts import dispatch
 from apps.etl.models import DataQualityLog
 from apps.etl.tasks import US_CLOSE_CHECK, ready_for_research
-from apps.market.calendar import TradingDays
+from apps.market.calendar import OutsideCalendarError, TradingDays
 from apps.research.lock import ResearchBusyError, research_lock
+from apps.research.models import HoldoutScope, LabelDaily
 from apps.research.monitor import run_monitor
 from apps.research.predict import predict
+from apps.research.production import DESIGNS, build_run
+from apps.research.promotion import PROMOTION_CHECK, first_day, promote
 
 logger = logging.getLogger(__name__)
 EVENING_CHECK = "research_evening"
 MORNING_CHECK = "research_morning"
+RETRAIN_CHECK = "research_retrain"
+NOT_FROZEN = "the design is not frozen: DESIGNS names no research_run_key"
+MISSED = "missed"
+RETRAIN_WINDOW = 5
 GATE_SHUT = "research gate shut"
 US_CLOSE_MISSING = "missing"
 EVENING_STEPS = ("features", "labels")
@@ -59,11 +67,47 @@ def _monitor(day: date) -> str:
     return f"{result.scored} model_monitor rows, degraded {degraded}"
 
 
+def retrain_key(scope: str, day: date) -> str:
+    return f"{scope}-{day:%Y-%m}"
+
+
+def _month(check: str, day: date) -> Any:
+    return DataQualityLog.objects.filter(
+        check_name=check, date__year=day.year, date__month=day.month
+    )
+
+
+def _pending(day: date) -> list[str]:
+    """The run keys this month's retrain built that no promotion has tried yet."""
+    row = _month(RETRAIN_CHECK, day).filter(date__lte=day).order_by("-date", "-pk").first()
+    built = {} if row is None else row.detail.get("built", {})
+    keys = [built[scope] for scope in HoldoutScope.values if scope in built]
+    tried = DataQualityLog.objects.filter(check_name=PROMOTION_CHECK, detail__run_key__in=keys)
+    seen = {row.detail["run_key"] for row in tried}
+    return [key for key in keys if key not in seen]
+
+
+def _promote(day: date) -> str:
+    """Promote each untried build from its first day; a refusal fails the step after the rest."""
+    done, failed = [], []
+    for run_key in _pending(day):
+        try:
+            result = promote(run_key, first_day(run_key), settings.FEATURE_PARQUET_DIR)
+        except Exception as error:
+            failed.append(f"{run_key}: {type(error).__name__}: {error}")
+            continue
+        done.append(f"{run_key}: {'promoted' if result.promoted else 'kept the serving runs'}")
+    if failed:
+        raise RuntimeError("; ".join([*failed, *done]))
+    return "; ".join(done)
+
+
 STEPS: dict[str, Callable[[date], str]] = {
     "labels": _labels,
     "features": _features,
     "predict": _predict,
     "monitor": _monitor,
+    "promote": _promote,
 }
 
 
@@ -135,9 +179,61 @@ def step(self: Task[Any, Any], done: list[Done], name: str, check: str, day: str
 @shared_task(name="research.finish")
 def finish(done: list[Done], check: str, day: str, extra: dict[str, str]) -> str:
     """Record the chain as done, as a warning when it ran without the US close."""
+    session = date.fromisoformat(day)
     severity = Severity.WARNING if extra else Severity.INFO
-    _record(date.fromisoformat(day), check, severity, {"steps": done, **extra})
+    _record(session, check, severity, {"steps": done, **extra})
+    if check == MORNING_CHECK and _retrain_due(session):
+        retrain.delay(day)
     return str(severity)
+
+
+def _retrain_due(day: date) -> bool:
+    """A month retrains once, from a morning among its first sessions."""
+    calendar = TradingDays.from_db()
+    opening = calendar.between(day.replace(day=1), day)
+    return len(opening) <= RETRAIN_WINDOW and not _month(RETRAIN_CHECK, day).exists()
+
+
+@shared_task(name="research.retrain")
+def retrain(day: str) -> str:
+    """This month's N and N′ of every frozen scope as of day, once the labels reach day."""
+    session = date.fromisoformat(day)
+    last = LabelDaily.objects.aggregate(last=Max("date"))["last"]
+    built: dict[str, str] = {}
+    refused: dict[str, str] = {}
+    failed: dict[str, str] = {}
+    for scope in HoldoutScope.values:
+        research = DESIGNS[scope].research_run_key
+        if last is None or last < session:
+            refused[scope] = f"label_daily ends on {last}, before {session}"
+        elif research is None:
+            refused[scope] = NOT_FROZEN
+        else:
+            key = retrain_key(scope, session)
+            try:
+                build_run(scope, key, research, session, settings.FEATURE_PARQUET_DIR)
+            except Exception as error:
+                logger.error("research retrain %s %s failed: %s", scope, day, error)
+                failed[scope] = f"{type(error).__name__}: {error}"
+            else:
+                built[scope] = key
+    severity = Severity.WARNING if refused or failed else Severity.INFO
+    _record(
+        session, RETRAIN_CHECK, severity, {"built": built, "refused": refused, "failed": failed}
+    )
+    return str(severity)
+
+
+def _flag_missed(calendar: TradingDays, day: date) -> None:
+    """Warn when the session before day never had a morning run, once the schedule has run."""
+    try:
+        before = calendar.shift(day, -1)
+    except OutsideCalendarError:
+        return
+    seen = DataQualityLog.objects.filter(check_name=MORNING_CHECK)
+    if seen.filter(date=before).exists() or not seen.filter(date__lt=before).exists():
+        return
+    _record(before, MORNING_CHECK, Severity.WARNING, {"reason": MISSED})
 
 
 @shared_task(bind=True, max_retries=None, name="research.evening")
@@ -171,8 +267,9 @@ def morning(self: Task[Any, Any], day: str | None = None) -> str:
     if day is None and _early("MORNING"):
         return "early"
     if day is None:
-        yesterday = timezone.localtime().date() - timedelta(days=1)
-        session = TradingDays.from_db().latest_on_or_before(yesterday)
+        calendar = TradingDays.from_db()
+        session = calendar.latest_on_or_before(timezone.localtime().date() - timedelta(days=1))
+        _flag_missed(calendar, session)
     else:
         session = date.fromisoformat(day)
     if _finished(session, MORNING_CHECK):
@@ -186,5 +283,6 @@ def morning(self: Task[Any, Any], day: str | None = None) -> str:
             args=(session.isoformat(),), countdown=settings.RESEARCH_US_CLOSE_COUNTDOWN
         )
     names = MORNING_STEPS if _finished(session, EVENING_CHECK) else ("labels", *MORNING_STEPS)
+    names = (*names, "promote") if _pending(session) else names
     _start(MORNING_CHECK, session, names, {} if landed else {"us_close": US_CLOSE_MISSING})
     return "started"
