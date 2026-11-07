@@ -36,6 +36,8 @@ FAST = {
     "RESEARCH_US_CLOSE_RETRIES": 2,
     "RESEARCH_LOCK_COUNTDOWN": 0,
     "RESEARCH_LOCK_RETRIES": 2,
+    "RESEARCH_RETRAIN_COUNTDOWN": 0,
+    "RESEARCH_RETRAIN_RETRIES": 2,
 }
 
 
@@ -64,10 +66,10 @@ def retries_run_in_place() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
-def retrains(monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    """The monthly retrains a finished morning queues, kept from running in these tests."""
-    days: list[str] = []
-    monkeypatch.setattr(tasks.retrain, "delay", lambda day: days.append(day))
+def retrains(monkeypatch: pytest.MonkeyPatch) -> list[date]:
+    """The monthly retrain a finished morning may queue or warn about, kept out of these tests."""
+    days: list[date] = []
+    monkeypatch.setattr(tasks, "_retrain_after", days.append)
     return days
 
 

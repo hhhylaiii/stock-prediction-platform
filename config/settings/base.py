@@ -131,10 +131,16 @@ RESEARCH_US_CLOSE_COUNTDOWN = env.int("RESEARCH_US_CLOSE_COUNTDOWN", default=300
 RESEARCH_US_CLOSE_RETRIES = env.int("RESEARCH_US_CLOSE_RETRIES", default=6)
 RESEARCH_LOCK_COUNTDOWN = env.int("RESEARCH_LOCK_COUNTDOWN", default=600)
 RESEARCH_LOCK_RETRIES = env.int("RESEARCH_LOCK_RETRIES", default=6)
+RESEARCH_RETRAIN_BEFORE = env.str("RESEARCH_RETRAIN_BEFORE", default="09:00")
+RESEARCH_RETRAIN_MIN_FREE = env.int("RESEARCH_RETRAIN_MIN_FREE", default=50)
+RESEARCH_RETRAIN_COUNTDOWN = env.int("RESEARCH_RETRAIN_COUNTDOWN", default=1800)
+RESEARCH_RETRAIN_RETRIES = env.int("RESEARCH_RETRAIN_RETRIES", default=6)
 if time.fromisoformat(RESEARCH_AT["EVENING"]) <= time.fromisoformat(ETL_AT["CHECK_QUALITY"]):
     raise ImproperlyConfigured("RESEARCH_AT_EVENING must come after ETL_AT_CHECK_QUALITY")
 if time.fromisoformat(RESEARCH_AT["MORNING"]) <= time.fromisoformat(ETL_AT["US_CLOSE"]):
     raise ImproperlyConfigured("RESEARCH_AT_MORNING must come after ETL_AT_US_CLOSE")
+if time.fromisoformat(RESEARCH_RETRAIN_BEFORE) <= time.fromisoformat(RESEARCH_AT["MORNING"]):
+    raise ImproperlyConfigured("RESEARCH_RETRAIN_BEFORE must come after RESEARCH_AT_MORNING")
 
 
 def _crontab(at: str, **fields: str) -> crontab:

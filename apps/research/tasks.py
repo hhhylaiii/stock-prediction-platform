@@ -6,6 +6,7 @@ import logging
 from collections.abc import Callable
 from datetime import date, time, timedelta
 from io import StringIO
+from time import monotonic
 from typing import Any
 
 from celery import Task, chain, shared_task
@@ -20,19 +21,27 @@ from apps.etl.models import DataQualityLog
 from apps.etl.tasks import US_CLOSE_CHECK, ready_for_research
 from apps.market.calendar import OutsideCalendarError, TradingDays
 from apps.research.lock import ResearchBusyError, research_lock
-from apps.research.models import HoldoutScope, LabelDaily
+from apps.research.models import HoldoutScope, LabelDaily, ModelRun
 from apps.research.monitor import run_monitor
 from apps.research.predict import predict
 from apps.research.production import DESIGNS, build_run
 from apps.research.promotion import PROMOTION_CHECK, first_day, promote
+from apps.research.resources import free_percent, peak_rss_mb
+from apps.research.runs import PRODUCTION
 
 logger = logging.getLogger(__name__)
 EVENING_CHECK = "research_evening"
 MORNING_CHECK = "research_morning"
 RETRAIN_CHECK = "research_retrain"
+PROMOTE_CHECK = "research_promote"
 NOT_FROZEN = "the design is not frozen: DESIGNS names no research_run_key"
+ALREADY_BUILT = "already built this month"
 MISSED = "missed"
+MISSED_LOOKBACK = 5
 RETRAIN_WINDOW = 5
+SKIPPED = (
+    f"no morning chain finished before the cutoff in the month's first {RETRAIN_WINDOW} sessions"
+)
 GATE_SHUT = "research gate shut"
 US_CLOSE_MISSING = "missing"
 EVENING_STEPS = ("features", "labels")
@@ -77,29 +86,43 @@ def _month(check: str, day: date) -> Any:
     )
 
 
+def _tried(keys: list[str]) -> set[str]:
+    """Run keys a promotion judged, or that already failed once in the promote step."""
+    judged = DataQualityLog.objects.filter(check_name=PROMOTION_CHECK, detail__run_key__in=keys)
+    errored = DataQualityLog.objects.filter(
+        check_name=PROMOTE_CHECK, detail__failed__has_any_keys=keys
+    )
+    return {row.detail["run_key"] for row in judged} | {
+        key for row in errored for key in row.detail["failed"]
+    }
+
+
 def _pending(day: date) -> list[str]:
     """The run keys this month's retrain built that no promotion has tried yet."""
     row = _month(RETRAIN_CHECK, day).filter(date__lte=day).order_by("-date", "-pk").first()
     built = {} if row is None else row.detail.get("built", {})
     keys = [built[scope] for scope in HoldoutScope.values if scope in built]
-    tried = DataQualityLog.objects.filter(check_name=PROMOTION_CHECK, detail__run_key__in=keys)
-    seen = {row.detail["run_key"] for row in tried}
-    return [key for key in keys if key not in seen]
+    if not keys:
+        return []
+    tried = _tried(keys)
+    return [key for key in keys if key not in tried]
 
 
 def _promote(day: date) -> str:
-    """Promote each untried build from its first day; a refusal fails the step after the rest."""
-    done, failed = [], []
+    """Promote each untried build from day, or its first day if later; errors make one warning."""
+    done: list[str] = []
+    failed: dict[str, str] = {}
     for run_key in _pending(day):
         try:
-            result = promote(run_key, first_day(run_key), settings.FEATURE_PARQUET_DIR)
+            result = promote(run_key, max(day, first_day(run_key)), settings.FEATURE_PARQUET_DIR)
         except Exception as error:
-            failed.append(f"{run_key}: {type(error).__name__}: {error}")
+            logger.error("research promote %s %s failed: %s", run_key, day, error)
+            failed[run_key] = f"{type(error).__name__}: {error}"
             continue
         done.append(f"{run_key}: {'promoted' if result.promoted else 'kept the serving runs'}")
     if failed:
-        raise RuntimeError("; ".join([*failed, *done]))
-    return "; ".join(done)
+        _record(day, PROMOTE_CHECK, Severity.WARNING, {"failed": failed, "done": done})
+    return "; ".join([*done, *(f"{key}: failed, see {PROMOTE_CHECK}" for key in failed)])
 
 
 STEPS: dict[str, Callable[[date], str]] = {
@@ -178,60 +201,112 @@ def step(self: Task[Any, Any], done: list[Done], name: str, check: str, day: str
 
 @shared_task(name="research.finish")
 def finish(done: list[Done], check: str, day: str, extra: dict[str, str]) -> str:
-    """Record the chain as done, as a warning when it ran without the US close."""
+    """Record the chain as done, as a warning without the US close; a morning may then retrain."""
     session = date.fromisoformat(day)
     severity = Severity.WARNING if extra else Severity.INFO
     _record(session, check, severity, {"steps": done, **extra})
-    if check == MORNING_CHECK and _retrain_due(session):
-        retrain.delay(day)
+    if check == MORNING_CHECK:
+        _retrain_after(session)
     return str(severity)
 
 
-def _retrain_due(day: date) -> bool:
-    """A month retrains once, from a morning among its first sessions."""
-    calendar = TradingDays.from_db()
-    opening = calendar.between(day.replace(day=1), day)
-    return len(opening) <= RETRAIN_WINDOW and not _month(RETRAIN_CHECK, day).exists()
+def _retrain_detail(
+    refused: dict[str, str],
+    built: dict[str, str] | None = None,
+    failed: dict[str, str] | None = None,
+    free: float | None = None,
+    runs: dict[str, dict[str, float]] | None = None,
+) -> dict[str, Any]:
+    return {
+        "built": built or {},
+        "refused": refused,
+        "failed": failed or {},
+        "free_percent": free,
+        "runs": runs or {},
+    }
 
 
-@shared_task(name="research.retrain")
-def retrain(day: str) -> str:
-    """This month's N and N′ of every frozen scope as of day, once the labels reach day."""
+def _retrain_after(day: date) -> None:
+    """Queue the month's one retrain from an early enough morning in its first sessions."""
+    if _month(RETRAIN_CHECK, day).exists():
+        return
+    opening = TradingDays.from_db().between(day.replace(day=1), day)
+    if len(opening) > RETRAIN_WINDOW:
+        skipped = _retrain_detail(dict.fromkeys(HoldoutScope.values, SKIPPED))
+        _record(day, RETRAIN_CHECK, Severity.WARNING, skipped)
+    elif timezone.localtime().time() < time.fromisoformat(settings.RESEARCH_RETRAIN_BEFORE):
+        retrain.delay(day.isoformat())
+
+
+@shared_task(bind=True, max_retries=None, name="research.retrain")
+def retrain(self: Task[Any, Any], day: str) -> str:
+    """This month's N and N′ of every frozen scope as of day, once memory and labels allow."""
+    if not settings.RESEARCH_SCHEDULE_ENABLED:
+        return "disabled"
     session = date.fromisoformat(day)
+    if _month(RETRAIN_CHECK, session).exists():
+        return "done"
+    free = free_percent()
+    if free is not None and free < settings.RESEARCH_RETRAIN_MIN_FREE:
+        if self.request.retries < settings.RESEARCH_RETRAIN_RETRIES:
+            logger.warning("research retrain %s deferred: %.0f%% of memory free", day, free)
+            raise self.retry(args=(day,), countdown=settings.RESEARCH_RETRAIN_COUNTDOWN)
+        short = f"{free:.0f}% of memory free, under {settings.RESEARCH_RETRAIN_MIN_FREE}%"
+        detail = _retrain_detail(dict.fromkeys(HoldoutScope.values, short), free=free)
+        _record(session, RETRAIN_CHECK, Severity.WARNING, detail)
+        return "short of memory"
+    detail = _build_all(session, free)
+    severity = Severity.WARNING if detail["refused"] or detail["failed"] else Severity.INFO
+    _record(session, RETRAIN_CHECK, severity, detail)
+    return str(severity)
+
+
+def _built_this_month(scope: str, day: date) -> bool:
+    as_of = {f"params__{PRODUCTION}__as_of__startswith": f"{day:%Y-%m}"}
+    return ModelRun.objects.filter(run_key__startswith=f"{scope}-", **as_of).exists()
+
+
+def _build_all(day: date, free: float | None) -> dict[str, Any]:
+    """Build each frozen scope in turn, timing each and noting the worker's peak memory after."""
     last = LabelDaily.objects.aggregate(last=Max("date"))["last"]
     built: dict[str, str] = {}
     refused: dict[str, str] = {}
     failed: dict[str, str] = {}
+    runs: dict[str, dict[str, float]] = {}
     for scope in HoldoutScope.values:
         research = DESIGNS[scope].research_run_key
-        if last is None or last < session:
-            refused[scope] = f"label_daily ends on {last}, before {session}"
+        if last is None or last < day:
+            refused[scope] = f"label_daily ends on {last}, before {day}"
         elif research is None:
             refused[scope] = NOT_FROZEN
+        elif _built_this_month(scope, day):
+            refused[scope] = ALREADY_BUILT
         else:
-            key = retrain_key(scope, session)
+            key = retrain_key(scope, day)
+            start = monotonic()
             try:
-                build_run(scope, key, research, session, settings.FEATURE_PARQUET_DIR)
+                build_run(scope, key, research, day, settings.FEATURE_PARQUET_DIR)
             except Exception as error:
                 logger.error("research retrain %s %s failed: %s", scope, day, error)
                 failed[scope] = f"{type(error).__name__}: {error}"
             else:
                 built[scope] = key
-    severity = Severity.WARNING if refused or failed else Severity.INFO
-    _record(
-        session, RETRAIN_CHECK, severity, {"built": built, "refused": refused, "failed": failed}
-    )
-    return str(severity)
+            elapsed = round(monotonic() - start, 1)
+            runs[scope] = {"elapsed_s": elapsed, "peak_rss_mb": round(peak_rss_mb(), 1)}
+    return _retrain_detail(refused, built, failed, free, runs)
 
 
 def _flag_missed(calendar: TradingDays, day: date) -> None:
-    """Warn when the session before day never had a morning run, once the schedule has run."""
+    """Warn when the session before day had no morning run though one of the few before it did."""
     try:
         before = calendar.shift(day, -1)
+        since = calendar.shift(before, -MISSED_LOOKBACK)
     except OutsideCalendarError:
         return
     seen = DataQualityLog.objects.filter(check_name=MORNING_CHECK)
-    if seen.filter(date=before).exists() or not seen.filter(date__lt=before).exists():
+    if seen.filter(date=before).exists():
+        return
+    if not seen.filter(date__gte=since, date__lt=before).exists():
         return
     _record(before, MORNING_CHECK, Severity.WARNING, {"reason": MISSED})
 
@@ -261,7 +336,7 @@ def evening(self: Task[Any, Any], day: str | None = None) -> str:
 
 @shared_task(bind=True, max_retries=None, name="research.morning")
 def morning(self: Task[Any, Any], day: str | None = None) -> str:
-    """Before the open: the last session's features with the US close, predictions, monitor."""
+    """Before the open: features with the US close, predictions, monitor, then pending swaps."""
     if not settings.RESEARCH_SCHEDULE_ENABLED:
         return "disabled"
     if day is None and _early("MORNING"):
