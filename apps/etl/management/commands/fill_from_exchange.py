@@ -16,7 +16,7 @@ SOURCES = ("twse", "tpex")
 
 class Command(BaseCommand):
     help = (
-        "Fill missing holdings, share counts, valuations or margin balances"
+        "Fill missing holdings, share counts, valuations, margin or lending balances"
         " from the exchanges' daily tables."
     )
 

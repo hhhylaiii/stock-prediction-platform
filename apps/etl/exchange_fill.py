@@ -32,6 +32,7 @@ FILLS: dict[str, tuple[str, tuple[str, ...]]] = {
     HOLDINGS: ("foreign_holding", ("foreign_holding", "shares_outstanding")),
     "valuation": ("daily_valuation", ("daily_valuation",)),
     "margin": ("margin", ("margin",)),
+    "sbl": ("sbl", ("sbl",)),
 }
 TABLES: dict[str, dict[str, DailyTable]] = {"twse": TWSE_TABLES, "tpex": TPEX_TABLES}
 FIGURES = ("pe", "pb", "dividend_yield")
@@ -42,6 +43,7 @@ DIGITS = {
     "pb": 0.01,
     "dividend_yield": 1e-4,
     **dict.fromkeys(MARGINS, 1.0),
+    "sbl_short_balance": 1.0,
 }
 SAMPLES = 20
 Filled = dict[str, dict[str, list[Any]]]
@@ -178,6 +180,7 @@ def _write(target: str, frame: pd.DataFrame, day: date, shares: Shares) -> Writt
     writers: dict[str, Callable[[], Written]] = {
         "foreign_holding": lambda: _fill_chip(frame, day, ("fi_holding_pct",)),
         "margin": lambda: _fill_chip(frame, day, MARGINS),
+        "sbl": lambda: _fill_chip(frame, day, ("sbl_short_balance",)),
         "daily_valuation": lambda: _add_valuations(frame, day),
         "shares_outstanding": lambda: shares.fill(frame, day),
     }
