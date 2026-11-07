@@ -38,6 +38,7 @@ from apps.research.models import (
     ModelRun,
     ModelStatus,
 )
+from apps.research.monitor import DEGRADED_WINDOW
 
 PAGE_ORDER = (
     Slot(ModelObjective.RANK, 20),
@@ -191,7 +192,7 @@ NO_RESEARCH = {"metric_run_key": None, "metric_source": None, "research": None, 
 
 def degraded_window(params: dict[str, Any]) -> dict[str, Any] | None:
     """params.degraded_window's three fields, or None when it is missing or unreadable."""
-    window = params.get("degraded_window")
+    window = params.get(DEGRADED_WINDOW)
     if not isinstance(window, dict):
         return None
     if any(type(window.get(name)) is not kind for name, kind in WINDOW_FIELDS.items()):
