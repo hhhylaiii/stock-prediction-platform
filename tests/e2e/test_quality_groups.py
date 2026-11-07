@@ -107,7 +107,8 @@ def test_a_failed_correction_request_leaves_the_daily_checks(
 def test_a_check_written_per_stock_on_the_day_reads_as_one_line(
     page: Page, live_server: LiveServer, seeded: Seed
 ) -> None:
-    for stock in ("2330", "2317", "2454"):
+    logged(seeded, "probe_per_stock", "info", {"stock_id": "2330"})
+    for stock in ("2317", "2454"):
         logged(seeded, "probe_per_stock", "warning", {"stock_id": stock})
 
     page.goto(f"{live_server.url}/#models")

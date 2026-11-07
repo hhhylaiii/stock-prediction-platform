@@ -29,6 +29,7 @@ def test_each_correction_check_reads_as_one_summary_row(client: Client) -> None:
     note(date(2026, 10, 15), "fi_holding_zero_replaced", "2330")
     note(date(2026, 11, 7), "statement_filed_later", "2330", Severity.WARNING)
     note(date(2026, 11, 7), "statement_filed_later", "2317", Severity.WARNING)
+    note(date(2026, 11, 7), "statement_filed_later", "1101", Severity.INFO)
     note(OCT_30, "row_count", "2330")
 
     body = envelope_of(client.get("/api/data-quality/corrections"))
@@ -45,8 +46,8 @@ def test_each_correction_check_reads_as_one_summary_row(client: Client) -> None:
         {
             "check_name": "statement_filed_later",
             "severity": "warning",
-            "rows": 2,
-            "stocks": 2,
+            "rows": 3,
+            "stocks": 3,
             "first_date": "2026-11-07",
             "last_date": "2026-11-07",
         },

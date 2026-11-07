@@ -2,7 +2,7 @@ from apps.etl import cumulative_margins, filings, mops_history, statement_overwr
 from apps.etl.corrections import CORRECTION_CHECKS
 
 
-def test_every_check_that_logs_one_row_per_stock_is_registered() -> None:
+def test_every_correction_check_is_registered() -> None:
     written = {
         filings.FILED_LATE_CHECK,
         filings.FILED_LATER_CHECK,
