@@ -3,15 +3,16 @@
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
-from datetime import date, timedelta
+from datetime import date
 from pathlib import Path
 from typing import cast
 
 import numpy as np
 import pandas as pd
+from django.db.models import OuterRef, Subquery
 
 from apps.market.calendar import OutsideCalendarError, TradingDays
-from apps.market.models import StockMaster
+from apps.market.models import DailyPrice, StockMaster
 from apps.research.experiments import (
     MODEL,
     Arm,
@@ -70,8 +71,9 @@ MASKED_GROUPS: dict[str, tuple[str, ...]] = {
 MASKED = tuple(name for names in MASKED_GROUPS.values() for name in names)
 DELIST_SESSIONS = 120
 MOSTLY_MISSING = 0.5
-SCORE_COLUMNS = ["arm", "seed", "fold", "horizon", "stock_id", "date", "pct"]
-ROW_KEYS = ["arm", "horizon", "fold", "stock_id", "date"]
+SCORE_COLUMNS = ["arm", "seed", "fold", "horizon", "stock_id", "date", "near", "pct"]
+ROW_KEYS = ["arm", "horizon", "fold", "stock_id", "date", "near"]
+POPULATIONS = {"near": f"下市前 {DELIST_SESSIONS} 個交易日", "all": "下市前全部"}
 SUMMARY_COLUMNS = ["first", "second", "gap", "nw_t", "folds", "stocks", "rows"]
 MANY, FEW = "缺值多", "缺值少"
 
@@ -90,16 +92,21 @@ def mask_experiment(base: WalkForwardConfig, window: str = "base") -> Experiment
 def delisting_windows(
     calendar: TradingDays, sessions: int = DELIST_SESSIONS
 ) -> dict[str, tuple[date, date]]:
-    """Each delisted stock's last sessions trading days before its delist_date, in the calendar."""
-    rows = StockMaster.objects.filter(delist_date__isnull=False).values_list(
-        "stock_id", "delist_date"
+    """Each delisted stock's last sessions trading days up to its last quote before delisting."""
+    quotes = DailyPrice.objects.filter(
+        stock_id=OuterRef("stock_id"), date__lt=OuterRef("delist_date")
+    ).order_by("-date")
+    rows = (
+        StockMaster.objects.filter(delist_date__isnull=False)
+        .annotate(quoted=Subquery(quotes.values("date")[:1]))
+        .values_list("stock_id", "quoted")
     )
     windows = {}
-    for stock_id, delisted in rows:
-        if delisted is None:
+    for stock_id, quoted in rows:
+        if quoted is None:
             continue
         try:
-            last = calendar.latest_on_or_before(delisted - timedelta(days=1))
+            last = calendar.latest_on_or_before(quoted)
         except OutsideCalendarError:
             continue
         try:
@@ -110,12 +117,19 @@ def delisting_windows(
     return windows
 
 
+def _ends(rows: pd.DataFrame, windows: Mapping[str, tuple[date, date]], end: int) -> pd.Series:
+    return pd.to_datetime(rows["stock_id"].map({key: span[end] for key, span in windows.items()}))
+
+
 def soon_delisted(rows: pd.DataFrame, windows: Mapping[str, tuple[date, date]]) -> pd.Series:
     """Whether each row is dated inside its stock's delisting window."""
     days = pd.to_datetime(rows["date"])
-    first = pd.to_datetime(rows["stock_id"].map({key: span[0] for key, span in windows.items()}))
-    last = pd.to_datetime(rows["stock_id"].map({key: span[1] for key, span in windows.items()}))
-    return (days >= first) & (days <= last)
+    return (days >= _ends(rows, windows, 0)) & (days <= _ends(rows, windows, 1))
+
+
+def later_delisted(rows: pd.DataFrame, windows: Mapping[str, tuple[date, date]]) -> pd.Series:
+    """Whether each row belongs to a stock that delists later, dated up to its last window day."""
+    return pd.to_datetime(rows["date"]) <= _ends(rows, windows, 1)
 
 
 def _arm_scores(
@@ -128,12 +142,16 @@ def _arm_scores(
     cached = load_predictions(arm_key(run_key, arm, seed), MODEL, folds)
     ends = cached["fold"].map({fold.index: fold.eval_end for fold in folds})
     tested = cached[(cached["date"] <= ends) & cached["in_universe"].astype(bool)]
-    near = soon_delisted(tested, windows)
+    later, near = later_delisted(tested, windows), soon_delisted(tested, windows)
     parts = []
     for horizon in HORIZONS:
         pct = tested.groupby("date")[f"{MODEL}_h{horizon}"].rank(pct=True)
-        picked = tested.loc[near, ["fold", "stock_id", "date"]].assign(pct=pct[near])
-        parts.append(picked.assign(arm=arm.name, seed=seed, horizon=horizon))
+        picked = tested.loc[later, ["fold", "stock_id", "date"]]
+        parts.append(
+            picked.assign(
+                pct=pct[later], near=near[later], arm=arm.name, seed=seed, horizon=horizon
+            )
+        )
     return parts
 
 
@@ -144,7 +162,7 @@ def delisting_scores(
     seeds: Sequence[int],
     windows: Mapping[str, tuple[date, date]],
 ) -> pd.DataFrame:
-    """Each soon-delisted test row's daily score percentile in the universe, by arm and seed."""
+    """Daily universe score percentiles of the test rows of stocks that delist later."""
     parts = [
         part
         for arm in experiment.arms
@@ -166,26 +184,36 @@ def _sides(experiment: Experiment, rows: pd.DataFrame) -> tuple[pd.DataFrame, pd
     return rows[rows["arm"] == first], rows[rows["arm"] == second]
 
 
+def _populations(rows: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    return {"near": rows[rows["near"].astype(bool)], "all": rows}
+
+
 def delisting_summary(experiment: Experiment, scores: pd.DataFrame) -> pd.DataFrame:
-    """Per horizon: both arms' mean percentile, the gap and the NW t of the fold gaps."""
-    rows = _by_row(scores)
+    """Per population and horizon: both arms' mean percentile, the gap and the fold-gap NW t."""
     table = {}
-    for horizon in HORIZONS:
-        first, second = _sides(experiment, rows[rows["horizon"] == horizon])
-        first_folds = first.groupby("fold")["pct"].mean()
-        second_folds = second.groupby("fold")["pct"].mean()
-        shared = first_folds.index.intersection(second_folds.index)
-        low, high = float(first["pct"].mean()), float(second["pct"].mean())
-        table[horizon] = {
-            "first": low,
-            "second": high,
-            "gap": high - low,
-            "nw_t": paired_nw_t(second_folds, first_folds, FOLD_LAG) if len(shared) else math.nan,
-            "folds": len(shared),
-            "stocks": first["stock_id"].nunique(),
-            "rows": len(first),
-        }
+    for population, rows in _populations(_by_row(scores)).items():
+        for horizon in HORIZONS:
+            table[(population, horizon)] = _side_summary(
+                experiment, rows[rows["horizon"] == horizon]
+            )
     return pd.DataFrame.from_dict(table, orient="index").reindex(columns=SUMMARY_COLUMNS)
+
+
+def _side_summary(experiment: Experiment, rows: pd.DataFrame) -> dict[str, float | int]:
+    first, second = _sides(experiment, rows)
+    first_folds = first.groupby("fold")["pct"].mean()
+    second_folds = second.groupby("fold")["pct"].mean()
+    shared = first_folds.index.intersection(second_folds.index)
+    low, high = float(first["pct"].mean()), float(second["pct"].mean())
+    return {
+        "first": low,
+        "second": high,
+        "gap": high - low,
+        "nw_t": paired_nw_t(second_folds, first_folds, FOLD_LAG) if len(shared) else math.nan,
+        "folds": len(shared),
+        "stocks": first["stock_id"].nunique(),
+        "rows": len(first),
+    }
 
 
 def masked_values(rows: pd.DataFrame, directory: Path, features: Sequence[str]) -> pd.DataFrame:
@@ -207,21 +235,22 @@ def masked_values(rows: pd.DataFrame, directory: Path, features: Sequence[str]) 
 def missing_split(
     experiment: Experiment, scores: pd.DataFrame, shares: pd.DataFrame
 ) -> pd.DataFrame:
-    """Both arms' mean percentile per horizon for rows mostly missing the masked features or not."""
-    rows = _by_row(scores).merge(shares, on=["stock_id", "date"], how="left")
-    rows = rows.assign(split=np.where(rows["missing_share"] >= MOSTLY_MISSING, MANY, FEW))
+    """Both arms' mean percentile per population and horizon, rows mostly missing or not."""
+    merged = _by_row(scores).merge(shares, on=["stock_id", "date"], how="left")
+    merged = merged.assign(split=np.where(merged["missing_share"] >= MOSTLY_MISSING, MANY, FEW))
     table = {}
-    for horizon in HORIZONS:
-        for split in (MANY, FEW):
-            picked = rows[(rows["horizon"] == horizon) & (rows["split"] == split)]
-            first, second = _sides(experiment, picked)
-            low, high = float(first["pct"].mean()), float(second["pct"].mean())
-            table[(horizon, split)] = {
-                "rows": len(first),
-                "first": low,
-                "second": high,
-                "gap": high - low,
-            }
+    for population, rows in _populations(merged).items():
+        for horizon in HORIZONS:
+            for split in (MANY, FEW):
+                picked = rows[(rows["horizon"] == horizon) & (rows["split"] == split)]
+                first, second = _sides(experiment, picked)
+                low, high = float(first["pct"].mean()), float(second["pct"].mean())
+                table[(population, horizon, split)] = {
+                    "rows": len(first),
+                    "first": low,
+                    "second": high,
+                    "gap": high - low,
+                }
     return pd.DataFrame.from_dict(table, orient="index")
 
 
@@ -267,8 +296,8 @@ def _header(
         f"- 比較 {len(folds)} 個研究摺（摺 {folds[0]}–{folds[-1]}），seed {seeds}；"
         f"每組的快取 run_key 為 `{run_key}-<組名>`，seed 不是 0 時再加 `-s<seed>`；"
         f"{plain.name} 和 rank 窗長實驗同名，用同一個 run_key 時直接沿用它的快取",
-        "- 這是診斷，不是採用判定：遮掉後即將下市股的分數明顯回升，代表模型在用這幾類特徵"
-        "（多半是它們的缺值）壓低即將下市股的分數。只用現存股票重算 IC 是倖存者樣本"
+        "- 這是診斷，不是採用判定：遮掉後之後會下市的股票分數明顯回升，代表模型在用這幾類特徵"
+        "壓低它們的分數；靠的是缺值還是特徵值，看「依缺值拆分」。只用現存股票重算 IC 是倖存者樣本"
         "（SPEC §8 第 3 條），不做",
     ]
 
@@ -278,33 +307,35 @@ def _delisting_lines(experiment: Experiment, scores: pd.DataFrame) -> list[str]:
     table = delisting_summary(experiment, scores)
     lines = [
         "",
-        f"## 下市前 {DELIST_SESSIONS} 個交易日的分數",
+        "## 之後會下市的股票的分數",
         "",
         "- 每天的分數先在當天的 universe 列裡轉成百分位（越高越看好），各 seed 先逐列平均",
+        f"- {POPULATIONS['near']}：從該檔下市前最後一個有報價的交易日往前數；"
+        f"{POPULATIONS['all']}：這些股票在比較期內、最後報價日以前的全部測試列",
     ]
     if not table["rows"].any():
-        lines.append("- 比較的測試期裡沒有即將下市的列")
+        lines.append("- 比較的測試期裡沒有之後會下市的列")
     lines += [
         "",
-        f"| horizon | {plain} | {masked} | 差 | 逐摺差 NW t | 摺數 | 檔數 | 列數 |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- |",
+        f"| 母體 | horizon | {plain} | {masked} | 差 | 逐摺差 NW t | 摺數 | 檔數 | 列數 |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
-    for horizon, row in table.iterrows():
+    risen = []
+    for key, row in table.iterrows():
+        population, horizon = cast(tuple[str, int], key)
+        label = f"{POPULATIONS[population]} {horizon} 日"
         lines.append(
-            f"| {horizon} 日 | {_cell(row['first'])} | {_cell(row['second'])} | "
-            f"{_signed(row['gap'])} | {_signed(row['nw_t'], 2)} | {row['folds']:.0f} | "
-            f"{row['stocks']:.0f} | {row['rows']:.0f} |"
+            f"| {POPULATIONS[population]} | {horizon} 日 | {_cell(row['first'])} | "
+            f"{_cell(row['second'])} | {_signed(row['gap'])} | {_signed(row['nw_t'], 2)} | "
+            f"{row['folds']:.0f} | {row['stocks']:.0f} | {row['rows']:.0f} |"
         )
-    risen = [
-        f"{horizon} 日"
-        for horizon, row in table.iterrows()
-        if row["gap"] > 0 and row["nw_t"] > GATE_T
-    ]
+        if row["gap"] > 0 and row["nw_t"] > GATE_T:
+            risen.append(label)
     lines.append("")
     if risen:
         lines.append(
             f"**判讀：⚠️ 遮掉後 {'、'.join(risen)}的分數回升，逐摺差 NW t 高於 {GATE_T:g}：模型在用"
-            "這幾類特徵壓低即將下市股的分數；真資料上的特徵重要度先不下結論**"
+            "這幾類特徵壓低之後會下市的股票的分數；真資料上的特徵重要度先不下結論**"
         )
     else:
         lines.append(f"**判讀：沒有看到遮掉後分數明顯回升（差 > 0 且逐摺差 NW t > {GATE_T:g}）**")
@@ -314,20 +345,20 @@ def _delisting_lines(experiment: Experiment, scores: pd.DataFrame) -> list[str]:
 def _split_lines(experiment: Experiment, split: pd.DataFrame | None) -> list[str]:
     lines = ["", "## 依缺值拆分", ""]
     if split is None:
-        return [*lines, "- 篩選後沒有被遮掉的特徵，或沒有即將下市的列：不拆"]
+        return [*lines, "- 篩選後沒有被遮掉的特徵，或沒有之後會下市的列：不拆"]
     plain, masked = (arm.name for arm in experiment.arms)
     lines += [
         f"- 「{MANY}」：篩選後被遮掉的特徵至少 {MOSTLY_MISSING:.0%} 缺值的列。回升集中在{MANY}，"
         f"代表模型靠的是缺值本身；兩群都回升，代表靠的是特徵值",
         "",
-        f"| horizon | 群 | 列數 | {plain} | {masked} | 差 |",
-        "| --- | --- | --- | --- | --- | --- |",
+        f"| 母體 | horizon | 群 | 列數 | {plain} | {masked} | 差 |",
+        "| --- | --- | --- | --- | --- | --- | --- |",
     ]
     for key, row in split.iterrows():
-        horizon, group = cast(tuple[int, str], key)
+        population, horizon, group = cast(tuple[str, int, str], key)
         lines.append(
-            f"| {horizon} 日 | {group} | {row['rows']:.0f} | {_cell(row['first'])} | "
-            f"{_cell(row['second'])} | {_signed(row['gap'])} |"
+            f"| {POPULATIONS[population]} | {horizon} 日 | {group} | {row['rows']:.0f} | "
+            f"{_cell(row['first'])} | {_cell(row['second'])} | {_signed(row['gap'])} |"
         )
     return lines
 

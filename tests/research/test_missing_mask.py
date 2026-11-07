@@ -26,6 +26,7 @@ from apps.research.missing_mask import (
     delisting_scores,
     delisting_summary,
     delisting_windows,
+    later_delisted,
     mask_experiment,
     mask_report,
     masked_gain_share,
@@ -91,41 +92,48 @@ def calendar() -> TradingDays:
     return TradingDays(days, days[0], days[-1])
 
 
-def delist(stock_id: str, day: date | None) -> None:
+def delist(stock_id: str, day: date | None, *quotes: date) -> None:
     StockMaster.objects.create(stock_id=stock_id, name=stock_id, market="TWSE", delist_date=day)
+    DailyPrice.objects.bulk_create(
+        DailyPrice(stock_id=stock_id, date=quote, close=10, volume=1000, turnover=10_000)
+        for quote in quotes
+    )
 
 
 @pytest.mark.django_db
-def test_delisting_windows_cover_the_last_sessions_before_delisting() -> None:
-    delist("1101", date(2016, 12, 1))
-    delist("1102", date(2016, 10, 3))
-    delist("1103", date(2016, 1, 5))
-    delist("1104", date(2015, 6, 1))
-    delist("1105", None)
-    delist("1106", date(2017, 3, 1))
+def test_delisting_windows_end_at_the_last_quote_before_delisting() -> None:
+    delist("1101", date(2016, 12, 1), date(2016, 11, 10), date(2016, 11, 15))
+    delist("1102", date(2016, 10, 3), date(2016, 9, 30), date(2016, 10, 3))
+    delist("1103", date(2016, 1, 5), date(2016, 1, 4))
+    delist("1104", date(2015, 6, 1), date(2015, 5, 29))
+    delist("1105", None, date(2016, 11, 30))
+    delist("1106", date(2017, 3, 1), date(2016, 12, 30))
+    delist("1107", date(2016, 11, 1))
 
     windows = delisting_windows(calendar(), sessions=3)
 
     assert windows == {
-        "1101": (date(2016, 11, 28), date(2016, 11, 30)),
+        "1101": (date(2016, 11, 11), date(2016, 11, 15)),
         "1102": (date(2016, 9, 28), date(2016, 9, 30)),
         "1103": (date(2016, 1, 1), date(2016, 1, 4)),
+        "1106": (date(2016, 12, 28), date(2016, 12, 30)),
     }
 
 
 def test_soon_delisted_flags_the_rows_inside_their_stock_window() -> None:
     rows = pd.DataFrame(
         {
-            "stock_id": ["1101", "1101", "1101", "1102", "1103"],
+            "stock_id": ["1101", "1101", "1101", "1102", "1103", "1102"],
             "date": [
                 date(2016, 11, 25),
                 date(2016, 11, 28),
                 date(2016, 11, 30),
                 date(2016, 11, 28),
                 date(2016, 11, 28),
+                date(2016, 9, 1),
             ],
         },
-        index=[4, 5, 6, 7, 8],
+        index=[4, 5, 6, 7, 8, 9],
     )
     windows = {
         "1101": (date(2016, 11, 28), date(2016, 11, 30)),
@@ -138,18 +146,30 @@ def test_soon_delisted_flags_the_rows_inside_their_stock_window() -> None:
         6: True,
         7: False,
         8: False,
+        9: False,
+    }
+    assert later_delisted(rows, windows).to_dict() == {
+        4: True,
+        5: True,
+        6: True,
+        7: False,
+        8: False,
+        9: True,
     }
 
 
-def scored(values: dict[tuple[str, int], list[float]], seeds: tuple[int, ...] = (0,)) -> Any:
+def scored(
+    values: dict[tuple[str, int], list[float]], seeds: tuple[int, ...] = (0,), near: bool = True
+) -> Any:
     """Score rows: each (arm, fold) gets one stock-day per listed value at both horizons."""
     rows = []
     for (arm, fold), per_row in values.items():
         for seed in seeds:
             for k, pct in enumerate(per_row):
                 for horizon in (5, 20):
-                    day = date(2016, 1 + fold, 1 + k)
-                    rows.append([arm, seed, fold, horizon, f"{1101 + k}", day, pct + seed / 100])
+                    day = date(2016, 1 + fold, 1 + k + (0 if near else 10))
+                    stock = f"{1101 + k}"
+                    rows.append([arm, seed, fold, horizon, stock, day, near, pct + seed / 100])
     return pd.DataFrame(rows, columns=SCORE_COLUMNS)
 
 
@@ -171,25 +191,41 @@ def test_delisting_summary_pairs_the_seed_averaged_fold_means() -> None:
     first = pd.Series({fold: np.mean(pcts) + 0.01 for fold, pcts in FIRST.items()})
     second = pd.Series({fold: np.mean(pcts) + 0.01 for fold, pcts in RISEN.items()})
     for horizon in (5, 20):
-        row = table[horizon]
+        row = table[("near", horizon)]
+        assert table[("all", horizon)] == row
         assert row["first"] == pytest.approx(np.mean([*FIRST.values()]) + 0.01)
         assert row["second"] == pytest.approx(np.mean([*RISEN.values()]) + 0.01)
         assert row["gap"] == pytest.approx(row["second"] - row["first"])
         assert row["nw_t"] == pytest.approx(paired_nw_t(second, first, FOLD_LAG))
         assert (row["folds"], row["stocks"], row["rows"]) == (4, 2, 8)
-    assert table[20]["nw_t"] > 2
+    assert table[("near", 20)]["nw_t"] > 2
+
+
+def test_delisting_summary_counts_every_row_before_delisting_in_the_all_group() -> None:
+    far = {fold: [0.6, 0.6] for fold in FIRST}
+    scores = pd.concat(
+        [scored(both(FIRST, RISEN)), scored(both(far, far), near=False)], ignore_index=True
+    )
+
+    table = delisting_summary(mask_experiment(SPEC_LAYOUT), scores).to_dict(orient="index")
+
+    near, every = table[("near", 20)], table[("all", 20)]
+    assert (near["rows"], every["rows"]) == (8, 16)
+    assert near["first"] == pytest.approx(np.mean([*FIRST.values()]))
+    assert every["first"] == pytest.approx((np.mean([*FIRST.values()]) + 0.6) / 2)
+    assert every["gap"] == pytest.approx(near["gap"] / 2)
 
 
 def test_delisting_summary_pairs_only_the_folds_both_arms_have() -> None:
     second = {fold: pcts for fold, pcts in RISEN.items() if fold != 3}
     scores = scored(both(FIRST, second))
 
-    table = delisting_summary(mask_experiment(SPEC_LAYOUT), scores)
+    table = delisting_summary(mask_experiment(SPEC_LAYOUT), scores).to_dict(orient="index")
 
     first = pd.Series({fold: np.mean(pcts) for fold, pcts in FIRST.items() if fold != 3})
     risen = pd.Series({fold: np.mean(pcts) for fold, pcts in second.items()})
-    assert table.loc[5, "nw_t"] == pytest.approx(paired_nw_t(risen, first, FOLD_LAG))
-    assert table.loc[5, "folds"] == 3
+    assert table[("near", 5)]["nw_t"] == pytest.approx(paired_nw_t(risen, first, FOLD_LAG))
+    assert table[("near", 5)]["folds"] == 3
 
 
 def test_delisting_summary_of_no_rows_is_empty() -> None:
@@ -197,8 +233,8 @@ def test_delisting_summary_of_no_rows_is_empty() -> None:
 
     table = delisting_summary(mask_experiment(SPEC_LAYOUT), scores)
 
-    assert list(table.index) == [5, 20]
-    assert table["rows"].tolist() == [0, 0]
+    assert list(table.index) == [("near", 5), ("near", 20), ("all", 5), ("all", 20)]
+    assert table["rows"].tolist() == [0, 0, 0, 0]
     assert table[["first", "second", "nw_t"]].isna().all().all()
 
 
@@ -214,7 +250,8 @@ def test_missing_split_groups_the_rows_by_their_masked_gaps() -> None:
 
     split = missing_split(mask_experiment(SPEC_LAYOUT), scores, share).to_dict(orient="index")
 
-    many, few = split[(20, "缺值多")], split[(20, "缺值少")]
+    many, few = split[("near", 20, "缺值多")], split[("near", 20, "缺值少")]
+    assert split[("all", 20, "缺值多")] == many
     assert (many["rows"], few["rows"]) == (2, 1)
     assert many["first"] == pytest.approx(0.3)
     assert many["second"] == pytest.approx(0.55)
@@ -224,11 +261,11 @@ def test_missing_split_groups_the_rows_by_their_masked_gaps() -> None:
 
 @pytest.fixture
 def small(run_panel: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """The check on the one-year panel: monthly folds, tech_ret_60d masked."""
+    """The check on the one-year panel: monthly folds; fund_ep is masked but never screened."""
     monkeypatch.setattr(experiments, "COARSE_MONTHS", 1)
     monkeypatch.setattr(experiments, "WINDOW_FROM", date(2016, 1, 1))
     monkeypatch.setattr(lgbm_runs, "MAX_ROUNDS", 80)
-    monkeypatch.setattr(missing_mask, "MASKED", ("tech_ret_60d",))
+    monkeypatch.setattr(missing_mask, "MASKED", ("tech_ret_60d", "fund_ep"))
     return run_panel
 
 
@@ -240,24 +277,27 @@ def trained(directory: Path, seeds: tuple[int, ...] = (0,)) -> tuple[Any, dict[s
 
 
 @pytest.mark.django_db
-def test_delisting_scores_rank_each_day_and_keep_the_soon_delisted_rows(small: Path) -> None:
+def test_delisting_scores_rank_each_day_and_keep_the_rows_before_delisting(small: Path) -> None:
     chosen, folds = trained(small, (0, 1))
-    delist("1105", date(2016, 12, 1))
+    delist("1105", date(2016, 12, 1), date(2016, 11, 30))
     windows = delisting_windows(calendar(), sessions=30)
 
     scores = delisting_scores(chosen, "rank-mask", folds, (0, 1), windows)
 
     assert set(scores["stock_id"]) == {"1105"}
     first, last = windows["1105"]
-    assert scores["date"].between(first, last).all()
+    assert (scores["date"] <= last).all()
+    assert scores["near"].tolist() == (scores["date"] >= first).tolist()
+    assert scores["near"].any()
+    assert not scores["near"].all()
     for arm in chosen.arms:
         for seed, horizon in ((0, 5), (1, 20)):
             cached = load_predictions(arm_key("rank-mask", arm, seed), "lightgbm", folds[arm.name])
             ends = cached["fold"].map({fold.index: fold.eval_end for fold in folds[arm.name]})
             tested = cached[(cached["date"] <= ends) & cached["in_universe"].astype(bool)]
             pct = tested.groupby("date")[f"lightgbm_h{horizon}"].rank(pct=True)
-            near = (tested["stock_id"] == "1105") & tested["date"].between(first, last)
-            expected = pd.Series(pct[near].to_numpy(), index=tested.loc[near, "date"].to_numpy())
+            later = (tested["stock_id"] == "1105") & (tested["date"] <= last)
+            expected = pd.Series(pct[later].to_numpy(), index=tested.loc[later, "date"].to_numpy())
             got = scores[
                 (scores["arm"] == arm.name)
                 & (scores["seed"] == seed)
@@ -340,11 +380,18 @@ def test_the_report_flags_a_clear_rise_of_the_soon_delisted_scores() -> None:
     assert "倖存者樣本（SPEC §8 第 3 條），不做" in text
     assert "| base | 0.0600 | 0.0600 | 0.0600 | — |" in text
     assert "| masked | 0.0500 | 0.0500 | 0.0500 | -0.0100 |" in text
-    assert "## 下市前 120 個交易日的分數" in text
-    row = table.to_dict(orient="index")[20]
+    assert "靠的是缺值還是特徵值，看「依缺值拆分」" in text
+    assert "## 之後會下市的股票的分數" in text
+    assert "- 下市前 120 個交易日：從該檔下市前最後一個有報價的交易日往前數" in text
+    row = table.to_dict(orient="index")[("near", 20)]
     gap, nw_t, first, second = row["gap"], row["nw_t"], row["first"], row["second"]
-    assert f"| 20 日 | {first:.4f} | {second:.4f} | {gap:+.4f} | {nw_t:+.2f} | 4 | 2 | 8 |" in text
-    assert "**判讀：⚠️ 遮掉後 5 日、20 日的分數回升，逐摺差 NW t 高於 2" in text
+    cells = f"{first:.4f} | {second:.4f} | {gap:+.4f} | {nw_t:+.2f} | 4 | 2 | 8 |"
+    assert f"| 下市前 120 個交易日 | 20 日 | {cells}" in text
+    assert f"| 下市前全部 | 20 日 | {cells}" in text
+    assert (
+        "**判讀：⚠️ 遮掉後 下市前 120 個交易日 5 日、下市前 120 個交易日 20 日、下市前全部 5 日、"
+        "下市前全部 20 日的分數回升，逐摺差 NW t 高於 2"
+    ) in text
     assert "| 5 日 | 12.3% |" in text
     assert "| 20 日 | 20.0% |" in text
     assert "## 每摺" in text
@@ -355,7 +402,7 @@ def test_the_report_states_when_no_rise_shows_and_when_no_row_is_near_delisting(
     empty = report(pd.DataFrame(columns=SCORE_COLUMNS))
 
     assert "**判讀：沒有看到遮掉後分數明顯回升" in flat
-    assert "- 比較的測試期裡沒有即將下市的列" in empty
+    assert "- 比較的測試期裡沒有之後會下市的列" in empty
     assert "**判讀：沒有看到遮掉後分數明顯回升" in empty
 
 
@@ -375,9 +422,9 @@ def test_the_report_lists_the_missing_split() -> None:
 
     assert "## 依缺值拆分" in text
     assert "回升集中在缺值多，代表模型靠的是缺值本身；兩群都回升，代表靠的是特徵值" in text
-    assert "| 20 日 | 缺值多 | 2 | 0.3000 | 0.5500 | +0.2500 |" in text
-    assert "| 20 日 | 缺值少 | 1 | 0.3000 | 0.3000 | +0.0000 |" in text
-    assert "- 篩選後沒有被遮掉的特徵，或沒有即將下市的列：不拆" in skipped
+    assert "| 下市前 120 個交易日 | 20 日 | 缺值多 | 2 | 0.3000 | 0.5500 | +0.2500 |" in text
+    assert "| 下市前全部 | 20 日 | 缺值少 | 1 | 0.3000 | 0.3000 | +0.0000 |" in text
+    assert "- 篩選後沒有被遮掉的特徵，或沒有之後會下市的列：不拆" in skipped
 
 
 @pytest.fixture
@@ -386,7 +433,7 @@ def command(small: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     DailyPrice.objects.create(
         stock_id="1101", date=weekdays()[-1], close=10, volume=1000, turnover=10_000
     )
-    delist("1105", date(2016, 12, 1))
+    delist("1105", date(2016, 12, 1), date(2016, 11, 30))
     return small
 
 
@@ -413,6 +460,8 @@ def test_missing_mask_trains_both_arms_and_writes_the_report(command: Path, tmp_
         chosen, "rank-mask", daily, scores, split, shares, ["tech_ret_60d"], "暫定"
     )
     assert output.read_text() == expected
+    assert "，共 2 個，篩選後實際用到 1 個" in expected
+    assert "| 下市前 120 個交易日 | 20 日 | 缺值少 |" in expected
     assert "rank-mask-masked-s1: ran folds" in out.getvalue()
     assert f"wrote {output}" in out.getvalue()
 
