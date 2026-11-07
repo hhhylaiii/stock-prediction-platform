@@ -249,6 +249,47 @@ def promotion_alert(
     _note(day, scope, run_key, _failed(results), reason, promoted=bool(reason))
 
 
+def swapped_in(seed: Seed, run_key: str, back: int = 1, scope: str = "rank") -> None:
+    _note(seed.sessions[-back], scope, run_key, [], "", promoted=True)
+
+
+def test_a_passed_promotion_reads_as_swapped_in_not_as_a_warning(
+    page: Page, live_server: LiveServer, seeded: Seed
+) -> None:
+    promotion_alert(
+        seeded, "rank-2026-11", [refused(Slot("rank", 20), "rank-n", AGREEMENT)], back=3
+    )
+    swapped_in(seeded, "rank-2026-12")
+
+    page.goto(f"{live_server.url}/#models")
+
+    promotion = page.locator("#model-checks .check").filter(has_text="換模")
+    expect(promotion).to_have_count(1)
+    expect(promotion.locator("i")).not_to_have_class("warn")
+    expect(promotion.locator(".pinned")).to_have_text(
+        f"{seeded.last_session.isoformat()}，近 30 個交易日共 2 筆"
+    )
+    expect(promotion_lines(page)).to_have_count(1)
+    expect(promotion_lines(page).first).to_have_text("已換上 rank-2026-12")
+    expect(page.locator("#model-checks")).not_to_contain_text("續用現役模型")
+
+
+def test_the_last_written_promotion_of_a_scope_wins_over_its_date(
+    page: Page, live_server: LiveServer, seeded: Seed
+) -> None:
+    promotion_alert(seeded, "rank-new", [refused(Slot("rank", 20), "rank-n", AGREEMENT)])
+    swapped_in(seeded, "rank-backfill", back=3)
+
+    page.goto(f"{live_server.url}/#models")
+
+    promotion = page.locator("#model-checks .check").filter(has_text="換模")
+    expect(promotion).to_have_count(1)
+    expect(promotion.locator(".pinned")).to_have_text(
+        f"{seeded.sessions[-3].isoformat()}，近 30 個交易日共 2 筆"
+    )
+    expect(promotion_lines(page).first).to_have_text("已換上 rank-backfill")
+
+
 def test_a_refused_build_names_each_failed_slot_and_gate(
     page: Page, live_server: LiveServer, seeded: Seed
 ) -> None:

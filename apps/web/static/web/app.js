@@ -811,6 +811,7 @@
   }
 
   function promotionLines(d) {
+    if (d.promoted === true && !d.forced) return ['已換上 ' + (d.run_key || '')];
     const head = (d.forced ? '強制換模：' + (d.reason || '沒有寫原因') : '換模門檻未過，續用現役模型') + (d.run_key ? '（' + d.run_key + '）' : '');
     return [head, ...(d.failed || []).map(item => slotText(item.slot) + (item.run_id ? '（' + item.run_id + '）' : '') + '：' + (item.gates || []).map(gateText).join('、'))];
   }
@@ -835,7 +836,7 @@
         return ['', [d.flagged ? '少量標記，' + stocks : '沒有標記']];
       case 'monitor_unscored': return ['warn', [fmtInt(sizeOf(d.runs)) + ' 筆']];
       case 'model_alert': return ['warn', (d.runs || []).map(run => alertLine(run, date))];
-      case 'model_promotion': return ['warn', promotionLines(d)];
+      case 'model_promotion': return [check.severity === 'info' ? '' : 'warn', promotionLines(d)];
       default: return [check.severity === 'info' ? '' : 'warn', [(SEVERITY[check.severity] || [check.severity])[0]]];
     }
   }
@@ -851,10 +852,10 @@
   }
 
   function latestPromotions(data) {
-    const all = data.flatMap(entry => (entry.model_checks || []).filter(check => check.check_name === 'model_promotion').reverse().map(check => ({ date: entry.date, check: check })));
-    const runKey = item => (item.check.detail || {}).run_key;
-    const latest = all.filter(item => item.date === all[0].date);
-    return { total: all.length, shown: latest.filter((item, i) => latest.findIndex(other => runKey(other) === runKey(item)) === i) };
+    const all = data.flatMap(entry => (entry.model_checks || []).filter(check => check.check_name === 'model_promotion').map(check => ({ date: entry.date, check: check })))
+      .sort((a, b) => (b.check.id || 0) - (a.check.id || 0));
+    const scopeOf = item => (item.check.detail || {}).scope || (item.check.detail || {}).run_key;
+    return { total: all.length, shown: all.filter((item, i) => all.findIndex(other => scopeOf(other) === scopeOf(item)) === i) };
   }
 
   function renderModelChecks(data, meta) {
