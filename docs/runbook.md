@@ -341,6 +341,28 @@ done
 - 先跑完 FinMind 的 `daily_price`、`shares_outstanding`、`daily_chip`、`daily_valuation` 回補（含 `--retry-rejected`）再跑補缺：`daily_price` 決定補哪些代號、`shares_outstanding` 決定股數的界線（第一次 `holdings` 補缺時就固定）；FinMind 寫 `daily_chip`、`daily_valuation` 時整列已存在就跳過，補缺新增的列會擋掉之後的 FinMind 回補。之後真的要再回補 FinMind，先刪掉補缺新增的列：`daily_chip` 是只有 `fi_holding_pct` 有值、其他欄位都是空的列；`daily_valuation` 的 `created` 只記每檔的日期範圍，範圍內可能夾著 FinMind 的列，要逐日分辨時從兩邊的 raw 重算。
 - 每個請求約 3.5 秒；一個市場一個 fill 2010-01-04 到 2026-10-21 約 4,130 天、約 4 小時，兩個 fill 約 8 小時。可以跑的時段是平日 02:00–15:00 和週末，和每日 ETL（含 02:00 前的重試）錯開；平日 15:00 前沒跑完就停，之後 `--resume`。
 
+## FinMind 外資持股 0 的覆寫（plan K21）
+
+FinMind 的外資持股比有一部分存成 0，但交易所那天的頁面不是 0。依 0 連續的長度分三類，只覆寫前兩類：
+
+| 類別 | 條件 | 處理 |
+| --- | --- | --- |
+| 整段都錯 | 同一檔連續 20 天以上的 0，有交易所頁面的日子裡 90% 以上不是 0 | 交易所不是 0 的那幾天改成交易所的值 |
+| 零星短段 | 連續不到 20 天的 0，交易所那天不是 0 | 改成交易所的值 |
+| 長段混著幾天 | 連續 20 天以上的 0，交易所不是 0 的日子不到 90% | 不動：改了會在一長段 0 裡做出 0 → 小值 → 0 的跳動 |
+
+- 只看普通股（`^[1-9][0-9]{3}$`）；交易所的值讀已經存在 raw 的 `foreign_holding` 頁（證交所 MI_QFIIS、櫃買 insti/qfii，不發請求），同一天有好幾份時用最新的。
+- 每覆寫一列記一列 `fi_holding_zero_replaced`（info，`date` 是那一天，`detail` 有 `stock_id`、`kind`、`old`、`new`、`source`、`raw_id`）；FinMind 和交易所的 raw 都不動。重跑只會碰到還是 0 的列，同一檔同一天不會記第二列 log。
+- 要等兩個市場的持股補缺（plan K17c）都跑完、交易所的頁面都在 raw 裡再跑；先看 dry run 的數字：
+
+  ```bash
+  uv run python manage.py replace_zero_holdings --dry-run
+  uv run python manage.py replace_zero_holdings
+  ```
+
+- 輸出的 `replaced` 是每個市場、每類的檔數與列數，`left` 是不動的長段混著幾天與沒有交易所頁面的 0（`unchecked`）。讀不了的 raw 頁記 warning，那天算 `unchecked`。
+- 覆寫後外資持股類特徵的歷史值會變，要重算：`uv run python manage.py build_features --start 2010-01-01 --end <最新價日>`。
+
 ## 交易所產業補缺（plan K17c）
 
 `stock_master.industry` 是空的股票（多半是 FinMind 股票清單沒有的下市股），用交易所「依產業別」的收盤行情補上。依序跑，先證交所、再櫃買；`--start` 從 2009-10-01 起，2009-12-31 那次抽樣才看得到 2010 年第一季就下市的股票：
