@@ -91,7 +91,7 @@ def test_coverage_builds_each_year_unmasked_and_names_the_affected_months(
     assert (march["current"], march["delisted"]) == (1.0, 0.0)
 
 
-def test_coverage_defaults_to_the_masked_columns_and_refuses_unknown_ones(
+def test_coverage_defaults_to_the_rule_columns_and_refuses_unknown_ones(
     built: list[tuple[date, date, Any]],
 ) -> None:
     out = StringIO()

@@ -65,7 +65,7 @@ US_CLOSE = {"mkt_sox_ret_5d", "mkt_tsm_adr_gap"}
 LONDON_PRIOR_CLOSE = {"mkt_usdtwd_chg_20d"}
 
 
-def test_first_batch_has_the_62_spec_features_and_quarterly_revenue_growth() -> None:
+def test_first_batch_has_63_features_including_quarterly_revenue_growth() -> None:
     first = [spec for spec in FEATURES if spec.batch == 1]
 
     assert len(first) == 63

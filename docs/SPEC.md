@@ -225,7 +225,7 @@ Oct 29, 2026 · @Owen Lai
 | 籌碼面 | `chip_fi_holding_pct` `chip_sbl_short_chg_5d` | daily\_chip、shares\_outstanding | t 日晚間 | 外資持股比；借券賣出餘額 5 日變化 / 流通股數，用借券賣出餘額而非借券餘額 |
 | 籌碼面 | `chip_big_holder_pct_chg_1w` `chip_holder_count_chg_1w` | weekly\_holding | publish\_date，即 data\_date 隔日 | 400 張以上級距占比週變化、總股東人數週變化；取 publish\_date ≤ t 的最近一期；level 16、17 排除 |
 | 基本面 | `fund_rev_yoy` `fund_rev_3m_yoy` | monthly\_revenue；來源缺時 financial\_statement | announce\_date | 單月 yoy、近 3 個月合計 yoy。月營收來源缺（最近一期月營收可見超過 62 天（日曆日）沒有新一期，或要讀的月份沒有紀錄）時改用同一天的 `fund_rev_yoy_q`；月份都有紀錄但讀到 2013-01 兩側或去年同期營收 ≤ 0 時照舊為 NaN，不補 |
-| 基本面 | `fund_rev_mom` | monthly\_revenue | announce\_date | 不用。單月 mom；月營收來源缺或讀到 2013-01 兩側時為 NaN。2016 到 2020 年下市的股票沒有月營收來源（第 3 節），mom 沒有季資料可替代，進模型時缺值會透露之後下市 |
+| 基本面 | `fund_rev_mom` | monthly\_revenue | announce\_date | 不用。單月 mom；月營收來源缺、讀到 2013-01 兩側或上月營收 ≤ 0 時為 NaN。2016 到 2020 年下市的股票沒有月營收來源（第 3 節），mom 沒有季資料可替代，進模型時缺值會透露之後下市 |
 | 基本面 | `fund_ep` `fund_eps_yoy` | financial\_statement、daily\_price | announce\_date | E/P = EPS TTM / 收盤價，虧損為負值，不用本益比；EPS TTM 為 PIT 最近四季合計，Q4 由年報減前三季；EPS yoy 為 TTM 年增，分母取去年 TTM 絕對值，去年為負或零時 NaN；最近一期財報可見超過 200 天（日曆日）沒有新一期時為 NaN |
 | 基本面 | `fund_bp` `fund_dividend_yield` | daily\_valuation | t 日晚間 | 證交所、櫃買每日公布的股價淨值比與殖利率；B/P = 1 / 股價淨值比 |
 | 基本面 | `fund_roe_ttm` `fund_gross_margin` `fund_op_margin` `fund_debt_ratio` | financial\_statement | announce\_date | 以 announce\_date 對齊；過期上限 200 天，同 `fund_ep` |

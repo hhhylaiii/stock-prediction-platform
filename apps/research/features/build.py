@@ -57,7 +57,7 @@ def compute_features(
 ) -> pd.DataFrame:
     """Stock, date, universe flag and every stored feature of each panel row, source-gap rules on.
 
-    The second batch is stored for later evaluation; screening and training read the first only.
+    The second batch and unused features are stored too; screening and training read the first.
     """
     technical = technical_features(panel)
     fundamental = apply_fallbacks(fundamental_features(panel), panel)

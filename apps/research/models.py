@@ -172,7 +172,7 @@ class LabelDaily(models.Model):
 
 
 class FeatureDaily(models.Model):
-    """Raw features of both batches per stock and trading day; transforms run in the pipeline."""
+    """Raw values of every stored feature per stock and day; transforms run in the pipeline."""
 
     pk = models.CompositePrimaryKey("stock_id", "date")
     stock_id = models.CharField(max_length=10)
