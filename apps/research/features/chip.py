@@ -1,14 +1,18 @@
 """Chip features of SPEC §6: institutional flows, margin, lending and TDCC holding changes."""
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import date, timedelta
+from types import MappingProxyType
 
 import numpy as np
 import pandas as pd
+from django.db.models import Min, Q
 
+from apps.etl.runs import covered_days
 from apps.market.calendar import TradingDays
-from apps.market.models import DailyChip, WeeklyHolding
+from apps.market.models import DailyChip, Market, WeeklyHolding
 from apps.research.features.common import (
+    LISTING,
     carried,
     feature_frame,
     ratio,
@@ -16,6 +20,7 @@ from apps.research.features.common import (
     shifted,
     traded,
 )
+from apps.research.features.fundamental import sourced_name
 from apps.research.features.registry import Group, feature_names
 from apps.research.panel import require_sorted
 
@@ -38,6 +43,25 @@ CHIP_COLUMNS = [
     "fi_holding_pct",
     "day_trade_volume",
 ]
+LENDING: Mapping[str, tuple[str, ...]] = MappingProxyType(
+    {
+        "margin_balance": ("margin_balance", "margin_limit", "short_balance"),
+        "sbl_short_balance": ("sbl_short_balance",),
+    }
+)
+SOURCED_CHIPS = (
+    "chip_margin_chg_5d",
+    "chip_margin_usage",
+    "chip_short_ratio",
+    "chip_sbl_short_chg_5d",
+)
+LENDING_CELLS = [cell for cells in LENDING.values() for cell in cells]
+EXCHANGE_TABLES: Mapping[str, str] = MappingProxyType(
+    {"margin_balance": "margin", "sbl_short_balance": "sbl"}
+)
+EXCHANGES: Mapping[str, str] = MappingProxyType({Market.TWSE: "twse", Market.TPEX: "tpex"})
+WRITTEN_COLUMNS = ["market", "source", "date"]
+FILLER = 1.0
 HOLDING_LOOKBACK = timedelta(days=42)
 HOLDING_STALE = pd.Timedelta(21, unit="D")
 
@@ -61,20 +85,32 @@ def _change(panel: pd.DataFrame, column: str) -> pd.Series:
     return ratio(balance - shifted(balance, panel, CHANGE_DAYS), panel["shares"])
 
 
+def _lending(panel: pd.DataFrame) -> dict[str, pd.Series]:
+    margin = _balance(panel, "margin_balance")
+    return {
+        "chip_margin_chg_5d": _change(panel, "margin_balance"),
+        "chip_margin_usage": ratio(margin, _balance(panel, "margin_limit")),
+        "chip_short_ratio": ratio(_balance(panel, "short_balance"), margin),
+        "chip_sbl_short_chg_5d": _change(panel, "sbl_short_balance"),
+    }
+
+
+def lending_features(panel: pd.DataFrame) -> pd.DataFrame:
+    """Margin and lending features of every row, as chip_features gives them."""
+    require_sorted(panel)
+    return feature_frame(panel, _lending(panel), SOURCED_CHIPS)
+
+
 def chip_features(panel: pd.DataFrame) -> pd.DataFrame:
     """Chip features of every row; needs the chip columns and the weekly holding changes."""
     require_sorted(panel)
-    margin = _balance(panel, "margin_balance")
     columns = {
         **{f"chip_fi_net_{days}d": _net(panel, "fi_net", days) for days in FLOW_DAYS},
         "chip_it_net_5d": _net(panel, "it_net", CHANGE_DAYS),
         "chip_dealer_self_net_5d": _net(panel, "dealer_self_net", CHANGE_DAYS),
         "chip_dealer_hedge_net_5d": _net(panel, "dealer_hedge_net", CHANGE_DAYS),
-        "chip_margin_chg_5d": _change(panel, "margin_balance"),
-        "chip_margin_usage": ratio(margin, _balance(panel, "margin_limit")),
-        "chip_short_ratio": ratio(_balance(panel, "short_balance"), margin),
+        **_lending(panel),
         "chip_fi_holding_pct": _balance(panel, "fi_holding_pct"),
-        "chip_sbl_short_chg_5d": _change(panel, "sbl_short_balance"),
         "chip_big_holder_pct_chg_1w": panel["big_holder_pct_chg"],
         "chip_holder_count_chg_1w": panel["holder_count_chg"],
     }
@@ -165,6 +201,57 @@ def attach_chips(panel: pd.DataFrame, chips: pd.DataFrame) -> pd.DataFrame:
     keys = pd.MultiIndex.from_arrays([panel["stock_id"], panel["date"]])
     values = lookup.reindex(keys).to_numpy(dtype=np.float64)
     return panel.assign(**{column: values[:, k] for k, column in enumerate(CHIP_COLUMNS)})
+
+
+def load_chip_starts() -> pd.DataFrame:
+    """First day each stock has a margin and a lending balance on record, over the whole table."""
+    firsts = {marker: Min("date", filter=Q(**{f"{marker}__isnull": False})) for marker in LENDING}
+    rows = DailyChip.objects.values("stock_id").annotate(**firsts)
+    frame = pd.DataFrame(list(rows), columns=["stock_id", *LENDING])
+    return frame.set_index("stock_id")
+
+
+def load_exchange_days(days: Sequence[date]) -> pd.DataFrame:
+    """Market, source balance and day of each exchange margin or lending table a run wrote."""
+    rows = [
+        (market, marker, day)
+        for market, source in EXCHANGES.items()
+        for marker, table in EXCHANGE_TABLES.items()
+        for day in sorted(
+            covered_days(source, f"fill:{table}", days) | covered_days(source, table, days)
+        )
+    ]
+    return pd.DataFrame(rows, columns=WRITTEN_COLUMNS)
+
+
+def _both_written(written: pd.DataFrame, marker: str) -> list[date]:
+    """Days whose table of the source both markets' runs wrote."""
+    markets = written[written["source"] == marker].groupby("date")["market"].nunique()
+    return list(markets[markets.eq(len(EXCHANGES))].index)
+
+
+def chip_sourcing(panel: pd.DataFrame, starts: pd.DataFrame, written: pd.DataFrame) -> pd.DataFrame:
+    """Per row, 0 where a lending feature is missing only for rows or shares the stock should have.
+
+    A row is expected on a traded day whose tables not both markets wrote, from the stock's first
+    row on or every day for a stock without any; halted days carry a row as the features do.
+    """
+    inputs = panel[[*LISTING, "date", "has_bar", "shares", *LENDING_CELLS]]
+    days = pd.to_datetime(inputs["date"])
+    priced = inputs["has_bar"].astype(bool)
+    filled = inputs.assign(shares=inputs["shares"].fillna(FILLER))
+    for marker, cells in LENDING.items():
+        first = pd.to_datetime(inputs["stock_id"].map(starts[marker]))
+        listed = inputs["date"].isin(_both_written(written, marker))
+        expected = priced & ~listed & (first.isna() | days.ge(first))
+        missing = inputs[marker].isna() & expected
+        filled = filled.assign(**{cell: filled[cell].mask(missing, FILLER) for cell in cells})
+    actual, whole = lending_features(inputs), lending_features(filled)
+    flags = {
+        sourced_name(name): (~(actual[name].isna() & whole[name].notna())).astype("float64")
+        for name in SOURCED_CHIPS
+    }
+    return inputs[["stock_id", "date"]].assign(**flags)
 
 
 def load_holding_changes(
