@@ -35,6 +35,7 @@ from apps.research.features.build import (
     current_name,
     observable_frame,
 )
+from apps.research.features.chip import SOURCED_CHIPS
 from apps.research.features.registry import FEATURES, feature_names
 from apps.research.features.residual import observable_name, rules_signature
 from apps.research.features.store import (
@@ -762,6 +763,18 @@ def test_observable_gaps_mark_formula_and_industry_gaps_but_not_missing_inputs()
         for k, (year, quarter) in enumerate(periods)
     )
 
+    lent = {"margin_balance": 1_000, "margin_limit": 5_000, "short_balance": 100}
+    DailyChip.objects.bulk_create(
+        DailyChip(
+            stock_id=stock_id,
+            date=day,
+            **(lent if stock_id == "2330" else {**lent, "margin_limit": None}),
+        )
+        for stock_id in ("2330", "2881")
+        for day in CALENDAR.between(d("2015-06-01"), d("2016-03-31"))
+        if (stock_id, day) != ("2330", d("2016-03-02"))
+    )
+
     frame = build_feature_frame(CALENDAR, d("2016-03-01"), d("2016-03-04"))
     gaps = observable_frame(CALENDAR, d("2016-03-01"), d("2016-03-04"))
 
@@ -784,6 +797,11 @@ def test_observable_gaps_mark_formula_and_industry_gaps_but_not_missing_inputs()
     assert gap("2881", "fund_debt_ratio") == (True, False)
     assert gap("1101", "fund_ep") == (True, False)
     assert gap("1101", "fund_rev_yoy") == (True, False)
+    assert gap("2330", "chip_margin_usage") == (True, False)
+    assert gap("2881", "chip_margin_usage") == (True, True)
+    assert gap("2881", "chip_short_ratio") == (False, True)
+    assert gap("1101", "chip_short_ratio") == (True, False)
+    assert set(SOURCED_CHIPS) <= set(CHECKED)
     now = observable_frame(CALENDAR, d("2016-03-01"), d("2016-03-04"), current=True)
     both = frame.merge(now, on=keys)
     assert len(both) == len(frame)

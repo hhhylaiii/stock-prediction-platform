@@ -7,9 +7,13 @@ import pandas as pd
 
 from apps.market.calendar import TradingDays
 from apps.research.features.chip import (
+    SOURCED_CHIPS,
     attach_chips,
     attach_holding_changes,
     chip_features,
+    chip_sourcing,
+    lending_features,
+    load_chip_starts,
     load_chips,
     load_holding_changes,
     second_batch_chip_features,
@@ -48,7 +52,9 @@ from apps.research.features.technical import (
 
 FEATURE_COLUMNS = [spec.name for spec in FEATURES]
 CURRENT = "_now"
-CHECKED = [name for name in OBSERVABLE if name in feature_names(Group.FUNDAMENTAL)]
+CHECKED = [
+    name for name in OBSERVABLE if name in {*feature_names(Group.FUNDAMENTAL), *SOURCED_CHIPS}
+]
 MODEL_COLUMNS = [*feature_names(batch=1), *feature_names(batch=2)]
 FRAME_COLUMNS = ["stock_id", "date", "in_universe", *FEATURE_COLUMNS]
 FIRST_BATCH_COLUMNS = ["stock_id", "date", "in_universe", *feature_names(batch=1)]
@@ -128,7 +134,7 @@ def observable_frame(
 ) -> pd.DataFrame:
     """Per listed stock and day in [start, end], which OBSERVABLE gaps have a known cause.
 
-    With current, also each fundamental of OBSERVABLE as today's database gives it, masked.
+    With current, also each CHECKED feature as today's database gives it, masked.
     """
     keys = [
         "stock_id",
@@ -141,9 +147,14 @@ def observable_frame(
     panel = load_feature_panel(calendar, start, end) if low <= high else pd.DataFrame()
     if panel.empty:
         return pd.DataFrame(columns=columns)
-    attached = attach_fundamentals(panel, calendar, panel["date"].min(), end)
+    first = panel["date"].min()
+    chips = attach_chips(attach_fundamentals(panel, calendar, first, end), load_chips(first, end))
+    flags = chip_sourcing(chips, load_chip_starts()).drop(columns=["stock_id", "date"])
+    attached = chips.assign(**flags)
     gaps = observable_gaps(attached)
     if current:
-        values = mask_months(apply_fallbacks(fundamental_features(attached), attached), masked)
+        fundamental = apply_fallbacks(fundamental_features(attached), attached)
+        lending = lending_features(attached).drop(columns=["stock_id", "date"])
+        values = mask_months(fundamental.join(lending), masked)
         gaps = gaps.assign(**{current_name(name): values[name].to_numpy() for name in CHECKED})
     return gaps[gaps["date"].between(start, end)].reset_index(drop=True)[columns]

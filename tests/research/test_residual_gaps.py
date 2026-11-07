@@ -6,6 +6,7 @@ import pandas as pd
 import pytest
 
 from apps.research.features.build import MODEL_COLUMNS
+from apps.research.features.chip import SOURCED_CHIPS
 from apps.research.features.fundamental import (
     BASIS_SIGNALS,
     STATEMENT_INPUTS,
@@ -210,7 +211,10 @@ def test_a_gap_is_observable_only_when_every_input_its_value_reads_is_on_record(
             "stock_id": ["2330", "2881", "1101", "1102"],
             "date": [d("2017-03-01")] * 4,
             "industry": ["半導體業", "金融業", "水泥工業", None],
-            **{sourced_name(name): [1.0, 0.0, NAN, 0.0] for name in STATEMENT_INPUTS},
+            **{
+                sourced_name(name): [1.0, 0.0, NAN, 0.0]
+                for name in [*STATEMENT_INPUTS, *SOURCED_CHIPS]
+            },
             sourced_name("fund_rev_yoy"): [1.0, 1.0, NAN, 0.0],
             sourced_name("fund_rev_3m_yoy"): [0.0, 0.0, 0.0, 1.0],
         }
@@ -238,6 +242,7 @@ def test_a_gap_is_observable_only_when_every_input_its_value_reads_is_on_record(
         "ind_ep_neutral",
         "fund_rev_yoy",
         "fund_rev_3m_yoy",
+        *SOURCED_CHIPS,
     }
     paired = {*MARGINS, "fund_rev_yoy", "fund_rev_3m_yoy", "fund_rev_yoy_q"}
     for name in (name for name in OBSERVABLE if name not in paired):
