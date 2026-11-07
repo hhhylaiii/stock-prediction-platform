@@ -9,6 +9,7 @@ from django.core.management.base import BaseCommand, CommandError
 
 from apps.market.calendar import CalendarError
 from apps.research.holdout import HoldoutError
+from apps.research.lock import ResearchBusyError
 from apps.research.predict import PredictionGateError
 from apps.research.prediction_cache import FoldMismatchError, MissingFoldsError
 from apps.research.promotion import Promoted, first_day, promote
@@ -53,6 +54,7 @@ class Command(BaseCommand):
             )
         except (
             RunError,
+            ResearchBusyError,
             HoldoutError,
             CalendarError,
             PredictionGateError,

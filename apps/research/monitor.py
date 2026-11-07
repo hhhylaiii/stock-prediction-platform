@@ -27,6 +27,7 @@ from apps.etl.models import DataQualityLog
 from apps.market.calendar import CalendarError, OutsideCalendarError, TradingDays
 from apps.research.baselines import INTERVAL_HORIZON
 from apps.research.evaluation import ALERT_SHARE, odds_against_q50, wide_bands
+from apps.research.lock import locked
 from apps.research.metrics.forecast import (
     daily_absolute_error,
     daily_auc,
@@ -522,6 +523,7 @@ class MonitorResult:
     degraded: tuple[str, ...]
 
 
+@locked("monitor")
 def run_monitor(day: date, calendar: TradingDays) -> MonitorResult:
     """Score predictions maturing on the day, check its outputs, raise alerts; reruns rewrite."""
     if not calendar.is_trading_day(day):

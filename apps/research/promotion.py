@@ -17,6 +17,7 @@ from apps.market.calendar import TradingDays
 from apps.research.baseline_runs import SCOPES
 from apps.research.gates import SAMPLE_UNITS, SlotGates, build_runs, check_gates
 from apps.research.holdout import production_pass
+from apps.research.lock import locked
 from apps.research.models import ModelRun, ModelStatus, Prediction
 from apps.research.monitor import DEGRADED_ON, DEGRADED_WINDOW, PROMOTED_ON, RESTORED_ON
 from apps.research.predict import SERVING, Slot, predict, serving_run
@@ -166,6 +167,7 @@ def _swap(
     return sorted(retired)
 
 
+@locked("promote")
 def promote(
     run_key: str, day: date, directory: Path, force: bool = False, reason: str = ""
 ) -> Promoted:
@@ -201,6 +203,7 @@ def _active_in(slot: Slot, run_id: str) -> list[str]:
     return [run.run_id for run in runs if run.run_id != run_id]
 
 
+@locked("restore")
 def restore(run_id: str, day: date, reason: str) -> ModelRun:
     """Put a degraded run back to active from day; its degraded days become a closed period."""
     reason = reason.strip()

@@ -122,10 +122,30 @@ if time.fromisoformat(FILING_VISIBLE_BEFORE) >= time.fromisoformat(ETL_AT["CHECK
     raise ImproperlyConfigured("FILING_VISIBLE_BEFORE must come before ETL_AT_CHECK_QUALITY")
 
 
+RESEARCH_SCHEDULE_ENABLED = env.bool("RESEARCH_SCHEDULE_ENABLED", default=False)
+RESEARCH_AT = {
+    name: env.str(f"RESEARCH_AT_{name}", default=default)
+    for name, default in (("EVENING", "23:00"), ("MORNING", "06:00"))
+}
+RESEARCH_US_CLOSE_COUNTDOWN = env.int("RESEARCH_US_CLOSE_COUNTDOWN", default=300)
+RESEARCH_US_CLOSE_RETRIES = env.int("RESEARCH_US_CLOSE_RETRIES", default=6)
+RESEARCH_LOCK_COUNTDOWN = env.int("RESEARCH_LOCK_COUNTDOWN", default=600)
+RESEARCH_LOCK_RETRIES = env.int("RESEARCH_LOCK_RETRIES", default=6)
+if time.fromisoformat(RESEARCH_AT["EVENING"]) <= time.fromisoformat(ETL_AT["CHECK_QUALITY"]):
+    raise ImproperlyConfigured("RESEARCH_AT_EVENING must come after ETL_AT_CHECK_QUALITY")
+if time.fromisoformat(RESEARCH_AT["MORNING"]) <= time.fromisoformat(ETL_AT["US_CLOSE"]):
+    raise ImproperlyConfigured("RESEARCH_AT_MORNING must come after ETL_AT_US_CLOSE")
+
+
+def _crontab(at: str, **fields: str) -> crontab:
+    """A crontab in TIME_ZONE at an HH:MM."""
+    hour, minute = at.split(":")
+    return crontab(hour=hour, minute=minute, **fields)
+
+
 def _at(name: str, **fields: str) -> crontab:
     """A crontab in TIME_ZONE at the HH:MM of ETL_AT[name]."""
-    hour, minute = ETL_AT[name].split(":")
-    return crontab(hour=hour, minute=minute, **fields)
+    return _crontab(ETL_AT[name], **fields)
 
 
 CELERY_BEAT_SCHEDULE: dict[str, dict[str, object]] = {
@@ -181,6 +201,8 @@ CELERY_BEAT_SCHEDULE: dict[str, dict[str, object]] = {
         "task": "etl.business_signal",
         "schedule": _at("BUSINESS_SIGNAL", day_of_month="15"),
     },
+    "research-evening": {"task": "research.evening", "schedule": _crontab(RESEARCH_AT["EVENING"])},
+    "research-morning": {"task": "research.morning", "schedule": _crontab(RESEARCH_AT["MORNING"])},
 }
 
 TWSE_BASE_URL = env.str("TWSE_BASE_URL", default="https://www.twse.com.tw")

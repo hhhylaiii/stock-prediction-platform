@@ -129,6 +129,8 @@ def test_the_beat_schedule_covers_the_daily_etl_in_taipei_time() -> None:
         "etl-us-close": crontab(hour=5, minute=30),
         "etl-weekly-holding": crontab(hour=10, minute=0, day_of_week="sat"),
         "etl-business-signal": crontab(hour=10, minute=0, day_of_month="15"),
+        "research-evening": crontab(hour=23, minute=0),
+        "research-morning": crontab(hour=6, minute=0),
     }
     assert settings.CELERY_TIMEZONE == "Asia/Taipei"
 
