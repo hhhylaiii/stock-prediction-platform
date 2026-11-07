@@ -125,6 +125,13 @@ def test_an_index_day_is_done_when_the_market_index_has_a_row() -> None:
     assert missing_days(jobs["twse/index_daily"], DAYS) == [DAYS[0], DAYS[2]]
 
 
+def test_a_return_index_day_is_done_only_with_its_own_row() -> None:
+    IndexDaily.objects.create(index_id="TAIEX", date=DAYS[0], close=1)
+    IndexDaily.objects.create(index_id="TAIEX_TR", date=DAYS[1], close=1)
+    job = next(job for job in JOBS if job.key == "twse/return_index")
+    assert missing_days(job, DAYS) == [DAYS[0], DAYS[2]]
+
+
 def test_every_daily_exchange_dataset_is_caught_up_and_share_counts_are_rebuilt() -> None:
     keys = {job.key: job for job in JOBS}
     for source in ("twse", "tpex"):

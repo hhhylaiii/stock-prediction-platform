@@ -30,6 +30,7 @@ MARGIN_LOT_ROWS = ("融資(交易單位)", "融券(交易單位)")
 MONTHLY_UNIT_HINT = "單位：元、股"
 MONTHLY_FIELDS = ("日期", "成交股數", "成交金額", "成交筆數", "發行量加權股價指數", "漲跌點數")
 INDEX_COLUMNS = ["index_id", "date", "close", "volume"]
+RETURN_INDEX_FIELDS = ("日期", "發行量加權股價報酬指數")
 
 
 def check_answer(payload: dict[str, Any], day: date) -> None:
@@ -159,6 +160,40 @@ def taiex_rows(payload: dict[str, Any], day: date) -> pd.DataFrame:
     by_day = {parse_roc_date(str(row[0])): row for row in rows}
     row = row_of_day(by_day, day, "TWSE FMTQIK")
     return pd.DataFrame([row], columns=list(MONTHLY_FIELDS)).assign(date=day)
+
+
+def return_index_rows(payload: dict[str, Any], day: date) -> pd.DataFrame:
+    """The MFI94U row of the day; a day after the last row is not published yet."""
+    if str(payload.get("stat", "")) != "OK":
+        raise SchemaChangedError(f"TWSE MFI94U answered with stat {payload.get('stat')!r}")
+    fields = tuple("".join(str(name).split()) for name in payload.get("fields") or ())
+    if fields != RETURN_INDEX_FIELDS:
+        raise SchemaChangedError(f"TWSE MFI94U fields changed: {payload.get('fields')}")
+    rows = payload.get("data")
+    if not isinstance(rows, list) or not all(
+        isinstance(row, list) and len(row) == len(RETURN_INDEX_FIELDS) for row in rows
+    ):
+        raise SchemaChangedError("TWSE MFI94U rows are malformed")
+    by_day = {parse_roc_date(str(row[0]).strip()): row for row in rows}
+    row = row_of_day(by_day, day, "TWSE MFI94U")
+    return pd.DataFrame([row], columns=list(RETURN_INDEX_FIELDS)).assign(date=day)
+
+
+def return_index_frame(raw_df: pd.DataFrame) -> pd.DataFrame:
+    records = []
+    for row in raw_df.to_dict("records"):
+        close = parse_price(row["發行量加權股價報酬指數"])
+        if close is None:
+            raise SchemaChangedError(f"TWSE MFI94U has no close on {row['date']}")
+        records.append(
+            {
+                "index_id": IndexId.TAIEX_TR.value,
+                "date": row["date"],
+                "close": close,
+                "volume": None,
+            }
+        )
+    return pd.DataFrame(records, columns=INDEX_COLUMNS, dtype=object)
 
 
 def taiex_frame(raw_df: pd.DataFrame) -> pd.DataFrame:

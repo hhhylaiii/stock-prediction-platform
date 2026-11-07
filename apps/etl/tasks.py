@@ -86,7 +86,7 @@ def _both(*datasets: str, sessions_back: tuple[int, ...] = (0,)) -> list[Fetch]:
 
 
 BATCHES: dict[str, list[Fetch]] = {
-    "prices": _both("daily_price", "index_daily"),
+    "prices": [*_both("daily_price", "index_daily"), Fetch("twse", "return_index")],
     "afternoon": [
         *_both("institutional", "daily_valuation", "attention", "disposition", "full_delivery"),
         Fetch("twse", "foreign_holding"),
