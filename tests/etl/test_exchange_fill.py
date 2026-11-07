@@ -172,22 +172,24 @@ def test_missing_lending_balances_are_added_and_stored_ones_left_alone(
     priced("1101", "1213", "2317", "2330", "2603", "2609")
     DailyChip.objects.create(stock_id="1101", date=DAY, fi_holding_pct=13.36)
     DailyChip.objects.create(stock_id="2317", date=DAY, sbl_short_balance=5)
-    DailyChip.objects.create(stock_id="2330", date=DAY, sbl_short_balance=15_528_514)
+    DailyChip.objects.create(stock_id="2330", date=DAY, sbl_short_balance=15_528_513)
     DailyChip.objects.create(stock_id="2609", date=DAY, fi_net=1)
     run = fill_missing(adapter, "sbl", DAY, DAY)
     assert [lent(code) for code in ("1101", "1213", "2317", "2330", "2609")] == [
         113_290_742,
         0,
         5,
-        15_528_514,
+        15_528_513,
         None,
     ]
     assert DailyChip.objects.get(stock_id="1101").fi_holding_pct == 13.36
     assert not DailyChip.objects.filter(stock_id__in=["0050", "2603"]).exists()
     (log,) = DataQualityLog.objects.filter(check_name=FILL_CHECK)
     assert sorted(log.detail["filled"]["sbl"]) == ["1101", "1213"]
+    assert log.detail["created"]["sbl"] == {"1213": ["2026-10-28", "2026-10-28", 1]}
     assert log.detail["differences"]["sbl"]["sample"] == [
-        ["2317", "2026-10-28", "sbl_short_balance", 5, 77_830_749]
+        ["2317", "2026-10-28", "sbl_short_balance", 5, 77_830_749],
+        ["2330", "2026-10-28", "sbl_short_balance", 15_528_513, 15_528_514],
     ]
     assert (run.status, run.rows) == ("success", 2)
 
