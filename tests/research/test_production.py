@@ -594,6 +594,30 @@ def test_a_failed_build_leaves_an_annotated_shadow_and_builds_again(
 
 
 @pytest.mark.django_db
+def test_a_failed_rebuild_keeps_no_earlier_gates(
+    researched: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    claim_all()
+    last = weekdays()[-1]
+    build_run("rank", "rank-prod", "rank-wf1", last, researched)
+    for run in ModelRun.objects.filter(run_key__in=["rank-prod", "rank-prod-shadow"]):
+        ModelRun.objects.filter(pk=run.pk).update(params={**run.params, "gates": {"passed": True}})
+    fit = lgbm_runs.FITS["rank"]
+
+    def broken(job: Any) -> Any:
+        if job.run_key == "rank-prod":
+            raise MemoryError("the fit ran out of memory")
+        return fit(job)
+
+    monkeypatch.setitem(lgbm_runs.FITS, "rank", broken)
+    with pytest.raises(MemoryError, match="out of memory"):
+        build_run("rank", "rank-prod", "rank-wf1", last, researched)
+
+    assert ModelRun.objects.filter(run_key="rank-prod").count() == 2
+    assert not ModelRun.objects.filter(run_key="rank-prod", params__has_key="gates").exists()
+
+
+@pytest.mark.django_db
 def test_research_fits_refuse_a_production_run_key(researched: Path) -> None:
     research_row("rank-made", production={"role": "model"})
     research_row("interval-made", production={"role": "model"})

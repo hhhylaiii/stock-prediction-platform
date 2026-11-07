@@ -109,6 +109,7 @@ class Built:
 DESIGNS: dict[str, Design] = {scope: Design() for scope in HoldoutScope.values}
 BAGS = 5
 SHADOW = "shadow"
+GATES = "gates"
 BASELINED = (HoldoutScope.RETURN, HoldoutScope.INTERVAL)
 REFERENCED: dict[str, str] = {
     ModelObjective.RANK: IC_THRESHOLD,
@@ -224,6 +225,13 @@ def _fit(
     return _run_ids(key)
 
 
+def _clear_gates(run_key: str) -> None:
+    """Drop the gates an earlier check recorded, so a rebuild never keeps a stale verdict."""
+    for run in ModelRun.objects.filter(run_key=run_key, params__has_key=GATES):
+        kept = {name: value for name, value in run.params.items() if name != GATES}
+        ModelRun.objects.filter(pk=run.pk).update(params=kept)
+
+
 def _run_ids(key: str) -> list[str]:
     return list(
         ModelRun.objects.filter(run_key=key).order_by("run_id").values_list("run_id", flat=True)
@@ -257,6 +265,7 @@ def build_run(
         for role, note in roles.items()
     }
     shadowed = shadow_fold(calendar, as_of, design.config)
+    _clear_gates(run_key)
     shadow = _fit(
         scope,
         shadowed,
