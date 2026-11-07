@@ -27,6 +27,7 @@
   const ALERT_REASONS = { below_threshold: '低於門檻', outside_range: '超出範圍', above_baseline: '輸給 baseline', missing_reference: '缺參考值' };
   const ALERT_METRICS = { ic: 'IC', coverage: '覆蓋率', brier: 'Brier' };
   const GATES = { agreement: '與現役模型的預測相關', gain_overlap: '與現役模型的重要特徵重疊', shadow_oos: '影子模型最近 6 個月 OOS', data_quality: '訓練窗內的資料品質' };
+  const SAMPLE_UNITS = { stocks: ' 檔', features: ' 個特徵', days: ' 天' };
   const OBJECTIVES = { rank: '排名', regression: '絕對報酬', quantile: '報酬區間', volatility: '波動率', classification: '上漲機率' };
   const SEVERITY = { info: ['通過', 'in'], warning: ['警告', 'warn'], error: ['錯誤', 'warn'] };
 
@@ -798,10 +799,16 @@
     return [OBJECTIVES[objective] || objective, ...rest].join(' ');
   }
 
+  function gateText(gate) {
+    const value = typeof gate.value === 'number' ? '實際 ' + (Number.isInteger(gate.value) ? fmtInt(gate.value) : gate.value.toFixed(3)) : '';
+    const sample = Number.isInteger(gate.sample) ? '樣本 ' + fmtInt(gate.sample) + (SAMPLE_UNITS[gate.sample_unit] || '') : '';
+    const parts = [gate.reason, value, gate.threshold ? '門檻 ' + gate.threshold : '', sample].filter(Boolean);
+    return (GATES[gate.name] || gate.name) + (parts.length ? '（' + parts.join('，') + '）' : '');
+  }
+
   function promotionLines(d) {
     const head = (d.forced ? '強制換模：' + (d.reason || '沒有寫原因') : '換模門檻未過，續用現役模型') + (d.run_key ? '（' + d.run_key + '）' : '');
-    return [head, ...(d.failed || []).map(item => slotText(item.slot) + (item.run_id ? '（' + item.run_id + '）' : '') + '：' +
-      (item.gates || []).map(gate => (GATES[gate.name] || gate.name) + (gate.reason ? '（' + gate.reason + '）' : '')).join('、'))];
+    return [head, ...(d.failed || []).map(item => slotText(item.slot) + (item.run_id ? '（' + item.run_id + '）' : '') + '：' + (item.gates || []).map(gateText).join('、'))];
   }
 
   function alertLine(run) {
@@ -829,13 +836,13 @@
     }
   }
 
-  function modelCheckHtml(check, alertShare) {
+  function modelCheckHtml(check, alertShare, note) {
     const [state, lines] = modelCheckState(check, alertShare);
     const failed = check.severity === 'error';
     const cls = failed ? 'warn' : state;
     const shown = failed ? ['錯誤，' + (lines[0] || ''), ...lines.slice(1)] : lines;
     const runClass = ['model_alert', 'model_promotion'].includes(check.check_name) ? ' run' : '';
-    return '<div class="check"><i class="' + cls + '"></i><div><div>' + esc(CHECKS[check.check_name] || check.check_name) + '</div>' +
+    return '<div class="check"><i class="' + cls + '"></i><div><div>' + esc(CHECKS[check.check_name] || check.check_name) + (note ? '　<span class="faint small pinned">' + esc(note) + '</span>' : '') + '</div>' +
       shown.map(line => '<div class="muted small' + runClass + '">' + esc(line) + '</div>').join('') + '</div></div>';
   }
 
@@ -844,7 +851,10 @@
     const day = data.find(entry => (entry.model_checks || []).length);
     const share = meta.output_alert_share;
     sub.textContent = day ? '最近一次寫入的交易日：' + day.date + '；區間寬度比與機率矛盾的標記超過 ' + Math.round(share * 100) + '% 才算警告。' : '';
-    host.innerHTML = day ? day.model_checks.map(check => modelCheckHtml(check, share)).join('') : '<p class="placeholder">還沒有模型輸出檢查。</p>';
+    const promotions = data.flatMap(entry => (entry.model_checks || []).filter(check => check.check_name === 'model_promotion').map(check => ({ date: entry.date, check: check })));
+    const pinned = promotions.length ? modelCheckHtml(promotions[0].check, share, promotions[0].date + (promotions.length > 1 ? '，近 ' + data.length + ' 個交易日共 ' + promotions.length + ' 筆' : '')) : '';
+    const rest = day ? day.model_checks.filter(check => check.check_name !== 'model_promotion') : [];
+    host.innerHTML = day ? pinned + rest.map(check => modelCheckHtml(check, share)).join('') : '<p class="placeholder">還沒有模型輸出檢查。</p>';
   }
 
   async function renderQuality() {

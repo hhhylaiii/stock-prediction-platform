@@ -207,7 +207,8 @@ def test_a_refused_build_names_each_failed_slot_and_gate(
     page.goto(f"{live_server.url}/#models")
 
     promotion = page.locator("#model-checks .check").filter(has_text="換模")
-    expect(promotion.get_by_text("換模", exact=True)).to_have_count(1)
+    expect(promotion.locator("div > div").first).to_contain_text("換模　")
+    expect(promotion.locator(".pinned")).to_have_text(seeded.last_session.isoformat())
     expect(promotion.locator("i")).to_have_class("warn")
     lines = promotion_lines(page)
     expect(lines).to_have_count(3)
@@ -221,6 +222,45 @@ def test_a_refused_build_names_each_failed_slot_and_gate(
     )
     expect(page.locator("#model-checks img")).to_have_count(0)
     expect(page.locator("#quality")).not_to_contain_text("換模")
+
+
+def promotion(run_key: str, gates: list[dict[str, object]]) -> dict[str, object]:
+    failed = [{"slot": "rank 20 日", "run_id": "rank-n", "gates": gates}]
+    return {"run_key": run_key, "forced": False, "reason": None, "failed": failed}
+
+
+def test_the_latest_promotion_stays_on_top_for_thirty_sessions(
+    page: Page, live_server: LiveServer, seeded: Seed
+) -> None:
+    gate = {
+        "name": "agreement",
+        "reason": "相關太低",
+        "value": 0.62,
+        "threshold": ">= 0.7",
+        "sample": 1842,
+        "sample_unit": "stocks",
+    }
+    log(seeded, "model_promotion", "warning", promotion("prod-old", [gate]), back=12)
+    log(seeded, "model_promotion", "warning", promotion("prod-new", [gate]), back=5)
+    log(seeded, "model_promotion", "warning", promotion("prod-gone", [gate]), back=31)
+    clean = {"share": 0.0, "flagged": 0, "n_stocks": 1842, "stocks": []}
+    log(seeded, "output_width_ratio", "info", clean)
+
+    page.goto(f"{live_server.url}/#models")
+
+    checks = page.locator("#model-checks .check")
+    expect(checks).to_have_count(2)
+    expect(checks.nth(0).locator(".pinned")).to_have_text(
+        f"{seeded.sessions[-5].isoformat()}，近 30 個交易日共 2 筆"
+    )
+    lines = checks.nth(0).locator(".run")
+    expect(lines.nth(0)).to_have_text("換模門檻未過，續用現役模型（prod-new）")
+    expect(lines.nth(1)).to_have_text(
+        "排名 20 日（rank-n）：與現役模型的預測相關"
+        "（相關太低，實際 0.620，門檻 >= 0.7，樣本 1,842 檔）"
+    )
+    expect(checks.nth(1)).to_contain_text("區間寬度比異常")
+    expect(page.locator("#model-checks-sub")).to_contain_text(seeded.last_session.isoformat())
 
 
 def test_a_forced_swap_leads_with_its_reason(
