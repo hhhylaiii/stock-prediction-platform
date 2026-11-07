@@ -61,6 +61,7 @@ EXCHANGE_TABLES: Mapping[str, str] = MappingProxyType(
 )
 EXCHANGES: Mapping[str, str] = MappingProxyType({Market.TWSE: "twse", Market.TPEX: "tpex"})
 WRITTEN_COLUMNS = ["market", "source", "date"]
+SBL_BASIS_BREAKS: Mapping[str, date] = MappingProxyType({Market.TWSE: date(2012, 3, 19)})
 FILLER = 1.0
 HOLDING_LOOKBACK = timedelta(days=42)
 HOLDING_STALE = pd.Timedelta(21, unit="D")
@@ -85,13 +86,30 @@ def _change(panel: pd.DataFrame, column: str) -> pd.Series:
     return ratio(balance - shifted(balance, panel, CHANGE_DAYS), panel["shares"])
 
 
+def _read_days(panel: pd.DataFrame, column: str) -> pd.Series:
+    """Day of the balance each row reads: its own, or on a halted day the one it carries."""
+    own = pd.to_datetime(panel["date"]).where(panel[column].notna())
+    return own.where(panel["has_bar"].astype(bool), carried(own, panel))
+
+
+def _across_breaks(panel: pd.DataFrame, breaks: Mapping[str, date] = SBL_BASIS_BREAKS) -> pd.Series:
+    """Rows whose change reads one lending balance from before their market's break, one after."""
+    read = _read_days(panel, "sbl_short_balance")
+    earlier = shifted(read, panel, CHANGE_DAYS)
+    crossed = pd.Series(False, index=panel.index)
+    for market, day in breaks.items():
+        cut = pd.Timestamp(day)
+        crossed = crossed | (panel["market"].eq(market) & read.ge(cut) & earlier.lt(cut))
+    return crossed
+
+
 def _lending(panel: pd.DataFrame) -> dict[str, pd.Series]:
     margin = _balance(panel, "margin_balance")
     return {
         "chip_margin_chg_5d": _change(panel, "margin_balance"),
         "chip_margin_usage": ratio(margin, _balance(panel, "margin_limit")),
         "chip_short_ratio": ratio(_balance(panel, "short_balance"), margin),
-        "chip_sbl_short_chg_5d": _change(panel, "sbl_short_balance"),
+        "chip_sbl_short_chg_5d": _change(panel, "sbl_short_balance").mask(_across_breaks(panel)),
     }
 
 
@@ -236,7 +254,7 @@ def chip_sourcing(panel: pd.DataFrame, starts: pd.DataFrame, written: pd.DataFra
     A row is expected on a traded day whose tables not both markets wrote, from the stock's first
     row on or every day for a stock without any; halted days carry a row as the features do.
     """
-    inputs = panel[[*LISTING, "date", "has_bar", "shares", *LENDING_CELLS]]
+    inputs = panel[[*LISTING, "date", "market", "has_bar", "shares", *LENDING_CELLS]]
     days = pd.to_datetime(inputs["date"])
     priced = inputs["has_bar"].astype(bool)
     filled = inputs.assign(shares=inputs["shares"].fillna(FILLER))

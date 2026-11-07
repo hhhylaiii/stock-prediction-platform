@@ -8,6 +8,7 @@ import pytest
 
 from apps.market.calendar import TradingDays
 from apps.research.features.chip import (
+    SBL_BASIS_BREAKS,
     chip_features,
     holding_changes,
     second_batch_chip_features,
@@ -86,6 +87,39 @@ def test_margin_and_lending_changes_and_ratios() -> None:
     assert at(features, "2330", 9, "chip_short_ratio") == pytest.approx(2_000 / 10_900)
     assert at(features, "2330", 9, "chip_fi_holding_pct") == 30.0
     assert math.isnan(at(features, "2330", 4, "chip_margin_chg_5d"))
+
+
+@pytest.mark.parametrize(("market", "cut"), [("TWSE", True), ("TPEx", False)])
+def test_lending_changes_across_the_twse_basis_break_are_missing(market: str, cut: bool) -> None:
+    panel = listing(
+        "2330", rising(20), start=date(2012, 3, 5), shares=1_000_000.0, market=market
+    ).assign(**chips(20))
+
+    features = chip_features(panel)
+
+    days = panel["date"].tolist()
+    crossed = [days.index(date(2012, 3, 19)) + k for k in range(5)]
+    missing = features["chip_sbl_short_chg_5d"].isna().tolist()
+    assert missing == [k < 5 or (cut and k in crossed) for k in range(20)]
+    assert days[crossed[-1]] == date(2012, 3, 23)
+    assert {"TWSE": date(2012, 3, 19)} == SBL_BASIS_BREAKS
+    assert features["chip_margin_chg_5d"].iloc[5:].notna().all()
+
+
+def test_a_halt_across_the_basis_break_cuts_the_changes_reading_both_sides() -> None:
+    closes = rising(20)
+    panel = listing("2330", closes, start=date(2012, 3, 5), shares=1_000_000.0)
+    halted = panel["date"].isin([date(2012, 3, 19), date(2012, 3, 20)])
+    lent = [NAN if gone else 5_000.0 + 10 * k for k, gone in enumerate(halted)]
+    panel = panel.assign(**chips(20, sbl_short_balance=lent))
+    panel = panel.assign(close=panel["close"].mask(halted), has_bar=~halted)
+
+    features = chip_features(panel)
+
+    days = panel["date"].tolist()
+    missing = features["chip_sbl_short_chg_5d"].isna().tolist()
+    cut = [date(2012, 3, d) for d in (21, 22, 23, 26, 27)]
+    assert [day for k, day in enumerate(days) if missing[k] and k >= 5] == cut
 
 
 def test_balances_carry_over_halted_days() -> None:

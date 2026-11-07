@@ -261,6 +261,44 @@ def test_a_null_balance_makes_every_cell_of_the_row_missing() -> None:
     assert found["chip_short_ratio"] == [5]
 
 
+def test_lending_changes_cut_at_the_basis_break_are_observable() -> None:
+    rows = listing("2330", rising(N), start=date(2012, 3, 12)).assign(
+        margin_balance=10_000.0, margin_limit=50_000.0, short_balance=2_000.0
+    )
+    rows = rows.assign(sbl_short_balance=[5_000.0 + 10 * k for k in range(N)])
+    first = pd.DataFrame(
+        {"margin_balance": [date(2012, 3, 12)], "sbl_short_balance": [date(2012, 3, 12)]},
+        index=pd.Index(["2330"], name="stock_id"),
+    )
+
+    values = lending_features(rows)
+    flags = chip_sourcing(rows, first, written())
+
+    cut = values["chip_sbl_short_chg_5d"].isna() & rows.index.isin(range(5, 10))
+    assert cut.sum() == 5
+    assert flags.loc[cut, sourced_name("chip_sbl_short_chg_5d")].eq(1.0).all()
+
+
+def test_a_change_pushed_across_the_break_by_a_source_gap_stays_a_source_gap() -> None:
+    rows = listing("2330", rising(N), start=date(2012, 3, 12)).assign(
+        margin_balance=10_000.0, margin_limit=50_000.0, short_balance=2_000.0
+    )
+    lent = [NAN if k in (5, 6) else 5_000.0 + 10 * k for k in range(N)]
+    rows = rows.assign(sbl_short_balance=lent)
+    rows = rows.assign(has_bar=rows.index != 6, close=rows["close"].where(rows.index != 6))
+    first = pd.DataFrame(
+        {"margin_balance": [date(2012, 3, 12)], "sbl_short_balance": [date(2012, 3, 12)]},
+        index=pd.Index(["2330"], name="stock_id"),
+    )
+
+    values = lending_features(rows)["chip_sbl_short_chg_5d"]
+    flags = chip_sourcing(rows, first, written())[sourced_name("chip_sbl_short_chg_5d")]
+
+    assert [k for k in range(5, N) if math.isnan(values.iloc[k])] == [5, 7, 8, 9, 10, 11]
+    assert flags.iloc[[5, 7, 8, 9]].tolist() == [1.0] * 4
+    assert flags.iloc[[10, 11]].tolist() == [0.0, 0.0]
+
+
 @pytest.mark.django_db
 def test_exchange_days_are_the_days_each_markets_runs_wrote_a_table() -> None:
     def run(source: str, dataset: str, status: str, last: int, **checkpoint: str) -> None:
