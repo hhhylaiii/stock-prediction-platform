@@ -24,7 +24,80 @@ SHARE_DIGITS = 12
 FALLBACKS: Mapping[str, str] = MappingProxyType(
     {"fund_rev_yoy": "fund_rev_yoy_q", "fund_rev_3m_yoy": "fund_rev_yoy_q"}
 )
-MASKED_MONTHS: Mapping[str, frozenset[str]] = MappingProxyType({})
+
+
+def _spans(*spans: str | tuple[str, str]) -> frozenset[str]:
+    """Every month of the spans, both ends included; a single month may be given alone."""
+    pairs = [(span, span) if isinstance(span, str) else span for span in spans]
+    return frozenset(
+        str(month) for first, last in pairs for month in pd.period_range(first, last, freq="M")
+    )
+
+
+MASKED_MONTHS: Mapping[str, frozenset[str]] = MappingProxyType(
+    {
+        "fund_rev_yoy": _spans(
+            ("2010-01", "2014-09"),
+            ("2014-12", "2015-05"),
+            ("2015-08", "2016-02"),
+            ("2016-04", "2016-05"),
+            "2016-09",
+            ("2017-03", "2017-04"),
+            "2018-08",
+        ),
+        "fund_rev_3m_yoy": _spans(
+            ("2010-01", "2014-09"),
+            ("2014-12", "2015-05"),
+            ("2015-08", "2016-05"),
+            ("2017-01", "2017-04"),
+        ),
+        "fund_ep": _spans(
+            ("2010-01", "2014-03"), ("2015-09", "2016-02"), ("2016-04", "2016-05"), "2017-01"
+        ),
+        "fund_eps_yoy": _spans(
+            ("2010-04", "2015-03"),
+            ("2015-08", "2015-09"),
+            ("2016-04", "2017-06"),
+            "2017-08",
+            ("2021-08", "2021-09"),
+            ("2022-02", "2022-03"),
+            ("2022-09", "2023-01"),
+        ),
+        "fund_roe_ttm": _spans(
+            ("2014-05", "2014-06"),
+            "2014-09",
+            ("2015-09", "2016-02"),
+            "2016-05",
+            "2017-04",
+            "2017-12",
+            ("2019-06", "2020-11"),
+            ("2023-03", "2024-12"),
+        ),
+        "fund_gross_margin": _spans(("2010-01", "2013-05")),
+        "fund_op_margin": _spans(("2010-01", "2013-05")),
+        "fund_debt_ratio": _spans(
+            "2013-05",
+            "2017-04",
+            ("2018-08", "2018-10"),
+            ("2019-06", "2019-11"),
+            ("2021-01", "2021-02"),
+            "2021-06",
+            ("2021-09", "2021-10"),
+            "2022-10",
+            ("2023-03", "2023-05"),
+            ("2023-12", "2024-11"),
+        ),
+        "fund_gm_yoy_chg": _spans(("2010-01", "2014-05"), "2016-05", "2016-11"),
+        "fund_opm_yoy_chg": _spans(("2010-01", "2014-05"), "2016-05", "2016-11"),
+        "fund_cfo_to_ni": _spans(("2015-09", "2016-02"), "2016-05", "2022-10"),
+        "fund_days_since_fs": _spans(("2010-01", "2013-05")),
+        "fund_rev_yoy_q": _spans(("2010-01", "2014-05"), "2016-05", "2017-01", "2017-04"),
+        "ind_ep_neutral": _spans(
+            ("2010-01", "2014-03"), ("2015-09", "2016-02"), ("2016-04", "2016-05"), "2017-01"
+        ),
+        "fund_days_to_ex_date": _spans("2022-11"),
+    }
+)
 GROUPS = {True: "delisted", False: "current"}
 OBSERVED = "_observable"
 PRESENT = "present_"

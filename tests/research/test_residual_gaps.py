@@ -117,13 +117,48 @@ def test_defaults_are_the_decided_rules_and_empty_rules_change_nothing() -> None
         "fund_rev_yoy": "fund_rev_yoy_q",
         "fund_rev_3m_yoy": "fund_rev_yoy_q",
     }
-    assert dict(MASKED_MONTHS) == {}
     assert (ACCEPT_RATIO, ACCEPT_GAP, MAX_MASKED_SHARE) == (1.5, 0.05, 0.2)
     features = frame([("2330", "2017-03-02", NAN, 0.2, 0.01, 0.30)])
 
     pd.testing.assert_frame_equal(apply_fallbacks(features, sourcing([NAN]), {}), features)
-    pd.testing.assert_frame_equal(mask_months(features), features)
     pd.testing.assert_frame_equal(mask_months(features, {}), features)
+
+
+def research_months() -> list[str]:
+    return [f"{year}-{month:02d}" for year in range(2010, 2025) for month in range(1, 13)]
+
+
+def test_masked_months_are_the_months_residual_coverage_found_on_2026_11_08() -> None:
+    months = research_months()
+    leading = frozenset(months[: months.index("2013-05") + 1])
+
+    assert set(MASKED_MONTHS) == {
+        "fund_rev_yoy",
+        "fund_rev_3m_yoy",
+        "fund_ep",
+        "fund_eps_yoy",
+        "fund_roe_ttm",
+        "fund_gross_margin",
+        "fund_op_margin",
+        "fund_debt_ratio",
+        "fund_gm_yoy_chg",
+        "fund_opm_yoy_chg",
+        "fund_cfo_to_ni",
+        "fund_days_since_fs",
+        "fund_rev_yoy_q",
+        "ind_ep_neutral",
+        "fund_days_to_ex_date",
+    }
+    for name in ("fund_gross_margin", "fund_op_margin", "fund_days_since_fs"):
+        assert MASKED_MONTHS[name] == leading
+    assert MASKED_MONTHS["fund_days_to_ex_date"] == frozenset({"2022-11"})
+    assert MASKED_MONTHS["fund_ep"] == MASKED_MONTHS["ind_ep_neutral"]
+    assert len(MASKED_MONTHS["fund_eps_yoy"]) == 87
+    assert sum(map(len, MASKED_MONTHS.values())) == 742
+    for name, chosen in MASKED_MONTHS.items():
+        assert chosen <= set(months), name
+        assert len(chosen) <= len(months) / 2, name
+    assert set(MASKED_MONTHS) <= set(MODEL_COLUMNS)
 
 
 def test_monthly_coverage_splits_universe_rows_by_later_delisting() -> None:
