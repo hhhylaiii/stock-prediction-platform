@@ -69,6 +69,7 @@ MASKED_GROUPS: dict[str, tuple[str, ...]] = {
     "產業": ("ind_sector_ret_20d", "ind_rel_ret_20d"),
 }
 MASKED = tuple(name for names in MASKED_GROUPS.values() for name in names)
+FILLED = frozenset(MASKED_GROUPS["產業"])
 DELIST_SESSIONS = 120
 MOSTLY_MISSING = 0.5
 SCORE_COLUMNS = ["arm", "seed", "fold", "horizon", "stock_id", "date", "near", "pct"]
@@ -94,7 +95,7 @@ def delisting_windows(
 ) -> dict[str, tuple[date, date]]:
     """Each delisted stock's last sessions trading days up to its last quote before delisting."""
     quotes = DailyPrice.objects.filter(
-        stock_id=OuterRef("stock_id"), date__lt=OuterRef("delist_date")
+        stock_id=OuterRef("stock_id"), date__lt=OuterRef("delist_date"), close__isnull=False
     ).order_by("-date")
     rows = (
         StockMaster.objects.filter(delist_date__isnull=False)
@@ -173,6 +174,25 @@ def delisting_scores(
     return frame.reindex(columns=SCORE_COLUMNS)
 
 
+def outside_universe(
+    experiment: Experiment,
+    run_key: str,
+    folds: Mapping[str, list[Fold]],
+    seed: int,
+    windows: Mapping[str, tuple[date, date]],
+) -> dict[str, tuple[int, int]]:
+    """Stocks and test rows of each delisting group that sit outside the universe."""
+    plain = experiment.arms[0]
+    cached = load_predictions(arm_key(run_key, plain, seed), MODEL, folds[plain.name])
+    ends = cached["fold"].map({fold.index: fold.eval_end for fold in folds[plain.name]})
+    outside = cached[(cached["date"] <= ends) & ~cached["in_universe"].astype(bool)]
+    groups = {
+        "near": outside[soon_delisted(outside, windows)],
+        "all": outside[later_delisted(outside, windows)],
+    }
+    return {name: (frame["stock_id"].nunique(), len(frame)) for name, frame in groups.items()}
+
+
 def _by_row(scores: pd.DataFrame) -> pd.DataFrame:
     """Percentiles averaged over seeds, one per arm, horizon and stock-day."""
     typed = scores.astype({"pct": "float64"})
@@ -217,18 +237,19 @@ def _side_summary(experiment: Experiment, rows: pd.DataFrame) -> dict[str, float
 
 
 def masked_values(rows: pd.DataFrame, directory: Path, features: Sequence[str]) -> pd.DataFrame:
-    """Each stock-day's share of the features that are missing, read a year at a time."""
+    """Each stock-day's share of the features missing; FILLED ones count without an industry."""
+    blank = set(StockMaster.objects.filter(industry="").values_list("stock_id", flat=True))
+    filled = [name for name in features if name in FILLED]
     keys = rows[["stock_id", "date"]].drop_duplicates()
     parts = []
     for low, high in years(min(keys["date"]), max(keys["date"])):
         stored = read_columns(low, high, directory, features)
         wanted = keys[(keys["date"] >= low) & (keys["date"] <= high)]
         joined = wanted.merge(stored, on=["stock_id", "date"], how="left")
-        parts.append(
-            joined[["stock_id", "date"]].assign(
-                missing_share=joined[list(features)].isna().mean(axis=1)
-            )
-        )
+        unknown = joined["stock_id"].isin(blank)
+        gaps = joined[list(features)].isna()
+        gaps = gaps.assign(**{name: gaps[name] | unknown for name in filled})
+        parts.append(joined[["stock_id", "date"]].assign(missing_share=gaps.mean(axis=1)))
     return pd.concat(parts, ignore_index=True)
 
 
@@ -302,9 +323,14 @@ def _header(
     ]
 
 
-def _delisting_lines(experiment: Experiment, scores: pd.DataFrame) -> list[str]:
+def _delisting_lines(
+    experiment: Experiment, scores: pd.DataFrame, outside: Mapping[str, tuple[int, int]]
+) -> list[str]:
     plain, masked = (arm.name for arm in experiment.arms)
     table = delisting_summary(experiment, scores)
+    left_out = "；".join(
+        f"{POPULATIONS[name]} {stocks} 檔 {rows} 列" for name, (stocks, rows) in outside.items()
+    )
     lines = [
         "",
         "## 之後會下市的股票的分數",
@@ -312,6 +338,7 @@ def _delisting_lines(experiment: Experiment, scores: pd.DataFrame) -> list[str]:
         "- 每天的分數先在當天的 universe 列裡轉成百分位（越高越看好），各 seed 先逐列平均",
         f"- {POPULATIONS['near']}：從該檔下市前最後一個有報價的交易日往前數；"
         f"{POPULATIONS['all']}：這些股票在比較期內、最後報價日以前的全部測試列",
+        f"- 在 universe 外、不進下表的測試列（全額交割、處置、無成交等）：{left_out}",
     ]
     if not table["rows"].any():
         lines.append("- 比較的測試期裡沒有之後會下市的列")
@@ -350,6 +377,7 @@ def _split_lines(experiment: Experiment, split: pd.DataFrame | None) -> list[str
     lines += [
         f"- 「{MANY}」：篩選後被遮掉的特徵至少 {MOSTLY_MISSING:.0%} 缺值的列。回升集中在{MANY}，"
         f"代表模型靠的是缺值本身；兩群都回升，代表靠的是特徵值",
+        "- 產業一類在產業空白時填當天的市場平均，不是缺值；這裡把產業空白的股票算成缺這兩欄",
         "",
         f"| 母體 | horizon | 群 | 列數 | {plain} | {masked} | 差 |",
         "| --- | --- | --- | --- | --- | --- | --- |",
@@ -378,6 +406,7 @@ def mask_report(
     scores: pd.DataFrame,
     split: pd.DataFrame | None,
     shares: Mapping[int, float],
+    outside: Mapping[str, tuple[int, int]],
     kept: Sequence[str],
     note: str | None = None,
 ) -> str:
@@ -391,7 +420,7 @@ def mask_report(
         "## IC",
         "",
         *ic_table_lines(summary(experiment, daily)),
-        *_delisting_lines(experiment, scores),
+        *_delisting_lines(experiment, scores, outside),
         *_split_lines(experiment, split),
         *_gain_lines(experiment, shares),
     ]

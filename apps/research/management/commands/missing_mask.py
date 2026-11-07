@@ -31,6 +31,7 @@ from apps.research.missing_mask import (
     masked_gain_share,
     masked_values,
     missing_split,
+    outside_universe,
 )
 from apps.research.models import HoldoutScope
 from apps.research.prediction_cache import FoldMismatchError, MissingFoldsError
@@ -86,9 +87,9 @@ class Command(BaseCommand):
             self.stdout.write(f"fold {first.index}: shuffled OOS rank IC {shuffled:.4f}")
             ran = train_arms(experiment, run_key, folds, directory, seeds)
             daily = daily_ics(experiment, run_key, folds, seeds)
-            scores = delisting_scores(
-                experiment, run_key, folds, seeds, delisting_windows(calendar)
-            )
+            windows = delisting_windows(calendar)
+            scores = delisting_scores(experiment, run_key, folds, seeds, windows)
+            outside = outside_universe(experiment, run_key, folds, seeds[0], windows)
             kept = [name for name in masked.variant.masked if name in screened]
             split = None
             if kept and not scores.empty:
@@ -109,6 +110,8 @@ class Command(BaseCommand):
             raise CommandError(str(error)) from error
         for name, indices in ran.items():
             self.stdout.write(f"{name}: ran folds {indices}")
-        text = mask_report(experiment, run_key, daily, scores, split, shares, kept, options["note"])
+        text = mask_report(
+            experiment, run_key, daily, scores, split, shares, outside, kept, options["note"]
+        )
         written = write_report(text, options["output"])
         self.stdout.write(text if written is None else f"wrote {written}")

@@ -32,6 +32,7 @@ from apps.research.missing_mask import (
     masked_gain_share,
     masked_values,
     missing_split,
+    outside_universe,
     soon_delisted,
 )
 from apps.research.models import FeatureDaily, HoldoutRun, HoldoutScope, ModelObjective, ModelRun
@@ -109,6 +110,10 @@ def test_delisting_windows_end_at_the_last_quote_before_delisting() -> None:
     delist("1105", None, date(2016, 11, 30))
     delist("1106", date(2017, 3, 1), date(2016, 12, 30))
     delist("1107", date(2016, 11, 1))
+    DailyPrice.objects.bulk_create(
+        DailyPrice(stock_id=stock_id, date=day, close=None, volume=0, turnover=0)
+        for stock_id, day in (("1101", date(2016, 11, 29)), ("1107", date(2016, 10, 31)))
+    )
 
     windows = delisting_windows(calendar(), sessions=3)
 
@@ -331,6 +336,40 @@ def test_masked_values_give_each_scored_row_its_share_of_missing_masked_features
 
 
 @pytest.mark.django_db
+def test_masked_values_count_the_industry_features_as_missing_without_an_industry(
+    small: Path,
+) -> None:
+    StockMaster.objects.create(stock_id="1105", name="1105", market="TWSE", industry="")
+    StockMaster.objects.create(stock_id="1106", name="1106", market="TWSE", industry="水泥工業")
+    FeatureDaily.objects.filter(date=date(2016, 11, 2)).update(ind_sector_ret_20d=0.01)
+    export_year(2016, small)
+    rows = pd.DataFrame({"stock_id": ["1105", "1106"], "date": [date(2016, 11, 2)] * 2})
+
+    share = masked_values(rows, small, ["tech_ret_60d", "ind_sector_ret_20d"])
+
+    assert share.set_index("stock_id")["missing_share"].to_dict() == {"1105": 0.5, "1106": 0.0}
+
+
+@pytest.mark.django_db
+def test_outside_universe_counts_the_delisting_rows_the_scores_leave_out(small: Path) -> None:
+    chosen, folds = trained(small, (0, 3))
+    delist("1139", date(2016, 12, 1), date(2016, 11, 30))
+    windows = delisting_windows(calendar(), sessions=30)
+
+    counted = outside_universe(chosen, "rank-mask", folds, 3, windows)
+
+    cached = load_predictions(arm_key("rank-mask", chosen.arms[0], 3), "lightgbm", folds["base"])
+    ends = cached["fold"].map({fold.index: fold.eval_end for fold in folds["base"]})
+    mine = cached[(cached["stock_id"] == "1139") & (cached["date"] <= ends)]
+    first, last = windows["1139"]
+    near = mine["date"].between(first, last).sum()
+    assert counted == {"near": (1, near), "all": (1, (mine["date"] <= last).sum())}
+    assert 0 < near < counted["all"][1]
+    scores = delisting_scores(chosen, "rank-mask", folds, (0, 3), windows)
+    assert scores.empty
+
+
+@pytest.mark.django_db
 def test_masked_gain_share_reads_the_first_arm_gain_on_the_masked_features(small: Path) -> None:
     chosen, folds = trained(small, (0, 1))
 
@@ -357,12 +396,14 @@ def ic_daily() -> pd.DataFrame:
     return pd.DataFrame(rows, columns=experiments.DAILY_COLUMNS)
 
 
+OUTSIDE = {"near": (1, 5), "all": (2, 30)}
+
+
 def report(scores: pd.DataFrame, split: pd.DataFrame | None = None) -> str:
     chosen = mask_experiment(SPEC_LAYOUT)
     shares = {5: 0.123, 20: 0.2}
-    return mask_report(
-        chosen, "rank-mask", ic_daily(), scores, split, shares, ["fund_ep", "chip_short_ratio"]
-    )
+    kept = ["fund_ep", "chip_short_ratio"]
+    return mask_report(chosen, "rank-mask", ic_daily(), scores, split, shares, OUTSIDE, kept)
 
 
 def test_the_report_flags_a_clear_rise_of_the_soon_delisted_scores() -> None:
@@ -383,6 +424,10 @@ def test_the_report_flags_a_clear_rise_of_the_soon_delisted_scores() -> None:
     assert "靠的是缺值還是特徵值，看「依缺值拆分」" in text
     assert "## 之後會下市的股票的分數" in text
     assert "- 下市前 120 個交易日：從該檔下市前最後一個有報價的交易日往前數" in text
+    assert (
+        "- 在 universe 外、不進下表的測試列（全額交割、處置、無成交等）："
+        "下市前 120 個交易日 1 檔 5 列；下市前全部 2 檔 30 列"
+    ) in text
     row = table.to_dict(orient="index")[("near", 20)]
     gap, nw_t, first, second = row["gap"], row["nw_t"], row["first"], row["second"]
     cells = f"{first:.4f} | {second:.4f} | {gap:+.4f} | {nw_t:+.2f} | 4 | 2 | 8 |"
@@ -422,6 +467,7 @@ def test_the_report_lists_the_missing_split() -> None:
 
     assert "## 依缺值拆分" in text
     assert "回升集中在缺值多，代表模型靠的是缺值本身；兩群都回升，代表靠的是特徵值" in text
+    assert "這裡把產業空白的股票算成缺這兩欄" in text
     assert "| 下市前 120 個交易日 | 20 日 | 缺值多 | 2 | 0.3000 | 0.5500 | +0.2500 |" in text
     assert "| 下市前全部 | 20 日 | 缺值少 | 1 | 0.3000 | 0.3000 | +0.0000 |" in text
     assert "- 篩選後沒有被遮掉的特徵，或沒有之後會下市的列：不拆" in skipped
@@ -456,8 +502,10 @@ def test_missing_mask_trains_both_arms_and_writes_the_report(command: Path, tmp_
     scores = delisting_scores(chosen, "rank-mask", folds, (0, 1), delisting_windows(calendar()))
     shares = masked_gain_share(chosen, "rank-mask", folds, (0, 1))
     split = missing_split(chosen, scores, masked_values(scores, command, ["tech_ret_60d"]))
+    windows = delisting_windows(calendar())
+    outside = outside_universe(chosen, "rank-mask", folds, 0, windows)
     expected = mask_report(
-        chosen, "rank-mask", daily, scores, split, shares, ["tech_ret_60d"], "暫定"
+        chosen, "rank-mask", daily, scores, split, shares, outside, ["tech_ret_60d"], "暫定"
     )
     assert output.read_text() == expected
     assert "，共 2 個，篩選後實際用到 1 個" in expected
