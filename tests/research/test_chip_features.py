@@ -106,6 +106,19 @@ def test_lending_changes_across_the_twse_basis_break_are_missing(market: str, cu
     assert features["chip_margin_chg_5d"].iloc[5:].notna().all()
 
 
+def test_the_basis_break_follows_the_market_on_each_day() -> None:
+    panel = listing("3092", rising(20), start=date(2012, 3, 5), shares=1_000_000.0)
+    moved = panel["date"].ge(date(2012, 3, 21))
+    panel = panel.assign(market=panel["market"].where(moved, "TPEx"), **chips(20))
+
+    features = chip_features(panel)
+
+    days = panel["date"].tolist()
+    missing = features["chip_sbl_short_chg_5d"].isna().tolist()
+    cut = [date(2012, 3, d) for d in (21, 22, 23)]
+    assert [day for k, day in enumerate(days) if missing[k] and k >= 5] == cut
+
+
 def test_a_halt_across_the_basis_break_cuts_the_changes_reading_both_sides() -> None:
     closes = rising(20)
     panel = listing("2330", closes, start=date(2012, 3, 5), shares=1_000_000.0)
@@ -294,6 +307,26 @@ def test_a_stock_left_out_of_its_market_day_trade_table_was_not_eligible() -> No
     assert at(features, "2330", 6, "chip_day_trade_ratio_5d") == pytest.approx(0.1)
     assert math.isnan(at(features, "2330", 8, "chip_day_trade_ratio_5d"))
     assert math.isnan(at(features, "6488", 6, "chip_day_trade_ratio_5d"))
+
+
+def test_day_trade_eligibility_reads_the_table_of_the_market_on_each_day() -> None:
+    left_out = [NAN] * 14
+    moving = listing("3092", rising(14), market=["TPEx"] * 7 + ["TWSE"] * 7)
+    panel = pd.concat(
+        [
+            moving.assign(**chips(14, day_trade_volume=left_out)),
+            listing("2330", rising(14)).assign(**chips(14)),
+            listing("6488", rising(14), market="TPEx").assign(
+                **chips(14, day_trade_volume=left_out)
+            ),
+        ],
+        ignore_index=True,
+    ).sort_values(["stock_id", "date"], ignore_index=True)
+
+    features = second_batch_chip_features(panel)
+
+    assert math.isnan(at(features, "3092", 8, "chip_day_trade_ratio_5d"))
+    assert at(features, "3092", 13, "chip_day_trade_ratio_5d") == 0.0
 
 
 def test_holding_change_institutional_net_and_buy_streak() -> None:

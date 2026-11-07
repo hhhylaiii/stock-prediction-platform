@@ -21,6 +21,7 @@ from apps.market.models import (
     DividendEvent,
     FinancialStatement,
     IndexDaily,
+    MarketHistory,
     MonthlyRevenue,
     SharesOutstanding,
     StockMaster,
@@ -79,6 +80,7 @@ def listed(stock_id: str, start: str, end: str, step: float = 0.1) -> None:
     StockMaster.objects.create(
         stock_id=stock_id, name=stock_id, market="TWSE", industry="水泥工業", list_date=d(start)
     )
+    MarketHistory.objects.create(stock_id=stock_id, start_date=d(start), market="TWSE")
     DailyPrice.objects.bulk_create(
         DailyPrice(
             stock_id=stock_id,

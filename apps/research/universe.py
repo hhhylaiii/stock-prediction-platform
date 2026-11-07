@@ -13,7 +13,15 @@ from apps.research.pricelimit import apply_price_limits
 MIN_AGE = 60
 TURNOVER_WINDOW = 20
 MIN_MEDIAN_TURNOVER = 10_000_000
-EXCLUSIONS = ("halted", "no_trade", "new_listing", "disposition", "full_delivery", "illiquid")
+EXCLUSIONS = (
+    "unlisted",
+    "halted",
+    "no_trade",
+    "new_listing",
+    "disposition",
+    "full_delivery",
+    "illiquid",
+)
 EVENT_FLAGS = {
     DispositionType.ATTENTION: "attention",
     DispositionType.DISPOSITION: "disposition",
@@ -67,6 +75,7 @@ def apply_universe(
     }
     median = _median_turnover(panel)
     result = panel.assign(
+        unlisted=~panel["listed"].astype(bool),
         halted=~panel["has_bar"].astype(bool),
         no_trade=panel["has_bar"].astype(bool) & panel["close"].isna(),
         new_listing=panel["age"] < MIN_AGE,

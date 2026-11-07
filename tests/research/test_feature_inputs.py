@@ -5,7 +5,13 @@ from decimal import Decimal
 import pandas as pd
 import pytest
 
-from apps.market.models import DailyPrice, IndexDaily, SharesOutstanding, StockMaster
+from apps.market.models import (
+    DailyPrice,
+    IndexDaily,
+    MarketHistory,
+    SharesOutstanding,
+    StockMaster,
+)
 from apps.research.features.inputs import (
     FEATURE_WARMUP,
     attach_market_returns,
@@ -114,6 +120,39 @@ def test_feature_panel_keeps_warmup_rows_with_shares_and_market_returns() -> Non
     assert panel["shares"].eq(500.0).all()
     assert panel["market_ret"].iloc[-1] == pytest.approx(1 / (100.0 + len(days) - 2))
     assert {"in_universe", "limit_up_close", "attention", "turnover_med_20d"} <= set(panel.columns)
+
+
+def test_the_market_return_follows_the_market_on_each_day() -> None:
+    StockMaster.objects.create(stock_id="3092", name="3092", market="TWSE", industry="電子零組件業")
+    days = CALENDAR.between(d("2016-06-01"), d("2016-12-30"))
+    DailyPrice.objects.bulk_create(
+        DailyPrice(
+            stock_id="3092", date=day, open=10, high=10, low=10, close=10, volume=1, turnover=10
+        )
+        for day in days
+    )
+    closes("TAIEX", {day.isoformat(): 100.0 + k for k, day in enumerate(days)})
+    closes("TPEX", {day.isoformat(): 1_000.0 + 20 * k for k, day in enumerate(days)})
+    MarketHistory.objects.bulk_create(
+        [
+            MarketHistory(
+                stock_id="3092", start_date=d("2010-01-04"), end_date=d("2016-12-14"), market="TPEx"
+            ),
+            MarketHistory(stock_id="3092", start_date=d("2016-12-15"), market="TWSE"),
+        ]
+    )
+
+    panel = load_feature_panel(CALENDAR, d("2016-12-01"), d("2016-12-30"))
+
+    shown = panel[panel["date"].ge(d("2016-12-01"))]
+    before = shown[shown["date"].lt(d("2016-12-15"))]
+    after = shown[shown["date"].ge(d("2016-12-15"))]
+    assert before["market"].eq("TPEx").all()
+    tpex = [1 / (50.0 + days.index(day) - 1) for day in before["date"]]
+    assert before["market_ret"].tolist() == pytest.approx(tpex)
+    assert after["market"].eq("TWSE").all()
+    taiex = [1 / (100.0 + days.index(day) - 1) for day in after["date"]]
+    assert after["market_ret"].tolist() == pytest.approx(taiex)
 
 
 def test_inputs_at_the_edges_of_the_calendar_and_of_a_stock_filter() -> None:
