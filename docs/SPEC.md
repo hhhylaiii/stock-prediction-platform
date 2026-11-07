@@ -103,7 +103,7 @@ Oct 29, 2026 · @Owen Lai
 | `weekly_holding` | stock\_id, data\_date, level | level（1–15）、holders、shares、pct、publish\_date | 集保 | publish\_date（data\_date 隔日） |
 | `monthly_revenue` | stock\_id, period（YYYY-MM） | revenue、yoy、mom | MOPS | announce\_date |
 | `financial_statement` | stock\_id, period（YYYY-Qn）, fin\_type | eps、revenue、gross\_margin、op\_margin、net\_income、roe、debt\_ratio、operating\_cf | MOPS | announce\_date |
-| `index_daily` | index\_id, date | close、volume；index\_id 含 TAIEX、TPEX、SOX、TSM\_ADR、USDTWD | 證交所、yfinance | date |
+| `index_daily` | index\_id, date | close、volume；index\_id 含 TAIEX、TAIEX\_TR（發行量加權股價報酬指數，含息）、TPEX、SOX、TSM\_ADR、USDTWD | 證交所、yfinance | date |
 | `macro_indicator` | indicator\_id, period | value | data.gov.tw | announce\_date |
 | `shares_outstanding` | stock\_id, effective\_date | shares、reason（增資、減資、庫藏股註銷） | 證交所、櫃買中心 | effective\_date |
 | `daily_valuation` | stock\_id, date | pe、pb、dividend\_yield（交易所每日公布的本益比、股價淨值比、殖利率） | 證交所、櫃買中心；歷史用 FinMind | date |
@@ -160,7 +160,7 @@ Oct 29, 2026 · @Owen Lai
 | 時間 | 工作 | 來源 | 頻率 |
 | --- | --- | --- | --- |
 | 15:10 | 更正交易日曆；補抓前 14 天到前一交易日漏掉的日子，並補跑那些日子的品質檢查 | 證交所、櫃買中心 | 每交易日 |
-| 15:30 | 日成交價量、加權與櫃買指數 | 證交所、櫃買中心 | 每交易日 |
+| 15:30 | 日成交價量、加權與櫃買指數、加權股價報酬指數 | 證交所、櫃買中心 | 每交易日 |
 | 16:00 | 以當日行情更新 `stock_master` | 證交所、櫃買中心 | 每交易日 |
 | 16:30 | 三大法人買賣超、本益比與淨值比、注意與處置名單、全額交割名單；證交所的外資持股與流通股數變動 | 證交所、櫃買中心 | 每交易日 |
 | 18:30 | 櫃買的外資持股與流通股數變動（櫃買每日 18:00、22:00 更新） | 櫃買中心 | 每交易日 |
