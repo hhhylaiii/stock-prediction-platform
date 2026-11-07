@@ -36,6 +36,7 @@ from apps.research.models import (
     MetricGrain,
     ModelObjective,
     ModelRun,
+    ModelStatus,
 )
 
 PAGE_ORDER = (
@@ -219,7 +220,11 @@ class ModelListView(ReadOnlyView):
                     "created_at": timezone.localtime(run.created_at),
                     "served_on": day,
                     "degraded_on": run.degraded_on,
-                    "degraded_window": degraded_window(params.get(run.run_id) or {}),
+                    "degraded_window": (
+                        degraded_window(params.get(run.run_id) or {})
+                        if run.status == ModelStatus.DEGRADED
+                        else None
+                    ),
                     "recent": recent[Slot(run.objective, run.horizon)],
                     **research,
                 }

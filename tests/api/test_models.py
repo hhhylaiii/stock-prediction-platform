@@ -373,7 +373,7 @@ def test_a_degraded_model_stays_listed(client: Client, runs: Runs) -> None:
     assert rows[("quantile", 20)]["status"] == "degraded"
 
 
-WINDOW = {"own_rows": 40, "days": 60, "mostly_predecessors": True}
+WINDOW = {"own_rows": 20, "days": 60, "mostly_predecessors": True}
 
 
 def test_a_degraded_model_carries_its_day_and_window_but_no_other_params(
@@ -417,6 +417,19 @@ def test_an_unreadable_degraded_window_is_left_out(
     rows = by_slot(envelope_of(client.get("/api/models")))
 
     assert rows[("quantile", 20)]["degraded_window"] is None
+
+
+def test_a_window_left_behind_on_a_restored_run_is_not_served(client: Client, runs: Runs) -> None:
+    ModelRun.objects.filter(pk="quantile-h20").update(
+        status="active", params={"degraded_window": WINDOW}
+    )
+
+    rows = by_slot(envelope_of(client.get("/api/models")))
+
+    assert (rows[("quantile", 20)]["degraded_on"], rows[("quantile", 20)]["degraded_window"]) == (
+        None,
+        None,
+    )
 
 
 def test_no_models_served_yet(client: Client, db: None) -> None:
