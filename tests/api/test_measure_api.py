@@ -5,7 +5,9 @@ from typing import Any
 
 import pytest
 from django.core.management import call_command
+from django.db import connection
 from django.test import Client
+from django.test.utils import CaptureQueriesContext
 
 from apps.api.management.commands import measure_api
 from tests.api.conftest import Runs
@@ -76,3 +78,11 @@ def test_the_stock_and_repeat_are_options(runs: Runs, calendar_in_db: list[objec
     call_command("measure_api", "--stock", "6488", "--repeat", "0", stdout=out)
 
     assert "| `/api/stocks/6488/history` |" in out.getvalue()
+
+
+def test_the_corrections_summary_is_timed_without_its_cache(client: Client) -> None:
+    with CaptureQueriesContext(connection) as queries:
+        measure_api.timed(client, "/api/data-quality/corrections", 3)
+
+    summaries = [q for q in queries.captured_queries if "GROUP BY" in q["sql"].upper()]
+    assert len(summaries) == 1 + 3

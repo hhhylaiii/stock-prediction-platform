@@ -8,8 +8,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from django.conf import settings
+from django.core.cache import cache
 from django.core.management.base import BaseCommand, CommandParser
 from django.test import Client
+
+from apps.api.ops import CORRECTIONS_CACHE_KEY
 
 ENDPOINTS = (
     "/api/stocks/{stock}",
@@ -25,6 +28,7 @@ ENDPOINTS = (
     "/api/data-quality",
     "/api/data-quality/corrections",
 )
+CACHED = {"/api/data-quality/corrections": CORRECTIONS_CACHE_KEY}
 HEADER = ("| 端點 | 狀態 | 中位數 ms | p95 ms | 最大 ms |", "| --- | --- | --- | --- | --- |")
 
 
@@ -42,11 +46,16 @@ class Timing:
 
 
 def timed(client: Client, path: str, repeat: int) -> tuple[str, list[float]]:
-    """Statuses of a warm-up call and the repeats, then the milliseconds of each repeat."""
+    """Statuses of a warm-up call and the repeats, then the milliseconds of each repeat.
+
+    A cached endpoint drops its own key before each repeat, so a repeat times the query.
+    """
     first = client.get(path).status_code
     others: Counter[int] = Counter()
     spent = []
     for _ in range(repeat):
+        if path in CACHED:
+            cache.delete(CACHED[path])
         start = time.perf_counter()
         status = client.get(path).status_code
         spent.append((time.perf_counter() - start) * 1000)
