@@ -381,7 +381,7 @@
       '<div class="aside"><div class="kpi" id="stock-rank"><div class="l"></div><div class="v">—</div></div>' +
       '<button type="button" class="ghost" id="watch-btn" aria-pressed="' + watching + '" style="height:36px">' + (watching ? '已追蹤' : '加入追蹤') + '</button></div></div>' +
       '<div class="section"><div class="sechead"><div class="control"><h2 id="chart-title"></h2>' +
-      '<div class="seg" role="group" aria-label="預測期間" id="stock-seg"><button type="button" data-sh="5">5 日</button><button type="button" data-sh="20">20 日</button></div>' +
+      '<div class="seg" role="group" aria-label="預測期間" id="stock-seg"><button type="button" data-sh="5">5 日</button><button type="button" data-sh="20">20 日</button></div><span class="faint small" id="stock-seg-hint"></span>' +
       '<div class="seg" role="group" aria-label="圖表類型" id="chart-seg"><button type="button" data-ct="candle" aria-pressed="' + (state.chart === 'candle') + '">K 線</button><button type="button" data-ct="line" aria-pressed="' + (state.chart === 'line') + '">收盤線</button></div></div>' +
       '<div class="legend" id="chart-legend"></div></div><div class="chart" id="price-chart"></div></div>' +
       '<div class="two"><section id="features"><h2>這次預測怎麼來的</h2><div class="body">' + loading + '</div></section>' +
@@ -548,6 +548,14 @@
       else drawPriceChart(host, s, bars, state.chart, fan);
     };
     const showRank = () => { document.querySelector('#stock-rank .v').innerHTML = rankHtml(entryOf(), forecasts.status); };
+    const showSeg = () => {
+      if (forecasts.status !== 'fulfilled') return;
+      const ready = new Set(forecasts.value.data.horizons.filter(entry => entry.prediction).map(entry => entry.horizon));
+      const buttons = [...document.querySelectorAll('#stock-seg [data-sh]')];
+      buttons.forEach(b => { b.disabled = !ready.has(Number(b.dataset.sh)); });
+      const missing = buttons.filter(b => b.disabled).map(b => b.dataset.sh + ' 日');
+      document.getElementById('stock-seg-hint').textContent = !ready.size ? '預測產出後可切換 5 日／20 日' : missing.length ? missing.join('、') + '預測尚未產出' : '';
+    };
     const drawHorizon = () => {
       controls();
       document.querySelectorAll('#stock-seg [data-sh]').forEach(b => b.setAttribute('aria-pressed', String(Number(b.dataset.sh) === state.h)));
@@ -568,6 +576,7 @@
       forecasts = result;
       document.querySelector('#forecasts .body').innerHTML = result.status === 'rejected' ? errorBox(result.reason) : forecastsHtml(result.value.data);
       showRank();
+      showSeg();
       if (fanOf(entryOf())) drawChart();
     });
     later.history.then(result => { if (token === state.stockToken) showHistory(document.getElementById('history'), result); });

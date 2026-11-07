@@ -120,12 +120,16 @@ def test_the_horizon_switch_reranks_and_redraws(
     add_contribs(explained, [("tech_rsi_14", 0.01)], (0.0, 76), horizon=5)
     page.goto(f"{live_server.url}/#stock-2330")
     expect(page.locator("#price-chart path.fan-band")).to_have_count(1)
+    expect(page.locator("#chart-title")).to_have_text("過去 60 個交易日，與未來 20 日的預測")
+    expect(page.locator("#stock-seg button:disabled")).to_have_count(0)
+    expect(page.locator("#stock-seg-hint")).to_have_text("")
     expect(page.locator("#chart-legend")).to_contain_text("80% 預測區間（內插）")
     expect(page.locator("#chart-legend")).to_contain_text("預測中位數（內插）")
 
     page.locator("#stock-seg [data-sh='5']").click()
 
     expect(page.locator(".stockhead .kpi .v")).to_have_text("第 2 名 / 25")
+    expect(page.locator("#chart-title")).to_have_text("過去 60 個交易日，與未來 5 日的預測")
     expect(page.locator("#price-chart path.fan-median")).to_have_count(1)
     expect(page.locator("#price-chart path.fan-band")).to_have_count(0)
     expect(page.locator("#chart-legend")).not_to_contain_text("80% 預測區間")
@@ -183,6 +187,20 @@ def test_a_stock_without_predictions_says_so(
     expect(page.locator("#history")).to_contain_text("還沒有到期的預測。")
     expect(page.locator("#chart-title")).to_have_text("過去 60 個交易日")
     expect(page.locator("#price-chart path.fan-median")).to_have_count(0)
+    expect(page.locator("#stock-seg button:disabled")).to_have_count(2)
+    expect(page.locator("#stock-seg-hint")).to_have_text("預測產出後可切換 5 日／20 日")
+
+
+def test_a_horizon_without_a_prediction_cannot_be_picked(
+    page: Page, live_server: LiveServer, explained: Seed
+) -> None:
+    Prediction.objects.filter(stock_id="2330", horizon=5).delete()
+    page.goto(f"{live_server.url}/#stock-2330")
+
+    expect(page.locator("#stock-seg [data-sh='5']")).to_be_disabled()
+    expect(page.locator("#stock-seg [data-sh='20']")).to_be_enabled()
+    expect(page.locator("#stock-seg-hint")).to_have_text("5 日預測尚未產出")
+    expect(page.locator("#chart-title")).to_have_text("過去 60 個交易日，與未來 20 日的預測")
 
 
 def test_a_failed_contribution_request_keeps_the_rest(
