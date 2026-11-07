@@ -12,6 +12,7 @@ import pytest
 from django.core.management import call_command
 from django.core.management.base import CommandError
 
+from apps.etl.models import EtlRun
 from apps.market.calendar import TradingDays
 from apps.market.models import (
     DailyChip,
@@ -35,6 +36,7 @@ from apps.research.features.build import (
     current_name,
     observable_frame,
 )
+from apps.research.features.chip import SOURCED_CHIPS
 from apps.research.features.registry import FEATURES, feature_names
 from apps.research.features.residual import observable_name, rules_signature
 from apps.research.features.store import (
@@ -762,6 +764,43 @@ def test_observable_gaps_mark_formula_and_industry_gaps_but_not_missing_inputs()
         for k, (year, quarter) in enumerate(periods)
     )
 
+    for stock_id in ("2330", "2881", "1101"):
+        SharesOutstanding.objects.create(
+            stock_id=stock_id, effective_date=d("2015-01-02"), shares=1_000_000
+        )
+    DailyChip.objects.bulk_create(
+        DailyChip(
+            stock_id=stock_id,
+            date=day,
+            margin_balance=1_000 + 10 * k,
+            margin_limit=5_000 if stock_id == "2330" else None,
+            short_balance=100,
+            sbl_short_balance=500 + 5 * k,
+        )
+        for stock_id in ("2330", "2881")
+        for k, day in enumerate(CALENDAR.between(d("2015-06-01"), d("2016-03-31")))
+        if (stock_id, day) != ("2330", d("2016-03-02"))
+    )
+
+    listed("2882", "2015-06-01", "2016-03-31")
+    SharesOutstanding.objects.create(
+        stock_id="2882", effective_date=d("2015-01-02"), shares=1_000_000
+    )
+    DailyChip.objects.bulk_create(
+        DailyChip(stock_id="2882", date=day, margin_balance=1_000, margin_limit=5_000)
+        for day in CALENDAR.between(d("2016-03-03"), d("2016-03-31"))
+    )
+    EtlRun.objects.bulk_create(
+        EtlRun(
+            source=source,
+            dataset="fill:margin",
+            start_date=d("2016-03-03"),
+            end_date=d("2016-03-03"),
+            status=EtlRun.Status.SUCCESS,
+        )
+        for source in ("twse", "tpex")
+    )
+
     frame = build_feature_frame(CALENDAR, d("2016-03-01"), d("2016-03-04"))
     gaps = observable_frame(CALENDAR, d("2016-03-01"), d("2016-03-04"))
 
@@ -784,8 +823,23 @@ def test_observable_gaps_mark_formula_and_industry_gaps_but_not_missing_inputs()
     assert gap("2881", "fund_debt_ratio") == (True, False)
     assert gap("1101", "fund_ep") == (True, False)
     assert gap("1101", "fund_rev_yoy") == (True, False)
+    assert gap("2330", "chip_margin_usage") == (True, False)
+    assert gap("2881", "chip_margin_usage") == (True, True)
+    assert gap("2881", "chip_short_ratio") == (False, True)
+    assert gap("1101", "chip_short_ratio") == (True, False)
+    assert gap("2882", "chip_margin_usage") == (True, True)
+    shown = gaps[(gaps["date"] == d("2016-03-03")) & (gaps["stock_id"] == "1101")]
+    assert shown[observable_name("chip_short_ratio")].tolist() == [True]
+    assert set(SOURCED_CHIPS) <= set(CHECKED)
     now = observable_frame(CALENDAR, d("2016-03-01"), d("2016-03-04"), current=True)
     both = frame.merge(now, on=keys)
     assert len(both) == len(frame)
     for name in CHECKED:
-        assert both[name].isna().equals(both[current_name(name)].isna()), name
+        pd.testing.assert_series_equal(both[name], both[current_name(name)], check_names=False)
+    assert all(both[name].notna().any() for name in SOURCED_CHIPS)
+    hidden = {name: frozenset({"2016-03"}) for name in SOURCED_CHIPS}
+    masked = build_feature_frame(CALENDAR, d("2016-03-01"), d("2016-03-04"), masked=hidden)
+    later = observable_frame(CALENDAR, d("2016-03-01"), d("2016-03-04"), True, hidden)
+    paired = masked.merge(later, on=keys)
+    hidden_columns = [*SOURCED_CHIPS, *map(current_name, SOURCED_CHIPS)]
+    assert paired[hidden_columns].isna().all().all()
