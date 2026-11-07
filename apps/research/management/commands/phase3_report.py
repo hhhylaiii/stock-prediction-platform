@@ -88,7 +88,7 @@ def _ruled(start: date, end: date) -> None:
 
 
 def _unmoved(rows: pd.DataFrame, year: int) -> None:
-    """Refuse a partition whose fundamental gaps today's database no longer gives."""
+    """Refuse a partition whose CHECKED gaps today's database no longer gives."""
     matched = rows[rows["_merge"].eq("both") & rows["in_universe"].astype(bool)]
     moved = [
         name
