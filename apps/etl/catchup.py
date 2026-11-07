@@ -11,6 +11,7 @@ from django.db import models
 from django.utils import timezone
 
 from apps.etl.adapters import build_adapter
+from apps.etl.adapters.corporate_actions import DIVIDEND_EVENT
 from apps.etl.adapters.dispositions import ATTENTION, DISPOSITION, FULL_DELIVERY
 from apps.etl.adapters.exchange_tables import DailyTable
 from apps.etl.adapters.tpex import QUOTED_TYPE as TPEX_QUOTED_TYPE
@@ -141,7 +142,10 @@ def _exchange_jobs(
         Job(source, "daily_price", quotes_present(market)),
         Job(source, "index_daily", index_present(index_id)),
         *(_table_job(source, market, dataset, table) for dataset, table in tables.items()),
-        *(Job(source, dataset) for dataset in (ATTENTION, DISPOSITION, FULL_DELIVERY)),
+        *(
+            Job(source, dataset)
+            for dataset in (ATTENTION, DISPOSITION, FULL_DELIVERY, DIVIDEND_EVENT)
+        ),
     ]
 
 

@@ -16,6 +16,7 @@ from django.db.models import Min
 from django.utils import timezone
 
 from apps.etl.adapters import build_adapter
+from apps.etl.adapters.corporate_actions import DIVIDEND_EVENT
 from apps.etl.adapters.mops import REVENUE_SCAN, STATEMENT_SCAN
 from apps.etl.alerts import dispatch
 from apps.etl.catchup import REDONE, catch_up
@@ -49,6 +50,7 @@ GATE_DATASETS = frozenset(
         "sbl",
         "foreign_holding",
         "daily_valuation",
+        DIVIDEND_EVENT,
     }
 )
 Severity = DataQualityLog.Severity
@@ -96,6 +98,7 @@ BATCHES: dict[str, list[Fetch]] = {
     "night": [
         *_both("margin", "sbl"),
         *_both("day_trade", sessions_back=tuple(range(REDONE["day_trade"] + 1))),
+        *_both(DIVIDEND_EVENT),
     ],
     "notices": _both("attention", "disposition"),
 }
