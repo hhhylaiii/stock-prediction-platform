@@ -110,6 +110,8 @@ def test_write_events_adds_listed_codes_and_readjusts_earlier_prices() -> None:
 @pytest.mark.django_db
 def test_write_events_fills_a_blank_factor_and_logs_but_keeps_different_figures() -> None:
     _listed("1101", "2330")
+    _price("1101", date(2026, 11, 2))
+    _price("1101", EX)
     DividendEvent.objects.create(
         stock_id="1101",
         ex_date=EX,
@@ -127,6 +129,8 @@ def test_write_events_fills_a_blank_factor_and_logs_but_keeps_different_figures(
     kept = {row.stock_id: row for row in DividendEvent.objects.all()}
     assert kept["1101"].adj_factor == pytest.approx(0.88)
     assert kept["1101"].announce_date == date(2026, 10, 20)
+    factors = dict(DailyPrice.objects.values_list("date", "adj_factor"))
+    assert factors == {date(2026, 11, 2): pytest.approx(0.88), EX: 1.0}
     assert kept["2330"].adj_factor == pytest.approx(0.99)
     assert kept["2330"].cash_dividend == Decimal("5")
     log = DataQualityLog.objects.get(check_name=MISMATCH_CHECK)
