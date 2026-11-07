@@ -126,26 +126,28 @@ def table_checks(client: Client, day: str | None) -> list[Check]:
         long.check("20 日價格區間", banded, f"；來源 {source_text}"),
         long.check("20 日上漲機率", likely),
         short.check(
-            "5 日排名與預測價格", lambda row: ranked(row) and priced(row), f"；{short.head}"
+            "5 日排名、預測價格與區間",
+            lambda row: ranked(row) and priced(row) and banded(row),
+            f"；{short.head}",
         ),
     ]
 
 
-def shown(entry: Row) -> bool:
-    """What the stock page draws: rank and price, plus band and odds on the 20-day horizon."""
+def whole(entry: Row) -> bool:
+    """Rank, price and band on every horizon, plus the odds on the 20-day one."""
     row = entry.get("prediction")
-    if not row or not (ranked(row) and priced(row)):
+    if not row or not (ranked(row) and priced(row) and banded(row)):
         return False
-    return entry.get("horizon") != 20 or (banded(row) and likely(row))
+    return entry.get("horizon") != 20 or likely(row)
 
 
 def stock_checks(client: Client, stock: str, day: str | None) -> list[Check]:
     forecast = fetch(client, f"/api/stocks/{stock}/predictions")
     entries = (forecast.get("data") or {}).get("horizons") or []
-    whole = sorted(
+    done = sorted(
         entry["horizon"]
         for entry in entries
-        if day is not None and entry.get("date") == day and shown(entry)
+        if day is not None and entry.get("date") == day and whole(entry)
     )
     features = fetch(client, f"/api/stocks/{stock}/features")
     items = (features.get("data") or {}).get("items") or []
@@ -154,8 +156,8 @@ def stock_checks(client: Client, stock: str, day: str | None) -> list[Check]:
     return [
         Check(
             f"{stock} 個股頁兩個期間",
-            whole == sorted(OUTPUT_HORIZONS),
-            "齊全的期間 " + ("、".join(map(str, whole)) or "無"),
+            done == sorted(OUTPUT_HORIZONS),
+            "齊全的期間 " + ("、".join(map(str, done)) or "無"),
         ),
         Check(
             f"{stock} 的特徵",

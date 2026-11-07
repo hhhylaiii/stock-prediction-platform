@@ -29,7 +29,7 @@ CHECKS = [
     "20 日預測價格",
     "20 日價格區間",
     "20 日上漲機率",
-    "5 日排名與預測價格",
+    "5 日排名、預測價格與區間",
     "2330 個股頁兩個期間",
     "2330 的特徵",
     "11 個端點都回 200",
@@ -127,12 +127,57 @@ def test_a_missing_probability_fails_only_its_check(complete: Runs, tmp_path: Pa
     assert str(error) == "未通過：20 日上漲機率"
 
 
-def test_the_five_day_horizon_needs_no_band(complete: Runs, tmp_path: Path) -> None:
+def test_a_five_day_row_without_a_band_fails(complete: Runs, tmp_path: Path) -> None:
     Prediction.objects.filter(run=complete.vol, stock_id="2330").delete()
 
-    target, _ = report(tmp_path)
+    _, text = failing(tmp_path)
 
-    assert checks_of(target.read_text())["2330 個股頁兩個期間"] == ("通過", "齊全的期間 5、20")
+    assert failed(text) == {"5 日排名、預測價格與區間", "2330 個股頁兩個期間"}
+    assert checks_of(text)["2330 個股頁兩個期間"][1] == "齊全的期間 20"
+
+
+def test_a_twenty_day_row_without_a_band_fails_only_the_bands(
+    complete: Runs, tmp_path: Path
+) -> None:
+    Prediction.objects.filter(run=complete.quantile, stock_id="6488").update(q10=None, q90=None)
+    Prediction.objects.filter(run=complete.vol, stock_id="6488").delete()
+
+    _, text = failing(tmp_path)
+
+    assert failed(text) == {"20 日價格區間", "5 日排名、預測價格與區間"}
+    assert checks_of(text)["20 日價格區間"][1] == "缺 1 檔；來源 None 1、quantile 2"
+
+
+def test_a_ranked_stock_without_a_rank_fails_the_ranking(complete: Runs, tmp_path: Path) -> None:
+    Prediction.objects.filter(run=complete.rank20, stock_id="2317", date=OCT_30).update(
+        rank=None, pct=None
+    )
+
+    _, text = failing(tmp_path)
+
+    assert failed(text) == {"20 日排名"}
+    assert checks_of(text)["20 日排名"][1] == "缺 1 檔；date 2026-10-30，3 檔，universe 3"
+
+
+def test_a_page_that_fails_mid_scan_leaves_no_table(
+    complete: Runs, tmp_path: Path, settings: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings.API_MAX_PAGE_SIZE = 2
+    real_get = Client.get
+
+    def broken(self: Client, path: str, *args: Any, **kwargs: Any) -> Any:
+        response = real_get(self, path, *args, **kwargs)
+        if path.endswith("&page=2"):
+            response.status_code, response.content = 500, b""
+        return response
+
+    monkeypatch.setattr(Client, "get", broken)
+
+    _, text = failing(tmp_path)
+
+    lacking = {"20 日排名", "20 日預測價格", "20 日價格區間", "20 日上漲機率"}
+    assert failed(text) == lacking | {"5 日排名、預測價格與區間"}
+    assert {checks_of(text)[name][1].split("；")[0] for name in lacking} == {"沒有最新交易日的表"}
 
 
 def test_a_stock_missing_its_twenty_day_odds_lacks_that_horizon(
@@ -217,7 +262,7 @@ def test_prices_without_predictions_fail_every_prediction_check(
 def test_two_missing_dates_are_not_the_same_day(calendar_in_db: list[date], tmp_path: Path) -> None:
     _, text = failing(tmp_path)
 
-    assert {"最新交易日有預測", "20 日排名", "5 日排名與預測價格"} <= failed(text)
+    assert {"最新交易日有預測", "20 日排名", "5 日排名、預測價格與區間"} <= failed(text)
     assert checks_of(text)["最新交易日有預測"][1] == "price_date None，prediction_date None"
 
 
