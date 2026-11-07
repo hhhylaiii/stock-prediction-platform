@@ -1,4 +1,4 @@
-"""Time the eleven read-only API endpoints in process and print a markdown table."""
+"""Time the twelve read-only API endpoints in process and print a markdown table."""
 
 import math
 import statistics
@@ -23,6 +23,7 @@ ENDPOINTS = (
     "/api/models/ic-monthly",
     "/api/etl/runs",
     "/api/data-quality",
+    "/api/data-quality/corrections",
 )
 HEADER = ("| 端點 | 狀態 | 中位數 ms | p95 ms | 最大 ms |", "| --- | --- | --- | --- | --- |")
 
