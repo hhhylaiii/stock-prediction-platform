@@ -21,7 +21,7 @@ from apps.market.models import DividendEvent, StockMaster
 BASE = "https://www.twse.com.tw/rwd/zh"
 TWT49U = f"{BASE}/exRight/TWT49U"
 DETAIL = f"{BASE}/exRight/TWT49UDetail"
-RESTARTS = (f"{BASE}/reducation/TWTAUU", f"{BASE}/change/TWTB8U", f"{BASE}/split/TWTCAU")
+RESTARTS = (f"{BASE}/reducation/TWTAUU", f"{BASE}/change/TWTB8U")
 NO_DATA = {"stat": "很抱歉，沒有符合條件的資料!"}
 OCT_6 = date(2026, 10, 6)
 OCT_7 = date(2026, 10, 7)
@@ -94,7 +94,6 @@ def test_dividend_events_of_the_session_with_details_for_rows_not_cash_only(
         "ex_rights_detail": 2,
         "capital_reduction": 1,
         "par_value_change": 1,
-        "split": 1,
     }
 
 
@@ -160,4 +159,4 @@ def test_a_quiet_session_has_no_events(adapter: TwseAdapter) -> None:
     for url in RESTARTS:
         responses.get(url, json=NO_DATA)
     assert _events(adapter, OCT_6).empty
-    assert len(responses.calls) == 4
+    assert len(responses.calls) == 3
