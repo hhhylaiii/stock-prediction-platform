@@ -7,6 +7,7 @@ import pandas as pd
 
 from apps.etl.adapters.exchange_tables import (
     DailyTable,
+    Renamed,
     check_answered,
     find_table,
     is_fraction,
@@ -28,6 +29,7 @@ from apps.market.models import DailyValuation, IndexId, SharesOutstanding
 MARGIN_SUMMARY_TITLE = "信用交易統計"
 MARGIN_LOT_ROWS = ("融資(交易單位)", "融券(交易單位)")
 MONTHLY_UNIT_HINT = "單位：元、股"
+SBL_FORMULA_CHANGE = date(2012, 3, 19)
 MONTHLY_FIELDS = ("日期", "成交股數", "成交金額", "成交筆數", "發行量加權股價指數", "漲跌點數")
 INDEX_COLUMNS = ["index_id", "date", "close", "volume"]
 RETURN_INDEX_FIELDS = ("日期", "發行量加權股價報酬指數")
@@ -88,6 +90,7 @@ TABLES: dict[str, DailyTable] = {
         name="股票名稱",
         columns={"sbl_short_balance": ("借券賣出當日餘額",)},
         convert=shares,
+        renamed=Renamed(SBL_FORMULA_CHANGE, {"借券賣出今日餘額": "借券賣出當日餘額"}),
     ),
     "foreign_holding": DailyTable(
         label="MI_QFIIS",

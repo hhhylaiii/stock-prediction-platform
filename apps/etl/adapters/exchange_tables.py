@@ -159,6 +159,13 @@ def is_positive(value: float) -> bool:
     return value > 0
 
 
+class Renamed(NamedTuple):
+    """Labelled field names a table used before a day, under the names it uses now."""
+
+    before: date
+    names: Mapping[str, str]
+
+
 class DailyTable(NamedTuple):
     """One whole-market table and the standard columns it fills, each summing its sources."""
 
@@ -181,13 +188,14 @@ class DailyTable(NamedTuple):
     positional: tuple[tuple[str, str], ...] = ()
     consistent: Callable[[Mapping[Hashable, Any]], bool] | None = None
     locate: Callable[[dict[str, Any]], dict[str, Any]] | None = None
+    renamed: Renamed | None = None
 
     @property
     def where(self) -> str:
         return f"{self.exchange} {self.label}"
 
 
-def labelled_fields(body: Mapping[str, Any], table: DailyTable) -> list[str]:
+def labelled_fields(body: Mapping[str, Any], table: DailyTable, day: date) -> list[str]:
     """Field names prefixed by their column group, so 融資今日餘額 and 融券今日餘額 differ."""
     fields = [str(name).strip() for name in body.get("fields") or []]
     if table.positional:
@@ -204,6 +212,8 @@ def labelled_fields(body: Mapping[str, Any], table: DailyTable) -> list[str]:
         if len(titles) != len(fields):
             raise SchemaChangedError(f"{table.where} column groups no longer match its fields")
         fields = [f"{title}{name}" for title, name in zip(titles, fields, strict=True)]
+    if table.renamed is not None and day < table.renamed.before:
+        fields = [table.renamed.names.get(name, name) for name in fields]
     if len(set(fields)) != len(fields):
         raise SchemaChangedError(f"{table.where} has repeated columns: {fields}")
     return fields
@@ -228,7 +238,7 @@ def source_rows(
         raise SchemaChangedError(f"{table.where} units changed: {body.get('hints')!r}")
     if table.check is not None:
         table.check(payload)
-    fields = labelled_fields(body, table)
+    fields = labelled_fields(body, table, day)
     needed = {table.code, table.name, *(name for names in table.columns.values() for name in names)}
     missing = sorted(needed - set(fields))
     if missing:
