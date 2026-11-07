@@ -28,9 +28,11 @@ from apps.market.models import (
 )
 from apps.research.features import store
 from apps.research.features.build import (
+    CHECKED,
     FEATURE_COLUMNS,
     FRAME_COLUMNS,
     build_feature_frame,
+    current_name,
     observable_frame,
 )
 from apps.research.features.registry import FEATURES, feature_names
@@ -782,3 +784,8 @@ def test_observable_gaps_mark_formula_and_industry_gaps_but_not_missing_inputs()
     assert gap("2881", "fund_debt_ratio") == (True, False)
     assert gap("1101", "fund_ep") == (True, False)
     assert gap("1101", "fund_rev_yoy") == (True, False)
+    now = observable_frame(CALENDAR, d("2016-03-01"), d("2016-03-04"), current=True)
+    both = frame.merge(now, on=keys)
+    assert len(both) == len(frame)
+    for name in CHECKED:
+        assert both[name].isna().equals(both[current_name(name)].isna()), name

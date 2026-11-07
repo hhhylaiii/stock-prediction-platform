@@ -63,7 +63,7 @@ def _rates(counts: pd.DataFrame, prefix: str) -> tuple[pd.Series, pd.Series]:
 
 
 def missing_table(counts: pd.DataFrame) -> pd.DataFrame:
-    """Missing shares, their ratio and gap in points, flagged past FLAG_RATIO or FLAG_GAP."""
+    """Source-gap shares, ratio, gap in points and flag, then shares of gaps with a known cause."""
     current, delisted = _rates(counts, "missing")
     seen_current, seen_delisted = _rates(counts, "observable")
     ratio = delisted / current.where(current > 0)
@@ -304,7 +304,8 @@ def render(
         f"{_failed(after)}",
         "",
         "補後只算來源缺。t 日當下看得到原因的缺值（要讀的期別與欄位都在、由公式留空，"
-        "或金融業沒有毛利率與營益率）另列在「補後有原因」一欄，不列入驗收。",
+        "金融業沒有毛利率與營益率，或落在 A 的遮罩月份）另列在「補後有原因」一欄，不列入驗收。"
+        "補前表算的是全部缺值，所以補前到補後的下降有一部分來自重新分類，不全是補值。",
         "",
         f"只列補前或補後超過列表門檻（比值 > {FLAG_RATIO:g}，"
         f"或差距 > {FLAG_GAP * 100:g} 個百分點），或補後未達驗收的特徵。完整表見附錄 CSV。",
