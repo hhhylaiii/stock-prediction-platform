@@ -837,6 +837,9 @@
       [windowText(run.own_rows, run.days, run.mostly_predecessors), modeText(run, date)].filter(Boolean).map(part => '；' + part).join('');
   }
 
+  const leftDetail = d => d.handled === 'by_hand' || has(d.limit);
+  const handNote = '人工重建後，這列會在 ' + QUALITY_DAYS + ' 個交易日內或出現新的人工重建紀錄時消失';
+
   function rebuildText(d) {
     if (d.error) return '重建失敗：' + d.error;
     const span = fmtInt(d.stocks || 0) + ' 檔，自 ' + (d.earliest || '—') + ' 起';
@@ -861,7 +864,7 @@
       case 'model_alert': return ['warn', (d.runs || []).map(run => alertLine(run, date))];
       case 'model_promotion': return [check.severity === 'info' ? '' : 'warn', promotionLines(d)];
       case 'research_retrain': return [check.severity === 'info' ? '' : 'warn', ['建 ' + keyCount(d.built) + '、拒 ' + keyCount(d.refused) + '、失敗 ' + keyCount(d.failed)]];
-      case 'research_rebuild': return [check.severity === 'info' ? '' : 'warn', [rebuildText(d)]];
+      case 'research_rebuild': return [check.severity === 'info' ? '' : 'warn', [rebuildText(d), ...(leftDetail(d) ? [handNote] : [])]];
       case 'research_promote': return ['warn', ['失敗 ' + keyCount(d.failed) + '、完成 ' + sizeOf(d.done), ...Object.entries(d.failed || {}).map(([key, error]) => key + '：' + error)]];
       default: return [check.severity === 'info' ? '' : 'warn', [(SEVERITY[check.severity] || [check.severity])[0]]];
     }
@@ -892,7 +895,7 @@
     return { total: all.length, shown: all.filter((item, i) => all.findIndex(other => keyOf(other.check) === keyOf(item.check)) === i) };
   }
 
-  const leftByHand = check => check.check_name === 'research_rebuild' && ((check.detail || {}).handled === 'by_hand' || has((check.detail || {}).limit));
+  const leftByHand = check => check.check_name === 'research_rebuild' && leftDetail(check.detail || {});
 
   function researchPins(data) {
     const dayOf = top => ((data.find(entry => entry.date === top.date) || {}).model_checks || [])

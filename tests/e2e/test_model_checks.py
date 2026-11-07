@@ -480,6 +480,7 @@ def test_research_schedule_checks_sit_with_the_model_checks(
 
 
 BUILT = {"rank": "rank-2026-11", "return": "return-2026-11"}
+HAND_NOTE = "人工重建後，這列會在 30 個交易日內或出現新的人工重建紀錄時消失"
 NOT_FROZEN = {"interval": tasks.NOT_FROZEN}
 
 
@@ -586,7 +587,10 @@ def test_a_rebuild_shows_every_row_of_its_day_the_one_left_by_hand_first(
     expect(rebuilds).to_have_count(2)
     expect(rebuilds.nth(0)).to_contain_text("研究資料重建")
     expect(rebuilds.nth(0).locator(".muted")).to_have_text(
-        f"最近 {tasks.RECENT_SESSIONS} 個交易日以外，未自動重建：1 檔，自 {old.isoformat()} 起"
+        [
+            f"最近 {tasks.RECENT_SESSIONS} 個交易日以外，未自動重建：1 檔，自 {old.isoformat()} 起",
+            HAND_NOTE,
+        ]
     )
     expect(rebuilds.nth(0).locator("i")).to_have_class("warn")
     rebuilt = f"已重建 2 檔，自 {recent.isoformat()} 起"
@@ -620,7 +624,7 @@ def test_a_rebuild_row_from_before_the_window_names_only_the_limit(
     page.goto(f"{live_server.url}/#models")
 
     expect(page.locator("#model-checks .check .muted")).to_have_text(
-        f"超過上限，未自動重建：1 檔，自 {earliest} 起"
+        [f"超過上限，未自動重建：1 檔，自 {earliest} 起", HAND_NOTE]
     )
 
 
@@ -677,7 +681,8 @@ def test_a_rebuild_left_by_hand_stays_pinned_after_a_later_rebuild(
 
     rebuilds = page.locator("#model-checks .check")
     expect(rebuilds).to_have_count(2)
-    expect(rebuilds.nth(0).locator(".muted")).to_contain_text("未自動重建")
+    expect(rebuilds.nth(0).locator(".muted").nth(0)).to_contain_text("未自動重建")
+    expect(rebuilds.nth(0).locator(".muted").nth(1)).to_have_text(HAND_NOTE)
     expect(rebuilds.nth(0).locator(".pinned")).to_have_text(seeded.sessions[-3].isoformat())
     expect(rebuilds.nth(0).locator("i")).to_have_class("warn")
     rebuilt = f"已重建 1 檔，自 {recent.isoformat()} 起"
