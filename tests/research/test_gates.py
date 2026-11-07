@@ -192,7 +192,7 @@ def test_the_comparisons_fail_without_data(researched: Path, case: str) -> None:
 
 
 @pytest.mark.django_db
-def test_the_shadow_gate_fails_without_enough_days_or_a_shadow(
+def test_the_shadow_gate_fails_without_enough_days(
     researched: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     built("rank", "rank-wf1", researched)
@@ -204,19 +204,45 @@ def test_the_shadow_gate_fails_without_enough_days_or_a_shadow(
     assert "少於 500" in found.reason
     assert found.sample > 0
 
-    monkeypatch.setattr(gates, "MIN_DAYS", 1)
-    fold_path("rank-prod-shadow", MODEL, 0).unlink()
-    missing = by_slot(check_gates("rank-prod", researched))[Slot("rank", 5)]["shadow_oos"]
 
-    assert missing.passed is False
-    assert "沒有對應的 N′" in missing.reason
+def other_shadow(run_key: str, **changed: str) -> None:
+    for run in ModelRun.objects.filter(run_key=f"{run_key}-shadow"):
+        note = {**run.params["production"], **changed}
+        ModelRun.objects.filter(pk=run.pk).update(params={**run.params, "production": note})
 
-    ModelRun.objects.filter(run_key="rank-prod-shadow").delete()
-    found = by_slot(check_gates("rank-prod", researched))[Slot("rank", 5)]["shadow_oos"]
 
-    assert found.passed is False
-    assert found.sample == 0
-    assert "沒有對應的 N′" in found.reason
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("scope", "case", "match"),
+    [
+        ("rank", "no cache", r"rank-prod-shadow has no cached fold 0"),
+        ("rank", "no shadow", r"rank-prod-shadow holds no shadow N′ for rank"),
+        ("interval", "other day", r"is the N′ of interval-prod as of 2016-11-30"),
+        ("interval", "other build", r"is the N′ of interval-old as of"),
+        ("interval", "no baselines", r"interval-prod-shadow has no baseline cache"),
+    ],
+)
+def test_gates_refuse_a_build_whose_shadow_is_incomplete(
+    researched: Path, scope: str, case: str, match: str
+) -> None:
+    runs = built(scope, f"{scope}-wf1", researched)
+    logged(runs[0])
+    key = f"{scope}-prod"
+    if case == "no cache":
+        fold_path(f"{key}-shadow", MODEL, 0).unlink()
+    if case == "no shadow":
+        ModelRun.objects.filter(run_key=f"{key}-shadow").delete()
+    if case == "other day":
+        other_shadow(key, as_of="2016-11-30")
+    if case == "other build":
+        other_shadow(key, shadow_of="interval-old")
+    if case == "no baselines":
+        fold_path(f"{key}-shadow", BASELINE, 0).unlink()
+
+    with pytest.raises(RunError, match=match):
+        check_gates(key, researched)
+
+    assert not ModelRun.objects.filter(run_key=key, params__has_key="gates").exists()
 
 
 @pytest.mark.django_db
@@ -464,30 +490,6 @@ def test_the_target_shadow_gates_hold_their_bounds(
     found = by_slot(check_gates(f"{scope}-prod", researched))[slot]["shadow_oos"]
 
     assert found.passed is passed
-
-
-@pytest.mark.django_db
-def test_a_shadow_of_another_day_or_without_baselines_fails(researched: Path) -> None:
-    built("interval", "interval-wf1", researched)
-    shadows = ModelRun.objects.filter(run_key="interval-prod-shadow", model_type=MODEL)
-    for run in shadows:
-        note = {**run.params["production"], "as_of": "2016-11-30"}
-        ModelRun.objects.filter(pk=run.pk).update(params={**run.params, "production": note})
-
-    stale = by_slot(check_gates("interval-prod", researched))[Slot("quantile", 20)]["shadow_oos"]
-
-    assert stale.passed is False
-    assert "2016-11-30 的 N′" in stale.reason
-
-    for run in shadows:
-        note = {**run.params["production"], "as_of": LAST.isoformat()}
-        ModelRun.objects.filter(pk=run.pk).update(params={**run.params, "production": note})
-    fold_path("interval-prod-shadow", BASELINE, 0).unlink()
-
-    bare = by_slot(check_gates("interval-prod", researched))[Slot("quantile", 20)]["shadow_oos"]
-
-    assert bare.passed is False
-    assert "沒有 baseline 快取" in bare.reason
 
 
 @pytest.mark.django_db

@@ -171,10 +171,6 @@ def _shadow_ic(shadow: ModelRun) -> Gate:
 
 def _shadow_target(shadow: ModelRun, directory: Path) -> Gate:
     fold = _fold(shadow)
-    if not fold_path(shadow.run_key, BASELINE, fold.index).exists():
-        return Gate(
-            "shadow_oos", False, None, "N′ 的 OOS", 0, f"{shadow.run_key} 沒有 baseline 快取"
-        )
     frame = target_eval.target_frame(shadow.run_key, [fold], directory)
     objective = ModelObjective(shadow.objective)
     if objective == ModelObjective.REGRESSION:
@@ -193,9 +189,10 @@ def _shadow_target(shadow: ModelRun, directory: Path) -> Gate:
     return _days_gate("shadow_oos", compared.model, compared.days, threshold, passed)
 
 
-def shadow_oos(run: ModelRun, directory: Path) -> Gate:
-    """Gate 3: N′ over its last months clears the absolute bar of N's objective."""
+def paired_shadow(run: ModelRun) -> ModelRun:
+    """N′ of the same build as N, with its caches; an unfinished build is refused."""
     key = shadow_key(run.run_key)
+    slot = Slot(run.objective, int(run.params["horizon"]))
     shadow = ModelRun.objects.filter(
         run_key=key,
         model_type=MODEL,
@@ -203,12 +200,24 @@ def shadow_oos(run: ModelRun, directory: Path) -> Gate:
         params__horizon=run.params["horizon"],
         params__production__role=SHADOW,
     ).first()
-    if shadow is None or not fold_path(key, MODEL, 0).exists():
-        return Gate("shadow_oos", False, None, "N′ 的 OOS", 0, f"{key} 沒有對應的 N′")
+    unfinished = "its last build_run did not finish"
+    if shadow is None:
+        raise RunError(f"{key} holds no shadow N′ for {slot}; {unfinished}")
     mine, theirs = run.params[PRODUCTION], shadow.params[PRODUCTION]
     if theirs.get("shadow_of") != run.run_key or theirs.get("as_of") != mine["as_of"]:
-        reason = f"{shadow.run_id} 是 {theirs.get('as_of')} 的 N′，N 是 {mine['as_of']}"
-        return Gate("shadow_oos", False, None, "N′ 的 OOS", 0, reason)
+        raise RunError(
+            f"{shadow.run_id} is the N′ of {theirs.get('shadow_of')} as of {theirs.get('as_of')}, "
+            f"not of {run.run_key} as of {mine['as_of']}"
+        )
+    if not fold_path(key, MODEL, 0).exists():
+        raise RunError(f"{key} has no cached fold 0; {unfinished}")
+    if run.objective != ModelObjective.RANK and not fold_path(key, BASELINE, 0).exists():
+        raise RunError(f"{key} has no baseline cache; {unfinished}")
+    return shadow
+
+
+def shadow_oos(run: ModelRun, shadow: ModelRun, directory: Path) -> Gate:
+    """Gate 3: N′ over its last months clears the absolute bar of N's objective."""
     if run.objective == ModelObjective.RANK:
         return _shadow_ic(shadow)
     return _shadow_target(shadow, directory)
@@ -232,14 +241,16 @@ def data_quality(run: ModelRun) -> Gate:
 
 def check_gates(run_key: str, directory: Path) -> list[SlotGates]:
     """Every gate of each N slot of run_key, recorded on the N runs together; no status changes."""
+    runs = build_runs(run_key)
+    shadows = {slot: paired_shadow(run) for slot, run in runs.items()}
     checked = []
-    for slot, run in build_runs(run_key).items():
+    for slot, run in runs.items():
         serving = serving_run(slot)
         as_of = date.fromisoformat(run.params[PRODUCTION]["as_of"])
         gates = [
             agreement(run, serving, as_of),
             gain_overlap(run, serving),
-            shadow_oos(run, directory),
+            shadow_oos(run, shadows[slot], directory),
             data_quality(run),
         ]
         served = None if serving is None else serving.run_id

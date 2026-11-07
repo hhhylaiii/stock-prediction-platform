@@ -1,5 +1,6 @@
 """Daily predictions (SPEC §7): each slot's serving run scores every stock with features."""
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -146,8 +147,8 @@ def _chosen(runs: dict[Slot, ModelRun | None]) -> dict[Slot, tuple[str, str] | N
 def _recheck(runs: dict[Slot, ModelRun | None]) -> None:
     """Lock the serving runs and refuse if any slot would pick another run than it scored with."""
     list(ModelRun.objects.select_for_update(no_key=True).filter(status__in=SERVING))
-    before, now = _chosen(runs), _chosen({slot: serving_run(slot) for slot in SLOTS})
-    moved = [str(slot) for slot in SLOTS if before[slot] != now[slot]]
+    before, now = _chosen(runs), _chosen({slot: serving_run(slot) for slot in runs})
+    moved = [str(slot) for slot in runs if before[slot] != now[slot]]
     if moved:
         raise RunError(f"the serving run of {', '.join(moved)} changed while predicting; run again")
 
@@ -193,14 +194,16 @@ def _check_rows(day: date, serving: dict[Slot, ModelRun], replace: bool) -> None
         )
 
 
-def predict(day: date, directory: Path, replace: bool = False) -> Predicted:
-    """Write every slot's predictions for day in one transaction; replace swaps other runs' rows."""
+def predict(
+    day: date, directory: Path, replace: bool = False, slots: Sequence[Slot] = SLOTS
+) -> Predicted:
+    """Write the slots' predictions for day in one transaction; replace swaps other runs' rows."""
     if not ready_for_research(day):
         raise PredictionGateError(
             f"{day} has not passed the research gate (every gate snapshot loaded, every quality "
             "check run, no error); predictions wait for it"
         )
-    runs = {slot: serving_run(slot) for slot in SLOTS}
+    runs = {slot: serving_run(slot) for slot in slots}
     serving = {slot: run for slot, run in runs.items() if run is not None}
     if not serving:
         raise RunError("no active or degraded run serves any slot")

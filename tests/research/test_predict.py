@@ -464,3 +464,39 @@ def test_the_command_reports_its_errors(served_runs: Path, settings: Any) -> Non
     clone(live(Slot("rank", 20)), ".twin", ModelStatus.ACTIVE)
     with pytest.raises(CommandError, match="are all active for rank 20"):
         call_command("predict", date=DAY.isoformat())
+
+
+@pytest.mark.django_db
+def test_predict_writes_only_the_slots_asked_for(
+    served_runs: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs = serve(*SLOTS)
+    passed()
+    asked = [Slot("rank", 5), Slot("quantile", 20)]
+    elsewhere = live(Slot("volatility", 20))
+    scored = predict_module.slot_rows
+
+    def retired(*args: Any) -> Any:
+        ModelRun.objects.filter(pk=elsewhere.pk).update(status=ModelStatus.RETIRED)
+        return scored(*args)
+
+    monkeypatch.setattr(predict_module, "slot_rows", retired)
+    result = predict(DAY, served_runs, slots=asked)
+
+    assert result.written == {live(slot).run_id: 40 for slot in asked}
+    assert result.missing == []
+    assert set(Prediction.objects.values_list("run_id", flat=True)) == {
+        live(slot).run_id for slot in asked
+    }
+    assert len(runs) == len(SLOTS)
+
+
+@pytest.mark.django_db
+def test_predict_reports_a_missing_slot_among_those_asked_for(served_runs: Path) -> None:
+    serve(Slot("rank", 5))
+    passed()
+
+    result = predict(DAY, served_runs, slots=[Slot("rank", 5), Slot("rank", 20)])
+
+    assert result.missing == [Slot("rank", 20)]
+    assert set(result.written) == {live(Slot("rank", 5)).run_id}
