@@ -76,10 +76,10 @@ Oct 29, 2026 · @Owen Lai
 
 **多來源合併原則**
 
-- 每類資料指定一個 primary source；其他來源只做比對驗證，不混用。
+- 每類資料指定一個 primary source；其他來源只做比對驗證，不混用。例外只有第 8 節第 5 條列出的幾條。
 - 價量 primary：證交所與櫃買中心；籌碼 primary：證交所與櫃買中心；財報與月營收 primary：MOPS；股權分散 primary：集保。
 - FinMind 是回補與驗證來源，每日增量不依賴它，避免非商業授權與維護時間影響正式流程。
-- FinMind 對 2016 到 2020 年下市的股票缺財報、月營收、股本與部分籌碼，這些缺口只補缺的列：財報與月營收用 MOPS 歷史彙總頁（下市公司不在彙總頁上，財報改讀 XBRL 檢視頁），股本與籌碼用證交所、櫃買每日表（交易所每日表補缺尚未實作）。下市公司的月營收沒有免費官方來源，standard 表維持缺值；特徵層的 `fund_rev_yoy`、`fund_rev_3m_yoy` 在月營收來源缺時改用季營收年增率（第 6 節處理步驟 6 的殘餘缺口規則）。
+- FinMind 對 2016 到 2020 年下市的股票缺財報、月營收、股本與部分籌碼，這些缺口只補缺的列或空的欄位：財報與月營收用 MOPS 歷史彙總頁（下市公司不在彙總頁上，財報改讀 XBRL 檢視頁；plan K17），股本、籌碼與本益比用證交所、櫃買每日表，產業用交易所依產業別的行情（plan K17c；外資持股比的 0 另見 K21；規則都在第 8 節第 5 條）。下市公司的月營收沒有免費官方來源，standard 表維持缺值；特徵層的 `fund_rev_yoy`、`fund_rev_3m_yoy` 在月營收來源缺時改用季營收年增率（第 6 節處理步驟 6 的殘餘缺口規則）。
 
 ## 4. 資料模型與儲存
 
@@ -248,7 +248,7 @@ Oct 29, 2026 · @Owen Lai
 **處理步驟（每日對全市場執行）**
 
 1. 定義 universe：特徵與預測對全部上市、上櫃普通股計算；訓練 universe 排除停牌、上市未滿 60 個交易日、處置期間、全額交割、當日無成交、20 日成交金額中位數低於 1,000 萬元的股票；注意股不排除，以 `tech_attention_t` 當特徵；處置與全額交割期間來自 `disposition_event`。以下所有橫截面統計與 label 的百分位都只在當日訓練 universe 內計算；universe 外的股票套用同一天的轉換參數照常推論，`feature_daily` 與 `prediction` 都帶 `in_universe` 旗標，API 回傳時標示，事後評估不計入。
-2. 可用時點對齊：每個特徵依表中「可用時點」以 merge\_asof 對齊到 t；基本面與總經用 announce\_date，weekly\_holding 用 publish\_date，美股用美國日曆日 ≤ t 的最近一個收盤，美國休市日自動取前一日；美元兌台幣用倫敦日 ≤ t−1 的最近一個收盤，週五與連假前也一樣。財報的 announce\_date：沒有更正紀錄的照實際上傳日，晚於法定截止日也延後；有更正紀錄的只拿來提早、不延後；有重編報表的期別用最後一次重編的上傳日；交易日 22:40 以後或非交易日上傳的算下一個交易日。財報數字：2013-Q1 起，revenue、net\_income、operating\_cf、debt\_ratio、roe 用該期報表當時公布的 MOPS 原值（彙總表、XBRL 檢視頁）覆寫 FinMind 重分類過的比較期數字，eps 只補 FinMind 的空值；gross\_margin、op\_margin 仍是 FinMind 值（MOPS 沒有這兩欄），MOPS 空缺時把 FinMind 的累計比率清成 NULL 一項尚未實作。前後期報表種類（個體、合併）不同時，revenue、gross\_margin、op\_margin、operating\_cf 不跨種類取前期，相關的年增與 TTM 為 NaN；月營收訊號讀到 2013-01 兩側的月份時為 NaN（2013 年起改為 IFRS 合併營收）。
+2. 可用時點對齊：每個特徵依表中「可用時點」以 merge\_asof 對齊到 t；基本面與總經用 announce\_date，weekly\_holding 用 publish\_date，美股用美國日曆日 ≤ t 的最近一個收盤，美國休市日自動取前一日；美元兌台幣用倫敦日 ≤ t−1 的最近一個收盤，週五與連假前也一樣。財報的 announce\_date：沒有更正紀錄的照實際上傳日，晚於法定截止日也延後；有更正紀錄的只拿來提早、不延後；有重編報表的期別用最後一次重編的上傳日；交易日 22:40 以後或非交易日上傳的算下一個交易日。財報數字：2013-Q1 起，revenue、net\_income、operating\_cf、debt\_ratio、roe 用該期報表當時公布的 MOPS 原值（彙總表、XBRL 檢視頁）覆寫 FinMind 重分類過的比較期數字，eps 只補 FinMind 的空值；gross\_margin、op\_margin 在 FinMind 已有的列保留 FinMind 值，清空與 MOPS 補列的規則見第 8 節第 5 條。前後期報表種類（個體、合併）不同時，revenue、gross\_margin、op\_margin、operating\_cf 不跨種類取前期，相關的年增與 TTM 為 NaN；月營收訊號讀到 2013-01 兩側的月份時為 NaN（2013 年起改為 IFRS 合併營收）。
 3. 極值處理：個股層級特徵以當日 universe 內 1% / 99% 分位 winsorize；某一側的截斷界會讓 universe 全部變成同值時（稀疏的 0/1 與計數特徵），那一側改用 universe 的極值當界；市場層級特徵與 `ind_sector_id` 不做。
 4. 標準化：個股層級特徵做當日橫截面 z-score，均值與標準差只用 universe 內的股票算。Ridge 與 logistic baseline 一律用 z-score 值；排名模型的 LightGBM 也用 z-score 值，原值跨年度有漂移，樹模型看不出相對當日市場的高低；絕對報酬、區間、波動、機率模型的 LightGBM 用原值並加入市場層級特徵，市場層級特徵進模型前先在訓練窗內依分位切成 5 級，見第 7 節模型表。市場層級特徵與 `ind_sector_id` 不做橫截面 z-score，市場層級特徵排名模型不使用。當日 universe 沒有離散度時 z 為 0，不是 NaN。
 5. 缺值：Ridge 與 logistic 填當日中位數並加 `_missing` 旗標；LightGBM 保留 NaN。
@@ -343,7 +343,12 @@ Oct 29, 2026 · @Owen Lai
 2. **還原權息**：label 一律用還原價，否則除息日會出現假跌幅，模型會學到「除息前賣出」這種假訊號。除權息資料來自 `dividend_event`，`adj_factor` 回溯調整。
 3. **存活者偏差**：`stock_master` 必須包含已下市股票，訓練集不得過濾掉它們。只用現存股票訓練，模型只學到「活下來的公司長什麼樣」。
 4. **不看未來**：台股特徵只能用 `<= t` 日收盤的資料，含移動平均的視窗也是；美股只能用美國日曆日 ≤ t 的收盤，匯率只能用倫敦日 ≤ t−1 的收盤，兩者都早於 t+1 開盤進場。回測進場價用 t+1 還原開盤價，不用 t 日收盤價。
-5. **來源衝突**：每類資料只有一個 primary source，secondary 只做比對。同一欄位在兩個來源數字不同時寫 `data_quality_log`，不得取平均或混用。
+5. **來源衝突**：每類資料只有一個 primary source，secondary 只做比對。同一欄位在兩個來源數字不同時寫 `data_quality_log`，不得取平均或混用。例外只有下面幾條，其他欄位、其他情況一律照前一句。這幾條都不取平均：每個欄位一次只採用一個來源，兩邊的 raw 都保留；除了下面註明的，兩邊數字不同照樣寫 `data_quality_log`。
+   - **財報（FinMind 回補的季別，也就是每日財報掃描接手的那一季之前；plan K18）**：2013-Q1 起，同一檔、同一季、同一種報表（個體或合併）的 `revenue`、`net_income`、`operating_cf`、`debt_ratio`、`roe` 以 MOPS 當期原值為 primary，MOPS 空或只有另一種報表時用 FinMind；`eps`、`gross_margin`、`op_margin` 以 FinMind 為 primary，`eps` 空時用 MOPS。FinMind 已有的列，兩個利益率不用 MOPS 補；只判 Q2 到 Q4（Q1 的累計就是單季）：FinMind 的值不是那一季自己的（跨季累計算出的）就清空，查不到同一種報表的 MOPS 數字而 FinMind 的 `revenue` 也是空的時同樣清空（2013 年前沒有 MOPS 頁面，`revenue` 空就清），判斷不了的留著。掃描接手那一季起，財報由 MOPS 直接寫入，照第 5 節「已有的列只新增不改」。
+   - **MOPS 補 FinMind 沒有的月份與季（plan K17，2013-Q1 起）**：FinMind 沒有某檔某期的月營收或財報列時，整列用 MOPS 歷史彙總頁或 XBRL 檢視頁新增，財報的兩個利益率由 MOPS 的損益表算；這一步不改 FinMind 已有的列（已有列的覆寫與清空照上一條），數字不同記 `revenue_history_mismatch`、`statement_history_mismatch`、`statement_viewer_mismatch`。
+   - **交易所逐日表補歷史缺值（plan K17c）**：FinMind 歷史回補缺的部分，用證交所、櫃買的逐日全市場表補，只寫當天在 `daily_price` 有價的代號，已有的值不改：`daily_chip` 的外資持股比是那天沒有列就新增、欄位空的才補；`daily_valuation` 的本益比、股價淨值比、殖利率是那天整列沒有才新增；`shares_outstanding` 只補每檔第一筆已存股數之前的日子（界線取第一次補缺時的值，沒有已存股數的股票整段都補），只寫股數變動的那天，股數只和界線那天的已存股數比對，跑完刪掉和補上的股數重複的已存列（生效的股數不變，刪掉的列記在 log）。`stock_master` 的產業以 FinMind 股票清單為 primary；空的用交易所依產業別的季底收盤行情補（多季看到時取最後一次，新上市的代號每季再補），不比對已有的，也不記差異。
+   - **外資持股比的 0（plan K21）**：只看普通股（不含存託憑證）；交易所的值讀已存的 raw 頁、不重抓，同一天有幾份時取最新的。FinMind 存 0、交易所當天的值大於 0 時，只有兩種情況改成交易所的值：同一檔依日期排序的已存非空值裡連續 20 天以上的 0，90% 以上的日子交易所頁面有這檔，且其中 90% 以上大於 0（整段裡大於 0 的日子都改）；連續不到 20 天的 0（大於 0 的那幾天改）。其餘長段的 0 不改。每改一列寫一列 `fi_holding_zero_replaced`，記舊值、新值與交易所 raw。
+   - **除權息事件（plan 2.7）**：FinMind 回補的列 `adj_factor` 是空的時，用交易所除權除息、恢復買賣結果表的因子補；已有的金額、因子和交易所不同時不改，記 `dividend_source_mismatch`，空的因子照樣補。交易所寫的列 `announce_date` 留空；已存的 FinMind 回應裡有公告日的由 `reapply_dividend_dates` 補（只補空的），其餘等 plan 2.7b 的預告表。FinMind 股利回補只到 2026-10-30：它對已存的列會覆寫金額與因子，之後的日子不用 FinMind 重跑。
 6. **上市、上櫃分流**：證交所與櫃買中心格式不同，adapter 分開寫，normalize 後才合併。興櫃股票無漲跌幅限制，第一版排除。
 7. **交易日曆**：以證交所公告為準，含補班日與颱風假。所有日期運算走 `trading_calendar`，不用 `pandas.bdate_range`。
 8. **單位**：成交量以「股」入庫，金額以「元」入庫。證交所與 FinMind 的成交量都是股；部分網頁與 CSV 以「張」顯示，normalize 時乘以 1,000。
