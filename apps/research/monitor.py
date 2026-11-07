@@ -426,6 +426,10 @@ def _mode(
             return RESET, {**extra, "reset_needed": WINDOW}
     start = _first_session(calendar, grace_start(run, slot.horizon, calendar))
     spared = calendar.between(start, calendar.end)[:GRACE_DAYS]
+    if len(spared) < GRACE_DAYS:
+        logger.warning(
+            "the calendar ends inside the grace of %s from %s; extend it", run.run_id, start
+        )
     if day < start or (spared and day <= spared[-1]):
         last = spared[-1] if spared else start
         return GRACE, {"grace_start": start.isoformat(), "grace_end": last.isoformat()}
@@ -452,11 +456,9 @@ def _entry(
 def run_alerts(
     day: date, matured: Mapping[int, date], calendar: TradingDays
 ) -> list[dict[str, Any]]:
-    """Per slot, the entry of the run serving the day when its slot's 60-row window breaches.
-
-    value, days and own_rows describe the chained window the mean came from in every mode; a
-    grace or reset entry warns without degrading.
-    """
+    """Per slot, the entry of the run serving the day when its slot's 60-row window breaches."""
+    watched = ModelRun.objects.filter(status__in=WATCHED, objective__in=list(RULES))
+    list(watched.select_for_update().order_by("run_id"))
     found = []
     for objective, rule in RULES.items():
         for horizon in rule.horizons:

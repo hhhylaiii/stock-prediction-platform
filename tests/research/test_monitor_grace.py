@@ -6,6 +6,7 @@ import pytest
 from django.utils import timezone
 
 from apps.etl.models import DataQualityLog
+from apps.market.models import TradingCalendar
 from apps.research import monitor
 from apps.research.models import ModelRun, Prediction
 from apps.research.monitor import (
@@ -337,6 +338,24 @@ def test_a_run_whose_grace_cannot_be_placed_is_skipped_with_a_warning(
 
     assert (result.degraded, alerts(), status(new)) == ((), [], "active")
     assert f"run {new.run_id} is not judged on {DAY}" in caplog.text
+
+
+def test_a_grace_past_the_end_of_the_calendar_warns_and_ends_on_its_last_day(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    predecessor()
+    last = calendar().shift(DAY, 2)
+    TradingCalendar.objects.filter(date__gt=last).delete()
+    new = make_run("prod.rank", "rank", params={**LIMITS, "promoted_on": DAY.isoformat()})
+    serves(new, 20)
+
+    with caplog.at_level(logging.WARNING, logger="apps.research.monitor"):
+        result = run_monitor(DAY, calendar())
+
+    [entry] = alerts()
+    assert (entry["mode"], entry["grace_end"]) == ("grace", last.isoformat())
+    assert (result.degraded, status(new)) == ((), "active")
+    assert f"the calendar ends inside the grace of {new.run_id}" in caplog.text
 
 
 def test_one_day_writes_judged_grace_and_reset_entries_the_contract_accepts() -> None:
