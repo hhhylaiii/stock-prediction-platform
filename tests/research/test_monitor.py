@@ -1,4 +1,4 @@
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from io import StringIO
 from typing import Any
 
@@ -92,7 +92,6 @@ def make_run(
         feature_hash="0" * 64,
         status=status,
         params={"promoted_on": LIVE.isoformat(), **(params or {})},
-        created_at=timezone.make_aware(datetime.combine(LIVE, datetime.min.time())),
     )
 
 
@@ -592,11 +591,28 @@ def test_rerunning_a_past_day_judges_the_run_that_served_it_not_todays() -> None
     history(old, "ic", [-0.5] * 60, end=date(2026, 6, 5))
     history(old, "ic", [0.1] * 60)
     past = calendar().shift(date(2026, 6, 5), 20)
+    serves(old, 20, past)
+    serves(new, 20)
 
     run_monitor(past, calendar())
 
     assert (status(new), alerts_on(past)) == ("active", [])
     assert DEGRADED_ON not in ModelRun.objects.get(pk=new.pk).params
+
+
+def test_rerunning_a_past_day_alerts_the_degraded_run_that_served_it() -> None:
+    limits = {IC_THRESHOLD: {"20": 0.0}}
+    old = make_run("prod.rank.old", "rank", "degraded", limits, train_end=date(2025, 12, 31))
+    new = make_run("prod.rank", "rank", params=limits, train_end=date(2026, 9, 1))
+    history(old, "ic", [-0.5] * 60, end=date(2026, 6, 5))
+    past = calendar().shift(date(2026, 6, 5), 20)
+    serves(old, 20, past)
+    serves(new, 20)
+
+    result = run_monitor(past, calendar())
+
+    assert [entry["run_id"] for entry in alerts_on(past)] == [old.run_id]
+    assert (status(old), status(new), result.degraded) == ("degraded", "active", ())
 
 
 @pytest.mark.parametrize(("short", "long", "breached"), [(-0.01, -0.01, 5), (0.01, -0.03, 20)])

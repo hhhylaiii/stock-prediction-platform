@@ -1,5 +1,6 @@
 """Post-launch monitoring: matured-prediction metrics, output consistency, rolling alerts (§7)."""
 
+import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date
@@ -106,6 +107,9 @@ BANDS: Mapping[str, list[str]] = {
     ModelObjective.CLASSIFICATION: ["prob_up_5pct"],
 }
 Scores = dict[str, float | None]
+
+
+logger = logging.getLogger(__name__)
 
 
 class MonitorError(ValueError):
@@ -365,9 +369,11 @@ def alert_problems(entry: Mapping[str, Any]) -> list[str]:
 
 
 def _served_on(day: date, slot: Slot) -> ModelRun | None:
-    """The run whose rows the API serves for the slot on the day, the one the day judges."""
+    """The run the API serves the slot from on the day, locked until the day is written."""
     found = runs_on(day, [slot]).get(slot)
-    return None if found is None else ModelRun.objects.get(pk=found.run_id)
+    if found is None:
+        return None
+    return ModelRun.objects.select_for_update().get(pk=found.run_id)
 
 
 def _first_session(calendar: TradingDays, day: date) -> date:
@@ -389,12 +395,13 @@ def grace_start(run: ModelRun, horizon: int, calendar: TradingDays) -> date:
     return max(boundary, promoted)
 
 
-def _restored_on(slot: Slot, day: date) -> date | None:
-    """The slot's latest restore on or before the day among runs that served its horizon."""
+def _restored_on(judged: ModelRun, slot: Slot, day: date) -> date | None:
+    """The slot's latest restore: the judged run's own at any date, others' on or before day."""
     runs = (
         ModelRun.objects.filter(objective=slot.objective, params__has_key=RESTORED_ON)
         .exclude(status=ModelStatus.CANDIDATE)
         .exclude(model_type=SCREENING_MODEL)
+        .exclude(pk=judged.pk)
     )
     days = [
         restored
@@ -403,14 +410,15 @@ def _restored_on(slot: Slot, day: date) -> date | None:
         and restored <= day
         and run.predictions.filter(horizon=slot.horizon).exists()
     ]
-    return max(days, default=None)
+    own = day_of(judged.params.get(RESTORED_ON))
+    return max([*days, *([] if own is None else [own])], default=None)
 
 
 def _mode(
     run: ModelRun, slot: Slot, rows: list[dict[str, Any]], day: date, calendar: TradingDays
 ) -> tuple[str, dict[str, Any]]:
     """judged, or grace or reset with their fields; a reset comes before a grace."""
-    restored = _restored_on(slot, day)
+    restored = _restored_on(run, slot, day)
     if restored is not None:
         since = sum(1 for row in rows if row["date"] >= restored)
         if since < WINDOW:
@@ -418,8 +426,9 @@ def _mode(
             return RESET, {**extra, "reset_needed": WINDOW}
     start = _first_session(calendar, grace_start(run, slot.horizon, calendar))
     spared = calendar.between(start, calendar.end)[:GRACE_DAYS]
-    if day <= spared[-1]:
-        return GRACE, {"grace_start": start.isoformat(), "grace_end": spared[-1].isoformat()}
+    if day < start or (spared and day <= spared[-1]):
+        last = spared[-1] if spared else start
+        return GRACE, {"grace_start": start.isoformat(), "grace_end": last.isoformat()}
     return JUDGED, {}
 
 
@@ -462,7 +471,10 @@ def run_alerts(
                 continue
             try:
                 mode, extra = _mode(run, slot, rows, day, calendar)
-            except CalendarError:
+            except CalendarError as error:
+                logger.warning(
+                    "run %s is not judged on %s for %s: %s", run.run_id, day, slot, error
+                )
                 continue
             entry = _entry(run, rule, slot, rows, mode, extra)
             if entry is not None:

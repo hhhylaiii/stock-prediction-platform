@@ -1,3 +1,4 @@
+import logging
 from datetime import date, datetime
 from typing import Any
 
@@ -6,7 +7,7 @@ from django.utils import timezone
 
 from apps.etl.models import DataQualityLog
 from apps.research import monitor
-from apps.research.models import ModelRun
+from apps.research.models import ModelRun, Prediction
 from apps.research.monitor import (
     ALERT_CHECK,
     BRIER_BASELINE,
@@ -132,6 +133,7 @@ def test_the_grace_starts_at_the_out_of_sample_boundary_when_it_is_later() -> No
     [
         (-2, date(2026, 1, 2), -2),
         (-30, date(2026, 9, 26), date(2026, 9, 28)),
+        (-30, date(2026, 9, 29), date(2026, 9, 29)),
     ],
 )
 def test_a_run_without_promoted_on_starts_its_grace_when_it_first_served(
@@ -199,15 +201,142 @@ def test_a_successor_keeps_the_reset_window_and_reset_comes_before_grace(
     assert result.degraded == ()
 
 
-def test_a_restore_after_the_day_does_not_reset_it() -> None:
+def test_the_judged_runs_own_later_restore_keeps_an_earlier_day_from_degrading_it() -> None:
     later = calendar().shift(DAY, 3)
     run = make_run("prod.rank", "rank", params={**LIMITS, "restored_on": later.isoformat()})
     history(run, "ic", [-0.5] * 60)
 
     result = run_monitor(DAY, calendar())
 
+    [entry] = alerts()
+    assert (entry["mode"], entry["restored_on"], entry["reset_rows"]) == (
+        "reset",
+        later.isoformat(),
+        0,
+    )
+    assert (result.degraded, status(run)) == ((), "active")
+
+
+def test_another_runs_later_restore_does_not_reset_an_earlier_day() -> None:
+    later = calendar().shift(DAY, 3)
+    old = make_run(
+        "prod.rank.old", "rank", status="retired", params={**LIMITS, "restored_on": str(later)}
+    )
+    serves(old, 20, window_days()[0])
+    run = make_run("prod.rank", "rank", params=LIMITS)
+    history(run, "ic", [-0.5] * 60)
+
+    result = run_monitor(DAY, calendar())
+
     assert [entry["mode"] for entry in alerts()] == ["judged"]
     assert result.degraded == (run.run_id,)
+
+
+def test_a_restore_of_another_horizon_does_not_reset_the_slot() -> None:
+    short = make_run(
+        "rank-h5",
+        "rank",
+        status="retired",
+        params={**LIMITS, "restored_on": str(window_days()[-3])},
+    )
+    serves(short, 5, window_days()[-3])
+    run = make_run("rank-h20", "rank", params=LIMITS)
+    history(run, "ic", [-0.5] * 60)
+
+    result = run_monitor(DAY, calendar())
+
+    assert [entry["mode"] for entry in alerts()] == ["judged"]
+    assert result.degraded == (run.run_id,)
+
+
+def test_the_latest_of_several_restores_sets_the_reset() -> None:
+    days = window_days()
+    for name, restored in (("first", days[0]), ("second", days[-11])):
+        old = make_run(
+            f"prod.rank.{name}",
+            "rank",
+            status="retired",
+            params={**LIMITS, "restored_on": str(restored)},
+        )
+        serves(old, 20, restored)
+    run = make_run("prod.rank", "rank", params=LIMITS)
+    history(run, "ic", [-0.5] * 60)
+
+    run_monitor(DAY, calendar())
+
+    [entry] = alerts()
+    assert (entry["mode"], entry["restored_on"], entry["reset_rows"]) == (
+        "reset",
+        str(days[-11]),
+        11,
+    )
+
+
+def test_a_reset_alerts_on_the_chained_mean_while_the_restored_days_recover() -> None:
+    days = window_days()
+    run = make_run("prod.rank", "rank", params={**LIMITS, "restored_on": str(days[-11])})
+    history(run, "ic", [-0.5] * 49, end=days[-12])
+    history(run, "ic", [0.5] * 11)
+
+    result = run_monitor(DAY, calendar())
+
+    [entry] = alerts()
+    assert entry["mode"] == "reset"
+    assert entry["value"] == pytest.approx(-19 / 60)
+    assert (entry["days"], entry["reset_rows"], result.degraded) == (60, 11, ())
+
+
+def test_a_day_served_before_the_run_went_live_is_spared() -> None:
+    predecessor()
+    live = calendar().shift(DAY, 2)
+    new = make_run("prod.rank", "rank", params={**LIMITS, "promoted_on": live.isoformat()})
+    serves(new, 20)
+
+    result = run_monitor(DAY, calendar())
+
+    [entry] = alerts()
+    assert (entry["mode"], entry["grace_start"]) == ("grace", live.isoformat())
+    assert entry["grace_end"] == calendar().shift(live, 4).isoformat()
+    assert alert_problems(entry) == []
+    assert (result.degraded, status(new)) == ((), "active")
+
+
+def test_without_a_grace_the_serving_run_is_judged_on_its_first_day(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(monitor, "GRACE_DAYS", 0)
+    predecessor()
+    new = make_run("prod.rank", "rank", params={**LIMITS, "promoted_on": DAY.isoformat()})
+    serves(new, 20)
+
+    result = run_monitor(DAY, calendar())
+
+    assert [entry["mode"] for entry in alerts()] == ["judged"]
+    assert result.degraded == (new.run_id,)
+
+
+def test_an_active_run_without_rows_that_day_is_not_judged() -> None:
+    run = make_run("prod.rank", "rank", params=LIMITS)
+    history(run, "ic", [-0.5] * 60)
+    Prediction.objects.filter(run=run, date=DAY).delete()
+
+    result = run_monitor(DAY, calendar())
+
+    assert (result.degraded, alerts(), status(run)) == ((), [], "active")
+
+
+def test_a_run_whose_grace_cannot_be_placed_is_skipped_with_a_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    predecessor()
+    new = make_run("prod.rank", "rank", params=LIMITS, train_end=date(2026, 3, 28))
+    serves(new, 20)
+
+    with caplog.at_level(logging.WARNING, logger="apps.research.monitor"):
+        result = run_monitor(DAY, calendar())
+
+    assert (result.degraded, alerts(), status(new)) == ((), [], "active")
+    assert f"run {new.run_id} is not judged on {DAY}" in caplog.text
 
 
 def test_one_day_writes_judged_grace_and_reset_entries_the_contract_accepts() -> None:

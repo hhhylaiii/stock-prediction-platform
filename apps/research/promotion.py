@@ -18,7 +18,7 @@ from apps.research.baseline_runs import SCOPES
 from apps.research.gates import SAMPLE_UNITS, SlotGates, build_runs, check_gates
 from apps.research.holdout import production_pass
 from apps.research.models import ModelRun, ModelStatus, Prediction
-from apps.research.monitor import DEGRADED_ON, PROMOTED_ON, RESTORED_ON
+from apps.research.monitor import DEGRADED_ON, DEGRADED_WINDOW, PROMOTED_ON, RESTORED_ON
 from apps.research.predict import SERVING, Slot, predict, serving_run
 from apps.research.runs import PRODUCTION, SCREENING_MODEL, RunError
 
@@ -233,7 +233,8 @@ def restore(run_id: str, day: date, reason: str) -> ModelRun:
         if not isinstance(periods, list):
             raise RunError(f"{run_id} alert_periods is not a list; fix it before restoring")
         entry = {"start": since.isoformat(), "end": day.isoformat(), "reason": reason}
-        kept = {name: value for name, value in run.params.items() if name != DEGRADED_ON}
+        dropped = (DEGRADED_ON, DEGRADED_WINDOW)
+        kept = {name: value for name, value in run.params.items() if name not in dropped}
         run.status = ModelStatus.ACTIVE
         run.params = {**kept, ALERT_PERIODS: [*periods, entry], RESTORED_ON: day.isoformat()}
         run.save(update_fields=["status", "params"])
