@@ -188,6 +188,7 @@ def test_a_stock_without_predictions_says_so(
     expect(page.locator("#chart-title")).to_have_text("過去 60 個交易日")
     expect(page.locator("#price-chart path.fan-median")).to_have_count(0)
     expect(page.locator("#stock-seg button:disabled")).to_have_count(2)
+    expect(page.locator("#stock-seg [data-sh='5']")).to_have_css("color", "rgb(107, 106, 100)")
     expect(page.locator("#stock-seg-hint")).to_have_text("預測產出後可切換 5 日／20 日")
 
 

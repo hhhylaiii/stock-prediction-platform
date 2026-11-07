@@ -238,3 +238,11 @@ def test_paging_or_switching_today_keeps_the_link_without_looking_it_up_again(
     expect(page.locator("#today-goto a")).to_have_text("查看 6488 環球晶 個股頁")
     assert len(looked_up(asked)) == 1
 
+
+def test_a_delisted_stock_says_it_has_no_predictions(
+    page: Page, live_server: LiveServer, listed: Seed
+) -> None:
+    page.goto(f"{live_server.url}/#stock-2498")
+
+    expect(page.locator("#stock-seg button:disabled")).to_have_count(2)
+    expect(page.locator("#stock-seg-hint")).to_have_text("已下市，沒有預測")

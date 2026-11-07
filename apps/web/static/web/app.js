@@ -566,7 +566,8 @@
       const buttons = [...document.querySelectorAll('#stock-seg [data-sh]')];
       buttons.forEach(b => { b.disabled = !ready.has(Number(b.dataset.sh)); });
       const missing = buttons.filter(b => b.disabled).map(b => b.dataset.sh + ' 日');
-      document.getElementById('stock-seg-hint').textContent = !ready.size ? '預測產出後可切換 5 日／20 日' : missing.length ? missing.join('、') + '預測尚未產出' : '';
+      const none = s.delist_date ? '已下市，沒有預測' : '預測產出後可切換 5 日／20 日';
+      document.getElementById('stock-seg-hint').textContent = !ready.size ? none : missing.length ? missing.join('、') + '預測尚未產出' : '';
     };
     const drawHorizon = () => {
       controls();
