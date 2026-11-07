@@ -151,8 +151,11 @@ def test_the_report_refuses_partitions_exported_without_the_source_gap_rules(
             before=str(before_table(stored / "before.csv")),
             start="2016-01-01",
             end="2016-12-31",
+            output=str(stored / "data.md"),
+            appendix=str(stored / "appendix"),
             stdout=StringIO(),
         )
+    assert not (stored / "data.md").exists()
 
 
 def test_the_report_refuses_partitions_stamped_with_other_rules(
@@ -168,8 +171,11 @@ def test_the_report_refuses_partitions_stamped_with_other_rules(
             before=str(before_table(stored / "before.csv")),
             start="2016-01-01",
             end="2016-12-31",
+            output=str(stored / "data.md"),
+            appendix=str(stored / "appendix"),
             stdout=StringIO(),
         )
+    assert not (stored / "data.md").exists()
 
 
 def test_the_report_checks_the_rules_of_the_gap_years_and_the_screening_window(
