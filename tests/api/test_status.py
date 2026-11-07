@@ -109,20 +109,19 @@ def test_warnings_are_counted_for_the_strip(client: Client, loaded: None) -> Non
 
 
 @time_machine.travel(FRIDAY_NIGHT, tick=False)
-def test_a_check_written_once_per_stock_counts_once_and_keeps_its_rows(
+def test_a_check_with_several_rows_counts_once_and_keeps_its_rows(
     client: Client, loaded: None
 ) -> None:
     DataQualityLog.objects.filter(date=OCT_30, check_name=CHECKS[0]).update(severity="warning")
-    for stock in ("1101", "1102", "2330"):
-        filings = [{"period": "2026Q2", "fin_type": "consolidated"}]
+    for kind in ("consolidated", "individual", "other"):
         DataQualityLog.objects.create(
             date=OCT_30,
-            check_name="statement_filed_later",
+            check_name="statement_type_mismatch",
             severity="warning",
-            detail={"stock_id": stock, "filings": filings},
+            detail={"statements": [{"fin_type": kind}]},
         )
     DataQualityLog.objects.create(
-        date=OCT_30, check_name="statement_filed_late", severity="info", detail={"stock_id": "2330"}
+        date=OCT_30, check_name="statement_source_mismatch", severity="info", detail={}
     )
 
     quality = envelope_of(client.get("/api/status"))["data"]["quality"]
