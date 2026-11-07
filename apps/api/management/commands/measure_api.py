@@ -1,4 +1,4 @@
-"""Time the twelve read-only API endpoints in process and print a markdown table."""
+"""Time the thirteen read-only API endpoints in process and print a markdown table."""
 
 import math
 import statistics
@@ -20,6 +20,7 @@ ENDPOINTS = (
     "/api/stocks/{stock}/predictions",
     "/api/stocks/{stock}/features",
     "/api/stocks/{stock}/history",
+    "/api/stocks?q={stock}",
     "/api/status",
     "/api/predictions",
     "/api/models",

@@ -46,10 +46,10 @@ def test_every_endpoint_gets_its_median_p95_and_max(
     call_command("measure_api", "--repeat", "20", stdout=out)
 
     rows = rows_of(out)
-    assert len(rows) == 12
+    assert len(rows) == 13
     assert rows[0] == ["`/api/stocks/2330`", "200", "1.5", "2.0", "50.0"]
     assert all(row[1:] == ["200", "1.5", "2.0", "50.0"] for row in rows)
-    assert len(calls) == 12 * (20 + 1)
+    assert len(calls) == 13 * (20 + 1)
 
 
 def test_statuses_other_than_the_first_are_counted(

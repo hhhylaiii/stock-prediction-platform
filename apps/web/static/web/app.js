@@ -86,6 +86,8 @@
   try { const c = localStorage.getItem('twp-chart'); if (c === 'line' || c === 'candle') state.chart = c; } catch (e) { state.chart = 'candle'; }
   try { const w = JSON.parse(localStorage.getItem('twp-watch') || '[]'); if (Array.isArray(w)) w.filter(c => STOCK_CODE.test(c)).forEach(c => state.watch.add(c)); } catch (e) { state.watch.clear(); }
   function saveWatch() { try { localStorage.setItem('twp-watch', JSON.stringify([...state.watch])); } catch (e) { return; } }
+  try { const s = localStorage.getItem('twp-stock'); if (s && STOCK_CODE.test(s)) state.stock = s; } catch (e) { state.stock = '2330'; }
+  function saveStock() { try { localStorage.setItem('twp-stock', state.stock); } catch (e) { return; } }
 
   const statusEl = document.getElementById('status');
   const summaryOf = day => ({ passed: day.passed, worst: day.worst, missing_checks: day.missing_checks, warnings: new Set(day.checks.filter(c => c.severity === 'warning').map(c => c.check_name)).size });
@@ -120,6 +122,7 @@
 
   const watchOnlyBtn = document.getElementById('watch-only');
   const qEl = document.getElementById('q');
+  const gotoEl = document.getElementById('today-goto');
 
   const rowsEl = document.getElementById('rows');
   const countEl = document.getElementById('count');
@@ -210,7 +213,7 @@
   }
 
   function emptyHtml(meta) {
-    if (state.q.trim()) return '<div class="empty">沒有符合「' + esc(state.q.trim()) + '」的股票。試試代號或公司名稱的一部分。</div>';
+    if (state.q.trim()) return '<div class="empty">今日預測裡沒有符合「' + esc(state.q.trim()) + '」的股票。試試代號或公司名稱的一部分。</div>';
     if (watchingOnly()) return '<div class="empty">追蹤的股票沒有這一期的預測。</div>';
     if (!meta.date) return '<div class="empty" id="today-empty">預測資料尚未產出。模型上線後，這裡會列出全市場的排名。</div>';
     return '<div class="empty">沒有符合條件的股票。</div>';
@@ -234,9 +237,30 @@
     return { rows: data, meta: meta };
   }
 
+  const findStocks = async text => (await api.get('stocks', { q: text.slice(0, SEARCH_MAX) })).data;
+
+  const goto = { text: '', ticket: 0 };
+
+  async function loadGoto() {
+    const text = state.q.trim();
+    if (text === goto.text) return;
+    goto.text = text;
+    const mine = ++goto.ticket;
+    gotoEl.hidden = true;
+    gotoEl.innerHTML = '';
+    if (!STOCK_CODE.test(text)) return;
+    let hits;
+    try { hits = await findStocks(text); } catch (err) { hits = []; if (mine === goto.ticket) goto.text = null; }
+    const hit = hits.find(row => row.stock_id.toLowerCase() === text.toLowerCase());
+    if (mine !== goto.ticket || !hit) return;
+    gotoEl.innerHTML = '<a href="#stock-' + encodeURIComponent(hit.stock_id) + '">查看 ' + esc(hit.stock_id) + ' ' + esc(hit.name) + ' 個股頁</a>';
+    gotoEl.hidden = false;
+  }
+
   async function loadToday() {
     const token = ++state.todayToken;
     controls();
+    loadGoto();
     prevBtn.disabled = nextBtn.disabled = true;
     let result;
     try {
@@ -273,6 +297,57 @@
   const stockEl = document.getElementById('view-stock');
   const backLink = '<a class="back" href="#today"><svg aria-hidden="true" width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2.5L4.5 7L9 11.5"></path></svg>今日預測</a>';
   const waiting = '<p class="placeholder">預測資料尚未產出。</p>';
+  const stockTop = () => '<div class="stock-top">' + backLink + '<form class="search stock-go" id="stock-go" role="search">' +
+    '<input type="search" id="stock-q" placeholder="前往個股：代號或名稱" aria-label="前往個股：代號或名稱" autocomplete="off" maxlength="' + SEARCH_MAX + '">' +
+    '<div class="stock-hits" id="stock-hits" hidden></div></form></div>';
+  const hitHtml = hit => '<a href="#stock-' + encodeURIComponent(hit.stock_id) + '"><span class="code">' + esc(hit.stock_id) + '</span> ' + esc(hit.name) +
+    ' <span class="faint small">' + esc(hit.market_label) + (hit.delisted ? ' 已下市' : '') + '</span></a>';
+
+  function bindStockSearch() {
+    const form = document.getElementById('stock-go'), input = document.getElementById('stock-q'), list = document.getElementById('stock-hits');
+    let timer = null, ticket = 0, shown = { text: null, hits: [] };
+    const show = html => { list.innerHTML = html; list.hidden = !html; };
+    const close = () => { clearTimeout(timer); ticket += 1; show(''); };
+    const lookup = async text => {
+      const mine = ++ticket;
+      try {
+        const hits = await findStocks(text);
+        if (mine !== ticket) return null;
+        shown = { text: text, hits: hits };
+        show(hits.length ? hits.map(hitHtml).join('') : '<div class="empty small">找不到這檔股票。</div>');
+        return hits;
+      } catch (err) {
+        if (mine === ticket) show(errorBox(err));
+        return null;
+      }
+    };
+    input.addEventListener('input', () => {
+      clearTimeout(timer);
+      const text = input.value.trim();
+      if (!text) { ticket += 1; show(''); return; }
+      timer = setTimeout(() => lookup(text), 250);
+    });
+    form.addEventListener('submit', async e => {
+      e.preventDefault();
+      clearTimeout(timer);
+      const text = input.value.trim();
+      if (!text) return;
+      const hits = shown.text === text ? shown.hits : await lookup(text);
+      if (!hits || !hits.length) return;
+      close();
+      location.hash = '#stock-' + encodeURIComponent(hits[0].stock_id);
+    });
+    form.addEventListener('keydown', e => { if (e.key === 'Escape') close(); });
+    form.addEventListener('focusout', e => { if (!form.contains(e.relatedTarget)) close(); });
+    list.addEventListener('mousedown', e => e.preventDefault());
+    list.addEventListener('click', e => { if (e.target.closest('a')) close(); });
+  }
+
+  function showStockProblem(html) {
+    stockEl.innerHTML = stockTop() + html;
+    bindStockSearch();
+  }
+  const missingHtml = code => '<div class="empty" id="stock-missing">找不到這檔股票（' + esc(code) + '）。</div>';
 
   function quoteHtml(quote) {
     if (!quote) return '<div class="price"><span class="faint small">尚無成交資料</span></div>';
@@ -312,13 +387,13 @@
   function stockHtml(s) {
     const watching = state.watch.has(s.stock_id);
     const tags = [s.market_label, s.industry, s.delist_date ? s.delist_date + ' 下市' : ''].filter(Boolean);
-    return backLink +
+    return stockTop() +
       '<div class="stockhead"><div><div class="id"><h1><span class="code">' + esc(s.stock_id) + '</span><span id="stock-name">' + esc(s.name) + '</span></h1>' +
       '<span class="tags">' + tags.map(t => '<span>' + esc(t) + '</span>').join('') + '</span></div>' + quoteHtml(s.quote) + '</div>' +
       '<div class="aside"><div class="kpi" id="stock-rank"><div class="l"></div><div class="v">—</div></div>' +
       '<button type="button" class="ghost" id="watch-btn" aria-pressed="' + watching + '" style="height:36px">' + (watching ? '已追蹤' : '加入追蹤') + '</button></div></div>' +
       '<div class="section"><div class="sechead"><div class="control"><h2 id="chart-title"></h2>' +
-      '<div class="seg" role="group" aria-label="預測期間" id="stock-seg"><button type="button" data-sh="5">5 日</button><button type="button" data-sh="20">20 日</button></div>' +
+      '<div class="seg" role="group" aria-label="預測期間" id="stock-seg"><button type="button" data-sh="5">5 日</button><button type="button" data-sh="20">20 日</button></div><span class="faint small" id="stock-seg-hint"></span>' +
       '<div class="seg" role="group" aria-label="圖表類型" id="chart-seg"><button type="button" data-ct="candle" aria-pressed="' + (state.chart === 'candle') + '">K 線</button><button type="button" data-ct="line" aria-pressed="' + (state.chart === 'line') + '">收盤線</button></div></div>' +
       '<div class="legend" id="chart-legend"></div></div><div class="chart" id="price-chart"></div></div>' +
       '<div class="two"><section id="features"><h2>這次預測怎麼來的</h2><div class="body">' + loading + '</div></section>' +
@@ -440,7 +515,7 @@
   async function renderStock(code) {
     const token = ++state.stockToken;
     if (!STOCK_CODE.test(code)) {
-      stockEl.innerHTML = backLink + errorBox({ message: '找不到股票 ' + code + '。' });
+      showStockProblem(missingHtml(code));
       return;
     }
     stockEl.innerHTML = backLink + loading;
@@ -451,13 +526,15 @@
     const [stock, prices] = await Promise.all([settle(api.get('stocks/' + code)), settle(api.get('stocks/' + code + '/prices', { days: PRICE_DAYS }))]);
     if (token !== state.stockToken) return;
     if (stock.status === 'rejected') {
-      stockEl.innerHTML = backLink + errorBox(stock.reason);
+      showStockProblem(stock.reason && stock.reason.status === 404 ? missingHtml(code) : errorBox(stock.reason));
       return;
     }
     const s = stock.value.data;
     state.stock = s.stock_id;
+    saveStock();
     document.querySelector('[data-nav="stock"]').setAttribute('href', '#stock-' + encodeURIComponent(state.stock));
     stockEl.innerHTML = stockHtml(s);
+    bindStockSearch();
     document.getElementById('watch-btn').addEventListener('click', e => {
       if (state.watch.has(s.stock_id)) state.watch.delete(s.stock_id); else state.watch.add(s.stock_id);
       saveWatch();
@@ -483,6 +560,15 @@
       else drawPriceChart(host, s, bars, state.chart, fan);
     };
     const showRank = () => { document.querySelector('#stock-rank .v').innerHTML = rankHtml(entryOf(), forecasts.status); };
+    const showSeg = () => {
+      if (forecasts.status !== 'fulfilled') return;
+      const ready = new Set(forecasts.value.data.horizons.filter(entry => entry.prediction).map(entry => entry.horizon));
+      const buttons = [...document.querySelectorAll('#stock-seg [data-sh]')];
+      buttons.forEach(b => { b.disabled = !ready.has(Number(b.dataset.sh)); });
+      const missing = buttons.filter(b => b.disabled).map(b => b.dataset.sh + ' 日');
+      const none = s.delist_date ? '已下市，沒有預測' : '預測產出後可切換 5 日／20 日';
+      document.getElementById('stock-seg-hint').textContent = !ready.size ? none : missing.length ? missing.join('、') + '預測尚未產出' : '';
+    };
     const drawHorizon = () => {
       controls();
       document.querySelectorAll('#stock-seg [data-sh]').forEach(b => b.setAttribute('aria-pressed', String(Number(b.dataset.sh) === state.h)));
@@ -503,6 +589,7 @@
       forecasts = result;
       document.querySelector('#forecasts .body').innerHTML = result.status === 'rejected' ? errorBox(result.reason) : forecastsHtml(result.value.data);
       showRank();
+      showSeg();
       if (fanOf(entryOf())) drawChart();
     });
     later.history.then(result => { if (token === state.stockToken) showHistory(document.getElementById('history'), result); });

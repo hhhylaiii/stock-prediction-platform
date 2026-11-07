@@ -35,6 +35,10 @@ class PredictionQuery(serializers.Serializer[Any]):
     q = serializers.CharField(max_length=32, required=False, allow_blank=True)
 
 
+class StockSearchQuery(serializers.Serializer[Any]):
+    q = serializers.CharField(max_length=32)
+
+
 class DateQuery(serializers.Serializer[Any]):
     date = serializers.DateField(required=False)
 

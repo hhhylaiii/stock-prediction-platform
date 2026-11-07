@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 from django.core.cache import cache
 from django.core.management import call_command
+from django.test import override_settings
 from playwright.sync_api import Page, expect
 from pytest_django.live_server_helper import LiveServer
 
@@ -269,6 +270,7 @@ def bench(predicted: Seed) -> Seed:
     return predicted
 
 
+@override_settings(API_THROTTLE_RATE="100000/min")
 def test_capture_the_report_and_views_on_the_seed(
     page: Page, live_server: LiveServer, bench: Seed, tmp_path: Path
 ) -> None:
