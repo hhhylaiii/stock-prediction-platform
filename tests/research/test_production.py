@@ -16,9 +16,9 @@ from apps.research import (
     holdout,
     lgbm_runs,
     monitor_refs,
-    prediction_cache,
     production,
 )
+from apps.research.baseline_runs import BASELINE
 from apps.research.holdout import HoldoutError, claim_holdout, production_pass
 from apps.research.lgbm_runs import MODEL, run_fold, run_id
 from apps.research.models import ModelRun, ModelStatus
@@ -45,7 +45,15 @@ from apps.research.walkforward import (
     generate_folds,
     oos_start,
 )
-from tests.research.run_panels import CONFIG, KEPT, UNSCREENED, research, weekdays
+from tests.research.run_panels import (
+    CONFIG,
+    KEPT,
+    UNSCREENED,
+    claim_all,
+    panel_calendar,
+    research,
+    weekdays,
+)
 
 AS_OF = date(2026, 10, 30)
 SPEC = WalkForwardConfig()
@@ -119,11 +127,6 @@ def test_production_folds_refuse_a_window_before_the_data(long_calendar: Trading
         shadow_fold(long_calendar, date(2013, 3, 29), SPEC)
 
 
-def panel_calendar() -> TradingDays:
-    days = weekdays()
-    return TradingDays(days, days[0], days[-1])
-
-
 @pytest.fixture
 def frozen(run_panel: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """The one-year panel with its last month past the holdout start and every scope claimed."""
@@ -166,6 +169,63 @@ def test_run_fold_checks_a_production_write_before_touching_the_cache(
 
     with pytest.raises((ValueError, HoldoutError), match=message):
         run_fold("rank", fold, run_key, frozen, KEPT, 0, production=production_pass("rank"))
+
+    assert cached.read_bytes() == b"kept"
+    assert not ModelRun.objects.filter(run_key=run_key).exists()
+
+
+@pytest.mark.django_db
+def test_a_production_pass_fits_the_shadow_baselines_past_the_holdout_start(frozen: Path) -> None:
+    fold = shadow_fold(panel_calendar(), weekdays()[-1], replace(CONFIG, train_months=5))
+    features = baseline_runs.scope_features("interval")
+    with pytest.raises(HoldoutError, match="holdout"):
+        baseline_runs.run_fold("interval", fold, "interval-prod-shadow", frozen, features)
+
+    baseline_runs.run_fold(
+        "interval",
+        fold,
+        "interval-prod-shadow",
+        frozen,
+        features,
+        production=production_pass("interval"),
+        annotate=lambda run: {"research_run_key": "interval-wf1"},
+    )
+
+    runs = {run.model_type: run for run in ModelRun.objects.filter(run_key="interval-prod-shadow")}
+    assert set(runs) == {"logistic", "histq"}
+    assert {run.params["research_run_key"] for run in runs.values()} == {"interval-wf1"}
+    cached = load_fold_predictions("interval-prod-shadow", BASELINE, fold)
+    assert (cached["date"].min(), cached["date"].max()) == (fold.test_start, fold.test_end)
+    assert cached["logistic_h20"].notna().all()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("run_key", "index", "message"),
+    [
+        ("rank-prod-shadow", 0, "start with interval-"),
+        ("interval-final", 0, "holdout run"),
+        ("interval-prod-shadow", 7, "production folds only"),
+    ],
+)
+def test_baseline_run_fold_checks_a_production_write_before_touching_the_cache(
+    frozen: Path, run_key: str, index: int, message: str
+) -> None:
+    shadowed = shadow_fold(panel_calendar(), weekdays()[-1], replace(CONFIG, train_months=5))
+    fold = replace(shadowed, index=index)
+    cached = fold_path(run_key, BASELINE, fold.index)
+    cached.parent.mkdir(parents=True)
+    cached.write_bytes(b"kept")
+
+    with pytest.raises((ValueError, HoldoutError), match=message):
+        baseline_runs.run_fold(
+            "interval",
+            fold,
+            run_key,
+            frozen,
+            baseline_runs.scope_features("interval"),
+            production=production_pass("interval"),
+        )
 
     assert cached.read_bytes() == b"kept"
     assert not ModelRun.objects.filter(run_key=run_key).exists()
@@ -238,33 +298,6 @@ def test_a_shadow_fold_is_evaluated_on_its_labelled_months(frozen: Path) -> None
     assert cached["date"].max() == fold.test_end
 
 
-@pytest.fixture
-def researched(run_panel: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Research caches of a rank and an interval walk-forward, then the panel's holdout start.
-
-    The panel's research folds hold fewer than 60 IC days, so the rolling window is 5 here.
-    """
-    monkeypatch.setattr(lgbm_runs, "MAX_ROUNDS", 80)
-    chosen = [fold for fold in research() if fold.research]
-    masked = Variant(masked=("tech_ret_60d",))
-    lgbm_runs.run_folds("rank", chosen, "rank-wf1", run_panel, variant=masked)
-    baseline_runs.run_folds("interval", chosen, "interval-wf1", run_panel)
-    monkeypatch.setattr(holdout, "SPEC_HOLDOUT_START", CONFIG.holdout_start)
-    monkeypatch.setattr(prediction_cache, "SPEC_HOLDOUT_START", CONFIG.holdout_start)
-    rolling = monitor_refs.rolling_ic_threshold
-    monkeypatch.setattr(monitor_refs, "rolling_ic_threshold", lambda ic: rolling(ic, 5))
-    monkeypatch.setattr(production, "SHADOW_MONTHS", 4)
-    monkeypatch.setattr(production, "BAGS", 2)
-    designs = {scope: Design(config=CONFIG) for scope in ("rank", "return", "interval")}
-    monkeypatch.setattr(production, "DESIGNS", {**designs, "rank": Design(CONFIG, masked)})
-    return run_panel
-
-
-def claim_all() -> None:
-    for scope in ("rank", "return", "interval"):
-        claim_holdout(scope, f"{scope}-final", weekdays()[-1])
-
-
 @pytest.mark.django_db
 def test_build_run_waits_for_the_holdout_claim(researched: Path) -> None:
     with pytest.raises(HoldoutError, match="rank design is not frozen"):
@@ -321,6 +354,7 @@ def test_build_run_fits_the_model_and_its_shadow_on_the_frozen_design(researched
         assert run.train_end == shadow_fold(panel_calendar(), last, CONFIG).train_end
     fold = production_fold(panel_calendar(), last, CONFIG)
     assert set(load_fold_predictions("rank-prod", MODEL, fold)["date"]) == {last}
+    assert not fold_path("rank-prod-shadow", BASELINE, 0).exists()
 
 
 @pytest.mark.django_db
@@ -348,7 +382,22 @@ def test_build_run_command_gives_the_probability_model_the_research_brier(
     assert {run.params["research_run_key"] for run in runs.values()} == {"interval-wf1"}
     shadow = ModelRun.objects.filter(run_key="interval-prod-shadow")
     assert not any("brier_baseline" in run.params for run in shadow)
+    baselines = shadow.filter(model_type__in=["logistic", "histq"])
+    assert baselines.count() == 2
+    assert {production_note(run)["role"] for run in baselines} == {"shadow"}
+    assert {run.params["research_run_key"] for run in baselines} == {"interval-wf1"}
+    shadow_fold_ = shadow_fold(panel_calendar(), last, CONFIG)
+    assert (
+        load_fold_predictions("interval-prod-shadow", BASELINE, shadow_fold_)["logistic_h20"]
+        .notna()
+        .all()
+    )
+    assert not ModelRun.objects.filter(run_key="interval-prod", model_type="logistic").exists()
+    assert not fold_path("interval-prod", BASELINE, 0).exists()
     assert f"Brier baseline from interval-wf1: {brier:.4f}" in out.getvalue()
+    listed = list(shadow.order_by("run_id").values_list("run_id", flat=True))
+    assert f"interval-prod-shadow: {', '.join(listed)}" in out.getvalue()
+    assert "interval-prod-shadow.logistic.h20.f000" in listed
     assert "rolling IC" not in out.getvalue()
 
 
@@ -362,6 +411,10 @@ def test_build_run_fits_the_return_scope_without_references(researched: Path) ->
     assert built.references == {}
     assert built.model == ["return-prod.lightgbm.h5.f000"]
     assert built.shadow == ["return-prod-shadow.lightgbm.h5.f000"]
+    shadow_fold_ = shadow_fold(panel_calendar(), weekdays()[-1], CONFIG)
+    zero = load_fold_predictions("return-prod-shadow", BASELINE, shadow_fold_)["zero_h5"]
+    assert (zero == 0).all()
+    assert not fold_path("return-prod", BASELINE, 0).exists()
     model = ModelRun.objects.get(run_key="return-prod")
     assert production_note(model)["role"] == "model"
     assert "rolling_ic_threshold" not in model.params
@@ -538,6 +591,30 @@ def test_a_failed_build_leaves_an_annotated_shadow_and_builds_again(
 
     assert len(built.model) == 2
     assert built.shadow == sorted(run.run_id for run in shadow)
+
+
+@pytest.mark.django_db
+def test_a_failed_rebuild_keeps_no_earlier_gates(
+    researched: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    claim_all()
+    last = weekdays()[-1]
+    build_run("rank", "rank-prod", "rank-wf1", last, researched)
+    for run in ModelRun.objects.filter(run_key__in=["rank-prod", "rank-prod-shadow"]):
+        ModelRun.objects.filter(pk=run.pk).update(params={**run.params, "gates": {"passed": True}})
+    fit = lgbm_runs.FITS["rank"]
+
+    def broken(job: Any) -> Any:
+        if job.run_key == "rank-prod":
+            raise MemoryError("the fit ran out of memory")
+        return fit(job)
+
+    monkeypatch.setitem(lgbm_runs.FITS, "rank", broken)
+    with pytest.raises(MemoryError, match="out of memory"):
+        build_run("rank", "rank-prod", "rank-wf1", last, researched)
+
+    assert ModelRun.objects.filter(run_key="rank-prod").count() == 2
+    assert not ModelRun.objects.filter(run_key="rank-prod", params__has_key="gates").exists()
 
 
 @pytest.mark.django_db

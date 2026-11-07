@@ -328,7 +328,7 @@ Oct 29, 2026 · @Owen Lai
 **模型管理與上線後監控**
 
 - 每次訓練寫一列 `model_run`，含參數、特徵清單、訓練區間、指標、seed、套件版本、特徵 Parquet 的 hash；模型檔以 `run_id` 命名存檔。`status` 取值 candidate、active、degraded、retired。
-- 每月重訓：新模型 N 以當下為訓練窗終點；同時訓一個設定相同的影子模型 N′，訓練窗截止在 6 個月加 20 個交易日之前，用來在最近 6 個月上做 OOS 檢查。上線門檻全部是對 N 的健全性檢查，不拿 N′ 跟舊模型比 IC（兩個同配方模型比 6 個月 IC 是噪音，且 N′ 看不到 N 新加入的最近 6 個月資料）：(1) N 與現役模型在最新交易日的預測 Spearman 相關 ≥ 0.7；(2) N 與現役模型 gain 前 10 名特徵重疊 ≥ 6 個；(3) N′ 最近 6 個月 OOS 達絕對門檻：排名 rank IC > 0、區間覆蓋率在 70% 到 90%、機率 Brier 不高於 logistic baseline、波動率 QLIKE 不高於 `tech_vol_20d` baseline、5 日 MAE 不高於零預測；(4) N 訓練窗內 `data_quality_log` 無 severity = error 的紀錄。任一不過，舊模型續用、告警並記錄原因，是否強制換模由人工決定。
+- 每月重訓：新模型 N 以當下為訓練窗終點；同時訓一個設定相同的影子模型 N′，訓練窗截止在 6 個月加 20 個交易日之前，用來在最近 6 個月上做 OOS 檢查。上線門檻全部是對 N 的健全性檢查，不拿 N′ 跟舊模型比 IC（兩個同配方模型比 6 個月 IC 是噪音，且 N′ 看不到 N 新加入的最近 6 個月資料）：(1) N 與現役模型在最新交易日的預測 Spearman 相關 ≥ 0.7；(2) N 與現役模型 gain 前 10 名特徵重疊 ≥ 6 個；(3) N′ 最近 6 個月 OOS 達絕對門檻：排名 rank IC > 0、區間覆蓋率在 70% 到 90%、機率 Brier 不高於 logistic baseline、波動率 QLIKE 不高於 `tech_vol_20d` baseline、5 日 MAE 不高於零預測；(4) N 訓練窗起點到 as_of（N 最後幾列訓練資料的 label 讀到 as_of 的價格）之間，`data_quality_log` 無 severity = error 的紀錄。任一不過，舊模型續用、告警並記錄原因，是否強制換模由人工決定。
 - 線上預測只用 `model_run` 中 `status = active` 的版本，每類目標各一個。
 - 事後評估：每日對 horizon 已到期的預測，從 `prediction` 與 `label_daily` 算實際 rank IC、覆蓋率、區間寬度、Brier、AUC、MAE（報酬或波動率，依 run 的目標）、方向準確率（同樣不計 label 為 0 的列），只算 universe 內且 `untradable_t1 = 0` 的列，寫入 `model_monitor` 表；服務層的「歷史預測準確度」讀這張表。
 - 告警：60 個交易日滾動 rank IC 低於門檻、覆蓋率出 70% 到 90%、Brier 高於 logistic baseline，任一成立就告警並把該模型 `status` 改 degraded，API 回應附警示；是否停用由人工決定。滾動 IC 的門檻不用固定 0：20 日 horizon 下 60 個交易日只有約 3 個獨立樣本，健康模型（IC 0.03）也會有約三成時間滾動均值小於 0；門檻取研究期 walk-forward 全部 60 日滾動 IC 的 5% 分位，寫進 `model_run.params`，每次重訓更新。

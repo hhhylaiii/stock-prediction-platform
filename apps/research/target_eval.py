@@ -77,6 +77,7 @@ class Comparison:
     baseline: float
     nw_t: float
     by_fold: pd.DataFrame
+    days: int = 0
 
 
 @dataclass(frozen=True)
@@ -103,6 +104,7 @@ class IntervalEvaluation:
     reliability: pd.DataFrame
     ece: float
     ece_raw: float
+    coverage_days: int = 0
 
 
 def scope_of(run_key: str) -> str:
@@ -161,6 +163,7 @@ def paired(first: pd.Series, second: pd.Series, folds: Sequence[Fold]) -> Compar
         float(research_ic(second, folds).mean()),
         nw_t,
         by_fold,
+        int(research_ic(first, folds).notna().sum()),
     )
 
 
@@ -265,6 +268,7 @@ def evaluate_interval(frame: pd.DataFrame, folds: Sequence[Fold]) -> IntervalEva
         reliability=reliability_table(_up_rows(research, [prob]), UP_LABEL, prob),
         ece=_ece(research, prob),
         ece_raw=_ece(research, f"{MODEL}_prob_raw_h{VOL_DAYS}"),
+        coverage_days=int(research_ic(covered, folds).notna().sum()),
     )
 
 

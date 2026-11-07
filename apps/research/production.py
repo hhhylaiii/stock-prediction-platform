@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from apps.market.calendar import TradingDays
+from apps.research import baseline_runs
 from apps.research.baseline_runs import check_run_key
 from apps.research.holdout import (
     PRODUCTION_FOLD,
@@ -108,6 +109,8 @@ class Built:
 DESIGNS: dict[str, Design] = {scope: Design() for scope in HoldoutScope.values}
 BAGS = 5
 SHADOW = "shadow"
+GATES = "gates"
+BASELINED = (HoldoutScope.RETURN, HoldoutScope.INTERVAL)
 REFERENCED: dict[str, str] = {
     ModelObjective.RANK: IC_THRESHOLD,
     ModelObjective.CLASSIFICATION: BRIER_BASELINE,
@@ -219,6 +222,17 @@ def _fit(
         production=granted,
         annotate=annotate,
     )
+    return _run_ids(key)
+
+
+def _clear_gates(run_key: str) -> None:
+    """Drop the gates an earlier check recorded, so a rebuild never keeps a stale verdict."""
+    for run in ModelRun.objects.filter(run_key=run_key, params__has_key=GATES):
+        kept = {name: value for name, value in run.params.items() if name != GATES}
+        ModelRun.objects.filter(pk=run.pk).update(params=kept)
+
+
+def _run_ids(key: str) -> list[str]:
     return list(
         ModelRun.objects.filter(run_key=key).order_by("run_id").values_list("run_id", flat=True)
     )
@@ -227,7 +241,7 @@ def _fit(
 def build_run(
     scope: str, run_key: str, research_run_key: str, as_of: date, directory: Path, seed: int = 0
 ) -> Built:
-    """Fit shadow N′, then N, on scope's frozen design through as_of; N carries the references."""
+    """Fit shadow N′ with its return or interval baselines, then N; N carries the references."""
     granted = production_pass(scope)
     _check_keys(scope, run_key, research_run_key, granted)
     design = DESIGNS[scope]
@@ -250,9 +264,11 @@ def build_run(
         role: {"research_run_key": research_run_key, PRODUCTION: note}
         for role, note in roles.items()
     }
+    shadowed = shadow_fold(calendar, as_of, design.config)
+    _clear_gates(run_key)
     shadow = _fit(
         scope,
-        shadow_fold(calendar, as_of, design.config),
+        shadowed,
         shadow_key(run_key),
         directory,
         features,
@@ -261,6 +277,17 @@ def build_run(
         granted,
         _annotation(notes["shadow"], {}),
     )
+    if scope in BASELINED:
+        baseline_runs.run_fold(
+            scope,
+            shadowed,
+            shadow_key(run_key),
+            directory,
+            baseline_runs.scope_features(scope),
+            production=granted,
+            annotate=_annotation(notes["shadow"], {}),
+        )
+        shadow = _run_ids(shadow_key(run_key))
     model = _fit(
         scope,
         production_fold(calendar, as_of, design.config),

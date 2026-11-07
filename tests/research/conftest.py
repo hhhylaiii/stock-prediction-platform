@@ -5,8 +5,18 @@ from typing import Any
 import pytest
 
 from apps.market.calendar import TradingDays
-from apps.research import baseline_runs, lgbm_runs, target_models
-from tests.research.run_panels import build_panel, research
+from apps.research import (
+    baseline_runs,
+    holdout,
+    lgbm_runs,
+    monitor_refs,
+    prediction_cache,
+    production,
+    target_models,
+)
+from apps.research.production import Design
+from apps.research.rank_model import Variant
+from tests.research.run_panels import CONFIG, build_panel, research
 
 
 def weekday_calendar(start: date, end: date) -> TradingDays:
@@ -51,4 +61,26 @@ def served_runs(run_panel: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     last = [fold for fold in research() if fold.research][-1]
     for scope in ("rank", "return", "interval"):
         lgbm_runs.run_folds(scope, [last], f"{scope}-live", run_panel, bags=2)
+    return run_panel
+
+
+@pytest.fixture
+def researched(run_panel: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Research caches of a rank and an interval walk-forward, then the panel's holdout start.
+
+    The panel's research folds hold fewer than 60 IC days, so the rolling window is 5 here.
+    """
+    monkeypatch.setattr(lgbm_runs, "MAX_ROUNDS", 80)
+    chosen = [fold for fold in research() if fold.research]
+    masked = Variant(masked=("tech_ret_60d",))
+    lgbm_runs.run_folds("rank", chosen, "rank-wf1", run_panel, variant=masked)
+    baseline_runs.run_folds("interval", chosen, "interval-wf1", run_panel)
+    monkeypatch.setattr(holdout, "SPEC_HOLDOUT_START", CONFIG.holdout_start)
+    monkeypatch.setattr(prediction_cache, "SPEC_HOLDOUT_START", CONFIG.holdout_start)
+    rolling = monitor_refs.rolling_ic_threshold
+    monkeypatch.setattr(monitor_refs, "rolling_ic_threshold", lambda ic: rolling(ic, 5))
+    monkeypatch.setattr(production, "SHADOW_MONTHS", 4)
+    monkeypatch.setattr(production, "BAGS", 2)
+    designs = {scope: Design(config=CONFIG) for scope in ("rank", "return", "interval")}
+    monkeypatch.setattr(production, "DESIGNS", {**designs, "rank": Design(CONFIG, masked)})
     return run_panel
