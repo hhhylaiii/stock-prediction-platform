@@ -138,6 +138,12 @@ class TwseClient(SourceClient):
     def build(cls, limiter: RateLimiter, session: requests.Session | None = None) -> "TwseClient":
         return cls(limiter, str(settings.TWSE_BASE_URL), float(settings.TWSE_TIMEOUT), session)
 
+    def check_payload(self, payload: dict[str, Any]) -> None:
+        """TWSE says it is busy inside a 200 answer; that answer is retried, never kept."""
+        stat = str(payload.get("stat", ""))
+        if BUSY_STAT in stat:
+            raise RetryableError(f"TWSE is busy: {stat}")
+
     def holiday_schedule(self, year: int) -> dict[str, Any]:
         """The 市場開休市日期 table of one year (2021 onwards); empty until TWSE publishes it."""
         params = {"date": f"{year}0101", "response": "json"}
@@ -370,11 +376,9 @@ class TwseAdapter(BaseAdapter):
         return event_frame(day_events([code for code in codes if code], day, FULL_DELIVERY))
 
     def _listed(self, dataset: str, path: str, params: dict[str, str]) -> dict[str, Any] | None:
-        """An answered list kept raw; None when nothing matched, retried later when busy."""
+        """An answered list kept raw; None when nothing matched."""
         payload = self.client.get_json(path, params)
         stat = str(payload.get("stat", ""))
-        if BUSY_STAT in stat:
-            raise RetryableError(f"TWSE {path} is busy: {stat}")
         self.save_raw(dataset, params, payload)
         if NO_DATA_STAT in stat:
             return None

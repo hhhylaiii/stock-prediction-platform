@@ -401,6 +401,19 @@ def test_a_busy_answer_is_retried_later_and_not_kept(
 
 @responses.activate
 @pytest.mark.django_db
+def test_a_busy_answer_is_retried_in_place_and_the_next_answer_kept(
+    adapter: TwseAdapter,
+) -> None:
+    responses.get(PUNISH, json={"stat": "系統忙碌中，請稍後再試！"})
+    responses.get(PUNISH, json=NO_DATA)
+    frame = adapter.normalize("disposition", adapter.fetch("disposition", DAY, DAY))
+    assert frame.empty
+    assert len(responses.calls) == 2
+    assert RawTwse.objects.get().payload == NO_DATA
+
+
+@responses.activate
+@pytest.mark.django_db
 def test_a_lowercase_ok_is_an_answer(
     adapter: TwseAdapter, load_fixture: Callable[[str], Any]
 ) -> None:
