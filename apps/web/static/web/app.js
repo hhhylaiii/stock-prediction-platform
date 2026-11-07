@@ -802,7 +802,8 @@
   function gateText(gate) {
     const value = typeof gate.value === 'number' ? '實際 ' + (Number.isInteger(gate.value) ? fmtInt(gate.value) : gate.value.toFixed(3)) : '';
     const sample = Number.isInteger(gate.sample) ? '樣本 ' + fmtInt(gate.sample) + (SAMPLE_UNITS[gate.sample_unit] || '') : '';
-    const parts = [gate.reason, value, gate.threshold ? '門檻 ' + gate.threshold : '', sample].filter(Boolean);
+    const threshold = has(gate.threshold) && gate.threshold !== '' ? '門檻 ' + gate.threshold : '';
+    const parts = [gate.reason, value, threshold, sample].filter(Boolean);
     return (GATES[gate.name] || gate.name) + (parts.length ? '（' + parts.join('，') + '）' : '');
   }
 

@@ -266,13 +266,25 @@ def test_the_latest_promotion_stays_on_top_for_thirty_sessions(
 def test_a_forced_swap_leads_with_its_reason(
     page: Page, live_server: LiveServer, seeded: Seed
 ) -> None:
-    failed = [
+    gates = [
         {
-            "slot": "rank 5 日",
-            "run_id": "rank5-n",
-            "gates": [{"name": "gain_overlap", "reason": "4 個"}],
-        }
+            "name": "gain_overlap",
+            "reason": "重疊太少",
+            "value": 4.0,
+            "threshold": 6,
+            "sample": 10,
+            "sample_unit": "features",
+        },
+        {
+            "name": "shadow_oos",
+            "reason": "",
+            "value": -0.01,
+            "threshold": 0,
+            "sample": 120,
+            "sample_unit": "days",
+        },
     ]
+    failed = [{"slot": "rank 5 日", "run_id": "rank5-n", "gates": gates}]
     detail = {"run_key": "prod-2026-11", "forced": True, "reason": XSS_NAME, "failed": failed}
     log(seeded, "model_promotion", "warning", detail)
 
@@ -281,7 +293,10 @@ def test_a_forced_swap_leads_with_its_reason(
     lines = promotion_lines(page)
     expect(lines).to_have_count(2)
     expect(lines.nth(0)).to_have_text(f"強制換模：{XSS_NAME}（prod-2026-11）")
-    expect(lines.nth(1)).to_have_text("排名 5 日（rank5-n）：與現役模型的重要特徵重疊（4 個）")
+    expect(lines.nth(1)).to_have_text(
+        "排名 5 日（rank5-n）：與現役模型的重要特徵重疊（重疊太少，實際 4，門檻 6，樣本 10 個特徵）"
+        "、影子模型最近 6 個月 OOS（實際 -0.010，門檻 0，樣本 120 天）"
+    )
     expect(page.locator("#model-checks img")).to_have_count(0)
 
 
