@@ -51,7 +51,7 @@ docker compose logs -f worker
 | 時間 | 工作 | 內容 | 備註 |
 | --- | --- | --- | --- |
 | 15:10 | `etl.prepare_day` | `refresh_calendar` 更正交易日曆（失敗寫 log，當晚 22:50 的 `etl_runs` 列出），再 `catch_up` 補抓前 14 天到前一交易日漏掉的日子；排程開始後沒跑過品質檢查的交易日（至少前一交易日）補跑，跑過但還有告警的重新判斷 | 先補抓再跑當日 |
-| 15:30 | `etl.run_batch prices` | 證交所、櫃買日價量與指數；證交所加權股價報酬指數，見下方「加權股價報酬指數」；當天的除權息、減資、面額變更、分割，見下方「每日除權息、減資、面額變更、分割」 | 除權息、恢復買賣的結果表在當天開盤前就公布 |
+| 15:30 | `etl.run_batch prices` | 證交所、櫃買日價量與指數；證交所加權股價報酬指數，見下方「加權股價報酬指數」；當天的除權息、減資、面額變更，見下方「每日除權息、減資、面額變更」 | 除權息、恢復買賣的結果表在當天開盤前就公布 |
 | 16:00 | `etl.refresh_master` | 用當天行情更新 `stock_master` | — |
 | 16:30 | `etl.run_batch afternoon` | 三大法人、本益比與淨值比、注意、處置、全額交割；證交所外資持股與發行股數 | 借券、當沖在 21:30；櫃買外資持股與發行股數在 18:30 |
 | 18:30 | `etl.run_batch qfii` | 櫃買外資持股與發行股數 | 櫃買每日 18:00、22:00 更新 |
@@ -173,20 +173,22 @@ uv run python manage.py reapply_dividend_dates --stock 2884 --stock 2885
 
 - 減資、分割這類只有參考價、沒有配息公告的事件，FinMind 沒有日期，等 2.7b 的預告表。
 
-## 每日除權息、減資、面額變更、分割（plan 2.7）
+## 每日除權息、減資、面額變更（plan 2.7）
 
 `dividend_event` 的每日來源是證交所、櫃買，每個交易日 15:30 的 prices 批各跑一次；歷史仍是 FinMind 回補。
 
-| 市場 | 除權息 | 減資 | 面額變更 | ETF 分割（反分割） |
-| --- | --- | --- | --- | --- |
-| 證交所 | TWT49U 除權除息計算結果；`權/息` 不是「息」的列另查 TWT49UDetail | TWTAUU | TWTB8U | TWTCAU |
-| 櫃買 | exDailyQ（逐日查，區間查詢最多回 100 筆） | revivt | pvChgRslt | — |
+| 市場 | 除權息 | 減資 | 面額變更 |
+| --- | --- | --- | --- |
+| 證交所 | TWT49U 除權除息計算結果；`權/息` 不是「息」的列另查 TWT49UDetail | TWTAUU | TWTB8U |
+| 櫃買 | exDailyQ（逐日查，區間查詢最多回 100 筆） | revivt | pvChgRslt |
+
+- ETF 的分割、反分割（證交所 TWTCAU）不抓：ETF 不在研究母體，研究層也不讀 ETF 的價格；歷史上 FinMind 回補的 ETF 分割照舊留著。
 
 - 交易日 D 的一次執行只抓除權息（恢復買賣）日是 D 的列：結果表在 D 開盤前就公布（開盤競價基準要用），15:30 一定查得到，和 D 的行情同一批進來。不往後抓下一個交易日：先寫下的列不會被之後的執行更正，休市順延時會留下錯的那天。
-- 因子：除權息 = 除權息參考價 ÷ 除權息前收盤價，和 FinMind 回補用的 `after_price` 同一個數；減資、面額變更、分割 = 恢復買賣參考價 ÷ 停止買賣前收盤價。同一檔同一天有兩種以上時相乘。寫入或補上因子的股票會重算 `daily_price.adj_factor`。
-- 金額：現金股利（元／股）；股票股利換成元／股（每仟股無償配股 ÷ 100，面額 10 元），和 FinMind 的單位相同。減資、面額變更、分割的列金額是 0。
+- 因子：除權息 = 除權息參考價 ÷ 除權息前收盤價，和 FinMind 回補用的 `after_price` 同一個數；減資、面額變更 = 恢復買賣參考價 ÷ 停止買賣前收盤價。同一檔同一天有兩種以上時相乘。寫入或補上因子的股票會重算 `daily_price.adj_factor`。
+- 金額：現金股利（元／股）；股票股利換成元／股（每仟股無償配股 ÷ 100，面額 10 元），和 FinMind 的單位相同。減資、面額變更的列金額是 0。
 - 已有的列（FinMind 回補過的）只補空的 `adj_factor`；金額或因子不同時不覆蓋，記一列 `dividend_source_mismatch`（info，每個執行日、每個來源一列，重跑時取代）。新列的 `announce_date` 留空：結果表不是公告，公告日交給 FinMind 重套與之後的預告表（2.7b）。
-- raw 各頁分開存：`ex_rights`、`ex_rights_detail`、`capital_reduction`、`par_value_change`、`split`。`reprocess --dataset dividend_event` 會照網址找回各自的頁，但和每日執行一樣只補空的因子，不改已存的列。要用改過的解析重套某段日期：先刪掉那段 `ex_date` 的列（2026-10-31 之後的都是交易所寫的，之前的是 FinMind 回補，不要刪），`reprocess` 那段日期，再 `reapply_dividend_dates` 補回 FinMind 的公告日；刪掉後沒有重寫回來的股票，用 `recompute_adj_factor --stock <代號>` 重算。
+- raw 各頁分開存：`ex_rights`、`ex_rights_detail`、`capital_reduction`、`par_value_change`。`reprocess --dataset dividend_event` 會照網址找回各自的頁，但和每日執行一樣只補空的因子，不改已存的列。要用改過的解析重套某段日期：先刪掉那段 `ex_date` 的列（2026-10-31 之後的都是交易所寫的，之前的是 FinMind 回補，不要刪），`reprocess` 那段日期，再 `reapply_dividend_dates` 補回 FinMind 的公告日；刪掉後沒有重寫回來的股票，用 `recompute_adj_factor --stock <代號>` 重算。
 - `dividend_event` 擋研究閘門：除權息日當天的技術面報酬要用到當天的因子。
 - 上線時補 FinMind 回補之後的缺口（回補到 2026-10-30，catchup 只回看 14 天）：
 
