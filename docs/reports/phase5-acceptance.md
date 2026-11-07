@@ -20,7 +20,7 @@
 - 環境：本機 macOS、Docker 的 PostgreSQL 16。twp 那一輪是在 2026-11-05 15:54 量的，正好在 ETL 時段內。
 - 表一在 #72 的 commit「fix: keep negative monthly ic bars inside the chart」上量測，當時已含 #64、#65。截圖在加深 seed 之後截，當時已含 #68。表二在 #104 的分支上用 `phase5_report` 重量，分支以 develop 977c31b 為底，已含 #76。
 
-twp 那一輪用唯讀交易連線，任何寫入都會被資料庫拒絕。throttle 每個 process 各自計數，預設 300/min；`--repeat 20` 共 252 次（11 個端點時是 231 次），用不到調高，調高只是讓 `--repeat` 可以設得更大。指令會記下每一次呼叫的狀態碼，只要有一次不同，狀態欄就會寫成像 `200/429×3` 的樣子：
+twp 那一輪用唯讀交易連線，任何寫入都會被資料庫拒絕。throttle 每個 process 各自計數，預設 300/min；`--repeat 20` 共 273 次（11 個端點時是 231 次），用不到調高，調高只是讓 `--repeat` 可以設得更大。指令會記下每一次呼叫的狀態碼，只要有一次不同，狀態欄就會寫成像 `200/429×3` 的樣子：
 
 ```bash
 DATABASE_URL=<twp 的連線字串> PGOPTIONS='-c default_transaction_read_only=on' \
@@ -117,7 +117,7 @@ seed 的內容是 e2e 的基本資料再放大：
 
 - [ ] 4.9 之後、4.7 在 twp 產出真預測時，在主機上跑下面這個指令，把數字抄進本報告後勾 S5。
   - 先確認 web 映像含最新的頁面（見最後兩條）：`--views` 截的是正在跑的 web。
-  - 它會量 12 個端點（2026-11-07 加上 `/api/data-quality/corrections`）、透過 API 逐條檢查驗收條件、記下資料量，寫成 `docs/reports/phase5/twp.md`（不入庫）。
+  - 它會量 13 個端點（2026-11-07 加上 `/api/data-quality/corrections` 與 `/api/stocks?q=`）、透過 API 逐條檢查驗收條件、記下資料量，寫成 `docs/reports/phase5/twp.md`（不入庫）。
   - 排名、價格、區間、機率逐頁看全市場 universe 內的股票；個股頁與特徵看 `--stock`（預設 2330），特徵至少要有一項原始值。
   - 每條都通過才截圖。每頁等資料區塊都載完（不剩「載入中」）才截，三張都截到才搬進 `docs/reports/phase5/`，蓋掉現在的 seed 截圖；中途失敗時一張都不動。
   - 有一條未通過時，報告照樣寫出，指令以非 0 結束並列出未通過的條目。
