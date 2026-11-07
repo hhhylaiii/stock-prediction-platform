@@ -21,6 +21,7 @@ from apps.research.features.build import (
     FRAME_COLUMNS,
     FRAME_TYPES,
 )
+from apps.research.features.residual import RULES_KEY, rules_signature
 from apps.research.models import FeatureDaily
 from apps.research.ranges import months, years
 
@@ -86,6 +87,12 @@ def existing_partition(directory: Path, year: int) -> Path:
     return path
 
 
+def partition_rules(directory: Path, year: int) -> str | None:
+    """Source-gap rules stamped on the year's partition when exported; None for an older file."""
+    stamp = (pq.read_schema(existing_partition(directory, year)).metadata or {}).get(RULES_KEY)
+    return None if stamp is None else stamp.decode()
+
+
 def _read_partition(directory: Path, low: date, high: date, wanted: list[str]) -> pd.DataFrame:
     """Rows of low..high from one yearly partition, schema and table read through one handle."""
     path = existing_partition(directory, low.year)
@@ -127,14 +134,36 @@ def read_columns(start: date, end: date, directory: Path, columns: Sequence[str]
     return pd.concat(parts, ignore_index=True)
 
 
-def export_year(year: int, directory: Path) -> Path | None:
-    """Rewrite one year's partition from feature_daily; a year without rows has no partition."""
+def _stamp(
+    directory: Path, year: int, frame: pd.DataFrame, rebuilt: tuple[date, date] | None
+) -> str | None:
+    """Current rules if every row was just rebuilt or the partition already had them, else none."""
+    current = rules_signature()
+    if rebuilt is None or (rebuilt[0] <= frame["date"].min() and frame["date"].max() <= rebuilt[1]):
+        return current
+    if not partition_path(directory, year).exists():
+        return None
+    return current if partition_rules(directory, year) == current else None
+
+
+def export_year(
+    year: int, directory: Path, rebuilt: tuple[date, date] | None = None
+) -> Path | None:
+    """Rewrite one year's partition from feature_daily; a year without rows has no partition.
+
+    rebuilt is the range just built; rows outside it keep the stamp only if the rules match.
+    """
     target = partition_path(directory, year)
     frame = read_features(date(year, 1, 1), date(year, 12, 31))
     if frame.empty:
         shutil.rmtree(target.parent, ignore_errors=True)
         return None
+    stamp = _stamp(directory, year, frame, rebuilt)
     table = pa.Table.from_pandas(frame, preserve_index=False)
+    metadata = {**(table.schema.metadata or {})}
+    if stamp is not None:
+        metadata[RULES_KEY] = stamp.encode()
+    table = table.replace_schema_metadata(metadata)
     target.parent.mkdir(parents=True, exist_ok=True)
     handle, temporary = tempfile.mkstemp(dir=target.parent, prefix=".part-", suffix=".tmp")
     os.close(handle)

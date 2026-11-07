@@ -6,7 +6,7 @@ import pandas as pd
 import pytest
 
 from apps.market.models import DailyValuation, FinancialStatement, MonthlyRevenue
-from apps.research.features.fundamental import attach_fundamentals
+from apps.research.features.fundamental import attach_fundamentals, sourced_name
 from tests.research.conftest import weekday_calendar
 
 CALENDAR = weekday_calendar(date(2013, 1, 1), date(2016, 12, 31))
@@ -143,6 +143,11 @@ def test_a_reused_code_reads_only_filings_of_the_new_listing() -> None:
     assert after["fund_days_since_fs"].tolist() == [0.0, 1.0]
     assert after[["eps_ttm", "fund_gm_yoy_chg", "fund_rev_yoy"]].isna().all().all()
     assert after["fund_rev_mom"].tolist() == pytest.approx([0.1, 0.1])
+    assert after[sourced_name("fund_rev_mom")].tolist() == [1.0, 1.0]
+    assert after[sourced_name("fund_rev_yoy")].isna().all()
+    waiting = before[sourced_name("fund_rev_mom")]
+    assert waiting.loc[: d("2016-04-08")].isna().all()
+    assert waiting.loc[d("2016-04-11") : d("2016-05-09")].eq(0.0).all()
 
 
 def test_a_late_earlier_quarter_delays_only_the_signals_that_read_it() -> None:
