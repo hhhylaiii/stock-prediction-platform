@@ -119,6 +119,8 @@ def test_a_first_launch_skips_the_comparisons_and_judges_the_shadow(researched: 
         "data_quality",
     ]
     assert set(stored["gates"][2]) == {"name", "passed", "value", "threshold", "sample", "reason"}
+    assert stored["gates"][3]["errors"] == []
+    assert stored["gates"][3]["errors_total"] == 0
     assert set(gates.SAMPLE_UNITS) == {gate["name"] for gate in stored["gates"]}
     assert ModelRun.objects.filter(run_key="rank-prod", status="candidate").count() == 2
 
@@ -287,10 +289,47 @@ def test_the_quality_gate_lists_errors_and_needs_some_checks(researched: Path) -
 
     assert found.passed is False
     assert found.value == 3
-    assert found.reason == (
-        f"{run.train_end} etl_runs, {run.train_end} row_count, {LAST} row_count"
-    )
+    assert found.reason == f"2 天有 error，最近 {LAST} row_count"
     assert found.sample == 3
+    assert found.extra == {
+        "errors": [
+            {"date": LAST.isoformat(), "check": "row_count"},
+            {"date": run.train_end.isoformat(), "check": "etl_runs"},
+            {"date": run.train_end.isoformat(), "check": "row_count"},
+        ],
+        "errors_total": 3,
+    }
+
+
+@pytest.mark.django_db
+def test_the_quality_gate_names_every_check_of_its_latest_error_day_and_caps_the_list(
+    researched: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs = built("rank", "rank-wf1", researched)
+    run = runs[0]
+    twenty = next(item for item in runs if item.params["horizon"] == 20)
+    logged(run)
+    logged(run, "error", run.train_end)
+    for name in ("row_count", "missing_values", "etl_runs"):
+        DataQualityLog.objects.create(date=LAST, check_name=name, severity="error", detail={})
+    monkeypatch.setattr(gates, "ERROR_LIMIT", 2)
+
+    found = by_slot(check_gates("rank-prod", researched))[Slot("rank", 20)]["data_quality"]
+
+    assert found.reason == f"2 天有 error，最近 {LAST} etl_runs、missing_values、row_count"
+    assert found.value == 4
+    assert found.extra == {
+        "errors": [
+            {"date": LAST.isoformat(), "check": "etl_runs"},
+            {"date": LAST.isoformat(), "check": "missing_values"},
+        ],
+        "errors_total": 4,
+    }
+    stored = ModelRun.objects.get(pk=twenty.pk).params["gates"]["gates"]
+    quality = next(gate for gate in stored if gate["name"] == "data_quality")
+    assert quality["errors"] == found.extra["errors"]
+    assert quality["errors_total"] == 4
+    assert all("errors" not in gate for gate in stored if gate["name"] != "data_quality")
 
 
 @pytest.mark.django_db

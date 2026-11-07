@@ -28,6 +28,7 @@ GAIN_OVERLAP = 6
 MIN_STOCKS = 30
 MIN_DAYS = 60
 COVERAGE = (0.70, 0.90)
+ERROR_LIMIT = 200
 NO_SERVING = "不適用（沒有服務中的 run）"
 SAMPLE_UNITS = {
     "agreement": "stocks",
@@ -60,6 +61,7 @@ class Gate:
     threshold: str
     sample: int
     reason: str
+    extra: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -236,13 +238,38 @@ def data_quality(run: ModelRun) -> Gate:
     days = window.values("date").distinct().count()
     if not days:
         reason = f"{run.train_start}–{as_of} 沒有任何品質檢查紀錄"
-        return Gate("data_quality", False, None, "無 error", 0, reason)
+        return Gate("data_quality", False, None, "無 error", 0, reason, _errors([]))
     errors = sorted(
-        set(window.filter(severity=DataQualityLog.Severity.ERROR).values_list("date", "check_name"))
+        set(
+            window.filter(severity=DataQualityLog.Severity.ERROR).values_list("date", "check_name")
+        ),
+        key=lambda error: (-error[0].toordinal(), error[1]),
     )
-    listed = ", ".join(f"{day} {name}" for day, name in errors)
-    passed = not errors
-    return Gate("data_quality", passed, float(len(errors)), "無 error", days, listed)
+    value = float(len(errors))
+    return Gate(
+        "data_quality", not errors, value, "無 error", days, _summary(errors), _errors(errors)
+    )
+
+
+def _summary(errors: list[tuple[date, str]]) -> str:
+    """How many days had an error, and the checks of the latest one."""
+    if not errors:
+        return ""
+    latest = errors[0][0]
+    checks = "、".join(name for day, name in errors if day == latest)
+    return f"{len({day for day, _ in errors})} 天有 error，最近 {latest} {checks}"
+
+
+def _errors(errors: list[tuple[date, str]]) -> dict[str, Any]:
+    listed = [{"date": day.isoformat(), "check": name} for day, name in errors[:ERROR_LIMIT]]
+    return {"errors": listed, "errors_total": len(errors)}
+
+
+def _stored(gate: Gate) -> dict[str, Any]:
+    return {
+        **{name: value for name, value in asdict(gate).items() if name != "extra"},
+        **gate.extra,
+    }
 
 
 def check_gates(run_key: str, directory: Path) -> list[SlotGates]:
@@ -279,6 +306,6 @@ def _record(run: ModelRun, checked: SlotGates) -> None:
     note: dict[str, Any] = {
         "serving": checked.serving,
         "passed": checked.passed,
-        "gates": [asdict(gate) for gate in checked.gates],
+        "gates": [_stored(gate) for gate in checked.gates],
     }
     ModelRun.objects.filter(pk=run.pk).update(params={**current.params, GATES: note})
