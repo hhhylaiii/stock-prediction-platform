@@ -7,6 +7,7 @@ from playwright.sync_api import Page, Route, expect
 from pytest_django.live_server_helper import LiveServer
 
 from apps.etl.models import EtlRun
+from apps.market.calendar import TradingDays
 from apps.market.models import TradingCalendar
 from apps.research.models import FeatureDaily, ModelMonitor, ModelRun, Prediction
 from tests.api.conftest import add_predictions
@@ -130,6 +131,9 @@ def test_degraded_models_monitoring_and_band_sources_are_shown(
     page: Page, live_server: LiveServer, predicted: Seed
 ) -> None:
     ModelRun.objects.filter(pk="quantile-h20").update(status="degraded")
+    ModelRun.objects.filter(pk__in=["rank-h20", "quantile-h20"]).update(
+        train_end=TradingDays.from_db().shift(predicted.sessions[-5], -20)
+    )
     EtlRun.objects.filter(status="success", start_date=predicted.last_session).update(
         finished_at=at(predicted.last_session, 23, 4)
     )

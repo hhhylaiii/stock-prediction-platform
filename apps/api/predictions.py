@@ -18,7 +18,7 @@ from apps.api.serving import (
     interval_alert,
     latest_served_date,
     ranks_on,
-    recent_mean,
+    recent_means,
     roles_for,
     runs_on,
 )
@@ -290,9 +290,10 @@ class PredictionListView(ReadOnlyView):
     def monitor(
         self, day: date | None, roles: dict[str, Slot], runs: dict[Slot, ServingRun]
     ) -> dict[str, Any]:
-        ic, ic_days = recent_mean(runs.get(roles["rank"]), day, "ic")
         band = runs.get(roles["interval"]) if "interval" in roles else None
-        coverage, coverage_days = recent_mean(band, day, "coverage")
+        (ic, ic_days), (coverage, coverage_days) = recent_means(
+            day, [(runs.get(roles["rank"]), "ic"), (band, "coverage")]
+        )
         return {
             "rank_ic": ic,
             "rank_ic_days": ic_days,

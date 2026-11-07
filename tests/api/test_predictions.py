@@ -10,6 +10,8 @@ from pytest_django import DjangoAssertNumQueries
 from apps.market.models import TradingCalendar
 from apps.research.models import FeatureDaily, ModelMonitor, ModelRun, Prediction
 from tests.api.conftest import (
+    CALENDAR_START,
+    EARLY_CALENDAR_START,
     NOV_2,
     OCT_28,
     OCT_29,
@@ -22,9 +24,16 @@ from tests.api.conftest import (
     envelope_of,
     sessions_until,
     taipei,
+    trained_until,
 )
 
 pytestmark = pytest.mark.usefixtures("calendar_in_db")
+
+
+@pytest.fixture
+def calendar_start() -> date:
+    """Runs here train before July, so their out-of-sample days start inside the calendar."""
+    return EARLY_CALENDAR_START
 
 
 def by_code(body: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -281,14 +290,26 @@ def test_on_a_model_switch_the_previous_rank_comes_from_the_retired_run(
     assert by_code(body)["2330"]["prev_rank"] == 2
 
 
-def test_a_broken_calendar_only_drops_the_previous_rank(client: Client, runs: Runs) -> None:
+def test_a_broken_calendar_drops_the_previous_rank_and_logs_the_empty_monitor(
+    client: Client, runs: Runs, caplog: pytest.LogCaptureFixture
+) -> None:
+    ModelMonitor.objects.bulk_create(
+        ModelMonitor(run=runs.rank20, date=day, horizon=20, ic=0.05, n_stocks=3)
+        for day in (OCT_29, OCT_30)
+    )
     TradingCalendar.objects.filter(date=date(2026, 8, 3)).delete()
 
     response = client.get("/api/predictions")
 
     assert response.status_code == 200
-    rows = by_code(envelope_of(response))
+    body = envelope_of(response)
+    rows = by_code(body)
     assert (rows["2330"]["rank"], rows["2330"]["prev_rank"]) == (1, None)
+    assert body["meta"]["monitor"]["rank_ic"] is None
+    assert [r.getMessage() for r in caplog.records if r.levelname == "ERROR"] == [
+        "trading calendar cannot be read (trading_calendar has 1 missing day(s));"
+        " no monitor row counts as out of sample"
+    ]
 
 
 @pytest.mark.parametrize(
@@ -347,6 +368,7 @@ def test_monitor_chains_the_runs_that_served_and_skips_in_sample_days(
 ) -> None:
     switch = date(2026, 9, 30)
     days = sessions_until(OCT_30)[-30:]
+    ModelRun.objects.filter(pk="rank-h20").update(train_end=trained_until(switch))
     old = add_model_run("rank-old", "rank", status="retired", train_end=date(2026, 6, 30))
     ModelMonitor.objects.bulk_create(
         ModelMonitor(
@@ -392,11 +414,21 @@ def test_predictions_query_count_on_the_tech_vol_path(
 ) -> None:
     Prediction.objects.filter(run=runs.vol, stock_id="6488").delete()
     FeatureDaily.objects.create(stock_id="6488", date=OCT_30, in_universe=True, tech_vol_20d=0.5)
+    ModelMonitor.objects.bulk_create(
+        ModelMonitor(run=run, date=day, horizon=20, ic=0.05, coverage=0.8, n_stocks=3)
+        for run in (runs.rank20, runs.quantile)
+        for day in (OCT_29, OCT_30)
+    )
 
     with django_assert_max_num_queries(13):
         response = client.get("/api/predictions")
 
-    assert by_code(envelope_of(response))["6488"]["interval_source"] == "tech_vol_20d"
+    body = envelope_of(response)
+    assert by_code(body)["6488"]["interval_source"] == "tech_vol_20d"
+    assert (body["meta"]["monitor"]["rank_ic_days"], body["meta"]["monitor"]["coverage_days"]) == (
+        2,
+        2,
+    )
 
 
 def test_two_thousand_stocks_answer_within_half_a_second(client: Client, db: None) -> None:
@@ -436,6 +468,7 @@ def test_two_thousand_stocks_answer_within_half_a_second(client: Client, db: Non
     assert elapsed < 0.5
 
 
+@pytest.mark.parametrize("calendar_start", [CALENDAR_START])
 def test_the_first_calendar_session_has_no_previous_rank(client: Client, db: None) -> None:
     add_stock()
     add_bars("2330", [date(2026, 7, 1)], [900.0])

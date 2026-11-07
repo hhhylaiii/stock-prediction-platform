@@ -19,6 +19,7 @@ from apps.api.serving import (
     best_runs,
     eligible,
     interval_alert,
+    out_of_sample,
     roles_for,
     serving_run,
 )
@@ -44,18 +45,18 @@ def matured(stock_id: str, horizon: int) -> dict[date, float]:
 def predicted(
     stock_id: str, slots: list[Slot], first: date, last: date
 ) -> dict[date, list[dict[str, Any]]]:
-    """Out-of-sample rows only: a day inside a run's training window is not a past forecast."""
+    """Out-of-sample rows only: a day whose label overlaps training is not a past forecast."""
     condition = Q()
     for slot in slots:
         condition |= Q(run__objective=slot.objective, horizon=slot.horizon)
-    rows = (
+    rows = list(
         eligible()
         .filter(condition, stock_id=stock_id, date__range=(first, last))
         .filter(date__gt=F("run__train_end"))
         .values(*SERVING_FIELDS, *ROW_FIELDS)
     )
     grouped: dict[date, list[dict[str, Any]]] = defaultdict(list)
-    for row in rows:
+    for row in out_of_sample(rows, load_calendar()) if rows else []:
         grouped[row["date"]].append(row)
     return grouped
 

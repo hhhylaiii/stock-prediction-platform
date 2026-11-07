@@ -48,8 +48,8 @@ VOL = 0.3
 
 @pytest.fixture(autouse=True)
 def calendar_rows() -> None:
-    first = date(2026, 1, 1)
-    days = (first + timedelta(days=n) for n in range(365))
+    first = date(2025, 1, 1)
+    days = (first + timedelta(days=n) for n in range(730))
     TradingCalendar.objects.bulk_create(
         TradingCalendar(date=day, is_trading_day=day.weekday() < 5 and day != HOLIDAY)
         for day in days
@@ -510,6 +510,15 @@ def test_in_sample_days_and_days_beyond_six_months_do_not_count() -> None:
 
     ModelRun.objects.filter(pk=trained.pk).update(train_end=date(2025, 6, 30))
     ModelMonitor.objects.filter(date__lt=days[-30]).update(date=F("date") - timedelta(days=200))
+    run_monitor(DAY, calendar())
+    assert (status(trained), alerts()) == ("active", [])
+
+
+def test_days_whose_label_reaches_into_training_do_not_count_toward_degrading() -> None:
+    days = calendar().between(date(2026, 1, 2), matured(20))
+    limits = {IC_THRESHOLD: {"20": 0.0}}
+    trained = make_run("prod.rank", "rank", params=limits, train_end=days[-71])
+    history(trained, "ic", [-0.5] * 70)
     run_monitor(DAY, calendar())
     assert (status(trained), alerts()) == ("active", [])
 

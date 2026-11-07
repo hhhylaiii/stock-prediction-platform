@@ -6,6 +6,7 @@ import pytest
 from playwright.sync_api import Page, Route, expect
 from pytest_django.live_server_helper import LiveServer
 
+from apps.market.calendar import TradingDays
 from apps.research.models import BacktestMetric, ModelMonitor, ModelRun
 from tests.e2e.conftest import Seed
 
@@ -67,6 +68,7 @@ def month_rows() -> list[BacktestMetric]:
 def scored(predicted: Seed) -> Seed:
     """Monitoring for every serving run, research totals and 26 months of rank IC."""
     days = predicted.sessions[-10:]
+    ModelRun.objects.update(train_end=TradingDays.from_db().shift(days[0], -20))
     monitors = {
         "rank-h5": {"ic": 0.03},
         "reg-h5": {"mae": 0.058, "direction_acc": 0.54},
@@ -108,7 +110,8 @@ def test_the_serving_models_are_listed_with_their_scores(
     rows = page.locator("#model-table .trow")
     expect(rows).to_have_count(6)
     icir = fmean(RANK_ICS) / stdev(RANK_ICS)
-    for text in ("排名", "20 日", "LightGBM", "2026-10", "2023-10 到 2026-09"):
+    trained = ModelRun.objects.get(pk="rank-h20").train_end
+    for text in ("排名", "20 日", "LightGBM", "2026-10", f"2023-10 到 {trained:%Y-%m}"):
         expect(rows.nth(0)).to_contain_text(text)
     expect(rows.nth(0)).to_contain_text(f"rank IC 0.049，ICIR {icir:.2f}（近 10 個評估日）")
     expect(rows.nth(0)).to_contain_text("研究期 rank IC 0.041，ICIR 0.62；Ridge 0.027，ICIR 0.41")

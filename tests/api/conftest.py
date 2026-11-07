@@ -13,6 +13,7 @@ from apps.research.models import ModelRun, Prediction
 
 TAIPEI = ZoneInfo("Asia/Taipei")
 CALENDAR_START = date(2026, 7, 1)
+EARLY_CALENDAR_START = date(2026, 1, 1)
 CALENDAR_END = date(2026, 11, 30)
 HOLIDAYS = frozenset({date(2026, 9, 25), date(2026, 10, 9)})
 OCT_28, OCT_29, OCT_30 = date(2026, 10, 28), date(2026, 10, 29), date(2026, 10, 30)
@@ -32,6 +33,11 @@ SESSIONS = [day for day in calendar_days() if is_session(day)]
 
 def sessions_until(last: date) -> list[date]:
     return [day for day in SESSIONS if day <= last]
+
+
+def trained_until(last_in_sample: date, horizon: int = 20) -> date:
+    """The train_end that keeps last_in_sample in sample and puts the next session out of it."""
+    return SESSIONS[SESSIONS.index(last_in_sample) + 1 - horizon]
 
 
 def taipei(year: int, month: int, day: int, hour: int = 0, minute: int = 0) -> datetime:
@@ -57,12 +63,19 @@ def fresh_throttle_cache() -> Iterator[None]:
 
 
 @pytest.fixture
-def calendar_in_db(db: None) -> list[date]:
-    """Weekdays of July to November 2026 minus two holidays, stored in trading_calendar."""
+def calendar_start() -> date:
+    """First stored calendar day; a module that trains runs before July starts it earlier."""
+    return CALENDAR_START
+
+
+@pytest.fixture
+def calendar_in_db(db: None, calendar_start: date) -> list[date]:
+    """Weekdays from calendar_start to November 2026 minus two holidays, in trading_calendar."""
+    days = calendar_days(calendar_start)
     TradingCalendar.objects.bulk_create(
-        TradingCalendar(date=day, is_trading_day=is_session(day)) for day in calendar_days()
+        TradingCalendar(date=day, is_trading_day=is_session(day)) for day in days
     )
-    return SESSIONS
+    return [day for day in days if is_session(day)]
 
 
 def add_stock(

@@ -13,8 +13,10 @@ from typing import Any
 
 from django.db.models import F, OuterRef, Q, QuerySet, Subquery
 
+from apps.market.calendar import CalendarError, TradingDays
 from apps.research.models import ModelMonitor, ModelObjective, ModelRun, ModelStatus, Prediction
 from apps.research.runs import SCREENING_MODEL
+from apps.research.walkforward import oos_start
 
 STATUS_ORDER = (ModelStatus.ACTIVE, ModelStatus.DEGRADED, ModelStatus.RETIRED)
 SERVING = (ModelStatus.ACTIVE, ModelStatus.DEGRADED)
@@ -234,6 +236,50 @@ def months_before(day: date, count: int) -> date:
     return date(year, month + 1, min(day.day, calendar.monthrange(year, month + 1)[1]))
 
 
+@functools.cache
+def warn_unplaced(run_id: str, horizon: int, reason: str) -> None:
+    logger.warning(
+        "run %s has no %s-day out-of-sample day in the calendar (%s); its rows are left out",
+        run_id,
+        horizon,
+        reason,
+    )
+
+
+def first_oos_day(calendar: TradingDays, run_id: str, train_end: date, horizon: int) -> date | None:
+    """predict's out-of-sample boundary; None, with a warning, when the calendar cannot place it."""
+    try:
+        return oos_start(calendar, train_end, horizon)
+    except CalendarError as error:
+        warn_unplaced(run_id, horizon, str(error))
+        return None
+
+
+def out_of_sample(rows: list[dict[str, Any]], calendar: TradingDays) -> list[dict[str, Any]]:
+    """Rows on or after their run's first out-of-sample day for the row's own horizon."""
+    trained = {(row["run_id"], row["horizon"]): row["run__train_end"] for row in rows}
+    starts = {
+        (run_id, horizon): first_oos_day(calendar, run_id, end, horizon)
+        for (run_id, horizon), end in trained.items()
+    }
+    return [
+        row
+        for row in rows
+        if (start := starts[(row["run_id"], row["horizon"])]) is not None and row["date"] >= start
+    ]
+
+
+def monitor_calendar() -> TradingDays | None:
+    """The calendar for monitor rows; None, logged as an error, when it cannot be read."""
+    try:
+        return TradingDays.from_db()
+    except CalendarError as error:
+        logger.error(
+            "trading calendar cannot be read (%s); no monitor row counts as out of sample", error
+        )
+        return None
+
+
 def served_monitor(windows: dict[Slot, tuple[date, date]]) -> dict[Slot, list[dict[str, Any]]]:
     """Per slot and day in (after, through], the monitor row of the run that served it, OOS only."""
     if not windows:
@@ -243,14 +289,15 @@ def served_monitor(windows: dict[Slot, tuple[date, date]]) -> dict[Slot, list[di
         condition |= Q(
             run__objective=slot.objective, horizon=slot.horizon, date__gt=after, date__lte=through
         )
-    rows = (
+    rows = list(
         ModelMonitor.objects.filter(condition, date__gt=F("run__train_end"))
         .exclude(run__status=ModelStatus.CANDIDATE)
         .exclude(run__model_type=SCREENING_MODEL)
         .values("date", *MONITOR_FIELDS, *SERVING_FIELDS)
     )
+    calendar = monitor_calendar() if rows else None
     by_day: dict[tuple[Slot, date], list[dict[str, Any]]] = defaultdict(list)
-    for row in rows:
+    for row in [] if calendar is None else out_of_sample(rows, calendar):
         by_day[(Slot(row["run__objective"], row["horizon"]), row["date"])].append(row)
     served: dict[Slot, list[dict[str, Any]]] = defaultdict(list)
     for (slot, _), candidates in sorted(by_day.items(), key=lambda item: item[0][1]):
@@ -259,14 +306,27 @@ def served_monitor(windows: dict[Slot, tuple[date, date]]) -> dict[Slot, list[di
     return served
 
 
-def recent_mean(run: ServingRun | None, day: date | None, field: str) -> tuple[float | None, int]:
-    """Mean of a monitor column over the slot's last 60 evaluated days up to the day."""
-    if run is None or day is None:
-        return None, 0
-    slot = Slot(run.objective, run.horizon)
-    window = {slot: (months_before(day, MONITOR_LOOKBACK_MONTHS), day)}
-    rows = served_monitor(window).get(slot, [])
+def column_mean(rows: list[dict[str, Any]], field: str) -> tuple[float | None, int]:
+    """Mean of a monitor column over the last 60 evaluated days among the rows."""
     values = [row[field] for row in reversed(rows) if row[field] is not None][:MONITOR_DAYS]
     if not values:
         return None, 0
     return round(fmean(values), MONITOR_DIGITS), len(values)
+
+
+def recent_means(
+    day: date | None, picks: list[tuple[ServingRun | None, str]]
+) -> list[tuple[float | None, int]]:
+    """Each run's column mean over its slot's last 60 evaluated days, from one monitor read."""
+    slots = {Slot(run.objective, run.horizon) for run, _ in picks if run is not None}
+    if day is None or not slots:
+        return [(None, 0)] * len(picks)
+    served = served_monitor(
+        dict.fromkeys(slots, (months_before(day, MONITOR_LOOKBACK_MONTHS), day))
+    )
+    return [
+        (None, 0)
+        if run is None
+        else column_mean(served.get(Slot(run.objective, run.horizon), []), field)
+        for run, field in picks
+    ]
