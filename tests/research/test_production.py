@@ -19,6 +19,7 @@ from apps.research import (
     prediction_cache,
     production,
 )
+from apps.research.baseline_runs import BASELINE
 from apps.research.holdout import HoldoutError, claim_holdout, production_pass
 from apps.research.lgbm_runs import MODEL, run_fold, run_id
 from apps.research.models import ModelRun, ModelStatus
@@ -166,6 +167,63 @@ def test_run_fold_checks_a_production_write_before_touching_the_cache(
 
     with pytest.raises((ValueError, HoldoutError), match=message):
         run_fold("rank", fold, run_key, frozen, KEPT, 0, production=production_pass("rank"))
+
+    assert cached.read_bytes() == b"kept"
+    assert not ModelRun.objects.filter(run_key=run_key).exists()
+
+
+@pytest.mark.django_db
+def test_a_production_pass_fits_the_shadow_baselines_past_the_holdout_start(frozen: Path) -> None:
+    fold = shadow_fold(panel_calendar(), weekdays()[-1], replace(CONFIG, train_months=5))
+    features = baseline_runs.scope_features("interval")
+    with pytest.raises(HoldoutError, match="holdout"):
+        baseline_runs.run_fold("interval", fold, "interval-prod-shadow", frozen, features)
+
+    baseline_runs.run_fold(
+        "interval",
+        fold,
+        "interval-prod-shadow",
+        frozen,
+        features,
+        production=production_pass("interval"),
+        annotate=lambda run: {"research_run_key": "interval-wf1"},
+    )
+
+    runs = {run.model_type: run for run in ModelRun.objects.filter(run_key="interval-prod-shadow")}
+    assert set(runs) == {"logistic", "histq"}
+    assert {run.params["research_run_key"] for run in runs.values()} == {"interval-wf1"}
+    cached = load_fold_predictions("interval-prod-shadow", BASELINE, fold)
+    assert (cached["date"].min(), cached["date"].max()) == (fold.test_start, fold.test_end)
+    assert cached["logistic_h20"].notna().all()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("run_key", "index", "message"),
+    [
+        ("rank-prod-shadow", 0, "start with interval-"),
+        ("interval-final", 0, "holdout run"),
+        ("interval-prod-shadow", 7, "production folds only"),
+    ],
+)
+def test_baseline_run_fold_checks_a_production_write_before_touching_the_cache(
+    frozen: Path, run_key: str, index: int, message: str
+) -> None:
+    shadowed = shadow_fold(panel_calendar(), weekdays()[-1], replace(CONFIG, train_months=5))
+    fold = replace(shadowed, index=index)
+    cached = fold_path(run_key, BASELINE, fold.index)
+    cached.parent.mkdir(parents=True)
+    cached.write_bytes(b"kept")
+
+    with pytest.raises((ValueError, HoldoutError), match=message):
+        baseline_runs.run_fold(
+            "interval",
+            fold,
+            run_key,
+            frozen,
+            baseline_runs.scope_features("interval"),
+            production=production_pass("interval"),
+        )
 
     assert cached.read_bytes() == b"kept"
     assert not ModelRun.objects.filter(run_key=run_key).exists()
@@ -321,6 +379,7 @@ def test_build_run_fits_the_model_and_its_shadow_on_the_frozen_design(researched
         assert run.train_end == shadow_fold(panel_calendar(), last, CONFIG).train_end
     fold = production_fold(panel_calendar(), last, CONFIG)
     assert set(load_fold_predictions("rank-prod", MODEL, fold)["date"]) == {last}
+    assert not fold_path("rank-prod-shadow", BASELINE, 0).exists()
 
 
 @pytest.mark.django_db
@@ -348,6 +407,18 @@ def test_build_run_command_gives_the_probability_model_the_research_brier(
     assert {run.params["research_run_key"] for run in runs.values()} == {"interval-wf1"}
     shadow = ModelRun.objects.filter(run_key="interval-prod-shadow")
     assert not any("brier_baseline" in run.params for run in shadow)
+    baselines = shadow.filter(model_type__in=["logistic", "histq"])
+    assert baselines.count() == 2
+    assert {production_note(run)["role"] for run in baselines} == {"shadow"}
+    assert {run.params["research_run_key"] for run in baselines} == {"interval-wf1"}
+    shadow_fold_ = shadow_fold(panel_calendar(), last, CONFIG)
+    assert (
+        load_fold_predictions("interval-prod-shadow", BASELINE, shadow_fold_)["logistic_h20"]
+        .notna()
+        .all()
+    )
+    assert not ModelRun.objects.filter(run_key="interval-prod", model_type="logistic").exists()
+    assert not fold_path("interval-prod", BASELINE, 0).exists()
     assert f"Brier baseline from interval-wf1: {brier:.4f}" in out.getvalue()
     assert "rolling IC" not in out.getvalue()
 
@@ -362,6 +433,10 @@ def test_build_run_fits_the_return_scope_without_references(researched: Path) ->
     assert built.references == {}
     assert built.model == ["return-prod.lightgbm.h5.f000"]
     assert built.shadow == ["return-prod-shadow.lightgbm.h5.f000"]
+    shadow_fold_ = shadow_fold(panel_calendar(), weekdays()[-1], CONFIG)
+    zero = load_fold_predictions("return-prod-shadow", BASELINE, shadow_fold_)["zero_h5"]
+    assert (zero == 0).all()
+    assert not fold_path("return-prod", BASELINE, 0).exists()
     model = ModelRun.objects.get(run_key="return-prod")
     assert production_note(model)["role"] == "model"
     assert "rolling_ic_threshold" not in model.params

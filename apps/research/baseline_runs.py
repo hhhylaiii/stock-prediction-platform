@@ -3,7 +3,7 @@
 import hashlib
 import json
 import math
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import date
 from functools import cached_property
@@ -26,7 +26,13 @@ from apps.research.baselines import (
     zero_return,
 )
 from apps.research.features.store import read_partitions
-from apps.research.holdout import HoldoutError, is_holdout, require_key
+from apps.research.holdout import (
+    HoldoutError,
+    ProductionPass,
+    authorize_production,
+    is_holdout,
+    require_key,
+)
 from apps.research.labels import HORIZONS, VOL_DAYS
 from apps.research.metrics.ic import daily_rank_ic, summarize_ic
 from apps.research.models import HoldoutScope, ModelObjective, ModelRun, ModelStatus
@@ -293,9 +299,20 @@ def require_candidates(run_key: str, fold: Fold) -> None:
         raise RunError(f"{kept} are past candidate; fold {fold.index} keeps its cache")
 
 
-def run_fold(scope: str, fold: Fold, run_key: str, directory: Path, features: list[str]) -> Path:
+def run_fold(
+    scope: str,
+    fold: Fold,
+    run_key: str,
+    directory: Path,
+    features: list[str],
+    production: ProductionPass | None = None,
+    annotate: Callable[[ModelRun], Mapping[str, Any]] | None = None,
+) -> Path:
     """Fit one fold's baselines; its old cache goes first and the new one is written last."""
-    if is_holdout(fold):
+    if production is not None:
+        check_run_key(scope, run_key)
+        authorize_production(run_key, production, fold)
+    elif is_holdout(fold):
         raise HoldoutError(f"fold {fold.index} is holdout; it runs once with the Phase 4 models")
     require_candidates(run_key, fold)
     fold_path(run_key, BASELINE, fold.index).unlink(missing_ok=True)
@@ -305,11 +322,15 @@ def run_fold(scope: str, fold: Fold, run_key: str, directory: Path, features: li
     if label_digest(scope, fold) != labels:
         raise RuntimeError(f"label_daily changed while fitting fold {fold.index}; run it again")
     for item in result.trained:
-        record_run(item.run, item.model, fold=fold)
+        if annotate is not None:
+            item.run.params = {**item.run.params, **annotate(item.run)}
+        record_run(item.run, item.model, fold=fold, production=production)
     rows = inputs.raw.loc[inputs.test, ROW_KEYS].reset_index(drop=True)
     notes = {"feature_hash": inputs.feature_hash, "label_hash": labels, "recipe": recipe(features)}
     predictions = rows.assign(**result.columns)
-    return save_fold_predictions(run_key, BASELINE, fold, predictions, notes=notes)
+    return save_fold_predictions(
+        run_key, BASELINE, fold, predictions, notes=notes, production=production
+    )
 
 
 def check_run_key(scope: str, run_key: str) -> None:

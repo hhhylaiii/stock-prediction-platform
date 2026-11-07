@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from apps.market.calendar import TradingDays
+from apps.research import baseline_runs
 from apps.research.baseline_runs import check_run_key
 from apps.research.holdout import (
     PRODUCTION_FOLD,
@@ -108,6 +109,7 @@ class Built:
 DESIGNS: dict[str, Design] = {scope: Design() for scope in HoldoutScope.values}
 BAGS = 5
 SHADOW = "shadow"
+BASELINED = (HoldoutScope.RETURN, HoldoutScope.INTERVAL)
 REFERENCED: dict[str, str] = {
     ModelObjective.RANK: IC_THRESHOLD,
     ModelObjective.CLASSIFICATION: BRIER_BASELINE,
@@ -219,6 +221,10 @@ def _fit(
         production=granted,
         annotate=annotate,
     )
+    return _run_ids(key)
+
+
+def _run_ids(key: str) -> list[str]:
     return list(
         ModelRun.objects.filter(run_key=key).order_by("run_id").values_list("run_id", flat=True)
     )
@@ -250,9 +256,10 @@ def build_run(
         role: {"research_run_key": research_run_key, PRODUCTION: note}
         for role, note in roles.items()
     }
+    shadowed = shadow_fold(calendar, as_of, design.config)
     shadow = _fit(
         scope,
-        shadow_fold(calendar, as_of, design.config),
+        shadowed,
         shadow_key(run_key),
         directory,
         features,
@@ -261,6 +268,17 @@ def build_run(
         granted,
         _annotation(notes["shadow"], {}),
     )
+    if scope in BASELINED:
+        baseline_runs.run_fold(
+            scope,
+            shadowed,
+            shadow_key(run_key),
+            directory,
+            baseline_runs.scope_features(scope),
+            production=granted,
+            annotate=_annotation(notes["shadow"], {}),
+        )
+        shadow = _run_ids(shadow_key(run_key))
     model = _fit(
         scope,
         production_fold(calendar, as_of, design.config),
