@@ -10,6 +10,7 @@ from django.core.management import call_command
 from playwright.sync_api import Page, expect
 from pytest_django.live_server_helper import LiveServer
 
+from apps.api.management.commands.phase5_report import capture_views
 from apps.etl.models import DataQualityLog, EtlRun
 from apps.market.models import DailyPrice, Market, StockMaster
 from apps.research.features.registry import FEATURES
@@ -268,33 +269,15 @@ def bench(predicted: Seed) -> Seed:
     return predicted
 
 
-def test_capture_timings_and_views_on_the_seed(
+def test_capture_the_report_and_views_on_the_seed(
     page: Page, live_server: LiveServer, bench: Seed, tmp_path: Path
 ) -> None:
     out_dir = Path(os.environ.get("ACCEPTANCE_OUT", tmp_path))
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out = StringIO()
 
-    call_command("measure_api", "--repeat", "20", stdout=out)
+    call_command("phase5_report", "--out", str(out_dir / "seed.md"), stdout=StringIO())
     cache.clear()
+    shots = capture_views(page, live_server.url, "2330", out_dir)
 
-    (out_dir / "seed-timings.md").write_text(out.getvalue())
-    rows = out.getvalue().splitlines()[2:]
-    assert len(rows) == 11
-    assert all(row.split(" | ")[1] == "200" for row in rows)
-    assert all(float(row.split(" | ")[3]) < 500 for row in rows)
-
-    page.set_viewport_size({"width": 1440, "height": 900})
-    page.goto(f"{live_server.url}/#today")
-    expect(page.locator("#rows .trow")).to_have_count(20)
-    page.screenshot(path=out_dir / "today.png", full_page=True)
-
-    page.goto(f"{live_server.url}/#stock-2330")
-    expect(page.locator("#price-chart path.fan-median")).to_have_count(1)
-    expect(page.locator("#history .trow").first).to_be_visible()
-    page.screenshot(path=out_dir / "stock.png", full_page=True)
-
-    page.goto(f"{live_server.url}/#models")
+    assert [shot.name for shot in shots] == ["today.png", "stock.png", "models.png"]
     expect(page.locator("#ic-chart rect.bar-model")).to_have_count(24)
     expect(page.locator("#model-table .trow")).to_have_count(6)
-    page.screenshot(path=out_dir / "models.png", full_page=True)

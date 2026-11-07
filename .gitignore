@@ -16,3 +16,4 @@ artifacts/
 .DS_Store
 .idea/
 .vscode/
+docs/reports/phase5/*.md
