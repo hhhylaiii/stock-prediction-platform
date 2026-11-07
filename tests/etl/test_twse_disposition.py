@@ -11,7 +11,7 @@ from django.core.management import call_command
 from apps.etl.adapters.twse import TwseAdapter
 from apps.etl.errors import SchemaChangedError, SourceNotReadyError
 from apps.etl.models import EtlRun, RawTwse
-from apps.etl.ratelimit import RateLimiter
+from apps.etl.ratelimit import RateLimiter, RetryableError
 from apps.market.calendar import NotATradingDayError, TradingDays
 from apps.market.models import DispositionEvent
 
@@ -385,6 +385,28 @@ def test_empty_list_writes_nothing_and_keeps_the_answer_raw(
     frame = adapter.normalize(dataset, adapter.fetch(dataset, DAY, DAY))
     assert adapter.upsert(dataset, frame) == 0
     assert RawTwse.objects.get().payload == NO_DATA
+
+
+@responses.activate
+@pytest.mark.django_db
+@pytest.mark.parametrize(("url", "dataset"), [(NOTICE, "attention"), (PUNISH, "disposition")])
+def test_a_busy_answer_is_retried_later_and_not_kept(
+    adapter: TwseAdapter, url: str, dataset: str
+) -> None:
+    responses.get(url, json={"stat": "系統忙碌中，請稍後再試！"})
+    with pytest.raises(RetryableError, match="busy"):
+        adapter.fetch(dataset, DAY, DAY)
+    assert not RawTwse.objects.exists()
+
+
+@responses.activate
+@pytest.mark.django_db
+def test_a_lowercase_ok_is_an_answer(
+    adapter: TwseAdapter, load_fixture: Callable[[str], Any]
+) -> None:
+    payload = load_fixture("twse/disposition/notice_20261028.json")
+    responses.get(NOTICE, json={**payload, "stat": "ok"})
+    assert len(_events(adapter, "attention", DAY, DAY)) == 5
 
 
 @responses.activate

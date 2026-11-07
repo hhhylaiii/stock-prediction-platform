@@ -50,7 +50,7 @@ from apps.etl.client import SourceClient
 from apps.etl.errors import SchemaChangedError, SourceNotReadyError
 from apps.etl.exchange_rows import TWSE_LAYOUT, OfficialDay, official_days
 from apps.etl.models import RawTwse
-from apps.etl.ratelimit import RateLimiter
+from apps.etl.ratelimit import RateLimiter, RetryableError
 from apps.etl.share_counts import drop_repeated_counts, latest_counts
 from apps.etl.upsert import upsert
 from apps.market.calendar import TradingDays
@@ -67,6 +67,7 @@ STOCK_DAY_PATH = "/rwd/zh/afterTrading/STOCK_DAY"
 NOTICE_PATH = "/rwd/zh/announcement/notice"
 PUNISH_PATH = "/rwd/zh/announcement/punish"
 FULL_DELIVERY_PATH = "/exchangeReport/TWT85U"
+BUSY_STAT = "系統忙碌"
 NOTICE_FIELDS = ("證券代號", "日期")
 PUNISH_FIELDS = ("證券代號", "公布日期", "處置起迄時間")
 CODE_FIELD = "證券代號"
@@ -301,13 +302,15 @@ class TwseAdapter(BaseAdapter):
         return event_frame(day_events([code for code in codes if code], day, FULL_DELIVERY))
 
     def _listed(self, dataset: str, path: str, params: dict[str, str]) -> dict[str, Any] | None:
-        """An answered list, kept raw even when empty; None when TWSE says nothing matched."""
+        """An answered list kept raw; None when nothing matched, retried later when busy."""
         payload = self.client.get_json(path, params)
-        self.save_raw(dataset, params, payload)
         stat = str(payload.get("stat", ""))
+        if BUSY_STAT in stat:
+            raise RetryableError(f"TWSE {path} is busy: {stat}")
+        self.save_raw(dataset, params, payload)
         if NO_DATA_STAT in stat:
             return None
-        if stat != "OK":
+        if stat.upper() != "OK":
             raise SchemaChangedError(f"TWSE {path} answered with stat {stat!r}")
         return payload
 
