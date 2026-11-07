@@ -13,9 +13,9 @@ from apps.research.features.chip import (
     chip_features,
     chip_sourcing,
     lending_features,
-    load_chip_pages,
     load_chip_starts,
     load_chips,
+    load_exchange_days,
     load_holding_changes,
     second_batch_chip_features,
 )
@@ -150,7 +150,8 @@ def observable_frame(
         return pd.DataFrame(columns=columns)
     first = panel["date"].min()
     chips = attach_chips(attach_fundamentals(panel, calendar, first, end), load_chips(first, end))
-    sourcing = chip_sourcing(chips, load_chip_starts(), load_chip_pages())
+    written = load_exchange_days(sorted(set(chips["date"])))
+    sourcing = chip_sourcing(chips, load_chip_starts(), written)
     flags = sourcing.drop(columns=["stock_id", "date"])
     attached = chips.assign(**flags)
     gaps = observable_gaps(attached)

@@ -4,7 +4,7 @@ from datetime import date
 import pandas as pd
 import pytest
 
-from apps.etl.models import RawTpex, RawTwse
+from apps.etl.models import EtlRun
 from apps.market.models import DailyChip
 from apps.research.features.chip import (
     LENDING,
@@ -12,8 +12,8 @@ from apps.research.features.chip import (
     chip_features,
     chip_sourcing,
     lending_features,
-    load_chip_pages,
     load_chip_starts,
+    load_exchange_days,
 )
 from apps.research.features.fundamental import sourced_name
 from tests.research.feature_panels import CALENDAR, listing, rising
@@ -41,17 +41,22 @@ def starts(margin: date | None = DAYS[0], sbl: date | None = DAYS[0]) -> pd.Data
     )
 
 
-def pages(*shown: tuple[str, str, int]) -> pd.DataFrame:
-    """Pages kept raw, as market, source balance and row of DAYS."""
+def written(*shown: tuple[str, str, int]) -> pd.DataFrame:
+    """Exchange tables runs wrote, as market, source balance and row of DAYS."""
     rows = [(market, source, DAYS[k]) for market, source, k in shown]
     return pd.DataFrame(rows, columns=["market", "source", "date"])
+
+
+def both(source: str, *rows: int) -> pd.DataFrame:
+    """Tables of the source both markets wrote on the given rows."""
+    return written(*((market, source, k) for k in rows for market in ("TWSE", "TPEx")))
 
 
 def gaps(
     rows: pd.DataFrame, first: pd.DataFrame | None = None, kept: pd.DataFrame | None = None
 ) -> dict[str, list[int]]:
     """Rows of each lending feature that are missing and whose flag is 0."""
-    shown = pages() if kept is None else kept
+    shown = written() if kept is None else kept
     flags = chip_sourcing(rows, starts() if first is None else first, shown)
     values = lending_features(rows)
     return {
@@ -97,7 +102,7 @@ def test_a_missing_margin_row_after_the_first_is_a_source_gap_on_each_day_readin
     assert found["chip_margin_usage"] == [6]
     assert found["chip_short_ratio"] == [6]
     assert found["chip_sbl_short_chg_5d"] == []
-    flags = chip_sourcing(rows, starts(), pages())
+    flags = chip_sourcing(rows, starts(), written())
     assert flags[sourced_name("chip_margin_chg_5d")].iloc[:5].tolist() == [1.0] * 5
     assert list(flags.columns) == ["stock_id", "date", *map(sourced_name, SOURCED_CHIPS)]
     pd.testing.assert_frame_equal(rows, before)
@@ -194,10 +199,16 @@ def test_a_halted_day_without_a_row_follows_the_row_it_carries() -> None:
     ]
 
 
-def test_a_stock_missing_from_its_markets_page_kept_raw_is_observable() -> None:
+def test_a_stock_missing_from_tables_both_markets_wrote_is_observable() -> None:
     none = panel(margin_balance=NAN, margin_limit=NAN, short_balance=NAN)
-    kept = pages(("TWSE", "margin_balance", 6), ("TPEx", "margin_balance", 7))
-    kept = pd.concat([kept, pages(("TWSE", "sbl_short_balance", 8))], ignore_index=True)
+    kept = pd.concat(
+        [
+            both("margin_balance", 6),
+            written(("TPEx", "margin_balance", 7), ("TWSE", "margin_balance", 9)),
+            both("sbl_short_balance", 8),
+        ],
+        ignore_index=True,
+    )
 
     found = gaps(none, starts(margin=None), kept)
 
@@ -205,7 +216,16 @@ def test_a_stock_missing_from_its_markets_page_kept_raw_is_observable() -> None:
     assert found["chip_short_ratio"] == [k for k in range(N) if k != 6]
 
 
-def test_a_day_without_its_page_keeps_the_first_row_rules() -> None:
+def test_a_lending_row_missing_from_tables_both_markets_wrote_is_observable() -> None:
+    none = panel(sbl_short_balance=NAN)
+
+    found = gaps(none, starts(sbl=None), both("sbl_short_balance", 8))
+
+    assert found["chip_sbl_short_chg_5d"] == [5, 6, 7, 9, 10, 11]
+    assert found["chip_margin_usage"] == []
+
+
+def test_a_day_without_both_tables_keeps_the_first_row_rules() -> None:
     gone = {"r6": NAN, "r9": NAN}
     rows = panel(
         margin_balance=column([10_000.0] * N, **gone),
@@ -213,43 +233,58 @@ def test_a_day_without_its_page_keeps_the_first_row_rules() -> None:
         short_balance=column([2_000.0] * N, **gone),
     )
 
-    found = gaps(rows, kept=pages(("TWSE", "margin_balance", 6)))
+    found = gaps(rows, kept=both("margin_balance", 6))
 
     assert found["chip_margin_usage"] == [9]
     assert found["chip_margin_chg_5d"] == [9]
 
 
-def test_a_null_balance_on_a_row_on_record_follows_its_page() -> None:
+def test_a_null_balance_on_a_row_on_record_follows_the_tables() -> None:
     rows = panel(margin_balance=column([10_000.0] * N, r4=NAN, r5=NAN))
 
-    found = gaps(rows, kept=pages(("TWSE", "margin_balance", 4)))
+    found = gaps(rows, kept=both("margin_balance", 4))
+
+    assert found["chip_margin_usage"] == [5]
+    assert found["chip_short_ratio"] == [5]
+
+
+def test_a_null_balance_makes_every_cell_of_the_row_missing() -> None:
+    rows = panel(
+        margin_balance=column([10_000.0] * N, r5=NAN),
+        margin_limit=column([50_000.0] * N, r5=0.0),
+        short_balance=column([2_000.0] * N, r5=NAN),
+    )
+
+    found = gaps(rows)
 
     assert found["chip_margin_usage"] == [5]
     assert found["chip_short_ratio"] == [5]
 
 
 @pytest.mark.django_db
-def test_chip_pages_are_the_days_each_market_kept_a_margin_or_lending_page() -> None:
-    def kept(model: type[RawTwse] | type[RawTpex], dataset: str, day: str, name: str) -> None:
-        model.objects.create(
+def test_exchange_days_are_the_days_each_markets_runs_wrote_a_table() -> None:
+    def run(source: str, dataset: str, status: str, last: int, **checkpoint: str) -> None:
+        EtlRun.objects.create(
+            source=source,
             dataset=dataset,
-            request_params={"date": day, "response": "json"},
-            payload={},
-            source_hash=name,
+            start_date=DAYS[0],
+            end_date=DAYS[last],
+            status=status,
+            checkpoint=checkpoint,
         )
 
-    kept(RawTwse, "margin", "20140102", "a")
-    kept(RawTwse, "margin", "20140102", "b")
-    kept(RawTwse, "sbl", "20140103", "c")
-    kept(RawTpex, "margin", "2014/01/06", "d")
-    kept(RawTwse, "daily_price", "20140107", "e")
+    run("twse", "fill:margin", EtlRun.Status.SUCCESS, 1)
+    run("tpex", "margin", EtlRun.Status.SUCCESS, 0)
+    run("tpex", "fill:sbl", EtlRun.Status.FAILED, 4, last_date=DAYS[2].isoformat())
+    run("twse", "fill:holdings", EtlRun.Status.SUCCESS, 4)
+    run("finmind", "margin", EtlRun.Status.SUCCESS, 4)
 
-    found = load_chip_pages().sort_values(["market", "source", "date"], ignore_index=True)
+    found = load_exchange_days(DAYS[:5]).sort_values(["market", "source", "date"])
 
     assert found.to_dict("records") == [
-        {"market": "TPEx", "source": "margin_balance", "date": date(2014, 1, 6)},
-        {"market": "TWSE", "source": "margin_balance", "date": date(2014, 1, 2)},
-        {"market": "TWSE", "source": "sbl_short_balance", "date": date(2014, 1, 3)},
+        {"market": "TPEx", "source": "margin_balance", "date": DAYS[0]},
+        *({"market": "TPEx", "source": "sbl_short_balance", "date": DAYS[k]} for k in range(3)),
+        *({"market": "TWSE", "source": "margin_balance", "date": DAYS[k]} for k in range(2)),
     ]
 
 

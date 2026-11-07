@@ -12,7 +12,7 @@ import pytest
 from django.core.management import call_command
 from django.core.management.base import CommandError
 
-from apps.etl.models import RawTwse
+from apps.etl.models import EtlRun
 from apps.market.calendar import TradingDays
 from apps.market.models import (
     DailyChip,
@@ -782,11 +782,23 @@ def test_observable_gaps_mark_formula_and_industry_gaps_but_not_missing_inputs()
         if (stock_id, day) != ("2330", d("2016-03-02"))
     )
 
-    RawTwse.objects.create(
-        dataset="margin",
-        request_params={"date": "20160303", "response": "json", "selectType": "ALL"},
-        payload={},
-        source_hash="margin-20160303",
+    listed("2882", "2015-06-01", "2016-03-31")
+    SharesOutstanding.objects.create(
+        stock_id="2882", effective_date=d("2015-01-02"), shares=1_000_000
+    )
+    DailyChip.objects.bulk_create(
+        DailyChip(stock_id="2882", date=day, margin_balance=1_000, margin_limit=5_000)
+        for day in CALENDAR.between(d("2016-03-03"), d("2016-03-31"))
+    )
+    EtlRun.objects.bulk_create(
+        EtlRun(
+            source=source,
+            dataset="fill:margin",
+            start_date=d("2016-03-03"),
+            end_date=d("2016-03-03"),
+            status=EtlRun.Status.SUCCESS,
+        )
+        for source in ("twse", "tpex")
     )
 
     frame = build_feature_frame(CALENDAR, d("2016-03-01"), d("2016-03-04"))
@@ -815,6 +827,7 @@ def test_observable_gaps_mark_formula_and_industry_gaps_but_not_missing_inputs()
     assert gap("2881", "chip_margin_usage") == (True, True)
     assert gap("2881", "chip_short_ratio") == (False, True)
     assert gap("1101", "chip_short_ratio") == (True, False)
+    assert gap("2882", "chip_margin_usage") == (True, True)
     shown = gaps[(gaps["date"] == d("2016-03-03")) & (gaps["stock_id"] == "1101")]
     assert shown[observable_name("chip_short_ratio")].tolist() == [True]
     assert set(SOURCED_CHIPS) <= set(CHECKED)
