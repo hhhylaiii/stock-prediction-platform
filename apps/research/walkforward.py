@@ -73,6 +73,11 @@ class Fold:
         return not self.tuning and not self.holdout
 
 
+def oos_start(calendar: TradingDays, train_end: date, horizon: int) -> date:
+    """First out-of-sample day: train_end + horizon sessions, past every training label."""
+    return calendar.shift(train_end, horizon)
+
+
 def add_months(day: date, months: int) -> date:
     """Same day of the month months later or earlier, clamped to the month's last day."""
     year, month = divmod(day.year * 12 + day.month - 1 + months, 12)

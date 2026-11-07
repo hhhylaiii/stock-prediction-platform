@@ -48,7 +48,7 @@ def test_secondary_indexes(table: str, columns: list[str]) -> None:
 
 
 def test_index_ids_cover_the_spec_series() -> None:
-    assert set(IndexId.values) == {"TAIEX", "TPEX", "SOX", "TSM_ADR", "USDTWD"}
+    assert set(IndexId.values) == {"TAIEX", "TAIEX_TR", "TPEX", "SOX", "TSM_ADR", "USDTWD"}
 
 
 def test_index_volume_states_its_units() -> None:

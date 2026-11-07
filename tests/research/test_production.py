@@ -43,6 +43,7 @@ from apps.research.walkforward import (
     WalkForwardError,
     add_months,
     generate_folds,
+    oos_start,
 )
 from tests.research.run_panels import CONFIG, KEPT, UNSCREENED, research, weekdays
 
@@ -90,6 +91,14 @@ def test_the_shadow_fold_tests_the_last_six_months_after_an_embargo(
     )
     assert not fold.tuning
     assert not fold.holdout
+
+
+def test_the_production_model_is_out_of_sample_from_its_day(long_calendar: TradingDays) -> None:
+    fold = production_fold(long_calendar, AS_OF, SPEC)
+
+    assert oos_start(long_calendar, fold.train_end, 20) == AS_OF
+    assert oos_start(long_calendar, fold.train_end, 5) == long_calendar.shift(fold.train_end, 5)
+    assert oos_start(long_calendar, fold.train_end, 5) < AS_OF
 
 
 def test_production_folds_follow_the_design_window(long_calendar: TradingDays) -> None:
