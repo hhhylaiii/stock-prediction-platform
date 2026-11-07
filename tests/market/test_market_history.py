@@ -4,7 +4,7 @@ from datetime import date
 import pytest
 from django.db import IntegrityError, transaction
 
-from apps.market.market_history import Span, market_on, market_spans, record_markets
+from apps.market.market_history import Span, market_on, market_spans, merge_spans, record_markets
 from apps.market.models import Market, MarketHistory
 
 TWSE = Market.TWSE.value
@@ -84,6 +84,35 @@ def test_days_are_read_in_date_order_whatever_order_they_come_in() -> None:
     assert [span.market for span in market_spans(days)] == [TWSE, TPEX]
 
 
+def test_stored_boundaries_on_days_the_pages_did_not_see_are_kept() -> None:
+    pages = [Span("6177", date(2026, 10, 1), None, TPEX)]
+    stored = [
+        Span("6177", date(2026, 10, 1), date(2026, 10, 26), TPEX),
+        Span("6177", date(2026, 10, 27), None, TWSE),
+    ]
+    seen = {date(2026, 10, 1), date(2026, 10, 2), date(2026, 11, 2)}
+    assert merge_spans(pages, stored, seen) == stored
+
+
+def test_stored_boundaries_on_days_the_pages_saw_give_way_to_the_pages() -> None:
+    pages = [
+        Span("6177", date(2026, 10, 1), date(2026, 10, 27), TPEX),
+        Span("6177", date(2026, 10, 28), None, TWSE),
+    ]
+    stored = [
+        Span("6177", date(2026, 10, 1), date(2026, 10, 28), TPEX),
+        Span("6177", date(2026, 10, 29), None, TWSE),
+    ]
+    seen = {date(2026, 10, 1), date(2026, 10, 28), date(2026, 10, 29)}
+    assert merge_spans(pages, stored, seen) == pages
+
+
+def test_a_stored_start_before_the_first_page_day_it_could_not_see_is_kept() -> None:
+    pages = [Span("2249", date(2026, 11, 2), None, TWSE)]
+    stored = [Span("2249", date(2026, 10, 22), None, TWSE)]
+    assert merge_spans(pages, stored, {date(2026, 11, 2)}) == stored
+
+
 @pytest.mark.django_db
 def test_market_on_reads_the_span_covering_each_day() -> None:
     MarketHistory.objects.bulk_create(
@@ -96,6 +125,12 @@ def test_market_on_reads_the_span_covering_each_day() -> None:
             ),
             MarketHistory(stock_id="6177", start_date=date(2013, 8, 1), market=TWSE),
             MarketHistory(stock_id="2330", start_date=date(2010, 1, 4), market=TWSE),
+            MarketHistory(
+                stock_id="1101",
+                start_date=date(2010, 1, 4),
+                end_date=date(2013, 7, 31),
+                market=TWSE,
+            ),
         ]
     )
     pairs = [
@@ -106,9 +141,10 @@ def test_market_on_reads_the_span_covering_each_day() -> None:
         ("2330", date(2026, 11, 6)),
         ("9999", date(2026, 11, 6)),
         ("6177", date(2010, 1, 4)),
+        ("1101", date(2013, 8, 1)),
     ]
     codes, days = zip(*pairs, strict=True)
-    assert market_on(codes, days) == [TPEX, TWSE, TWSE, None, TWSE, None, TPEX]
+    assert market_on(codes, days) == [TPEX, TWSE, TWSE, None, TWSE, None, TPEX, None]
 
 
 @pytest.mark.django_db

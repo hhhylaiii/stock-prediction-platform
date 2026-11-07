@@ -1,8 +1,9 @@
 """market_history rebuilt from the exchanges' stored foreign-holding pages, without fetching."""
 
 import logging
-from collections import defaultdict
-from collections.abc import Iterable, Iterator, Mapping
+from collections import Counter, defaultdict
+from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from datetime import date
 from typing import Any, NamedTuple
 
@@ -14,7 +15,7 @@ from apps.etl.errors import SourceError
 from apps.etl.models import DataQualityLog
 from apps.etl.zero_holdings import PAGES, Page
 from apps.market.calendar import TradingDays
-from apps.market.market_history import Span, market_spans
+from apps.market.market_history import Span, market_spans, merge_spans
 from apps.market.models import Market, MarketHistory, StockMaster
 
 logger = logging.getLogger(__name__)
@@ -24,7 +25,6 @@ NONE: frozenset[str] = frozenset()
 REBUILT_CHECK = "market_history_rebuilt"
 SAMPLE_SIZE = 20
 Listings = dict[date, dict[str, set[str]]]
-Spans = list[tuple[date, date | None, str]]
 
 
 class RebuildReport(NamedTuple):
@@ -42,28 +42,30 @@ class RebuildReport(NamedTuple):
 def rebuild_market_history(calendar: TradingDays) -> RebuildReport:
     """Codes the pages list get their spans rebuilt from the days both exchanges' pages are stored.
 
-    Spans that differ from the stored ones are logged, as the daily quotes may have written them.
+    Stored boundaries on days the pages could not see, such as the daily quotes wrote, are kept;
+    spans that still differ from the stored ones are logged.
     """
     listings, unreadable = _listings()
-    spans = market_spans((day, _markets(listed)) for day, listed in _both(listings))
-    rebuilt: dict[str, Spans] = defaultdict(list)
-    for span in spans:
-        rebuilt[span.stock_id].append((span.start_date, span.end_date, span.market))
+    both = list(_both(listings))
+    pages = market_spans((day, _markets(listed)) for day, listed in both)
     with transaction.atomic():
-        changed = _replace(rebuilt, spans)
-    seen = {code for listed in listings.values() for codes in listed.values() for code in codes}
+        spans, changed = _replace(pages, {day for day, _ in both})
     days = {
         source: {day for day, listed in listings.items() if source in listed} for source in MARKETS
     }
+    seen = {code for _, listed in both for codes in listed.values() for code in codes}
+    written = {span.stock_id for span in spans}
     return RebuildReport(
         spans=len(spans),
-        stocks=len(rebuilt),
-        moved=sorted(code for code, rows in rebuilt.items() if len(rows) > 1),
-        shared_days=sum(len(set.intersection(*listed.values())) for _, listed in _both(listings)),
+        stocks=len(written),
+        moved=sorted(
+            code for code, count in Counter(s.stock_id for s in spans).items() if count > 1
+        ),
+        shared_days=sum(len(set.intersection(*listed.values())) for _, listed in both),
         pages={source: len(on) for source, on in days.items()},
         unreadable=sorted(unreadable),
         missing=_missing(days, calendar),
-        unsettled=sorted(seen - set(rebuilt)),
+        unsettled=sorted(seen - written),
         changed=changed,
     )
 
@@ -91,34 +93,52 @@ def _both(listings: Listings) -> Iterator[tuple[date, dict[str, set[str]]]]:
     return ((day, listings[day]) for day in sorted(listings) if len(listings[day]) == len(MARKETS))
 
 
-def _replace(rebuilt: Mapping[str, Spans], spans: Iterable[Span]) -> list[str]:
-    """Swap in the rebuilt spans and log the codes whose stored spans differed."""
-    stored: dict[str, Spans] = defaultdict(list)
-    rows = MarketHistory.objects.filter(stock_id__in=list(rebuilt)).order_by(
-        "stock_id", "start_date"
-    )
-    for stock_id, start, end, market in rows.values_list(
-        "stock_id", "start_date", "end_date", "market"
-    ):
-        stored[stock_id].append((start, end, market))
-    changed = sorted(code for code, old in stored.items() if old != rebuilt[code])
+def _replace(pages: Sequence[Span], seen: AbstractSet[date]) -> tuple[list[Span], list[str]]:
+    """Swap in the merged spans and log the codes whose stored spans differed."""
+    stored: dict[str, list[Span]] = defaultdict(list)
+    codes = sorted({span.stock_id for span in pages})
+    rows = MarketHistory.objects.filter(stock_id__in=codes).order_by("stock_id", "start_date")
+    for row in rows.values_list("stock_id", "start_date", "end_date", "market"):
+        stored[row[0]].append(Span(*row))
+    by_code: dict[str, list[Span]] = defaultdict(list)
+    for span in pages:
+        by_code[span.stock_id].append(span)
+    merged = {code: merge_spans(by_code[code], stored.get(code, []), seen) for code in codes}
+    changed = sorted(code for code, old in stored.items() if _moved(old, merged[code]))
+    shifted = [code for code, old in stored.items() if old != merged[code] and code not in changed]
     rows.delete()
+    spans = [span for code in codes for span in merged[code]]
     MarketHistory.objects.bulk_create(MarketHistory(**span._asdict()) for span in spans)
-    if changed:
-        sample = [[code, _plain(stored[code]), _plain(rebuilt[code])] for code in changed]
+    if changed or shifted:
+        sample = [[code, _plain(stored[code]), _plain(merged[code])] for code in changed]
         DataQualityLog.objects.create(
             date=timezone.localdate(),
             check_name=REBUILT_CHECK,
             severity=DataQualityLog.Severity.INFO,
-            detail={"changed": len(changed), "sample": sample[:SAMPLE_SIZE]},
+            detail={
+                "changed": len(changed),
+                "sample": sample[:SAMPLE_SIZE],
+                "start_shifted": len(shifted),
+            },
         )
-    return changed
+    return spans, changed
 
 
-def _plain(spans: Spans) -> list[list[Any]]:
+def _moved(old: Sequence[Span], new: Sequence[Span]) -> bool:
+    """Spans that differ beyond where the first one starts."""
+    if not old or not new:
+        return bool(old) != bool(new)
+    return [old[0]._replace(start_date=new[0].start_date), *old[1:]] != list(new)
+
+
+def _plain(spans: Sequence[Span]) -> list[list[Any]]:
     return [
-        [start.isoformat(), end.isoformat() if end else None, market]
-        for start, end, market in spans
+        [
+            span.start_date.isoformat(),
+            span.end_date.isoformat() if span.end_date else None,
+            span.market,
+        ]
+        for span in spans
     ]
 
 

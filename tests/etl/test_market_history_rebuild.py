@@ -170,10 +170,11 @@ def test_trading_days_without_a_page_are_reported(load_fixture: Callable[[str], 
 @pytest.mark.usefixtures("transfer")
 def test_spans_a_rebuild_changes_are_logged_and_an_unchanged_rebuild_logs_nothing() -> None:
     MarketHistory.objects.create(stock_id="6177", start_date=DAYS[0], market=TPEX)
+    MarketHistory.objects.create(stock_id="2330", start_date=DAYS[1], market=TWSE)
     rebuild_market_history(CALENDAR)
     rebuild_market_history(CALENDAR)
     (log,) = DataQualityLog.objects.filter(check_name=REBUILT_CHECK)
-    assert (log.severity, log.detail["changed"]) == ("info", 1)
+    assert (log.severity, log.detail["changed"], log.detail["start_shifted"]) == ("info", 1, 1)
     assert log.detail["sample"] == [
         [
             "6177",
@@ -195,3 +196,15 @@ def test_a_day_with_one_exchanges_page_does_not_end_a_span(
     report = rebuild_market_history(CALENDAR)
     assert _spans() == [("6177", DAYS[0], None, TPEX)]
     assert report.missing == {"twse": [DAYS[1]], "tpex": [DAYS[3]]}
+
+
+@pytest.mark.usefixtures("transfer")
+def test_a_stored_move_after_the_last_page_day_is_kept() -> None:
+    MarketHistory.objects.create(stock_id="2330", start_date=DAYS[0], end_date=DAYS[3], market=TWSE)
+    MarketHistory.objects.create(stock_id="2330", start_date=date(2013, 8, 2), market=TPEX)
+    report = rebuild_market_history(CALENDAR)
+    assert [row for row in _spans() if row[0] == "2330"] == [
+        ("2330", DAYS[0], DAYS[3], TWSE),
+        ("2330", date(2013, 8, 2), None, TPEX),
+    ]
+    assert "2330" not in report.changed

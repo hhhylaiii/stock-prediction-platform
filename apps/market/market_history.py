@@ -51,6 +51,24 @@ def market_spans(listings: Iterable[tuple[date, Mapping[str, AbstractSet[str]]]]
     return sorted(spans, key=itemgetter(0, 1))
 
 
+def merge_spans(
+    pages: Sequence[Span], stored: Sequence[Span], seen: AbstractSet[date]
+) -> list[Span]:
+    """One stock's page spans, plus the stored boundaries on days the pages could not see."""
+    starts = [(span.start_date, span.market) for span in pages]
+    starts += [(span.start_date, span.market) for span in stored if span.start_date not in seen]
+    merged: list[tuple[date, str]] = []
+    for start, market in sorted(starts):
+        if not merged or merged[-1][1] != market:
+            merged.append((start, market))
+    code = (pages or stored)[0].stock_id
+    ends = [start - ONE_DAY for start, _ in merged[1:]]
+    return [
+        Span(code, start, end, market)
+        for (start, market), end in zip(merged, [*ends, None], strict=True)
+    ]
+
+
 def market_on(stock_ids: Sequence[str], days: Sequence[date]) -> list[str | None]:
     """The market of each stock on the day paired with it; None where no span covers the day."""
     spans: dict[str, list[tuple[date, date | None, str]]] = defaultdict(list)
