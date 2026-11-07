@@ -211,10 +211,11 @@ def test_the_run_length_and_the_two_ninety_percent_bounds(
         "1402": set(range(17)),
         "2002": set(range(20)),
         "2105": set(range(20)),
+        "2201": set(range(8)),
     }
-    listed = {"2002": set(range(18)), "2105": set(range(17))}
+    listed = {"2002": set(range(18)), "2105": set(range(17)), "2201": set(range(10))}
     _stored("1301", dict.fromkeys(days[:19], 0.0))
-    for code in ("1303", "1326", "1402", "2002", "2105"):
+    for code in ("1303", "1326", "1402", "2002", "2105", "2201"):
         _stored(code, dict.fromkeys(days, 0.0))
     for index, day in enumerate(days):
         values = {
@@ -231,10 +232,10 @@ def test_the_run_length_and_the_two_ninety_percent_bounds(
     }
     assert report["left"] == {
         "mixed_run": {"stocks": 2, "rows": 27},
-        "thin_run": {"stocks": 1, "rows": 17},
-        "unchecked": {"no_page": 0, "unreadable": 0, "not_listed": 5},
+        "thin_run": {"stocks": 2, "rows": 25},
+        "unchecked": {"no_page": 0, "unreadable": 0, "not_listed": 15},
     }
-    for code in ("1303", "1402", "2105"):
+    for code in ("1303", "1402", "2105", "2201"):
         assert set(_holdings(code).values()) == {0.0}
 
 

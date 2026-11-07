@@ -174,10 +174,10 @@ def classify(
             continue
         if len(days) < LONG_RUN:
             kind = SHORT_RUN
-        elif 10 * len(wrong) < WRONG_TENTHS * len(checked):
-            kind = MIXED_RUN
         elif 10 * len(checked) < COVERED_TENTHS * len(days):
             kind = THIN_RUN
+        elif 10 * len(wrong) < WRONG_TENTHS * len(checked):
+            kind = MIXED_RUN
         else:
             kind = WHOLE_RUN
         rows = [
