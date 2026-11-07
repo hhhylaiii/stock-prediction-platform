@@ -21,7 +21,7 @@ docker compose up -d --build --no-deps worker
 docker compose exec -T worker python manage.py shell -c "from django.conf import settings; print(len(settings.CELERY_BEAT_SCHEDULE), sorted(settings.CELERY_BEAT_SCHEDULE))"
 ```
 
-- 要列出下方排程表的 15 個項目。舊映像的排程可能是空的：2026-11-01 起的 worker 用舊映像帶著空排程跑了 4 天，什麼都沒抓，直到 11/05 重建才上線。
+- 要列出下方排程表的 17 個項目（15 個 ETL 加 `research-evening`、`research-morning`）。舊映像的排程可能是空的：2026-11-01 起的 worker 用舊映像帶著空排程跑了 4 天，什麼都沒抓，直到 11/05 重建才上線。
 - 第一個時段過後再看 `docker compose logs worker | grep "Sending due task"`，確認排程有送出任務。
 
 worker 只掛主機 `artifacts/` 底下的 `features`、`models`、`predictions` 三個子目錄（研究指令在主機上跑，worker 讀寫同一份；`reports/` 不掛）。換掉 worker 容器之後，確認三個路徑都在掛載點下、讀得到主機的特徵分區：
