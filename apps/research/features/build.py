@@ -15,15 +15,27 @@ from apps.research.features.chip import (
     second_batch_chip_features,
 )
 from apps.research.features.dividend import attach_ex_dates
-from apps.research.features.fundamental import attach_fundamentals, fundamental_features
+from apps.research.features.fundamental import (
+    BASIS_SIGNALS,
+    attach_fundamentals,
+    crossed_name,
+    fundamental_features,
+)
 from apps.research.features.inputs import load_feature_panel
 from apps.research.features.market import (
     MARKET_NAMES,
     attach_market_features,
     load_market_features,
 )
-from apps.research.features.registry import FEATURES, feature_names
-from apps.research.features.residual import MASKED_MONTHS, apply_fallbacks, mask_months
+from apps.research.features.registry import FEATURES, Group, feature_names
+from apps.research.features.residual import (
+    MASKED_MONTHS,
+    OBSERVABLE,
+    apply_fallbacks,
+    mask_months,
+    observable_gaps,
+    observable_name,
+)
 from apps.research.features.size_risk import (
     industry_risk_features,
     second_batch_industry_features,
@@ -35,6 +47,8 @@ from apps.research.features.technical import (
 )
 
 FEATURE_COLUMNS = [spec.name for spec in FEATURES]
+CURRENT = "_now"
+CHECKED = [name for name in OBSERVABLE if name in feature_names(Group.FUNDAMENTAL)]
 MODEL_COLUMNS = [*feature_names(batch=1), *feature_names(batch=2)]
 FRAME_COLUMNS = ["stock_id", "date", "in_universe", *FEATURE_COLUMNS]
 FIRST_BATCH_COLUMNS = ["stock_id", "date", "in_universe", *feature_names(batch=1)]
@@ -98,3 +112,38 @@ def build_feature_frame(
     features = compute_features(_with_inputs(panel, calendar, end), masked)
     inside = features[features["date"].between(start, end)]
     return inside.sort_values(["date", "stock_id"], ignore_index=True)[FRAME_COLUMNS]
+
+
+def current_name(name: str) -> str:
+    """Column of a feature as today's database gives it, beside the value stored earlier."""
+    return f"{name}{CURRENT}"
+
+
+def observable_frame(
+    calendar: TradingDays,
+    start: date,
+    end: date,
+    current: bool = False,
+    masked: Mapping[str, frozenset[str]] = MASKED_MONTHS,
+) -> pd.DataFrame:
+    """Per listed stock and day in [start, end], which OBSERVABLE gaps have a known cause.
+
+    With current, also each fundamental of OBSERVABLE as today's database gives it, masked.
+    """
+    keys = [
+        "stock_id",
+        "date",
+        *map(observable_name, OBSERVABLE),
+        *map(crossed_name, BASIS_SIGNALS),
+    ]
+    columns = [*keys, *(map(current_name, CHECKED) if current else ())]
+    low, high = max(start, calendar.start), min(end, calendar.end)
+    panel = load_feature_panel(calendar, start, end) if low <= high else pd.DataFrame()
+    if panel.empty:
+        return pd.DataFrame(columns=columns)
+    attached = attach_fundamentals(panel, calendar, panel["date"].min(), end)
+    gaps = observable_gaps(attached)
+    if current:
+        values = mask_months(apply_fallbacks(fundamental_features(attached), attached), masked)
+        gaps = gaps.assign(**{current_name(name): values[name].to_numpy() for name in CHECKED})
+    return gaps[gaps["date"].between(start, end)].reset_index(drop=True)[columns]

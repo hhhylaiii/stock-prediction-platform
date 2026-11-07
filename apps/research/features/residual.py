@@ -6,17 +6,41 @@ from types import MappingProxyType
 
 import pandas as pd
 
-from apps.research.features.fundamental import sourced_name
+from apps.research.features.fundamental import (
+    BASIS_SIGNALS,
+    STATEMENT_INPUTS,
+    crossed_name,
+    sourced_name,
+)
+from apps.research.features.size_risk import canonical_industry
 
 ACCEPT_RATIO = 1.5
 ACCEPT_GAP = 0.05
 MAX_MASKED_SHARE = 0.2
+BASIS_GAP = 0.01
 SHARE_DIGITS = 12
 FALLBACKS: Mapping[str, str] = MappingProxyType(
     {"fund_rev_yoy": "fund_rev_yoy_q", "fund_rev_3m_yoy": "fund_rev_yoy_q"}
 )
 MASKED_MONTHS: Mapping[str, frozenset[str]] = MappingProxyType({})
 GROUPS = {True: "delisted", False: "current"}
+OBSERVED = "_observable"
+PRESENT = "present_"
+OBSERVABLE: Mapping[str, tuple[str, ...]] = MappingProxyType(
+    {
+        "fund_ep": ("eps_ttm",),
+        "ind_ep_neutral": ("eps_ttm",),
+        **{name: (name,) for name in STATEMENT_INPUTS if name != "eps_ttm"},
+        "fund_rev_yoy": ("fund_rev_yoy", "fund_rev_yoy_q"),
+        "fund_rev_3m_yoy": ("fund_rev_3m_yoy", "fund_rev_yoy_q"),
+    }
+)
+NO_MARGINS = MappingProxyType(
+    dict.fromkeys(
+        ["fund_gross_margin", "fund_op_margin", "fund_gm_yoy_chg", "fund_opm_yoy_chg"],
+        frozenset({"金融保險"}),
+    )
+)
 RULES_KEY = b"residual_rules"
 
 
@@ -48,13 +72,87 @@ def mask_months(
     )
 
 
+def observable_name(name: str) -> str:
+    """Column that is True when a missing value of the feature has a cause known on its day."""
+    return f"{name}{OBSERVED}"
+
+
+def _recorded(panel: pd.DataFrame, signal: str, column: str) -> pd.Series:
+    """Whether the signal's inputs are on record, for a fallback also on one report basis."""
+    recorded = panel[sourced_name(signal)].eq(1.0)
+    if signal == column or signal not in BASIS_SIGNALS:
+        return recorded
+    return recorded & panel[crossed_name(signal)].ne(1.0)
+
+
+def observable_gaps(
+    panel: pd.DataFrame, exempt: Mapping[str, frozenset[str]] = NO_MARGINS
+) -> pd.DataFrame:
+    """Per row, whether each OBSERVABLE gap reads only inputs on record or its industry lacks it.
+
+    A value read from inputs all on record is missing by its formula, not by the source; a
+    fallback left NaN by a report-basis switch does not explain its column's gap.
+    """
+    industry = canonical_industry(panel["industry"])
+    observed = {}
+    for name, signals in OBSERVABLE.items():
+        recorded = pd.concat([_recorded(panel, signal, name) for signal in signals], axis=1)
+        observed[observable_name(name)] = recorded.any(axis=1) | industry.isin(
+            exempt.get(name, frozenset())
+        )
+    crossed = {crossed_name(name): panel[crossed_name(name)].eq(1.0) for name in BASIS_SIGNALS}
+    return panel[["stock_id", "date"]].assign(**observed, **crossed)
+
+
+def basis_counts(rows: pd.DataFrame, column: str, delisted: pd.Series) -> pd.Series:
+    """Universe rows missing a value read across report bases, and all universe rows, by fate."""
+    inside = rows[rows["in_universe"].astype(bool)]
+    fate = inside["stock_id"].map(delisted).eq(True)
+    hit = inside[column].isna() & inside[crossed_name(column)].eq(True)
+    return pd.Series(
+        {
+            "current": int(hit[~fate].sum()),
+            "delisted": int(hit[fate].sum()),
+            "rows_current": int((~fate).sum()),
+            "rows_delisted": int(fate.sum()),
+        }
+    )
+
+
+def masked_as_observable(
+    frame: pd.DataFrame, masked: Mapping[str, frozenset[str]] = MASKED_MONTHS
+) -> pd.DataFrame:
+    """New frame where gaps in a column's masked months also count as having a known cause."""
+    months = _months(frame["date"])
+    marked = {
+        observable_name(name): frame.get(observable_name(name), pd.Series(False, index=frame.index))
+        .eq(True)
+        .astype(bool)
+        | months.isin(sorted(chosen))
+        for name, chosen in masked.items()
+        if chosen
+    }
+    return frame.assign(**marked)
+
+
 def monthly_coverage(rows: pd.DataFrame, column: str, delisted: pd.Series) -> pd.DataFrame:
-    """Share of universe rows with a value per month, for stocks later delisted and the rest."""
+    """Share of universe rows with a value or an observable gap, per month and later fate.
+
+    The present_ shares count values only.
+    """
     inside = rows[rows["in_universe"].astype(bool)]
     group = inside["stock_id"].map(delisted).eq(True).map(GROUPS)
-    known = inside[column].notna().astype("float64")
-    shares = known.groupby([_months(inside["date"]), group]).mean().unstack()
-    return shares.reindex(columns=list(GROUPS.values())).rename_axis(index=None, columns=None)
+    present = inside[column].notna()
+    observed = observable_name(column)
+    known = present | inside[observed].eq(True) if observed in inside else present
+    months = _months(inside["date"])
+
+    def shares(flag: pd.Series) -> pd.DataFrame:
+        table = flag.astype("float64").groupby([months, group]).mean().unstack()
+        return table.reindex(columns=list(GROUPS.values()))
+
+    table = pd.concat([shares(known), shares(present).add_prefix(PRESENT)], axis=1)
+    return table.rename_axis(index=None, columns=None)
 
 
 def _apart(more: pd.Series, less: pd.Series) -> pd.Series:
@@ -64,9 +162,10 @@ def _apart(more: pd.Series, less: pd.Series) -> pd.Series:
 
 
 def affected_months(coverage: pd.DataFrame) -> list[str]:
-    """Months where, on their own, the delisted group is missing or present far more often."""
+    """Months where, on their own, the delisted group has source gaps or values far more often."""
     current, delisted = coverage["current"], coverage["delisted"]
-    affected = _apart(1 - delisted, 1 - current) | _apart(delisted, current)
+    present = coverage[f"{PRESENT}current"], coverage[f"{PRESENT}delisted"]
+    affected = _apart(1 - delisted, 1 - current) | _apart(present[1], present[0])
     return sorted(str(month) for month in coverage.index[affected])
 
 

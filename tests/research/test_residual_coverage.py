@@ -10,6 +10,8 @@ from django.core.management.base import CommandError
 
 from apps.market.calendar import TradingDays
 from apps.market.models import StockMaster, TradingCalendar
+from apps.research.features.fundamental import crossed_name
+from apps.research.features.residual import observable_name
 from apps.research.management.commands import residual_coverage
 from tests.research.conftest import weekday_calendar
 
@@ -56,7 +58,12 @@ def built(monkeypatch: pytest.MonkeyPatch) -> list[tuple[date, date, Any]]:
         return synthetic(calendar, start, end)
 
     monkeypatch.setattr(residual_coverage, "build_feature_frame", build)
+    monkeypatch.setattr(residual_coverage, "observable_frame", lambda *_: unexplained())
     return calls
+
+
+def unexplained() -> pd.DataFrame:
+    return pd.DataFrame(columns=["stock_id", "date", observable_name("fund_rev_yoy")])
 
 
 def test_coverage_builds_each_year_unmasked_and_names_the_affected_months(
@@ -85,7 +92,14 @@ def test_coverage_builds_each_year_unmasked_and_names_the_affected_months(
     assert text.count("warning: over 20% of the months") == 1
     assert text.index("warning") > text.index("chip_fi_holding_pct: 22")
     table = pd.read_csv(output)
-    assert list(table.columns) == ["column", "month", "current", "delisted"]
+    assert list(table.columns) == [
+        "column",
+        "month",
+        "current",
+        "delisted",
+        "present_current",
+        "present_delisted",
+    ]
     assert len(table) == 48
     march = table[(table["column"] == "fund_rev_mom") & (table["month"] == "2016-03")].iloc[0]
     assert (march["current"], march["delisted"]) == (1.0, 0.0)
@@ -120,3 +134,73 @@ def test_coverage_reads_2010_to_2020_by_default_and_names_an_empty_period(
     assert built[10][1] == date(2020, 12, 31)
     assert "fund_rev_yoy: 1 of 24 months affected (4%)" in out.getvalue()
     assert "fund_rev_yoy: no universe rows in the period" in empty.getvalue()
+
+
+def test_coverage_counts_a_gap_with_a_known_cause_as_covered(
+    built: list[tuple[date, date, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asked: list[tuple[date, date]] = []
+
+    def explained(calendar: TradingDays, start: date, end: date) -> pd.DataFrame:
+        asked.append((start, end))
+        low, high = max(start, calendar.start), min(end, calendar.end)
+        days = calendar.between(low, high) if low <= high else ()
+        rows = [(stock, day, True, True) for day in days for stock in ("2330", "1101")]
+        names = [observable_name("fund_rev_mom"), observable_name("fund_rev_yoy")]
+        return pd.DataFrame(rows, columns=["stock_id", "date", *names])
+
+    monkeypatch.setattr(residual_coverage, "observable_frame", explained)
+    out = StringIO()
+
+    call_command(
+        "residual_coverage", columns="fund_rev_mom,fund_rev_yoy,fund_rev_3m_yoy", stdout=out
+    )
+
+    assert asked[:2] == [
+        (date(2010, 1, 1), date(2010, 12, 31)),
+        (date(2011, 1, 1), date(2011, 12, 31)),
+    ]
+    assert "fund_rev_mom: 0 of 24 months affected (0%)" in out.getvalue()
+    assert "fund_rev_yoy: 1 of 24 months affected (4%)" in out.getvalue()
+    assert "fund_rev_3m_yoy: 1 of 24 months affected (4%)" in out.getvalue()
+
+
+def test_coverage_counts_gaps_read_across_report_bases_and_warns_when_they_lean_on_delisted(
+    built: list[tuple[date, date, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def crossed(calendar: TradingDays, start: date, end: date) -> pd.DataFrame:
+        low, high = max(start, calendar.start), min(end, calendar.end)
+        days = calendar.between(low, high) if low <= high else ()
+        rows = [(stock, day, stock == "1101") for day in days for stock in ("2330", "1101")]
+        return pd.DataFrame(rows, columns=["stock_id", "date", crossed_name("fund_rev_yoy_q")])
+
+    def build(calendar: TradingDays, start: date, end: date, masked: Any) -> pd.DataFrame:
+        return synthetic(calendar, start, end).assign(fund_rev_yoy_q=float("nan"))
+
+    monkeypatch.setattr(residual_coverage, "observable_frame", crossed)
+    monkeypatch.setattr(residual_coverage, "build_feature_frame", build)
+    out = StringIO()
+
+    call_command("residual_coverage", columns="fund_rev_yoy_q,fund_rev_yoy", stdout=out)
+
+    text = out.getvalue()
+    assert "fund_rev_yoy_q: gaps read across report bases, current 0.00%, delisted 100.00%" in text
+    assert "warning: these gaps lean on stocks later delisted; report before keeping them" in text
+    assert "fund_rev_yoy: gaps read across" not in text
+
+
+@pytest.mark.parametrize(
+    ("current", "delisted", "warned"),
+    [(20, 31, True), (30, 44, False), (4, 13, False), (4, 15, True), (0, 10, False)],
+)
+def test_the_basis_warning_needs_both_the_ratio_and_the_gap(
+    current: int, delisted: int, warned: bool
+) -> None:
+    out = StringIO()
+    counts = pd.Series(
+        {"current": current, "delisted": delisted, "rows_current": 1000, "rows_delisted": 1000}
+    )
+
+    residual_coverage.Command(stdout=out)._basis("fund_cfo_to_ni", counts)
+
+    assert ("warning: these gaps lean" in out.getvalue()) is warned

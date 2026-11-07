@@ -6,7 +6,12 @@ import pandas as pd
 import pytest
 
 from apps.market.models import DailyValuation, FinancialStatement, MonthlyRevenue
-from apps.research.features.fundamental import attach_fundamentals, sourced_name
+from apps.research.features.fundamental import (
+    BASIS_SIGNALS,
+    attach_fundamentals,
+    crossed_name,
+    sourced_name,
+)
 from tests.research.conftest import weekday_calendar
 
 CALENDAR = weekday_calendar(date(2013, 1, 1), date(2016, 12, 31))
@@ -145,6 +150,9 @@ def test_a_reused_code_reads_only_filings_of_the_new_listing() -> None:
     assert after["fund_rev_mom"].tolist() == pytest.approx([0.1, 0.1])
     assert after[sourced_name("fund_rev_mom")].tolist() == [1.0, 1.0]
     assert after[sourced_name("fund_rev_yoy")].isna().all()
+    assert before[sourced_name("fund_gross_margin")].isna().all()
+    assert after[sourced_name("eps_ttm")].isna().all()
+    assert after[sourced_name("fund_gross_margin")].tolist() == [1.0, 1.0]
     waiting = before[sourced_name("fund_rev_mom")]
     assert waiting.loc[: d("2016-04-08")].isna().all()
     assert waiting.loc[d("2016-04-11") : d("2016-05-09")].eq(0.0).all()
@@ -277,3 +285,17 @@ def test_quarterly_revenue_growth_appears_on_the_announce_date() -> None:
 
     assert math.isnan(attached["fund_rev_yoy_q"].iloc[0])
     assert attached["fund_rev_yoy_q"].iloc[1] == pytest.approx(0.3)
+
+
+def test_statement_flags_attach_and_go_stale_like_their_signals() -> None:
+    year_of_statements()
+    statement("2015-Q4", "2016-03-31", eps=5.0, gross_margin=None)
+    early = attach(panel_of("2330", "2016-03-28", "2016-04-01")).set_index("date")
+    stale = attach(panel_of("2330", "2016-10-24", "2016-10-24")).iloc[0]
+
+    assert {sourced_name(name) for name in STATEMENT_NAMES} <= set(early.columns)
+    assert early[[crossed_name(name) for name in BASIS_SIGNALS]].eq(0.0).all().all()
+    assert early[sourced_name("eps_ttm")].tolist() == [0.0, 0.0, 0.0, 1.0, 1.0]
+    assert early[sourced_name("fund_gross_margin")].tolist() == [1.0, 1.0, 1.0, 0.0, 0.0]
+    assert math.isnan(stale["eps_ttm"])
+    assert math.isnan(stale[sourced_name("eps_ttm")])

@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from datetime import date
 from io import StringIO
 from pathlib import Path
@@ -8,15 +9,68 @@ from django.core.management import call_command
 from django.core.management.base import CommandError
 
 from apps.market.models import StockMaster
-from apps.research.features.build import MODEL_COLUMNS
+from apps.research.features.build import CHECKED, MODEL_COLUMNS, current_name
+from apps.research.features.residual import OBSERVABLE, observable_name
 from apps.research.features.store import existing_partition, export_year
 from apps.research.management.commands import phase3_report
 from apps.research.models import FeatureDaily, ModelRun
-from apps.research.phase3_report import TABLE_COLUMNS
+from apps.research.phase3_report import AFTER_COLUMNS, TABLE_COLUMNS
 from tests.research.test_screening import STOCKS, stored
 
 pytestmark = pytest.mark.django_db
 __all__ = ["stored"]
+Explained = Callable[..., pd.DataFrame]
+
+
+def from_table(known: bool, drift: str = "") -> Explained:
+    """observable_frame stand-in from feature_daily; drift fills or empties today's values."""
+
+    def frame(calendar: object, start: date, end: date, **_: object) -> pd.DataFrame:
+        rows = pd.DataFrame(
+            list(
+                FeatureDaily.objects.filter(date__range=(start, end)).values(
+                    "stock_id", "date", "in_universe", *CHECKED
+                )
+            )
+        )
+        moved = (~rows["in_universe"] & (drift == "outside")) | (drift == "all")
+        now = rows[CHECKED].where(~moved, rows[CHECKED].fillna(1.0), axis=0)
+        if drift == "emptied":
+            now = pd.DataFrame(float("nan"), index=rows.index, columns=CHECKED)
+        return rows[["stock_id", "date"]].assign(
+            **{observable_name(name): known for name in OBSERVABLE},
+            **{current_name(name): now[name] for name in CHECKED},
+        )
+
+    return frame
+
+
+@pytest.fixture(autouse=True)
+def unexplained(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(phase3_report, "observable_frame", from_table(known=False))
+
+
+def report(stored: Path, **options: str) -> pd.DataFrame:
+    StockMaster.objects.get_or_create(
+        stock_id=STOCKS[0],
+        defaults={"name": "x", "market": "TWSE", "delist_date": date(2018, 1, 2)},
+    )
+    gone = FeatureDaily.objects.filter(stock_id=STOCKS[0], date__month=3)
+    gone.update(fund_ep=None, fund_rev_yoy=None)
+    export_year(2016, stored / "features", rebuilt=(date(2016, 1, 1), date(2016, 12, 31)))
+    call_command("ic_report", run_key="screen1", output=str(stored / "ic.md"), stdout=StringIO())
+    call_command(
+        "phase3_report",
+        run_key="screen1",
+        before=str(before_table(stored / "before.csv")),
+        start="2016-01-01",
+        end="2016-12-31",
+        output=str(stored / "data.md"),
+        appendix=str(stored / "appendix"),
+        stdout=StringIO(),
+        **options,
+    )
+    return pd.read_csv(stored / "appendix" / "missing-after.csv", index_col=0)
 
 
 def before_table(path: Path) -> Path:
@@ -68,7 +122,7 @@ def test_the_report_covers_gaps_fallbacks_and_monthly_ic(stored: Path) -> None:
     assert "目前沒有遮罩欄位。" in text
     assert "| 特徵 | 遮罩月份 |" not in text
     after = pd.read_csv(stored / "appendix" / "missing-after.csv", index_col=0)
-    assert list(after.columns) == TABLE_COLUMNS
+    assert list(after.columns) == AFTER_COLUMNS
     assert list(after.index) == MODEL_COLUMNS
     assert after["rows_delisted"].iloc[0] > 0
     assert after["rows_current"].iloc[0] > after["rows_delisted"].iloc[0]
@@ -200,3 +254,56 @@ def test_the_report_checks_the_rules_of_the_gap_years_and_the_screening_window(
 
     run = ModelRun.objects.get(run_id="screen1.screening")
     assert seen == [(date(2016, 1, 1), date(2016, 6, 30)), (run.train_start, run.train_end)]
+
+
+def test_gaps_with_a_known_cause_leave_the_acceptance(
+    stored: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plain = report(stored)
+    monkeypatch.setattr(phase3_report, "observable_frame", from_table(known=True))
+
+    explained = report(stored)
+
+    assert (plain.loc[["fund_ep", "fund_rev_yoy"], "delisted"] > 0).all()
+    assert explained.loc[CHECKED, ["current", "delisted"]].eq(0.0).all().all()
+    pd.testing.assert_series_equal(
+        explained.loc[CHECKED, "observable_delisted"],
+        plain.loc[CHECKED, "delisted"],
+        check_names=False,
+    )
+    assert plain.loc[CHECKED, "observable_delisted"].eq(0.0).all()
+
+
+def test_the_report_refuses_partitions_that_the_database_no_longer_gives(
+    stored: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    outside = FeatureDaily.objects.filter(stock_id=STOCKS[1], date__month=5)
+    assert outside.update(in_universe=False, fund_ep=None) > 0
+    monkeypatch.setattr(phase3_report, "observable_frame", from_table(known=True, drift="outside"))
+    report(stored)
+    monkeypatch.setattr(phase3_report, "observable_frame", from_table(known=True, drift="all"))
+
+    with pytest.raises(CommandError, match="no longer gives"):
+        report(stored)
+    monkeypatch.setattr(phase3_report, "observable_frame", from_table(known=True, drift="emptied"))
+
+    with pytest.raises(CommandError, match="no longer gives"):
+        report(stored)
+
+
+def test_gaps_in_masked_months_count_as_having_a_known_cause(
+    stored: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plain = report(stored)
+    monkeypatch.setattr(phase3_report, "MASKED_MONTHS", {"fund_ep": frozenset({"2016-03"})})
+
+    masked = report(stored)
+
+    def share(table: pd.DataFrame, name: str, column: str = "delisted") -> float:
+        value: float = table[column].loc[name]
+        return value
+
+    assert share(plain, "fund_ep") > 0
+    assert share(masked, "fund_ep") == 0.0
+    assert share(masked, "fund_ep", "observable_delisted") == share(plain, "fund_ep")
+    assert share(masked, "fund_rev_yoy") == share(plain, "fund_rev_yoy")

@@ -27,9 +27,16 @@ from apps.market.models import (
     WeeklyHolding,
 )
 from apps.research.features import store
-from apps.research.features.build import FEATURE_COLUMNS, FRAME_COLUMNS, build_feature_frame
+from apps.research.features.build import (
+    CHECKED,
+    FEATURE_COLUMNS,
+    FRAME_COLUMNS,
+    build_feature_frame,
+    current_name,
+    observable_frame,
+)
 from apps.research.features.registry import FEATURES, feature_names
-from apps.research.features.residual import rules_signature
+from apps.research.features.residual import observable_name, rules_signature
 from apps.research.features.store import (
     export_year,
     partition_rules,
@@ -727,3 +734,58 @@ def test_feature_dates_subset_of_calendar(tmp_path: Path, settings: Any) -> None
     assert days.isdisjoint(CLOSED)
     assert days == set(CALENDAR.between(d("2016-02-01"), d("2016-02-29")))
     assert not math.isnan(stored()["tech_ret_1d"].iloc[-1])
+
+
+def test_observable_gaps_mark_formula_and_industry_gaps_but_not_missing_inputs() -> None:
+    for stock_id in ("2330", "2881", "1101"):
+        listed(stock_id, "2015-06-01", "2016-03-31")
+    StockMaster.objects.filter(stock_id="2881").update(industry="金融業")
+    periods = [(2013, 4), *((2014, q) for q in (1, 2, 3, 4)), *((2015, q) for q in (1, 2, 3))]
+    blanks = {"gross_margin": None, "op_margin": None, "debt_ratio": None}
+    FinancialStatement.objects.bulk_create(
+        FinancialStatement(
+            stock_id=stock_id,
+            period=f"{year}-Q{quarter}",
+            eps=Decimal("-1") if k < 4 else Decimal("1"),
+            revenue=1_000,
+            net_income=100,
+            operating_cf=120,
+            roe=0.05,
+            **(
+                blanks
+                if stock_id == "2881"
+                else {"gross_margin": 0.4, "op_margin": 0.2, "debt_ratio": 0.3}
+            ),
+            announce_date=date(year, quarter * 3, 28) + timedelta(days=45),
+        )
+        for stock_id in ("2330", "2881")
+        for k, (year, quarter) in enumerate(periods)
+    )
+
+    frame = build_feature_frame(CALENDAR, d("2016-03-01"), d("2016-03-04"))
+    gaps = observable_frame(CALENDAR, d("2016-03-01"), d("2016-03-04"))
+
+    keys = ["stock_id", "date"]
+    pd.testing.assert_frame_equal(
+        gaps[keys].sort_values(keys, ignore_index=True),
+        frame[keys].sort_values(keys, ignore_index=True),
+    )
+    row = frame[frame["date"] == d("2016-03-02")].set_index("stock_id")
+    seen = gaps[gaps["date"] == d("2016-03-02")].set_index("stock_id")
+
+    def gap(stock_id: str, name: str) -> tuple[bool, bool]:
+        value: float = row[name].loc[stock_id]
+        return math.isnan(value), bool(seen[observable_name(name)].loc[stock_id])
+
+    assert gap("2330", "fund_eps_yoy") == (True, True)
+    assert gap("2330", "fund_ep") == (False, True)
+    assert gap("2881", "fund_gross_margin") == (True, True)
+    assert gap("2881", "fund_gm_yoy_chg") == (True, True)
+    assert gap("2881", "fund_debt_ratio") == (True, False)
+    assert gap("1101", "fund_ep") == (True, False)
+    assert gap("1101", "fund_rev_yoy") == (True, False)
+    now = observable_frame(CALENDAR, d("2016-03-01"), d("2016-03-04"), current=True)
+    both = frame.merge(now, on=keys)
+    assert len(both) == len(frame)
+    for name in CHECKED:
+        assert both[name].isna().equals(both[current_name(name)].isna()), name
