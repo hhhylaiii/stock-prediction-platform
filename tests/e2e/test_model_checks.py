@@ -624,6 +624,44 @@ def test_a_rebuild_row_from_before_the_window_names_only_the_limit(
     )
 
 
+def test_a_rebuild_row_from_before_the_handling_reads_as_rebuilt(
+    page: Page, live_server: LiveServer, seeded: Seed
+) -> None:
+    earliest = seeded.sessions[-5].isoformat()
+    log(seeded, tasks.REBUILD_CHECK, "info", {"earliest": earliest, "stocks": 2, "notes": {}})
+
+    page.goto(f"{live_server.url}/#models")
+
+    rebuilt = page.locator("#model-checks .check")
+    expect(rebuilt.locator(".muted")).to_have_text(f"重建 2 檔，自 {earliest} 起")
+    expect(rebuilt.locator("i")).not_to_have_class("warn")
+
+
+def moved(check: str, day: date) -> None:
+    """Date the newest row of check on day, as if an earlier chain had written it."""
+    row = DataQualityLog.objects.filter(check_name=check).latest("pk")
+    DataQualityLog.objects.filter(pk=row.pk).update(date=day)
+
+
+def test_only_the_latest_day_of_a_research_check_is_pinned(
+    page: Page, live_server: LiveServer, seeded: Seed, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rebuild_step(seeded, monkeypatch, error="boom")
+    moved(tasks.REBUILD_CHECK, seeded.sessions[-3])
+    monkeypatch.undo()
+    old = TradingDays.from_db().shift(seeded.last_session, -80)
+    log(seeded, ADJ_CHECK, "info", _merged({}, "2330", old), back=2)
+    log(seeded, ADJ_CHECK, "info", _merged({}, "9999", seeded.sessions[-5]), back=2)
+    rebuild_step(seeded, monkeypatch)
+
+    page.goto(f"{live_server.url}/#models")
+
+    rebuilds = page.locator("#model-checks .check")
+    expect(rebuilds).to_have_count(2)
+    expect(rebuilds.locator(".pinned")).to_have_text([seeded.last_session.isoformat()] * 2)
+    expect(page.locator("#model-checks")).not_to_contain_text("重建失敗")
+
+
 def test_a_failed_rebuild_shows_its_error(
     page: Page, live_server: LiveServer, seeded: Seed, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -641,7 +679,7 @@ def test_a_failed_rebuild_shows_its_error(
 def test_an_adj_factor_change_is_a_data_check_counting_its_stocks(
     page: Page, live_server: LiveServer, seeded: Seed
 ) -> None:
-    named = _merged(_merged({}, "2330", seeded.sessions[-4]), "9999", seeded.sessions[-2])
+    named = _merged(_merged({}, "2330", seeded.sessions[-2]), "9999", seeded.sessions[-4])
     log(seeded, ADJ_CHECK, "info", named)
 
     page.goto(f"{live_server.url}/#models")
