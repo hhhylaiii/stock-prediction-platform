@@ -15,7 +15,10 @@ SOURCES = ("twse", "tpex")
 
 
 class Command(BaseCommand):
-    help = "Fill missing holdings, share counts or valuations from the exchanges' daily tables."
+    help = (
+        "Fill missing holdings, share counts, valuations or margin balances"
+        " from the exchanges' daily tables."
+    )
 
     def add_arguments(self, parser: ArgumentParser) -> None:
         parser.add_argument("--source", choices=SOURCES, required=True)
