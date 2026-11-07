@@ -162,7 +162,7 @@ def _swap(
         retired += [item.run_id for item in serving]
         current = ModelRun.objects.get(pk=run.pk)
         own = [item for item in failed if item["run_id"] == run.run_id]
-        note = {"forced": bool(own), "reason": reason or None, "failed": own}
+        note = {"forced": bool(own), "reason": (reason or None) if failed else None, "failed": own}
         params = {**current.params, PROMOTED_ON: day.isoformat(), PROMOTION: note}
         ModelRun.objects.filter(pk=run.pk).update(status=ModelStatus.ACTIVE, params=params)
     return sorted(retired)

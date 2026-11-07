@@ -17,7 +17,11 @@ def verdict(gate: Gate) -> str:
         return gate.reason
     shown = "—" if gate.value is None else f"{gate.value:.4f}"
     detail = f"值 {shown}，門檻 {gate.threshold}，樣本 {gate.sample}"
-    return f"通過，{detail}" if gate.passed else f"不過（{gate.reason}），{detail}"
+    if gate.passed:
+        return f"通過，{detail}"
+    listed = gate.extra.get("errors_total")
+    where = f'；{listed} 組 error 的清單在 N 的 params["gates"]' if listed else ""
+    return f"不過（{gate.reason}），{detail}{where}"
 
 
 class Command(BaseCommand):

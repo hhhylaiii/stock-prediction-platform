@@ -14,6 +14,7 @@ from apps.research import gates
 from apps.research.baseline_runs import BASELINE
 from apps.research.gates import NO_SERVING, Gate, SlotGates, check_gates
 from apps.research.lgbm_runs import MODEL
+from apps.research.management.commands.check_gates import verdict
 from apps.research.models import (
     HoldoutRun,
     LabelDaily,
@@ -274,6 +275,7 @@ def test_the_quality_gate_lists_errors_and_needs_some_checks(researched: Path) -
     assert empty.passed is False
     assert empty.sample == 0
     assert "沒有任何品質檢查紀錄" in empty.reason
+    assert empty.extra == {"errors": [], "errors_total": 0}
 
     logged(run)
     logged(run, "error", run.train_end)
@@ -438,6 +440,19 @@ def built_n(run_key: str) -> ModelRun:
 
 def gate(passed: bool | None) -> Gate:
     return Gate("agreement", passed, None, "", 0, "")
+
+
+def test_the_report_points_a_failed_quality_gate_to_its_full_error_list() -> None:
+    listed = {"errors": [{"date": "2026-10-30", "check": "etl_runs"}], "errors_total": 3}
+    failed = Gate("data_quality", False, 3.0, "無 error", 5, "2 天有 error", listed)
+    clean = Gate("data_quality", True, 0.0, "無 error", 5, "", {"errors": [], "errors_total": 0})
+
+    assert verdict(failed) == (
+        "不過（2 天有 error），值 3.0000，門檻 無 error，樣本 5；"
+        '3 組 error 的清單在 N 的 params["gates"]'
+    )
+    assert verdict(clean) == "通過，值 0.0000，門檻 無 error，樣本 5"
+    assert verdict(gate(False)) == "不過（），值 —，門檻 ，樣本 0"
 
 
 def test_a_slot_passes_unless_some_gate_fails() -> None:

@@ -225,14 +225,22 @@ def test_force_without_failures_is_not_recorded_as_forced(
 ) -> None:
     runs = built("rank", "rank-wf1", researched)
     passed(LAST)
-    sent(monkeypatch)
+    dispatched = sent(monkeypatch)
 
     promote("rank-prod", LAST, researched, force=True, reason="routine")
 
-    assert {fresh(run).params["promotion"]["forced"] for run in runs} == {False}
+    for run in map(fresh, runs):
+        assert run.params["promotion"] == {"forced": False, "reason": None, "failed": []}
     [record] = alerts()
     assert record.severity == DataQualityLog.Severity.INFO
-    assert (record.detail["forced"], record.detail["reason"]) == (False, None)
+    assert record.detail == {
+        "run_key": "rank-prod",
+        "forced": False,
+        "reason": None,
+        "failed": [],
+        "promoted": True,
+    }
+    assert dispatched == []
 
 
 @pytest.mark.django_db
