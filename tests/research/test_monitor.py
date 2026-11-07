@@ -514,6 +514,15 @@ def test_in_sample_days_and_days_beyond_six_months_do_not_count() -> None:
     assert (status(trained), alerts()) == ("active", [])
 
 
+def test_days_whose_label_reaches_into_training_do_not_count_toward_degrading() -> None:
+    days = calendar().between(date(2026, 1, 2), matured(20))
+    limits = {IC_THRESHOLD: {"20": 0.0}}
+    trained = make_run("prod.rank", "rank", params=limits, train_end=days[-71])
+    history(trained, "ic", [-0.5] * 70)
+    run_monitor(DAY, calendar())
+    assert (status(trained), alerts()) == ("active", [])
+
+
 def test_the_active_run_is_judged_before_a_newer_degraded_one_and_screening_runs_never() -> None:
     limits = {IC_THRESHOLD: {"20": 0.0}}
     active = make_run("prod.rank", "rank", params=limits)
