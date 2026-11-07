@@ -311,9 +311,12 @@ def render(
         "",
         "A：沒有第二來源，在受影響月份對所有股票遮成空值。",
         "",
-        "| 特徵 | 遮罩月份 |",
-        "| --- | --- |",
-        *(f"| {name} | {month_ranges(months)} |" for name, months in masked.items()),
+        *(
+            ["| 特徵 | 遮罩月份 |", "| --- | --- |"]
+            + [f"| {name} | {month_ranges(months)} |" for name, months in masked.items()]
+            if masked
+            else ["目前沒有遮罩欄位。"]
+        ),
         "",
         f"## 逐月單因子 rank IC（|IC| 前 {len(top)} 名）",
         "",

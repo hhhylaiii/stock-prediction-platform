@@ -65,6 +65,8 @@ def test_the_report_covers_gaps_fallbacks_and_monthly_ic(stored: Path) -> None:
     assert "| fund_ep | 50.0%／0.0% |" in text
     assert "### 5 日" in text
     assert "### 20 日" in text
+    assert "目前沒有遮罩欄位。" in text
+    assert "| 特徵 | 遮罩月份 |" not in text
     after = pd.read_csv(stored / "appendix" / "missing-after.csv", index_col=0)
     assert list(after.columns) == TABLE_COLUMNS
     assert list(after.index) == MODEL_COLUMNS

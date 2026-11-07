@@ -1,4 +1,4 @@
-"""Every stored feature of a date range, both batches, assembled from the groups (SPEC §6)."""
+"""Every stored feature of a date range, assembled from the groups (SPEC §6)."""
 
 from collections.abc import Mapping
 from datetime import date
