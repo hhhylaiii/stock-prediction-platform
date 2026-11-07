@@ -86,15 +86,11 @@ def existing_partition(directory: Path, year: int) -> Path:
     return path
 
 
-def read_partitions(
-    start: date, end: date, directory: Path, columns: Sequence[str] = FIRST_BATCH_COLUMNS
-) -> pd.DataFrame:
-    """Rows dated in [start, end] from the yearly partitions; the first batch unless asked."""
-    wanted = list(columns)
-    parts = []
-    for low, high in years(start, end):
-        path = existing_partition(directory, low.year)
-        stored = set(pq.read_schema(path).names)
+def _read_partition(directory: Path, low: date, high: date, wanted: list[str]) -> pd.DataFrame:
+    """Rows of low..high from one yearly partition, schema and table read through one handle."""
+    path = existing_partition(directory, low.year)
+    with path.open("rb") as handle:
+        stored = set(pq.ParquetFile(handle).schema_arrow.names)
         missing = [name for name in wanted if name not in stored]
         if missing:
             raise ValueError(
@@ -102,7 +98,16 @@ def read_partitions(
                 f"run build_features --start {low.year}-01-01 --end {low.year}-12-31"
             )
         dated = [("date", ">=", low), ("date", "<=", high)]
-        parts.append(pq.read_table(path, columns=wanted, filters=dated).to_pandas())
+        frame: pd.DataFrame = pq.read_table(handle, columns=wanted, filters=dated).to_pandas()
+    return frame
+
+
+def read_partitions(
+    start: date, end: date, directory: Path, columns: Sequence[str] = FIRST_BATCH_COLUMNS
+) -> pd.DataFrame:
+    """Rows dated in [start, end] from the yearly partitions; the first batch unless asked."""
+    wanted = list(columns)
+    parts = [_read_partition(directory, low, high, wanted) for low, high in years(start, end)]
     return _typed(parts, wanted)
 
 
@@ -113,17 +118,10 @@ def read_columns(start: date, end: date, directory: Path, columns: Sequence[str]
         raise ValueError(f"{unknown} are not feature columns")
     wanted = [*KEYS, *columns]
     types = dict.fromkeys(columns, "float64")
-    parts: list[pd.DataFrame] = []
-    for low, high in years(start, end):
-        path = existing_partition(directory, low.year)
-        missing = [name for name in wanted if name not in pq.read_schema(path).names]
-        if missing:
-            raise ValueError(
-                f"feature partition for {low.year} in {directory} lacks {', '.join(missing)}; "
-                f"run build_features --start {low.year}-01-01 --end {low.year}-12-31"
-            )
-        dated = [("date", ">=", low), ("date", "<=", high)]
-        parts.append(pq.read_table(path, columns=wanted, filters=dated).to_pandas().astype(types))
+    parts = [
+        _read_partition(directory, low, high, wanted).astype(types)
+        for low, high in years(start, end)
+    ]
     if not parts:
         return pd.DataFrame(columns=wanted).astype(types)
     return pd.concat(parts, ignore_index=True)
