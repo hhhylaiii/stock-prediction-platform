@@ -24,7 +24,7 @@ def announcement_session(calendar: TradingDays, cutoff: time) -> Session:
 
 
 def fill_announce_dates(stock_id: str, announced: Mapping[date, date | None]) -> int:
-    """Dates only where none is stored; the exchanges' notice tables (plan 2.7) come first."""
+    """Dates only where none is stored; the exchanges' notice tables (plan 2.7b) come first."""
     known = {ex: day for ex, day in announced.items() if day is not None}
     rows = list(
         DividendEvent.objects.filter(
