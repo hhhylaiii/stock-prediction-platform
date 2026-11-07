@@ -88,6 +88,9 @@ docker compose logs -f worker
 - 23:00（`RESEARCH_AT_EVENING`，要晚於 22:50 的品質檢查）：當天是交易日、`ready_for_research` 通過時，用一條 Celery chain 依序跑 `build_features --date D`、`build_labels --end D`（最近 60 個交易日）。閘門沒過就 30 分鐘後重試，最多 6 次（同 ETL），用完寫 warning；重試帶著 D，過了午夜仍是 D 的工作。
 - 06:00（`RESEARCH_AT_MORNING`，要晚於 05:30 的 `us_close`）：D 是今天之前最後一個交易日，閘門沒過就不預測、寫 warning。D 的 `us_close` 還沒寫就 5 分鐘後再看，最多 6 次（`RESEARCH_US_CLOSE_COUNTDOWN`、`RESEARCH_US_CLOSE_RETRIES`）；等不到照跑，市場特徵沿用前一個美股收盤，完成紀錄記 warning。chain 依序跑：（D 的 23:00 沒有成功時先補 label）→ `build_features --date D` → `predict` → `monitor`，前一步成功才跑下一步。
 - 每條 chain 跑完寫一列 `data_quality_log`（`research_evening`、`research_morning`，`date` 是 D）：成功是 info，`detail.steps` 依序列出每一步的輸出；有一步失敗是 warning，`detail` 寫哪一步、錯誤與已完成的步驟，後面的步驟不跑，並送告警。D 已經有 info 那列就不重跑，所以週六早上跑過週五後，週日、週一早上不會重複；失敗的 D 會在下一個早上（還是同一個 D 時，例如週末）重跑。
+- 每月重訓：每月前 5 個交易日裡，第一條成功的 06:00 chain（D）跑完後排一個 `research.retrain(D)`，每月一次（看那個月有沒有 `research_retrain` 列）。每個 scope 各自處理：`production.DESIGNS[scope].research_run_key` 是 None（設計還沒凍結）就拒建；`label_daily` 還沒建到 D 就全部拒建；否則 `build_run`，run_key 是 `<scope>-YYYY-MM`。結果寫一列 `research_retrain`（`date` 是 D）：全部建好是 info，有拒建或失敗是 warning 並告警，`detail` 有 `built`、`refused`、`failed`。重訓不取研究鎖，但會佔住唯一的 worker 好幾個小時。
+- 換模：下一個早上起，06:00 的 chain 在 monitor 之後多一步 `promote`，把當月 `research_retrain` 建好、還沒有 `model_promotion` 列的 run_key 一個個 `promote`（`--date` 取預設）。門檻沒過就舊模型續用並告警（`model_promotion` warning），之後由人決定要不要 `--force`；`promote` 報錯時其他 scope 照跑，這一步記 warning，隔天早上再試。設計凍結的那支 PR 要在 `DESIGNS` 填 `research_run_key`（不放環境變數）；填了之後，`build_run` 拒絕其他研究 run。
+- 漏跑告警：beat 觸發的 06:00 若發現前一個交易日沒有任何 `research_morning` 列（開關打開後跑過），就替那天記一列 warning（`reason: missed`）並告警，不自動補跑。
 - 研究鎖：`predict`、`monitor`、`promote`、`restore_run` 與研究排程的每一步共用一把 Postgres advisory lock，同時只會有一個在跑（同一個工作內可重入，例如 `promote` 內部的 `predict`）。排程的步驟拿不到就 10 分鐘後重試，最多 6 次（`RESEARCH_LOCK_COUNTDOWN`、`RESEARCH_LOCK_RETRIES`），用完算失敗。手動指令拿不到會直接報錯，寫出持有者，例如 `the research lock is held by 'research 10-29 06:01 predict 2026-10-28' (pid 123)`（取得時間在前；Postgres 只留標籤前 63 個字元，太長的 run_id 尾巴會被截掉）；等它跑完再重跑。行程中斷時鎖隨連線釋放，不會卡住。
 - 看狀態：
 
@@ -97,7 +100,7 @@ docker compose logs -f worker
     "select date, check_name, severity, detail from data_quality_log where check_name like 'research_%' order by date desc limit 10"
   ```
 
-- Mac 在 06:00 睡著、同一天晚一點醒來時，beat 會補觸發 `research.morning` 照跑（可能已經開盤）；睡過午夜才醒的那次早於排定時間，會略過。平日的 D 沒跑成（閘門沒過、睡過午夜）不會自動補：隔天早上的 D 已經是新的一天。閘門沒過會記 warning 並告警；睡過午夜而被略過的那次只在 worker log（`research skipped MORNING`）與狀態頁的預測日期看得到，不告警。等 D 的 ETL 補齊（15:10 的補抓）後手動跑 `build_features --date D`、`predict --date D`、`monitor --date D`。
+- Mac 在 06:00 睡著、同一天晚一點醒來時，beat 會補觸發 `research.morning` 照跑（可能已經開盤）；睡過午夜才醒的那次早於排定時間，會略過。平日的 D 沒跑成（閘門沒過、睡過午夜）不會自動補：隔天早上的 D 已經是新的一天。閘門沒過會記 warning 並告警；睡過午夜而被略過的那次，隔天早上會補記一列 `missed` warning（見上）。等 D 的 ETL 補齊（15:10 的補抓）後手動跑 `build_features --date D`、`predict --date D`、`monitor --date D`。
 - 手動長時間重建特徵或 label（`build_features`、`build_labels` 不取研究鎖）時先關掉開關，或避開 23:00–02:30 與 06:00–08:00，否則排程那一步可能和它搶同一批列而失敗（記 warning）。
 - 打開開關時延長 `ops/launchd` 的 caffeinate：傍晚那次（15:00 起 `-t 39600`，到 02:00）改成 `-t 46800`（到 04:00），清晨那次（05:15 起 `-t 5400`）改成 `-t 9900`（到 08:00）。23:00 的閘門最晚重試到 02:00 才開始 chain，06:00 的 chain 最多等美股收盤 30 分鐘，每一步搶不到鎖還能再等 60 分鐘。
 - 上線前的日子要用 `predict --date D` 回填時（Phase 5 demo、驗收），先照「每日除權息、減資、面額變更」用 `fetch --source twse|tpex --dataset dividend_event` 補那段日子，否則研究閘門不會過。
