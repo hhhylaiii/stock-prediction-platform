@@ -462,7 +462,7 @@ uv run python manage.py fill_industry --source tpex --start 2009-10-01 --end 202
 - `model_alert` 每筆帶 `mode`：`judged` 會把 active 的 run 降級（`reason` 是 `missing_reference` 時只告警）；`grace`（上線日之前補寫的日子，以及換模後 5 個交易日）與 `reset`（`restore_run` 之後、該 slot（目標 × horizon）的窗口還沒累積滿 60 列，之後換上的 run 沿用；h20 約要 80 個交易日、h5 約 65 個）只告警。被判 run 自己的恢復日晚於告警日時（恢復後補跑之前的日子），`reset_rows` 是 0。`mostly_predecessors` 為 true 表示窗口多為前任 run 的列，人工恢復前先看這個。
 - `monitor`、`predict`、`promote`、`restore_run` 共用研究鎖，一次只跑一個（見「研究排程」）；手動指令拿不到鎖會報錯並寫出持有者，等它跑完再重跑。
 - 換模日落在交易日曆最後 4 個交易日內時，寬限結束日算不出來（log 會有 warning）；12 月換模前先照「交易日曆延伸」延伸日曆。
-- 換模：`promote --run-key K`，門檻沒過時舊模型續用並寫 `model_promotion` 告警；要強制換模用 `--force --reason "<原因>"`。每次 promote 都寫一列 `model_promotion`，`detail.promoted` 表示換了沒有：門檻全過是 info（不告警），沒過與強制換模是 warning；同一個 scope 看最新那一列就是現況。`data_quality` 門檻的 reason 只寫摘要（幾天有 error、最近一天是哪些檢查），完整清單在 N 的 `params["gates"]` 那一項的 `errors`（新到舊，最多 200 筆）與 `errors_total`。晚幾天才換模時，`--date` 預設會取 slot 已有列的最後一天。
+- 換模：`promote --run-key K`，門檻沒過時舊模型續用並寫 `model_promotion` 告警；要強制換模用 `--force --reason "<原因>"`。走到門檻判斷的 promote 每次都寫一列 `model_promotion`（在那之前就報錯的，例如非交易日、claim 不符，不寫），`detail.promoted` 表示換了沒有：門檻全過是 info（不告警），沒過與強制換模是 warning。同一個 scope 依 id（寫入順序）最新的那一列，就是最後一次換模嘗試的結果；`promoted` 是 false 時服務中的仍是前一個 build，restore 與降級不寫這一列。`data_quality` 門檻的 reason 只寫摘要（幾天有 error、最近一天是哪些檢查），完整清單在 N 的 `params["gates"]` 那一項的 `errors`（新到舊，最多 200 筆）與 `errors_total`。晚幾天才換模時，`--date` 預設會取 slot 已有列的最後一天。
 - 恢復：`restore_run --run-id R --date D --reason "<原因>"`，只接受 degraded 的 run，D 不早於它最後一個預測日、不晚於今天。
 
 ## 告警
