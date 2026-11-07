@@ -62,7 +62,9 @@ docker compose logs -f worker
 | 22:40 | `etl.statement_scan STATEMENTS_LATE` | 財報彙總表再掃一次；時間固定等於 `FILING_VISIBLE_BEFORE` | — |
 | 22:40 | `etl.revenue_scan REVENUE_LATE` | 月營收彙總頁再掃一次，時間和財報的最後一次相同 | — |
 | 22:50 | `etl.check_quality` | 五項品質檢查，另寫一列 `etl_runs`，列出當天沒完成的 dataset，以及這晚負責的排程工作哪些沒有成功的 run，一起送告警（見下方研究閘門） | — |
+| 23:00 | `research.evening` | 研究閘門通過後依序重算當天的特徵、最近 60 個交易日的 label，見下方「研究排程」 | `RESEARCH_SCHEDULE_ENABLED` 打開才跑 |
 | 05:30 | `etl.us_close` | 前一個台股交易日的費半、TSM ADR、美元台幣，每個交易日只跑一次，寫一列 `data_quality_log`（`us_close`）：費半、TSM 早於那天、或美元台幣早於再前一個交易日，就是 warning | 美元台幣在倫敦 23:59 才收盤，05:30 本來就只有前一天 |
+| 06:00 | `research.morning` | 前一個交易日 D：等 D 的 `us_close`，再依序重算 D 的特徵、`predict`、`monitor`，見下方「研究排程」 | 同上 |
 | 週六 10:00 | `etl.weekly_holding` | 集保股權分散表，抓最近一個已結束的週（週一才醒來也是抓上週），日期用那週最後一個交易日；漏跑時由週六之後第一個交易日（週六本身是交易日就是當天）的 `etl_runs` 列出 | — |
 | 每月 15 日 10:00 | `etl.business_signal` | data.gov.tw 景氣燈號；晚跑時 run 記在當月的排程日；漏跑時由排程日當天或之後第一個交易日的 `etl_runs` 列出 | M 月的資料在 M+2 月 15 日寫入，並以那天為 announce_date；國發會約每月 27 日發布上月，年假會延後 |
 
@@ -78,6 +80,24 @@ docker compose logs -f worker
   - 交易日曆更新、週持股：要有 run 涵蓋那一天。週持股的檔案只放最新一週，下一週出來後就補不回來，那一列會一直是 warning，只能接受。
   - `refresh_master`、景氣燈號：之後任何一次成功的 run 都算補上，因為它們會把之前的變動一起帶進來。
   - MOPS 掃描照舊只在當晚列，重算時不列（掃描補不回來）。
+
+### 研究排程
+
+`.env` 設 `RESEARCH_SCHEDULE_ENABLED=true` 才跑；預設關閉，`research.evening`、`research.morning` 觸發了也直接結束（正式 run 上線後再打開）。
+
+- 23:00（`RESEARCH_AT_EVENING`，要晚於 22:50 的品質檢查）：當天是交易日、`ready_for_research` 通過時，用一條 Celery chain 依序跑 `build_features --date D`、`build_labels --end D`（最近 60 個交易日）。閘門沒過就 30 分鐘後重試，最多 6 次（同 ETL），用完寫 warning。
+- 06:00（`RESEARCH_AT_MORNING`，要晚於 05:30 的 `us_close`）：D 是今天之前最後一個交易日，閘門沒過就不預測、寫 warning。D 的 `us_close` 還沒寫就 5 分鐘後再看，最多 6 次（`RESEARCH_US_CLOSE_COUNTDOWN`、`RESEARCH_US_CLOSE_RETRIES`）；等不到照跑，市場特徵沿用前一個美股收盤，完成紀錄記 warning。chain 依序跑：（D 的 23:00 沒有成功時先補 label）→ `build_features --date D` → `predict` → `monitor`，前一步成功才跑下一步。
+- 每條 chain 跑完寫一列 `data_quality_log`（`research_evening`、`research_morning`，`date` 是 D）：成功是 info，`detail.steps` 依序列出每一步的輸出；有一步失敗是 warning，`detail` 寫哪一步、錯誤與已完成的步驟，後面的步驟不跑，並送告警。D 已經有 info 那列就不重跑，所以週六早上跑過週五後，週日、週一早上不會重複；失敗的 D 會在下一個早上（還是同一個 D 時，例如週末）重跑。
+- 研究鎖：`predict`、`monitor`、`promote`、`restore_run` 與研究排程的每一步共用一把 Postgres advisory lock，同時只會有一個在跑（同一個工作內可重入，例如 `promote` 內部的 `predict`）。排程的步驟拿不到就 10 分鐘後重試，最多 6 次（`RESEARCH_LOCK_COUNTDOWN`、`RESEARCH_LOCK_RETRIES`），用完算失敗。手動指令拿不到會直接報錯，寫出持有者，例如 `the research lock is held by 'research predict 2026-10-28 since 2026-10-29 06:01' (pid 123)`；等它跑完再重跑。行程中斷時鎖隨連線釋放，不會卡住。
+- 看狀態：
+
+  ```bash
+  docker compose logs worker | grep -E "research (skipped|.* failed)"
+  docker compose exec db psql -U twp -d twp -c \
+    "select date, check_name, severity, detail from data_quality_log where check_name like 'research_%' order by date desc limit 10"
+  ```
+
+- 上線前的日子要用 `predict --date D` 回填時（Phase 5 demo、驗收），先照「每日除權息、減資、面額變更」用 `fetch --source twse|tpex --dataset dividend_event` 補那段日子，否則研究閘門不會過。
 
 ## 重試與失敗
 
@@ -437,7 +457,7 @@ uv run python manage.py fill_industry --source tpex --start 2009-10-01 --end 202
 
 - `monitor --date D` 判的是 D 當天服務中的 run（D 在該 horizon 有 `prediction` 列的 run，依 API 的順序）。slot 當天沒有 `prediction` 列就不判，停機或 predict 失敗的那幾天監控會暫停；補跑時先補 `predict --date D`，再補 `monitor --date D`。
 - `model_alert` 每筆帶 `mode`：`judged` 會把 active 的 run 降級（`reason` 是 `missing_reference` 時只告警）；`grace`（上線日之前補寫的日子，以及換模後 5 個交易日）與 `reset`（`restore_run` 之後、該 slot（目標 × horizon）的窗口還沒累積滿 60 列，之後換上的 run 沿用；h20 約要 80 個交易日、h5 約 65 個）只告警。被判 run 自己的恢復日晚於告警日時（恢復後補跑之前的日子），`reset_rows` 是 0。`mostly_predecessors` 為 true 表示窗口多為前任 run 的列，人工恢復前先看這個。
-- `monitor` 不要和 `predict`、`promote` 同時跑：三者都會鎖服務中的 run，重疊時可能互等，Postgres 會中止其中一個（整筆回復，重跑即可）。
+- `monitor`、`predict`、`promote`、`restore_run` 共用研究鎖，一次只跑一個（見「研究排程」）；手動指令拿不到鎖會報錯並寫出持有者，等它跑完再重跑。
 - 換模日落在交易日曆最後 4 個交易日內時，寬限結束日算不出來（log 會有 warning）；12 月換模前先照「交易日曆延伸」延伸日曆。
 - 換模：`promote --run-key K`，門檻沒過時舊模型續用並寫 `model_promotion` 告警；要強制換模用 `--force --reason "<原因>"`。晚幾天才換模時，`--date` 預設會取 slot 已有列的最後一天。
 - 恢復：`restore_run --run-id R --date D --reason "<原因>"`，只接受 degraded 的 run，D 不早於它最後一個預測日、不晚於今天。
