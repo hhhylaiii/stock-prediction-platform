@@ -225,7 +225,7 @@ Oct 29, 2026 · @Owen Lai
 | 籌碼面 | `chip_fi_net_1d` `chip_fi_net_5d` `chip_fi_net_20d` | daily\_chip、shares\_outstanding | t 日晚間 | 外資買賣超股數 / 流通股數 |
 | 籌碼面 | `chip_it_net_5d` `chip_dealer_self_net_5d` `chip_dealer_hedge_net_5d` | daily\_chip、shares\_outstanding | t 日晚間 | 投信；自營商分自行買賣與避險；皆除以流通股數 |
 | 籌碼面 | `chip_margin_chg_5d` `chip_margin_usage` `chip_short_ratio` | daily\_chip、shares\_outstanding | t 日晚間 | 融資餘額 5 日變化 / 流通股數；融資使用率 = 融資餘額 / 融資限額；券資比 |
-| 籌碼面 | `chip_fi_holding_pct` `chip_sbl_short_chg_5d` | daily\_chip、shares\_outstanding | t 日晚間 | 外資持股比；借券賣出餘額 5 日變化 / 流通股數，用借券賣出餘額而非借券餘額。證交所 2012-03-19 起改了借券賣出餘額的計算方式並公告，上市股票的 5 日變化讀到的兩筆借券賣出餘額分屬這天前後時（停牌日沿用前一筆餘額，沒有停牌時就是 t 在 3/19 到其後第 4 個交易日），`chip_sbl_short_chg_5d` 為 NaN，算 PIT 可觀察；上櫃沒有這個斷點。市場以 `stock_master` 現在的市場判斷，2012 年後換過市場的股票會多遮或漏遮這幾天 |
+| 籌碼面 | `chip_fi_holding_pct` `chip_sbl_short_chg_5d` | daily\_chip、shares\_outstanding | t 日晚間 | 外資持股比；借券賣出餘額 5 日變化 / 流通股數，用借券賣出餘額而非借券餘額。證交所 2012-03-19 起改了借券賣出餘額的計算方式並公告，上市股票的 5 日變化讀到的兩筆借券賣出餘額分屬這天前後時（停牌日沿用前一筆餘額，沒有停牌時就是 t 在 3/19 到其後第 4 個交易日），`chip_sbl_short_chg_5d` 為 NaN，算 PIT 可觀察（補上該有卻沒有的借券列後就不跨這天的，照來源缺算）；上櫃沒有這個斷點。市場以 `stock_master` 現在的市場判斷，2012 年後換過市場的股票會多遮或漏遮這幾天 |
 | 籌碼面 | `chip_big_holder_pct_chg_1w` `chip_holder_count_chg_1w` | weekly\_holding | publish\_date，即 data\_date 隔日 | 400 張以上級距占比週變化、總股東人數週變化；取 publish\_date ≤ t 的最近一期；level 16、17 排除 |
 | 基本面 | `fund_rev_yoy` `fund_rev_3m_yoy` | monthly\_revenue；來源缺時 financial\_statement | announce\_date | 單月 yoy、近 3 個月合計 yoy。月營收來源缺（最近一期月營收可見超過 62 天（日曆日）沒有新一期，或要讀的月份沒有紀錄）時改用同一天的 `fund_rev_yoy_q`；月份都有紀錄但讀到 2013-01 兩側或去年同期營收 ≤ 0 時照舊為 NaN，不補 |
 | 基本面 | `fund_rev_mom` | monthly\_revenue | announce\_date | 不用。單月 mom；月營收來源缺、讀到 2013-01 兩側或上月營收 ≤ 0 時為 NaN。2016 到 2020 年下市的股票沒有月營收來源（第 3 節），mom 沒有季資料可替代，進模型時缺值會透露之後下市 |
