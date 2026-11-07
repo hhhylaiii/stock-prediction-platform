@@ -6,6 +6,7 @@ from types import MappingProxyType
 
 import pandas as pd
 
+from apps.research.features.chip import SOURCED_CHIPS
 from apps.research.features.fundamental import (
     BASIS_SIGNALS,
     STATEMENT_INPUTS,
@@ -33,6 +34,7 @@ OBSERVABLE: Mapping[str, tuple[str, ...]] = MappingProxyType(
         **{name: (name,) for name in STATEMENT_INPUTS if name != "eps_ttm"},
         "fund_rev_yoy": ("fund_rev_yoy", "fund_rev_yoy_q"),
         "fund_rev_3m_yoy": ("fund_rev_3m_yoy", "fund_rev_yoy_q"),
+        **{name: (name,) for name in SOURCED_CHIPS},
     }
 )
 NO_MARGINS = MappingProxyType(
