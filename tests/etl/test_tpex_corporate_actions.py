@@ -101,9 +101,7 @@ def test_a_quiet_session_has_no_events(
     adapter: TpexAdapter, load_fixture: Callable[[str], Any]
 ) -> None:
     _day(EX_DAILY, "2026/10/06", load_fixture(f"{FIXTURES}/exdailyq_20261006.json"))
-    reductions = load_fixture(f"{FIXTURES}/revivt_20261006_07.json")
-    reductions["tables"][0] = {**reductions["tables"][0], "data": [], "totalCount": 0}
-    _day(REDUCTION, "2026/10/06", reductions)
+    _day(REDUCTION, "2026/10/06", load_fixture(f"{FIXTURES}/revivt_20261008.json"))
     _day(PAR_VALUE, "2026/10/06", load_fixture(f"{FIXTURES}/pvchgrslt_20261006_07.json"))
     events = adapter.normalize("dividend_event", adapter.fetch("dividend_event", OCT_6, OCT_6))
     assert events.empty
