@@ -7,17 +7,19 @@ from datetime import date
 from pathlib import Path
 
 import pandas as pd
+from django.conf import settings
 from django.db import transaction
 
 from apps.market.calendar import TradingDays
 from apps.market.models import StockMaster
 from apps.research import lgbm_runs
-from apps.research.baseline_runs import BASELINE, check_run_key
+from apps.research.baseline_runs import BASELINE, check_run_key, shuffle_check
 from apps.research.ensemble import cached_scores
 from apps.research.eval_report import render_report, write_rank_metrics
 from apps.research.evaluation import (
     ImportanceDrift,
     RankReport,
+    ShuffleCheck,
     decile_report,
     importance_drift,
     rank_report,
@@ -147,6 +149,14 @@ def evaluate_run(
     }
 
 
+def shuffle_result(folds: Sequence[Fold], directory: Path, seed: int) -> ShuffleCheck:
+    """SPEC §8 shuffled-label IC on the first research fold, held to SHUFFLE_IC_LIMIT."""
+    fold = next((fold for fold in folds if fold.research), None)
+    if fold is None:
+        raise ValueError("no research folds to run the shuffle check on")
+    return ShuffleCheck(fold.index, shuffle_check(fold, directory, seed), settings.SHUFFLE_IC_LIMIT)
+
+
 def write_metrics(run_key: str, evaluations: Mapping[int, RankEvaluation]) -> int:
     """Replace the run's LightGBM and Ridge rank metrics at every horizon in one transaction."""
     with transaction.atomic():
@@ -183,7 +193,11 @@ def _gates(horizon: int, evaluated: RankEvaluation) -> str:
     return "\n".join(lines)
 
 
-def report(run_key: str, evaluations: Mapping[int, RankEvaluation]) -> str:
+def report(
+    run_key: str,
+    evaluations: Mapping[int, RankEvaluation],
+    shuffled: ShuffleCheck | None = None,
+) -> str:
     """Markdown of each horizon's LightGBM section, deciles and importance, then its gates."""
     sections = [
         render_report(
@@ -191,6 +205,7 @@ def report(run_key: str, evaluations: Mapping[int, RankEvaluation]) -> str:
             [evaluated.model],
             {horizon: evaluated.deciles},
             evaluated.importance,
+            shuffled=shuffled,
         )
         + "\n"
         + _gates(horizon, evaluated)
