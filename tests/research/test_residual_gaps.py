@@ -20,17 +20,21 @@ from apps.research.features.residual import (
     FALLBACKS,
     LISTING_WINDOWS,
     MASKED_MONTHS,
+    MAX_FILL_RATIO,
     MAX_MASKED_SHARE,
     OBSERVABLE,
     affected_months,
     apply_fallbacks,
     basis_counts,
+    fallback_filled,
+    fill_flags,
     mask_months,
     masked_as_observable,
     monthly_coverage,
     observable_gaps,
     observable_name,
     rules_signature,
+    unmasked_fills,
 )
 from apps.research.features.technical import MOMENTUM_DAYS
 
@@ -391,6 +395,7 @@ def test_a_month_where_only_the_delisted_have_values_stays_affected() -> None:
             "date": days,
             "in_universe": True,
             "fund_rev_yoy": [NAN] * 100 + [0.2] * 29 + [NAN] * 71,
+            "fund_rev_yoy_q": NAN,
             observable_name("fund_rev_yoy"): [True] * 100 + [False] * 29 + [True] * 71,
         }
     )
@@ -400,6 +405,98 @@ def test_a_month_where_only_the_delisted_have_values_stays_affected() -> None:
 
     coverage = monthly_coverage(rows, "fund_rev_yoy", delisted)
 
-    assert list(coverage.columns) == ["delisted", "current", "present_delisted", "present_current"]
-    assert list(coverage.loc["2013-03"]) == [1.0, 1.0, 0.29, 0.0]
+    assert list(coverage.columns) == [
+        "delisted",
+        "current",
+        "present_delisted",
+        "present_current",
+        "filled_delisted",
+        "filled_current",
+        "rows_delisted",
+        "rows_current",
+    ]
+    assert list(coverage.loc["2013-03"]) == [1.0, 1.0, 0.29, 0.0, 0.0, 0.0, 100, 100]
     assert affected_months(coverage) == ["2013-03"]
+
+
+def test_monthly_coverage_takes_fill_shares_and_rows_for_a_fallback_column() -> None:
+    rows = pd.DataFrame(
+        {
+            "stock_id": ["2330", "2317", "1101", "9999", "2330"],
+            "date": [d("2017-03-01")] * 4 + [d("2017-04-03")],
+            "in_universe": [True, True, True, False, True],
+            "fund_rev_yoy": [0.1, 0.2, 0.4, 0.5, NAN],
+            "fund_rev_yoy_q": [0.1, 0.3, 0.4, 0.5, NAN],
+        }
+    )
+    delisted = pd.Series({"2330": False, "2317": False, "1101": True, "9999": True})
+
+    coverage = monthly_coverage(rows, "fund_rev_yoy", delisted)
+    plain = monthly_coverage(rows, "fund_rev_yoy_q", delisted)
+
+    assert fallback_filled(rows, "fund_rev_yoy").tolist() == [True, False, True, True, False]
+    march, april = coverage.loc["2017-03"], coverage.loc["2017-04"]
+    assert (march["filled_current"], march["filled_delisted"]) == (0.5, 1.0)
+    assert (march["rows_current"], march["rows_delisted"]) == (2, 1)
+    assert (april["rows_current"], april["rows_delisted"]) == (1, 0)
+    assert coverage["filled_delisted"].isna().tolist() == [False, True]
+    assert "filled_current" not in plain
+    assert plain.loc["2017-03", "rows_current"] == 2
+
+
+@pytest.mark.parametrize(
+    ("current", "delisted", "affected"),
+    [
+        (0.00, 0.10, True),
+        (0.10, 0.16, True),
+        (0.10, 0.15, False),
+        (0.02, 0.06, False),
+        (0.00, 0.03, True),
+        (0.00, 0.00, False),
+        (0.05, NAN, False),
+        (NAN, 0.03, False),
+    ],
+)
+def test_a_month_is_affected_when_its_fills_lean_on_the_delisted(
+    current: float, delisted: float, affected: bool
+) -> None:
+    coverage = pd.DataFrame(
+        {
+            "current": [1.0],
+            "delisted": [1.0],
+            "present_current": [1.0],
+            "present_delisted": [1.0],
+            "filled_current": [current],
+            "filled_delisted": [delisted],
+        },
+        ["2017-03"],
+    )
+
+    assert affected_months(coverage) == (["2017-03"] if affected else [])
+
+
+def test_unmasked_fills_weigh_the_months_left_by_their_rows() -> None:
+    coverage = pd.DataFrame(
+        {
+            "filled_current": [0.1, 0.4, 0.9],
+            "filled_delisted": [0.5, NAN, 0.9],
+            "rows_current": [30, 10, 50],
+            "rows_delisted": [4, 0, 6],
+        },
+        ["2017-03", "2017-04", "2017-05"],
+    )
+
+    shares = unmasked_fills(coverage, ["2017-05"])
+    gone = unmasked_fills(coverage, coverage.index)
+
+    assert shares["current"] == pytest.approx((0.1 * 30 + 0.4 * 10) / 40)
+    assert shares["delisted"] == pytest.approx(0.5)
+    assert gone.isna().tolist() == [True, True]
+
+
+def test_fill_flags_mark_fills_over_the_ratio_or_on_the_delisted_only() -> None:
+    current = pd.Series([0.01, 0.01, 0.0, 0.0, NAN])
+    delisted = pd.Series([0.0301, 0.03, 0.01, 0.0, 0.1])
+
+    assert MAX_FILL_RATIO == 3.0
+    assert fill_flags(current, delisted).tolist() == [True, False, True, False, False]
