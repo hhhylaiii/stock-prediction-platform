@@ -833,6 +833,81 @@ def test_an_unreachable_revenue_scan_is_retried(
     assert len(fake.runs) == 2
 
 
+def _then(run: Callable[[str, date, date], EtlRun], move: Callable[[], None]) -> Any:
+    def moved(dataset: str, start: date, end: date) -> EtlRun:
+        try:
+            return run(dataset, start, end)
+        finally:
+            move()
+
+    return moved
+
+
+@pytest.mark.parametrize(
+    ("task", "slot"),
+    [(tasks.statement_scan, "STATEMENTS_LATE"), (tasks.revenue_scan, "REVENUE_LATE")],
+)
+def test_a_late_scan_retried_past_midnight_loads_the_session_it_began_on(
+    today: Callable[..., None],
+    adapter: Callable[..., FakeAdapter],
+    monkeypatch: pytest.MonkeyPatch,
+    task: Any,
+    slot: str,
+) -> None:
+    fake = adapter(RetryableError("connection reset"))
+    today(DAY, time(22, 40))
+
+    def past_midnight() -> None:
+        today(DAY + timedelta(1), time(0, 10))
+
+    monkeypatch.setattr(fake, "run", _then(fake.run, past_midnight))
+    assert task.apply(args=(slot,)).get() == "success: 3 rows"
+    dataset = task.name.removeprefix("etl.")
+    assert fake.runs == [(dataset, DAY, DAY), (dataset, DAY, DAY)]
+
+
+def test_a_master_refresh_retried_past_midnight_refreshes_the_session_it_began_on(
+    today: Callable[..., None], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    attempts: list[date] = []
+
+    def refresh(day: date, calendar: TradingDays) -> EtlRun:
+        attempts.append(day)
+        if len(attempts) == 1:
+            today(DAY + timedelta(1), time(0, 10))
+            raise SourceNotReadyError("quotes not loaded")
+        return EtlRun(start_date=day, end_date=day, checkpoint={"listed": 1})
+
+    monkeypatch.setattr("apps.etl.tasks.refresh_stock_master", refresh)
+    today(DAY, time(16, 0))
+    assert tasks.refresh_master.apply().get() == "success"
+    assert attempts == [DAY, DAY]
+
+
+@pytest.mark.parametrize(
+    ("task", "first", "later", "asked"),
+    [
+        (tasks.weekly_holding, date(2026, 10, 31), date(2026, 11, 7), date(2026, 10, 30)),
+        (tasks.business_signal, date(2026, 10, 15), date(2026, 11, 2), date(2026, 10, 15)),
+    ],
+)
+def test_a_periodic_file_retried_late_asks_for_the_day_its_first_try_did(
+    today: Callable[..., None],
+    adapter: Callable[..., FakeAdapter],
+    monkeypatch: pytest.MonkeyPatch,
+    task: Any,
+    first: date,
+    later: date,
+    asked: date,
+) -> None:
+    fake = adapter(SourceNotReadyError("not yet"))
+    today(first, time(10, 0))
+    monkeypatch.setattr(fake, "run", _then(fake.run, lambda: today(later, time(10, 0))))
+    assert task.apply().get() == "success: 3 rows"
+    dataset = task.name.removeprefix("etl.")
+    assert fake.runs == [(dataset, asked, asked), (dataset, asked, asked)]
+
+
 def test_research_waits_for_the_gate_datasets_and_the_quality_gate() -> None:
     assert not tasks.ready_for_research(DAY)
     gate = {job for job in DAILY_JOBS if job[1] in tasks.GATE_DATASETS}

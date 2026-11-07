@@ -121,6 +121,11 @@ def _session_today(slot: str | None = None) -> tuple[TradingDays, date] | None:
     return (calendar, today) if calendar.is_trading_day(today) else None
 
 
+def _pinned(day: str) -> tuple[TradingDays, date]:
+    """The session a retry carries from its first try, though the clock may be past midnight."""
+    return TradingDays.from_db(), date.fromisoformat(day)
+
+
 def _landed(day: date, owned: frozenset[Due] = frozenset()) -> DataQualityLog:
     """The daily datasets and owned runs without a run covering them; a gate one is an error."""
     wanted = {Due(source, dataset, day) for source, dataset in _daily_jobs()} | owned
@@ -168,14 +173,16 @@ def _reaudit(day: date, calendar: TradingDays | None = None) -> None:
         dispatch(fresh)
 
 
-def _retry_later(task: Task[Any, Any], what: str, exc: Exception) -> str:
+def _retry_later(task: Task[Any, Any], what: str, exc: Exception, day: date | None = None) -> str:
     """Unpublished days and network failures retry while retries last; throttling never does."""
     if isinstance(exc, ThrottledError):
         return _failed(what, exc)
     if task.request.retries >= settings.ETL_NOT_READY_RETRIES:
         logger.error("etl gave up %s after %d retries: %s", what, task.request.retries, exc)
         return "not ready" if isinstance(exc, SourceNotReadyError) else "unreachable"
-    raise task.retry(exc=exc, countdown=settings.ETL_NOT_READY_COUNTDOWN)
+    pinned = {} if day is None else {"day": day.isoformat()}
+    kwargs = {**(task.request.kwargs or {}), **pinned}
+    raise task.retry(exc=exc, countdown=settings.ETL_NOT_READY_COUNTDOWN, kwargs=kwargs)
 
 
 def _failed(what: str, exc: Exception) -> str:
@@ -252,25 +259,25 @@ def _audit_missed(sessions: Sequence[date], calendar: TradingDays) -> None:
 
 
 @shared_task(bind=True, max_retries=None, name="etl.refresh_master")
-def refresh_master(self: Task[Any, Any]) -> str:
+def refresh_master(self: Task[Any, Any], day: str | None = None) -> str:
     """Update stock_master once today's quotes of both exchanges are stored."""
-    session = _session_today("REFRESH_MASTER")
+    session = _session_today("REFRESH_MASTER") if day is None else _pinned(day)
     if session is None:
         return "closed"
     calendar, today = session
     try:
         refresh_stock_master(today, calendar)
     except (SourceNotReadyError, RetryableError) as exc:
-        return _retry_later(self, f"stock_master {today}", exc)
+        return _retry_later(self, f"stock_master {today}", exc, today)
     except Exception as exc:
         return _failed(f"stock_master {today}", exc)
     return "success"
 
 
 @shared_task(bind=True, max_retries=None, name="etl.statement_scan")
-def statement_scan(self: Task[Any, Any], slot: str) -> str:
+def statement_scan(self: Task[Any, Any], slot: str, day: str | None = None) -> str:
     """MOPS summaries on sessions while a quarter is being filed; outside the research gate."""
-    session = _session_today(slot)
+    session = _session_today(slot) if day is None else _pinned(day)
     if session is None:
         return "closed"
     calendar, today = session
@@ -280,9 +287,9 @@ def statement_scan(self: Task[Any, Any], slot: str) -> str:
 
 
 @shared_task(bind=True, max_retries=None, name="etl.revenue_scan")
-def revenue_scan(self: Task[Any, Any], slot: str) -> str:
+def revenue_scan(self: Task[Any, Any], slot: str, day: str | None = None) -> str:
     """MOPS monthly revenue pages on sessions while a month is being filed; outside the gate."""
-    session = _session_today(slot)
+    session = _session_today(slot) if day is None else _pinned(day)
     if session is None:
         return "closed"
     calendar, today = session
@@ -341,8 +348,11 @@ def _latest(index_id: str) -> date | None:
 
 
 @shared_task(bind=True, max_retries=None, name="etl.weekly_holding")
-def weekly_holding(self: Task[Any, Any]) -> str:
+def weekly_holding(self: Task[Any, Any], day: str | None = None) -> str:
     """TDCC's file of the last ended week, asked for with its last session, even when run late."""
+    if day is not None:
+        calendar, pinned = _pinned(day)
+        return _run_once(self, "tdcc", "weekly_holding", pinned, calendar)
     calendar = TradingDays.from_db()
     today = timezone.localtime().date()
     saturday = today - timedelta(days=(today.weekday() - SATURDAY) % 7)
@@ -353,10 +363,13 @@ def weekly_holding(self: Task[Any, Any]) -> str:
 
 
 @shared_task(bind=True, max_retries=None, name="etl.business_signal")
-def business_signal(self: Task[Any, Any]) -> str:
+def business_signal(self: Task[Any, Any], day: str | None = None) -> str:
     """data.gov.tw's monthly file, recorded on its due day even when beat fires it late."""
+    if day is not None:
+        calendar, pinned = _pinned(day)
+        return _run_once(self, "datagov", "business_signal", pinned, calendar)
     today = timezone.localtime().date()
-    due = [day for day in signal_days() if day <= today.day]
+    due = [number for number in signal_days() if number <= today.day]
     on = today.replace(day=max(due)) if due else today
     return _run_once(self, "datagov", "business_signal", on, TradingDays.from_db())
 
@@ -368,7 +381,7 @@ def _run_once(
     try:
         run = build_adapter(source, calendar).run(dataset, day, day)
     except (SourceNotReadyError, RetryableError) as exc:
-        return _retry_later(task, what, exc)
+        return _retry_later(task, what, exc, day)
     except Exception as exc:
         return _failed(what, exc)
     return f"success: {run.rows} rows"
