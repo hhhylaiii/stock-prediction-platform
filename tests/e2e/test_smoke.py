@@ -196,7 +196,7 @@ def test_a_bad_stock_hash_keeps_the_nav_on_the_last_good_stock(
 
     page.goto(f"{live_server.url}/#stock-%3Cb%3E")
 
-    expect(page.locator("#view-stock .error")).to_contain_text("找不到股票 <b>")
+    expect(page.locator("#stock-missing")).to_have_text("找不到這檔股票（<b>）。")
     expect(page.locator("[data-nav=stock]")).to_have_attribute("href", "#stock-2330")
 
 
@@ -205,4 +205,4 @@ def test_unknown_stock_shows_the_api_error(
 ) -> None:
     page.goto(f"{live_server.url}/#stock-0000")
 
-    expect(page.locator("#view-stock .error")).to_have_text("找不到股票 0000。")
+    expect(page.locator("#stock-missing")).to_have_text("找不到這檔股票（0000）。")

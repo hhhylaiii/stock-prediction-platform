@@ -86,6 +86,8 @@
   try { const c = localStorage.getItem('twp-chart'); if (c === 'line' || c === 'candle') state.chart = c; } catch (e) { state.chart = 'candle'; }
   try { const w = JSON.parse(localStorage.getItem('twp-watch') || '[]'); if (Array.isArray(w)) w.filter(c => STOCK_CODE.test(c)).forEach(c => state.watch.add(c)); } catch (e) { state.watch.clear(); }
   function saveWatch() { try { localStorage.setItem('twp-watch', JSON.stringify([...state.watch])); } catch (e) { return; } }
+  try { const s = localStorage.getItem('twp-stock'); if (s && STOCK_CODE.test(s)) state.stock = s; } catch (e) { state.stock = '2330'; }
+  function saveStock() { try { localStorage.setItem('twp-stock', state.stock); } catch (e) { return; } }
 
   const statusEl = document.getElementById('status');
   const summaryOf = day => ({ passed: day.passed, worst: day.worst, missing_checks: day.missing_checks, warnings: new Set(day.checks.filter(c => c.severity === 'warning').map(c => c.check_name)).size });
@@ -120,6 +122,7 @@
 
   const watchOnlyBtn = document.getElementById('watch-only');
   const qEl = document.getElementById('q');
+  const gotoEl = document.getElementById('today-goto');
 
   const rowsEl = document.getElementById('rows');
   const countEl = document.getElementById('count');
@@ -234,9 +237,25 @@
     return { rows: data, meta: meta };
   }
 
+  const findStocks = async text => (await api.get('stocks', { q: text.slice(0, SEARCH_MAX) })).data;
+
+  async function loadGoto(token) {
+    const text = state.q.trim();
+    gotoEl.hidden = true;
+    gotoEl.innerHTML = '';
+    if (!STOCK_CODE.test(text)) return;
+    let hits;
+    try { hits = await findStocks(text); } catch (err) { hits = []; }
+    const hit = hits.find(row => row.stock_id.toLowerCase() === text.toLowerCase());
+    if (token !== state.todayToken || !hit) return;
+    gotoEl.innerHTML = '<a href="#stock-' + encodeURIComponent(hit.stock_id) + '">查看 ' + esc(hit.stock_id) + ' ' + esc(hit.name) + ' 個股頁</a>';
+    gotoEl.hidden = false;
+  }
+
   async function loadToday() {
     const token = ++state.todayToken;
     controls();
+    loadGoto(token);
     prevBtn.disabled = nextBtn.disabled = true;
     let result;
     try {
@@ -273,6 +292,50 @@
   const stockEl = document.getElementById('view-stock');
   const backLink = '<a class="back" href="#today"><svg aria-hidden="true" width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2.5L4.5 7L9 11.5"></path></svg>今日預測</a>';
   const waiting = '<p class="placeholder">預測資料尚未產出。</p>';
+  const stockTop = () => '<div class="stock-top">' + backLink + '<form class="search stock-go" id="stock-go" role="search">' +
+    '<input type="search" id="stock-q" placeholder="前往個股：代號或名稱" aria-label="前往個股：代號或名稱" autocomplete="off" maxlength="' + SEARCH_MAX + '">' +
+    '<div class="stock-hits" id="stock-hits" role="listbox" aria-label="符合的股票" hidden></div></form></div>';
+  const hitHtml = hit => '<a role="option" href="#stock-' + encodeURIComponent(hit.stock_id) + '"><span class="code">' + esc(hit.stock_id) + '</span> ' + esc(hit.name) +
+    ' <span class="faint small">' + esc(hit.market_label) + (hit.delisted ? ' 已下市' : '') + '</span></a>';
+
+  function bindStockSearch() {
+    const input = document.getElementById('stock-q'), list = document.getElementById('stock-hits');
+    let timer = null, ticket = 0, shown = { text: null, hits: [] };
+    const show = html => { list.innerHTML = html; list.hidden = !html; };
+    const lookup = async text => {
+      const mine = ++ticket;
+      try {
+        const hits = await findStocks(text);
+        if (mine !== ticket) return null;
+        shown = { text: text, hits: hits };
+        show(hits.length ? hits.map(hitHtml).join('') : '<div class="empty small">找不到這檔股票。</div>');
+        return hits;
+      } catch (err) {
+        if (mine === ticket) show(errorBox(err));
+        return null;
+      }
+    };
+    input.addEventListener('input', () => {
+      clearTimeout(timer);
+      const text = input.value.trim();
+      if (!text) { ticket += 1; show(''); return; }
+      timer = setTimeout(() => lookup(text), 250);
+    });
+    document.getElementById('stock-go').addEventListener('submit', async e => {
+      e.preventDefault();
+      clearTimeout(timer);
+      const text = input.value.trim();
+      if (!text) return;
+      const hits = shown.text === text ? shown.hits : await lookup(text);
+      if (hits && hits.length) location.hash = '#stock-' + encodeURIComponent(hits[0].stock_id);
+    });
+  }
+
+  function showStockProblem(html) {
+    stockEl.innerHTML = stockTop() + html;
+    bindStockSearch();
+  }
+  const missingHtml = code => '<div class="empty" id="stock-missing">找不到這檔股票（' + esc(code) + '）。</div>';
 
   function quoteHtml(quote) {
     if (!quote) return '<div class="price"><span class="faint small">尚無成交資料</span></div>';
@@ -312,7 +375,7 @@
   function stockHtml(s) {
     const watching = state.watch.has(s.stock_id);
     const tags = [s.market_label, s.industry, s.delist_date ? s.delist_date + ' 下市' : ''].filter(Boolean);
-    return backLink +
+    return stockTop() +
       '<div class="stockhead"><div><div class="id"><h1><span class="code">' + esc(s.stock_id) + '</span><span id="stock-name">' + esc(s.name) + '</span></h1>' +
       '<span class="tags">' + tags.map(t => '<span>' + esc(t) + '</span>').join('') + '</span></div>' + quoteHtml(s.quote) + '</div>' +
       '<div class="aside"><div class="kpi" id="stock-rank"><div class="l"></div><div class="v">—</div></div>' +
@@ -440,7 +503,7 @@
   async function renderStock(code) {
     const token = ++state.stockToken;
     if (!STOCK_CODE.test(code)) {
-      stockEl.innerHTML = backLink + errorBox({ message: '找不到股票 ' + code + '。' });
+      showStockProblem(missingHtml(code));
       return;
     }
     stockEl.innerHTML = backLink + loading;
@@ -451,13 +514,15 @@
     const [stock, prices] = await Promise.all([settle(api.get('stocks/' + code)), settle(api.get('stocks/' + code + '/prices', { days: PRICE_DAYS }))]);
     if (token !== state.stockToken) return;
     if (stock.status === 'rejected') {
-      stockEl.innerHTML = backLink + errorBox(stock.reason);
+      showStockProblem(stock.reason && stock.reason.status === 404 ? missingHtml(code) : errorBox(stock.reason));
       return;
     }
     const s = stock.value.data;
     state.stock = s.stock_id;
+    saveStock();
     document.querySelector('[data-nav="stock"]').setAttribute('href', '#stock-' + encodeURIComponent(state.stock));
     stockEl.innerHTML = stockHtml(s);
+    bindStockSearch();
     document.getElementById('watch-btn').addEventListener('click', e => {
       if (state.watch.has(s.stock_id)) state.watch.delete(s.stock_id); else state.watch.add(s.stock_id);
       saveWatch();
