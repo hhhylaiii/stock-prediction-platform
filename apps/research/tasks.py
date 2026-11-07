@@ -19,7 +19,9 @@ from django.utils import timezone
 from apps.etl.alerts import dispatch
 from apps.etl.models import DataQualityLog
 from apps.etl.tasks import US_CLOSE_CHECK, ready_for_research
+from apps.market.adjust import ADJ_CHECK, REBUILT
 from apps.market.calendar import OutsideCalendarError, TradingDays
+from apps.research.labels import HORIZONS
 from apps.research.lock import ResearchBusyError, research_lock
 from apps.research.models import HoldoutScope, LabelDaily, ModelRun
 from apps.research.monitor import run_monitor
@@ -34,6 +36,9 @@ EVENING_CHECK = "research_evening"
 MORNING_CHECK = "research_morning"
 RETRAIN_CHECK = "research_retrain"
 PROMOTE_CHECK = "research_promote"
+REBUILD_CHECK = "research_rebuild"
+REBUILD_LIMIT = 30
+CONCURRENT = "the research schedule runs on a single worker process"
 NOT_FROZEN = "the design is not frozen: DESIGNS names no research_run_key"
 ALREADY_BUILT = "already built this month"
 MISSED = "missed"
@@ -125,7 +130,45 @@ def _promote(day: date) -> str:
     return "; ".join([*done, *(f"{key}: failed, see {PROMOTE_CHECK}" for key in failed)])
 
 
+def _open_notes() -> list[DataQualityLog]:
+    return list(
+        DataQualityLog.objects.filter(check_name=ADJ_CHECK)
+        .exclude(detail__has_key=REBUILT)
+        .order_by("pk")
+    )
+
+
+def _earliest(note: DataQualityLog) -> date:
+    stocks = note.detail.get("stocks", {})
+    return date.fromisoformat(note.detail.get("earliest") or min(stocks.values()))
+
+
+def _rebuild(day: date) -> str:
+    """Labels and features again from the earliest session an adj_factor change moved."""
+    notes = _open_notes()
+    if not notes:
+        return "no adj_factor change"
+    earliest = min(_earliest(note) for note in notes)
+    calendar = TradingDays.from_db()
+    if earliest > day:
+        summary = f"adj_factor moved from {earliest}, after {day}"
+    elif earliest < calendar.shift(day, -REBUILD_LIMIT):
+        count = sum(len(note.detail.get("stocks", {})) or note.detail["count"] for note in notes)
+        detail = {"earliest": earliest.isoformat(), "stocks": count, "limit": REBUILD_LIMIT}
+        _record(day, REBUILD_CHECK, Severity.WARNING, detail)
+        summary = f"adj_factor moved from {earliest}, over {REBUILD_LIMIT} sessions back"
+    else:
+        start = calendar.shift(earliest, -(max(HORIZONS) + 1))
+        labels = _command("build_labels", start=start, end=day)
+        summary = f"{labels}; {_command('build_features', start=earliest, end=day)}"
+    for note in notes:
+        closed = {**note.detail, REBUILT: day.isoformat()}
+        DataQualityLog.objects.filter(pk=note.pk, detail=note.detail).update(detail=closed)
+    return summary
+
+
 STEPS: dict[str, Callable[[date], str]] = {
+    "rebuild": _rebuild,
     "labels": _labels,
     "features": _features,
     "predict": _predict,
@@ -162,6 +205,16 @@ def _early(slot: str) -> bool:
         return False
     logger.warning("research skipped %s: fired at %s, before its slot", slot, now.isoformat())
     return True
+
+
+def _concurrency(task: Task[Any, Any]) -> int | None:
+    """The worker's process count when it is not one, as the schedule needs; else None."""
+    count = task.app.conf.get("worker_concurrency")
+    return None if count == 1 else count
+
+
+def _with_rebuild(names: tuple[str, ...]) -> tuple[str, ...]:
+    return ("rebuild", *names) if _open_notes() else names
 
 
 def _failed(check: str, day: date, name: str, error: Exception, done: list[Done]) -> None:
@@ -256,6 +309,11 @@ def retrain(self: Task[Any, Any], day: str) -> str:
     if not _retrain_hours():
         logger.warning("research retrain %s not started: outside its hours", day)
         return "late"
+    concurrency = _concurrency(self)
+    if concurrency is not None:
+        refused = dict.fromkeys(HoldoutScope.values, f"worker concurrency {concurrency}, not 1")
+        _record(session, RETRAIN_CHECK, Severity.WARNING, _retrain_detail(refused))
+        return "concurrent"
     free = free_percent()
     if free is not None and free < settings.RESEARCH_RETRAIN_MIN_FREE:
         if self.request.retries < settings.RESEARCH_RETRAIN_RETRIES:
@@ -339,6 +397,11 @@ def evening(self: Task[Any, Any], day: str | None = None) -> str:
         return "closed"
     if _finished(session, EVENING_CHECK):
         return "done"
+    concurrency = _concurrency(self)
+    if concurrency is not None:
+        detail = {"reason": CONCURRENT, "concurrency": concurrency}
+        _record(session, EVENING_CHECK, Severity.WARNING, detail)
+        return "concurrent"
     if not ready_for_research(session):
         if self.request.retries < settings.ETL_NOT_READY_RETRIES:
             raise self.retry(
@@ -346,7 +409,7 @@ def evening(self: Task[Any, Any], day: str | None = None) -> str:
             )
         _record(session, EVENING_CHECK, Severity.WARNING, {"reason": GATE_SHUT})
         return "not ready"
-    _start(EVENING_CHECK, session, EVENING_STEPS, {})
+    _start(EVENING_CHECK, session, _with_rebuild(EVENING_STEPS), {})
     return "started"
 
 
@@ -365,6 +428,11 @@ def morning(self: Task[Any, Any], day: str | None = None) -> str:
         session = date.fromisoformat(day)
     if _finished(session, MORNING_CHECK):
         return "done"
+    concurrency = _concurrency(self)
+    if concurrency is not None:
+        detail = {"reason": CONCURRENT, "concurrency": concurrency}
+        _record(session, MORNING_CHECK, Severity.WARNING, detail)
+        return "concurrent"
     if not ready_for_research(session):
         _record(session, MORNING_CHECK, Severity.WARNING, {"reason": GATE_SHUT})
         return "gate shut"
@@ -373,7 +441,8 @@ def morning(self: Task[Any, Any], day: str | None = None) -> str:
         raise self.retry(
             args=(session.isoformat(),), countdown=settings.RESEARCH_US_CLOSE_COUNTDOWN
         )
-    names = MORNING_STEPS if _finished(session, EVENING_CHECK) else ("labels", *MORNING_STEPS)
-    names = (*names, "promote") if _pending(session) else names
+    first = () if _finished(session, EVENING_CHECK) else ("labels",)
+    last = ("promote",) if _pending(session) else ()
+    names = _with_rebuild((*first, *MORNING_STEPS, *last))
     _start(MORNING_CHECK, session, names, {} if landed else {"us_close": US_CLOSE_MISSING})
     return "started"
