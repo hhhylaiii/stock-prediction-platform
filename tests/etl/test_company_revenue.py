@@ -58,6 +58,12 @@ def test_a_month_mops_holds_no_figures_for_reads_as_none(
     assert parse_company_revenue(answer("5349_102_1"), "2013-01") is None
 
 
+def test_a_company_mops_finds_no_match_for_that_month_reads_as_none(
+    answer: Callable[[str], dict[str, Any]],
+) -> None:
+    assert parse_company_revenue(answer("1258_112_5"), "2023-05") is None
+
+
 @pytest.mark.parametrize(
     "broken",
     [
