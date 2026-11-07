@@ -159,6 +159,7 @@ def observable_frame(
     if current:
         fundamental = apply_fallbacks(fundamental_features(attached), attached)
         lending = lending_features(attached).drop(columns=["stock_id", "date"])
-        values = mask_months(fundamental.join(lending), masked)
+        checked = {name: months for name, months in masked.items() if name in CHECKED}
+        values = mask_months(fundamental.join(lending), checked)
         gaps = gaps.assign(**{current_name(name): values[name].to_numpy() for name in CHECKED})
     return gaps[gaps["date"].between(start, end)].reset_index(drop=True)[columns]
