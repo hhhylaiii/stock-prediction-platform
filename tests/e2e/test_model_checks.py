@@ -290,6 +290,25 @@ def test_the_last_written_promotion_of_a_scope_wins_over_its_date(
     expect(promotion_lines(page).first).to_have_text("已換上 rank-backfill")
 
 
+def test_each_scope_keeps_its_own_latest_promotion_across_days(
+    page: Page, live_server: LiveServer, seeded: Seed
+) -> None:
+    promotion_alert(
+        seeded, "rank-2026-10", [refused(Slot("rank", 20), "rank-n", AGREEMENT)], back=10
+    )
+    interval = [refused(Slot("quantile", 20), "q-n", DATA_QUALITY)]
+    promotion_alert(seeded, "interval-2026-11", interval, back=2, scope="interval")
+
+    page.goto(f"{live_server.url}/#models")
+
+    promotions = page.locator("#model-checks .check").filter(has_text="換模")
+    expect(promotions).to_have_count(2)
+    expect(promotions.nth(0).locator(".pinned")).to_have_text(seeded.sessions[-2].isoformat())
+    expect(promotions.nth(0).locator(".run").first).to_contain_text("interval-2026-11")
+    expect(promotions.nth(1).locator(".pinned")).to_have_text(seeded.sessions[-10].isoformat())
+    expect(promotions.nth(1).locator(".run").first).to_contain_text("rank-2026-10")
+
+
 def test_a_refused_build_names_each_failed_slot_and_gate(
     page: Page, live_server: LiveServer, seeded: Seed
 ) -> None:
@@ -431,18 +450,26 @@ def test_a_numeric_threshold_off_the_contract_still_shows_zero(
 def test_research_schedule_checks_sit_with_the_model_checks(
     page: Page, live_server: LiveServer, seeded: Seed
 ) -> None:
-    log(seeded, "research_morning", "warning", {})
+    log(seeded, "research_morning", "warning", {}, back=2)
+    clean = {"share": 0.0, "flagged": 0, "n_stocks": 1842, "stocks": []}
+    log(seeded, "output_width_ratio", "info", clean, back=2)
     log(seeded, "research_evening", "info", {})
 
     page.goto(f"{live_server.url}/#models")
 
     checks = page.locator("#model-checks .check")
-    morning = checks.filter(has_text="研究早盤排程")
-    expect(morning).to_contain_text("警告")
-    expect(morning.locator("i")).to_have_class("warn")
-    evening = checks.filter(has_text="研究晚間排程")
-    expect(evening).to_contain_text("通過")
+    expect(checks).to_have_count(3)
+    evening = checks.nth(0)
+    expect(evening).to_contain_text("研究晚間排程")
+    expect(evening.locator(".pinned")).to_have_text(seeded.last_session.isoformat())
     expect(evening.locator("i")).not_to_have_class("warn")
+    morning = checks.nth(1)
+    expect(morning).to_contain_text("研究早盤排程")
+    expect(morning).to_contain_text("警告")
+    expect(morning.locator(".pinned")).to_have_text(seeded.sessions[-2].isoformat())
+    expect(morning.locator("i")).to_have_class("warn")
+    expect(checks.nth(2)).to_contain_text("區間寬度比異常")
+    expect(page.locator("#model-checks-sub")).to_contain_text(seeded.sessions[-2].isoformat())
     expect(page.locator("#quality")).not_to_contain_text("研究")
     expect(page.locator("#status")).to_contain_text("品質檢查通過（1 項警告）")
 

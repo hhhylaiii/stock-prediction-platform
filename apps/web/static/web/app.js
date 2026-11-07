@@ -851,22 +851,27 @@
       shown.map(line => '<div class="muted small' + runClass + '">' + esc(line) + '</div>').join('') + '</div></div>';
   }
 
-  function latestPromotions(data) {
-    const all = data.flatMap(entry => (entry.model_checks || []).filter(check => check.check_name === 'model_promotion').map(check => ({ date: entry.date, check: check })))
+  const isPromotion = check => check.check_name === 'model_promotion';
+  const isResearch = check => check.check_name.startsWith('research_');
+  const scopeOf = check => (check.detail || {}).scope || (check.detail || {}).run_key;
+
+  function latestBy(data, wanted, keyOf) {
+    const all = data.flatMap(entry => (entry.model_checks || []).filter(wanted).map(check => ({ date: entry.date, check: check })))
       .sort((a, b) => (b.check.id || 0) - (a.check.id || 0));
-    const scopeOf = item => (item.check.detail || {}).scope || (item.check.detail || {}).run_key;
-    return { total: all.length, shown: all.filter((item, i) => all.findIndex(other => scopeOf(other) === scopeOf(item)) === i) };
+    return { total: all.length, shown: all.filter((item, i) => all.findIndex(other => keyOf(other.check) === keyOf(item.check)) === i) };
   }
 
   function renderModelChecks(data, meta) {
     const sub = document.getElementById('model-checks-sub'), host = document.getElementById('model-checks');
-    const day = data.find(entry => (entry.model_checks || []).some(check => check.check_name !== 'model_promotion'));
+    const day = data.find(entry => (entry.model_checks || []).some(check => !isPromotion(check) && !isResearch(check)));
     const share = meta.output_alert_share;
     sub.textContent = day ? '最近一次寫入的交易日：' + day.date + '；區間寬度比與機率矛盾的標記超過 ' + Math.round(share * 100) + '% 才算警告。' : '';
-    const promotions = latestPromotions(data);
+    const promotions = latestBy(data, isPromotion, scopeOf);
     const count = promotions.total > promotions.shown.length ? '，近 ' + data.length + ' 個交易日共 ' + promotions.total + ' 筆' : '';
-    const pinned = promotions.shown.map(item => modelCheckHtml(item.check, share, item.date, item.date + count)).join('');
-    const rest = day ? day.model_checks.filter(check => check.check_name !== 'model_promotion').map(check => modelCheckHtml(check, share, day.date)).join('') : '';
+    const research = latestBy(data, isResearch, check => check.check_name).shown;
+    const pinned = promotions.shown.map(item => modelCheckHtml(item.check, share, item.date, item.date + count)).join('') +
+      research.map(item => modelCheckHtml(item.check, share, item.date, item.date)).join('');
+    const rest = day ? day.model_checks.filter(check => !isPromotion(check) && !isResearch(check)).map(check => modelCheckHtml(check, share, day.date)).join('') : '';
     host.innerHTML = pinned + rest || '<p class="placeholder">還沒有模型輸出檢查。</p>';
   }
 
