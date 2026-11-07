@@ -364,7 +364,8 @@
           '<span class="right num contrib"' + (pos ? '' : ' style="color:var(--ink-2)"') + '>' + signed(item.contrib, 3) + '</span>' +
           '<div class="bar"><div class="zero"></div><div class="fill" style="background:' + (pos ? 'var(--model)' : 'var(--ink-4)') + ';left:' + (pos ? 50 : 50 - w) + '%;width:' + w + '%"></div></div></div>';
       }).join('') + '</div>' +
-      '<p class="note">共 ' + fmtInt(data.n_features) + ' 個特徵' + (data.rest ? '，其餘 ' + fmtInt(data.rest.n_features) + ' 個合計 ' + signed(data.rest.contrib, 3) : '') + '。</p>';
+      '<p class="note">共 ' + fmtInt(data.n_features) + ' 個特徵' + (data.rest ? '，其餘 ' + fmtInt(data.rest.n_features) + ' 個合計 ' + signed(data.rest.contrib, 3) : '') + '。</p>' +
+      '<p class="faint small recompute">特徵值取自目前的特徵表，每晚重算近期資料後可能更新，和預測當時不一定相同；貢獻值是預測當時算的。</p>';
   }
 
   function historyRowHtml(row) {

@@ -151,6 +151,9 @@ def test_contributions_carry_chinese_names_and_raw_values(
     expect(feats.nth(3).locator(".value")).to_have_text("3.45%")
     expect(feats.nth(4).locator(".value")).to_have_text("22.0%")
     expect(page.locator("#features .note")).to_have_text("共 77 個特徵，其餘 72 個合計 +0.004。")
+    expect(page.locator("#features .recompute")).to_have_text(
+        "特徵值取自目前的特徵表，每晚重算近期資料後可能更新，和預測當時不一定相同；貢獻值是預測當時算的。"
+    )
 
 
 def test_history_counts_the_returns_inside_the_band(
