@@ -2,6 +2,7 @@ import pytest
 from playwright.sync_api import Page, Route, expect
 from pytest_django.live_server_helper import LiveServer
 
+from apps.market.calendar import TradingDays
 from apps.market.models import DailyPrice
 from apps.research.models import (
     REST_FEATURE,
@@ -77,7 +78,8 @@ def explained(predicted: Seed) -> Seed:
 def matured(predicted: Seed) -> Seed:
     """Two matured 20-day predictions of 2330, one inside its band and one above it."""
     sessions = predicted.sessions
-    ModelRun.objects.filter(pk="quantile-h20").update(train_end=sessions[0])
+    trained = TradingDays.from_db().shift(sessions[-61], -20)
+    ModelRun.objects.filter(pk="quantile-h20").update(train_end=trained)
     quantile = ModelRun.objects.get(pk="quantile-h20")
     band = {"q10": -0.05, "q50": 0.02, "q90": 0.12, "ret_pred": 0.02}
     for day, actual in ((sessions[-61], 0.2), (sessions[-41], 0.03)):

@@ -1,5 +1,5 @@
 import os
-from datetime import date, timedelta
+from datetime import date
 from io import StringIO
 from pathlib import Path
 from typing import Any
@@ -12,6 +12,7 @@ from pytest_django.live_server_helper import LiveServer
 
 from apps.api.management.commands.phase5_report import capture_views
 from apps.etl.models import DataQualityLog, EtlRun
+from apps.market.calendar import TradingDays
 from apps.market.models import DailyPrice, Market, StockMaster
 from apps.research.features.registry import FEATURES
 from apps.research.models import (
@@ -257,8 +258,7 @@ def add_research_and_checks(last: date) -> None:
 @pytest.fixture
 def bench(predicted: Seed) -> Seed:
     """The e2e seed widened to a full market, with a track record and research results."""
-    first = predicted.sessions[0] - timedelta(days=1)
-    ModelRun.objects.update(train_end=first)
+    ModelRun.objects.update(train_end=TradingDays.from_db().shift(predicted.sessions[0], -20))
     EtlRun.objects.filter(dataset__startswith="extra").delete()
     StockMaster.objects.filter(stock_id="9999").update(name="測試上櫃", industry="其他業")
     add_universe(predicted.last_session)
@@ -281,3 +281,4 @@ def test_capture_the_report_and_views_on_the_seed(
     assert [shot.name for shot in shots] == ["today.png", "stock.png", "models.png"]
     expect(page.locator("#ic-chart rect.bar-model")).to_have_count(24)
     expect(page.locator("#model-table .trow")).to_have_count(6)
+    expect(page.locator("#model-table")).not_to_contain_text("尚無到期的評估日")
