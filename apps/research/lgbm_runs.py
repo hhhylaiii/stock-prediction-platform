@@ -34,7 +34,7 @@ from apps.research.gbdt import (
     seeded,
 )
 from apps.research.gbdt import MAX_ROUNDS as DEFAULT_MAX_ROUNDS
-from apps.research.holdout import HoldoutError, is_holdout
+from apps.research.holdout import HoldoutError, ProductionPass, authorize_production, is_holdout
 from apps.research.labels import HORIZONS, VOL_DAYS
 from apps.research.metrics.forecast import (
     expected_calibration_error,
@@ -69,6 +69,7 @@ from apps.research.runs import (
     label_hash,
     lib_versions,
     record_run,
+    refuse_production_key,
     screened_features,
 )
 from apps.research.target_models import (
@@ -269,8 +270,12 @@ def _oos(scores: np.ndarray, evaluated: pd.DataFrame, horizon: int) -> Mapping[s
     }
 
 
-def _evaluated(job: Job, inputs: pd.DataFrame, labels: pd.DataFrame, label: str) -> pd.DataFrame:
-    """Tradable universe rows of test_start..eval_end with a known label; none is an error."""
+def _evaluated(
+    job: Job, inputs: pd.DataFrame, labels: pd.DataFrame, label: str
+) -> pd.DataFrame | None:
+    """Tradable labelled rows of test_start..eval_end; None when the fold evaluates no day."""
+    if job.fold.eval_end < job.fold.test_start:
+        return None
     inside = inputs[job.read.window(job.fold.test_start, job.fold.eval_end)]
     rows = training_rows(inside, labels, label)
     if rows.empty:
@@ -349,8 +354,11 @@ def _rank(job: Job) -> FoldFit:
         test = inputs[read.test][features]
         columns[f"{MODEL}_h{horizon}"] = np.asarray(boosted.booster.predict(test))
         evaluated = _evaluated(job, inputs, labels, RANK_LABEL)
-        scores = np.asarray(boosted.booster.predict(evaluated[features]))
-        oos = _oos(scores, evaluated, horizon)
+        oos = (
+            NO_IC
+            if evaluated is None
+            else _oos(np.asarray(boosted.booster.predict(evaluated[features])), evaluated, horizon)
+        )
         ranking = job.variant.objective == "lambdarank"
         params = {
             "rounds": boosted.rounds,
@@ -381,16 +389,22 @@ def _return(job: Job) -> FoldFit:
     fitted = fit_return(inputs, labels, fold, features, job.seed, MAX_ROUNDS, job.bags)
     booster = fitted.boosted.booster
     evaluated = _evaluated(job, inputs, labels, RETURN_LABEL)
-    predicted = np.asarray(booster.predict(evaluated[features]))
-    actual = evaluated[RETURN_LABEL].to_numpy(np.float64)
-    oos = _oos(predicted, evaluated, RETURN_HORIZON)
+    oos = NO_IC
+    errors: dict[str, float | None] = {"oos_mae": None, "oos_mae_zero": None}
+    if evaluated is not None:
+        predicted = np.asarray(booster.predict(evaluated[features]))
+        actual = evaluated[RETURN_LABEL].to_numpy(np.float64)
+        oos = _oos(predicted, evaluated, RETURN_HORIZON)
+        errors = {
+            "oos_mae": _mean(np.abs(predicted - actual)),
+            "oos_mae_zero": _mean(np.abs(actual)),
+        }
     params = {
         "rounds": fitted.boosted.rounds,
         "valid_huber": _plain(fitted.boosted.valid_score),
         "delta": fitted.delta,
         "market_bins": _edges(bins),
-        "oos_mae": _mean(np.abs(predicted - actual)),
-        "oos_mae_zero": _mean(np.abs(actual)),
+        **errors,
         "ic_nw_t": oos["ic_nw_t"],
         "importance_gain": _gains(booster, features),
     }
@@ -409,18 +423,23 @@ def _quantile(job: Job, inputs: pd.DataFrame, labels: pd.DataFrame, bins: Market
     fold, features = job.fold, job.features
     boosters = fit_quantiles(inputs, labels, fold, features, job.seed, MAX_ROUNDS, job.bags)
     evaluated = _evaluated(job, inputs, labels, RETURN_LABEL)
-    scored = _quantiles(boosters, evaluated, features)
-    actual = evaluated[RETURN_LABEL].to_numpy(np.float64)
-    pinball = [
-        pinball_loss(actual, scored[name], alpha).mean()
-        for name, alpha in target_models.QUANTILES.items()
-    ]
+    metrics: dict[str, float | None] = {"oos_coverage": None, "oos_pinball": None}
+    if evaluated is not None:
+        scored = _quantiles(boosters, evaluated, features)
+        actual = evaluated[RETURN_LABEL].to_numpy(np.float64)
+        pinball = [
+            pinball_loss(actual, scored[name], alpha).mean()
+            for name, alpha in target_models.QUANTILES.items()
+        ]
+        metrics = {
+            "oos_coverage": _mean((actual >= scored["q10"]) & (actual <= scored["q90"])),
+            "oos_pinball": _plain(float(sum(pinball))),
+        }
     params = {
         "rounds": {name: fit.rounds for name, fit in boosters.items()},
         "valid_loss": {name: _plain(fit.valid_score) for name, fit in boosters.items()},
         "market_bins": _edges(bins),
-        "oos_coverage": _mean((actual >= scored["q10"]) & (actual <= scored["q90"])),
-        "oos_pinball": _plain(float(sum(pinball))),
+        **metrics,
         "importance_gain": _gains(boosters["q50"].booster, features),
     }
     run = _run(job, ModelObjective.QUANTILE, VOL_DAYS, RETURN_LABEL, params)
@@ -437,13 +456,16 @@ def _volatility(job: Job, inputs: pd.DataFrame, labels: pd.DataFrame, bins: Mark
     fold, features = job.fold, job.features
     boosted = fit_volatility(inputs, labels, fold, features, job.seed, MAX_ROUNDS, job.bags)
     evaluated = _evaluated(job, inputs, labels, VOL_LABEL)
-    error = volatility(boosted, evaluated, features) - evaluated[VOL_LABEL].to_numpy(np.float64)
+    mae = None
+    if evaluated is not None:
+        error = volatility(boosted, evaluated, features) - evaluated[VOL_LABEL].to_numpy(np.float64)
+        mae = _mean(np.abs(error))
     params = {
         "rounds": boosted.rounds,
         "valid_l2": _plain(boosted.valid_score),
         "vol_floor": target_models.VOL_FLOOR,
         "market_bins": _edges(bins),
-        "oos_mae": _mean(np.abs(error)),
+        "oos_mae": mae,
         "importance_gain": _gains(boosted.booster, features),
     }
     run = _run(job, ModelObjective.VOLATILITY, VOL_DAYS, VOL_LABEL, params)
@@ -466,11 +488,16 @@ def _probability(job: Job, inputs: pd.DataFrame, labels: pd.DataFrame, bins: Mar
     fitted = fit_probability(inputs, labels, fold, features, job.seed, MAX_ROUNDS, job.bags)
     booster = fitted.boosted.booster
     evaluated = _evaluated(job, inputs, labels, UP_LABEL)
-    scored = evaluated[["date"]].assign(
-        up=evaluated[UP_LABEL].to_numpy(np.float64),
-        prob=fitted.predict(evaluated, features),
-        raw=np.asarray(booster.predict(evaluated[features])),
-    )
+    calibration: dict[str, float | None] = {
+        f"oos_{metric}{suffix}": None for metric in ("ece", "brier") for suffix in ("", "_raw")
+    }
+    if evaluated is not None:
+        scored = evaluated[["date"]].assign(
+            up=evaluated[UP_LABEL].to_numpy(np.float64),
+            prob=fitted.predict(evaluated, features),
+            raw=np.asarray(booster.predict(evaluated[features])),
+        )
+        calibration = {**_calibration(scored, "prob", ""), **_calibration(scored, "raw", "_raw")}
     params = {
         "rounds": fitted.boosted.rounds,
         "valid_logloss": _plain(fitted.boosted.valid_score),
@@ -478,8 +505,7 @@ def _probability(job: Job, inputs: pd.DataFrame, labels: pd.DataFrame, bins: Mar
         "ece_limit": target_models.ECE_LIMIT,
         "calibrated": fitted.calibrator is not None,
         "market_bins": _edges(bins),
-        **_calibration(scored, "prob", ""),
-        **_calibration(scored, "raw", "_raw"),
+        **calibration,
         "importance_gain": _gains(booster, features),
     }
     label = RELATIVE_LABEL if job.target.relative_up else UP_LABEL
@@ -520,9 +546,14 @@ def run_fold(
     bags: int = 1,
     variant: Variant = SPEC_RECIPE,
     target: TargetVariant = TARGET_RECIPE,
+    production: ProductionPass | None = None,
+    annotate: Callable[[ModelRun], Mapping[str, Any]] | None = None,
 ) -> Path:
     """Fit one fold of a scope's boosters; the old cache goes first, the new one last."""
-    if is_holdout(fold):
+    if production is not None:
+        check_run_key(scope, run_key)
+        authorize_production(run_key, production, fold)
+    elif is_holdout(fold):
         raise HoldoutError(f"fold {fold.index} is holdout; it runs once with the frozen design")
     require_candidates(run_key, fold)
     fold_path(run_key, MODEL, fold.index).unlink(missing_ok=True)
@@ -536,14 +567,18 @@ def run_fold(
         changed = "label_daily or TAIEX" if target.relative_up else "label_daily"
         raise RuntimeError(f"{changed} changed while fitting fold {fold.index}; run it again")
     for run, model in fitted.trained:
-        record_run(run, model, fold=fold)
+        if annotate is not None:
+            run.params = {**run.params, **annotate(run)}
+        record_run(run, model, fold=fold, production=production)
     rows = read.raw.loc[read.test, ROW_KEYS].reset_index(drop=True)
     notes = {
         "feature_hash": read.feature_hash,
         "label_hash": labels_digest,
         "recipe": recipe(scope, features, seed, bags, variant, target),
     }
-    return save_fold_predictions(run_key, MODEL, fold, rows.assign(**fitted.columns), notes=notes)
+    return save_fold_predictions(
+        run_key, MODEL, fold, rows.assign(**fitted.columns), notes=notes, production=production
+    )
 
 
 def _stale(
@@ -562,6 +597,24 @@ def _stale(
     return fold_notes(run_key, MODEL, fold.index) != current
 
 
+def check_design(scope: str, variant: Variant, target: TargetVariant) -> None:
+    """Refuse a rank variant outside rank, a target variant on rank and relative_up on return."""
+    if scope != HoldoutScope.RANK and variant != SPEC_RECIPE:
+        raise ValueError(f"design variants apply to the rank scope only, not {scope}")
+    if scope == HoldoutScope.RANK and target != TARGET_RECIPE:
+        raise ValueError("target variants apply to the return and interval scopes, not rank")
+    if scope == HoldoutScope.RETURN and target.relative_up:
+        raise ValueError("relative_up applies to the interval scope, whose probability uses it")
+
+
+def design_features(scope: str, variant: Variant, target: TargetVariant) -> list[str]:
+    """The screened features a scope fits on under a design, less the masked ones."""
+    features = [name for name in scope_features(scope, target) if name not in variant.masked]
+    if not features:
+        raise ValueError(f"the variant masks every {scope} feature")
+    return features
+
+
 def run_folds(
     scope: str,
     folds: Iterable[Fold],
@@ -575,20 +628,14 @@ def run_folds(
 ) -> list[int]:
     """Run a scope's folds without a current cache, or all with rerun; holdout is refused."""
     check_run_key(scope, run_key)
-    if scope != HoldoutScope.RANK and variant != SPEC_RECIPE:
-        raise ValueError(f"design variants apply to the rank scope only, not {scope}")
-    if scope == HoldoutScope.RANK and target != TARGET_RECIPE:
-        raise ValueError("target variants apply to the return and interval scopes, not rank")
-    if scope == HoldoutScope.RETURN and target.relative_up:
-        raise ValueError("relative_up applies to the interval scope, whose probability uses it")
+    refuse_production_key(run_key)
+    check_design(scope, variant, target)
     chosen = list(folds)
     held = [fold.index for fold in chosen if is_holdout(fold)]
     if held:
         raise HoldoutError(f"folds {held} are holdout; they run once with the frozen design")
     bag_seeds(seed, bags)
-    features = [name for name in scope_features(scope, target) if name not in variant.masked]
-    if not features:
-        raise ValueError(f"the variant masks every {scope} feature")
+    features = design_features(scope, variant, target)
     missing = set(missing_folds(run_key, MODEL, chosen))
     ran = []
     for fold in chosen:
