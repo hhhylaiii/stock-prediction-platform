@@ -373,6 +373,65 @@ def test_a_degraded_model_stays_listed(client: Client, runs: Runs) -> None:
     assert rows[("quantile", 20)]["status"] == "degraded"
 
 
+WINDOW = {"own_rows": 20, "days": 60, "mostly_predecessors": True}
+
+
+def test_a_degraded_model_carries_its_day_and_window_but_no_other_params(
+    client: Client, runs: Runs
+) -> None:
+    ModelRun.objects.filter(pk="quantile-h20").update(
+        status="degraded",
+        params={
+            "degraded_on": "2026-10-20",
+            "degraded_window": {**WINDOW, "note": "kept out"},
+            "gates": {"agreement": 0.9},
+            "research_run_key": "interval-research",
+        },
+    )
+
+    rows = by_slot(envelope_of(client.get("/api/models")))
+
+    quantile, rank = rows[("quantile", 20)], rows[("rank", 20)]
+    assert (quantile["degraded_on"], quantile["degraded_window"]) == ("2026-10-20", WINDOW)
+    assert not {"params", "gates", "research_run_key", "note"} & set(quantile)
+    assert (rank["degraded_on"], rank["degraded_window"]) == (None, None)
+
+
+@pytest.mark.parametrize(
+    "window",
+    [
+        "40/60",
+        {"own_rows": 40, "days": 60},
+        {**WINDOW, "own_rows": True},
+        {**WINDOW, "days": "60"},
+        {**WINDOW, "mostly_predecessors": 1},
+    ],
+)
+def test_an_unreadable_degraded_window_is_left_out(
+    client: Client, runs: Runs, window: object
+) -> None:
+    ModelRun.objects.filter(pk="quantile-h20").update(
+        status="degraded", params={"degraded_on": "2026-10-20", "degraded_window": window}
+    )
+
+    rows = by_slot(envelope_of(client.get("/api/models")))
+
+    assert rows[("quantile", 20)]["degraded_window"] is None
+
+
+def test_a_window_left_behind_on_a_restored_run_is_not_served(client: Client, runs: Runs) -> None:
+    ModelRun.objects.filter(pk="quantile-h20").update(
+        status="active", params={"degraded_window": WINDOW}
+    )
+
+    rows = by_slot(envelope_of(client.get("/api/models")))
+
+    assert (rows[("quantile", 20)]["degraded_on"], rows[("quantile", 20)]["degraded_window"]) == (
+        None,
+        None,
+    )
+
+
 def test_no_models_served_yet(client: Client, db: None) -> None:
     assert envelope_of(client.get("/api/models"))["data"] == []
 
