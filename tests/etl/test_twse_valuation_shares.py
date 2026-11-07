@@ -115,6 +115,22 @@ def test_valuation_out_of_range_is_dropped_with_a_warning(
 
 @responses.activate
 @pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("column", "field"), [(5, "pe"), (6, "pb"), (3, "dividend_yield")], ids=["pe", "pb", "yield"]
+)
+def test_valuation_null_in_a_ratio_column_is_missing(
+    adapter: TwseAdapter, load_fixture: Callable[[str], Any], column: int, field: str
+) -> None:
+    payload = load_fixture(VALUATION)
+    next(row for row in payload["data"] if row[0] == "2330")[column] = None
+    responses.get(VALUATION_URL, json=payload)
+    rows = _rows(adapter.normalize("daily_valuation", adapter.fetch("daily_valuation", DAY, DAY)))
+    assert rows["2330"][field] is None
+    assert rows["1101"]["pb"] == 0.91
+
+
+@responses.activate
+@pytest.mark.django_db
 def test_valuation_word_in_a_ratio_column_is_a_schema_change(
     adapter: TwseAdapter, load_fixture: Callable[[str], Any]
 ) -> None:
