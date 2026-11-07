@@ -5,14 +5,22 @@ import lightgbm as lgb
 import numpy as np
 import pandas as pd
 import pytest
-from apps.research.inference import day_rows, run_contributions, run_values, top_contributions
 
+from apps.research import lgbm_runs
+from apps.research.features.transforms import MarketBins
 from apps.research.gbdt import Bagged
+from apps.research.inference import (
+    day_rows,
+    model_inputs,
+    run_contributions,
+    run_values,
+    top_contributions,
+)
 from apps.research.lgbm_runs import MODEL, run_id
 from apps.research.models import REST_FEATURE, ModelRun
 from apps.research.prediction_cache import load_fold_predictions
 from apps.research.runs import load_model
-from tests.research.run_panels import research
+from tests.research.run_panels import research, weekdays
 
 LIVE = [fold for fold in research() if fold.research][-1]
 DAY = LIVE.test_end
@@ -22,15 +30,19 @@ def live_run(scope: str, objective: str, horizon: int) -> ModelRun:
     return ModelRun.objects.get(run_id=run_id(f"{scope}-live", objective, horizon, LIVE))
 
 
-def outputs(run: ModelRun, directory: Path) -> pd.DataFrame:
-    rows = day_rows(DAY, directory, run.feature_list)
+def outputs(run: ModelRun, directory: Path, day: date = DAY) -> pd.DataFrame:
+    rows = day_rows(day, directory, run.feature_list)
     values = run_values(run, load_model(run.run_key, run.run_id), rows)
     return rows[["stock_id", "in_universe"]].join(values)
 
 
-def cached(scope: str) -> pd.DataFrame:
-    frame = load_fold_predictions(f"{scope}-live", MODEL, LIVE)
-    return frame[frame["date"] == DAY].drop(columns=["date", "in_universe"])
+def cached(scope: str, day: date = DAY, run_key: str | None = None) -> pd.DataFrame:
+    frame = load_fold_predictions(run_key or f"{scope}-live", MODEL, LIVE)
+    return frame[frame["date"] == day].drop(columns=["date", "in_universe"])
+
+
+def live_days() -> list[date]:
+    return [day for day in weekdays() if LIVE.test_start <= day <= LIVE.test_end]
 
 
 @pytest.mark.django_db
@@ -46,29 +58,65 @@ def test_rank_inference_scores_the_day_as_its_fit_did(served_runs: Path) -> None
 
 
 @pytest.mark.django_db
-def test_return_and_interval_inference_match_their_fits(served_runs: Path) -> None:
-    regression = outputs(live_run("return", "regression", 5), served_runs)
-    quantile = outputs(live_run("interval", "quantile", 20), served_runs)
-    volatility = outputs(live_run("interval", "volatility", 20), served_runs)
-    probability = outputs(live_run("interval", "classification", 20), served_runs)
-    returns, interval = cached("return"), cached("interval")
+def test_a_single_seed_run_scores_and_explains_the_day_as_its_fit_did(served_runs: Path) -> None:
+    lgbm_runs.run_folds("rank", [LIVE], "rank-solo", served_runs, bags=1)
+    run = ModelRun.objects.get(run_id=run_id("rank-solo", "rank", 20, LIVE))
+    model = load_model(run.run_key, run.run_id)
+    rows = day_rows(DAY, served_runs, run.feature_list)
 
-    pairs = [
-        (regression, returns, "ret_pred", "lightgbm_ret_h5"),
-        (quantile, interval, "q10", "lightgbm_q10_h20"),
-        (quantile, interval, "q50", "lightgbm_q50_h20"),
-        (quantile, interval, "q90", "lightgbm_q90_h20"),
-        (volatility, interval, "vol_pred", "lightgbm_vol_h20"),
-        (probability, interval, "prob_up_5pct", "lightgbm_prob_h20"),
-    ]
-    for produced, fit, column, stored in pairs:
-        merged = produced.merge(fit, on="stock_id")
-        assert len(merged) == 40
-        np.testing.assert_allclose(merged[column], merged[stored], rtol=1e-6)
+    produced = rows[["stock_id"]].join(run_values(run, model, rows))
+    contrib = run_contributions(run, model, rows)
+
+    assert isinstance(model, lgb.Booster)
+    merged = produced.merge(cached("rank", run_key="rank-solo"), on="stock_id")
+    np.testing.assert_allclose(merged["score"], merged["lightgbm_h20"], rtol=1e-6)
+    gaps = produced.set_index("stock_id")["score"] - contrib.groupby("stock_id")["contrib"].sum()
+    assert gaps.std() < 1e-9
+
+
+PAIRS = [
+    ("return", "regression", 5, "ret_pred", "lightgbm_ret_h5"),
+    ("interval", "quantile", 20, "q10", "lightgbm_q10_h20"),
+    ("interval", "quantile", 20, "q50", "lightgbm_q50_h20"),
+    ("interval", "quantile", 20, "q90", "lightgbm_q90_h20"),
+    ("interval", "volatility", 20, "vol_pred", "lightgbm_vol_h20"),
+    ("interval", "classification", 20, "prob_up_5pct", "lightgbm_prob_h20"),
+]
+
+
+@pytest.mark.django_db
+def test_return_and_interval_inference_match_their_fits_on_every_test_day(
+    served_runs: Path,
+) -> None:
+    probability = live_run("interval", "classification", 20)
+    assert load_model(probability.run_key, probability.run_id)["calibrator"] is not None
+    for day in live_days():
+        for scope, objective, horizon, column, stored in PAIRS:
+            produced = outputs(live_run(scope, objective, horizon), served_runs, day)
+            merged = produced.merge(cached(scope, day), on="stock_id")
+            assert len(merged) == 40
+            np.testing.assert_allclose(merged[column], merged[stored], rtol=1e-6)
+    quantile = outputs(live_run("interval", "quantile", 20), served_runs)
     assert (quantile["ret_pred"] == quantile["q50"]).all()
     assert (quantile["q10"] <= quantile["q50"]).all()
     assert (quantile["q50"] <= quantile["q90"]).all()
+    volatility = outputs(live_run("interval", "volatility", 20), served_runs)
     assert list(volatility.columns) == ["stock_id", "in_universe", "vol_pred"]
+
+
+@pytest.mark.django_db
+def test_market_features_enter_the_raw_models_as_their_training_bins(served_runs: Path) -> None:
+    run = live_run("return", "regression", 5)
+    model = load_model(run.run_key, run.run_id)
+    seen = set()
+    for day in live_days():
+        rows = day_rows(day, served_runs, run.feature_list)
+        inputs = model_inputs(run, model, rows)
+        binned = MarketBins(model["market_bins"]).apply(rows)["mkt_taiex_ret_5d"]
+        np.testing.assert_array_equal(inputs["mkt_taiex_ret_5d"], binned)
+        seen |= set(inputs["mkt_taiex_ret_5d"])
+    assert seen <= {0.0, 1.0, 2.0, 3.0, 4.0}
+    assert len(seen) > 1
 
 
 @pytest.mark.django_db
@@ -105,6 +153,28 @@ def boosters(features: list[str]) -> Bagged:
         for seed in (1, 2)
     )
     return Bagged(members)
+
+
+def test_tied_contributions_follow_the_feature_list() -> None:
+    features = ["a", "b", "c", "z0", "z1", "z2", "z3"]
+    rng = np.random.default_rng(9)
+    frame = pd.DataFrame(rng.normal(size=(400, 3)), columns=["a", "b", "c"]).assign(
+        z0=0.0, z1=0.0, z2=0.0, z3=0.0
+    )
+    target = 3 * frame["a"] + 2 * frame["b"] + frame["c"]
+    booster = lgb.train(
+        {"objective": "regression", "verbose": -1, "num_leaves": 7},
+        lgb.Dataset(frame[features], target),
+        num_boost_round=30,
+    )
+
+    contrib = top_contributions((booster,), frame[features].head(3), pd.Series(["1", "2", "3"]))
+
+    for _, group in contrib.groupby("stock_id"):
+        assert list(group["feature"])[3:] == ["z0", "z1", REST_FEATURE]
+        assert set(list(group["feature"])[:3]) == {"a", "b", "c"}
+        assert group.iloc[-1]["n_features"] == 2
+        assert group.iloc[-1]["contrib"] == 0.0
 
 
 def test_contributions_keep_the_top_five_and_sum_the_rest() -> None:

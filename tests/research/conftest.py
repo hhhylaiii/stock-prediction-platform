@@ -5,7 +5,7 @@ from typing import Any
 import pytest
 
 from apps.market.calendar import TradingDays
-from apps.research import baseline_runs, lgbm_runs
+from apps.research import baseline_runs, lgbm_runs, target_models
 from tests.research.run_panels import build_panel, research
 
 
@@ -42,8 +42,12 @@ def rank_caches(run_panel: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 @pytest.fixture
 def served_runs(run_panel: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Two-seed rank, return and interval runs of the panel's last research fold, as candidates."""
+    """Two-seed rank, return and interval runs of the panel's last research fold, as candidates.
+
+    The ECE limit is negative so the probability model always carries its isotonic calibrator.
+    """
     monkeypatch.setattr(lgbm_runs, "MAX_ROUNDS", 60)
+    monkeypatch.setattr(target_models, "ECE_LIMIT", -1.0)
     last = [fold for fold in research() if fold.research][-1]
     for scope in ("rank", "return", "interval"):
         lgbm_runs.run_folds(scope, [last], f"{scope}-live", run_panel, bags=2)
