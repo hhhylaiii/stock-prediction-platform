@@ -9,11 +9,14 @@ from pytest_django import DjangoAssertNumQueries
 
 from apps.etl.models import DataQualityLog
 from apps.etl.quality import CHECKS, should_run_prediction
+from apps.market.adjust import ADJ_CHECK, _merged
 from apps.market.models import TradingCalendar
+from apps.research import tasks
 from apps.research.evaluation import ALERT_SHARE
 from apps.research.gates import Gate, SlotGates
 from apps.research.predict import Slot
 from apps.research.promotion import _failed, _note
+from apps.research.runs import RunError
 from tests.api.conftest import envelope_of, sessions_until, taipei
 
 pytestmark = pytest.mark.usefixtures("calendar_in_db")
@@ -112,11 +115,27 @@ def test_model_output_checks_are_listed_apart(client: Client) -> None:
 
 
 @time_machine.travel(FRIDAY_NIGHT, tick=False)
-def test_research_schedule_checks_sit_with_the_model_checks(client: Client) -> None:
+def test_research_schedule_checks_sit_with_the_model_checks(
+    client: Client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def refused(run_key: str, on: date, directory: object) -> None:
+        raise RunError("the serving run changed")
+
+    def broken(day: date, build: bool) -> str:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(tasks, "dispatch", lambda rows: None)
+    monkeypatch.setattr(tasks, "promote", refused)
+    monkeypatch.setattr(tasks, "first_day", lambda run_key: OCT_30)
+    monkeypatch.setattr(tasks, "_rebuild_notes", broken)
     log_all(OCT_30)
     log(OCT_30, "research_morning", Severity.WARNING, step="predict")
     log(OCT_30, "research_evening", Severity.INFO)
-    log(OCT_30, "research_retrain", Severity.WARNING, refused=["rank"])
+    retrain = tasks._retrain_detail({"interval": tasks.NOT_FROZEN}, {"rank": "rank-2026-10"})
+    log(OCT_30, tasks.RETRAIN_CHECK, Severity.WARNING, **retrain)
+    tasks._promote(OCT_30)
+    tasks._rebuild(OCT_30)
+    log(OCT_30, ADJ_CHECK, Severity.INFO, **_merged({}, "2330", date(2026, 10, 27)))
 
     day = envelope_of(client.get("/api/data-quality", {"days": 1}))["data"][0]
     quality = envelope_of(client.get("/api/status"))["data"]["quality"]
@@ -124,9 +143,12 @@ def test_research_schedule_checks_sit_with_the_model_checks(client: Client) -> N
     assert [check["check_name"] for check in day["model_checks"]] == [
         "research_evening",
         "research_morning",
+        "research_promote",
+        "research_rebuild",
         "research_retrain",
     ]
     assert not [check for check in day["checks"] if check["check_name"].startswith("research_")]
+    assert "adj_factor_changed" in [check["check_name"] for check in day["checks"]]
     assert (day["worst"], quality["worst"], quality["warnings"]) == ("info", "info", 0)
 
 

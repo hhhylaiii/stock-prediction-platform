@@ -18,6 +18,7 @@
     etl_runs: '資料集與排程工作都已更新',
     stock_master: '股票清單異動',
     us_close: '美股收盤',
+    adj_factor_changed: '還原因子更新',
     output_width_ratio: '區間寬度比異常',
     output_odds_vs_q50: '機率與中位數矛盾',
     monitor_unscored: '到期預測缺 label',
@@ -25,7 +26,9 @@
     model_promotion: '換模',
     research_evening: '研究晚間排程',
     research_morning: '研究早盤排程',
-    research_retrain: '每月重訓'
+    research_retrain: '每月重訓',
+    research_promote: '自動換模',
+    research_rebuild: '研究資料重建'
   };
   const ALERT_REASONS = { below_threshold: '低於門檻', outside_range: '超出範圍', above_baseline: '輸給 baseline', missing_reference: '缺參考值' };
   const ALERT_METRICS = { ic: 'IC', coverage: '覆蓋率', brier: 'Brier' };
@@ -71,6 +74,7 @@
   const statusEl = document.getElementById('status');
   const summaryOf = day => ({ passed: day.passed, worst: day.worst, missing_checks: day.missing_checks, warnings: day.checks.filter(c => c.severity === 'warning').length });
   const sizeOf = v => Array.isArray(v) ? v.length : Number(v || 0);
+  const keyCount = v => v && typeof v === 'object' ? Object.keys(v).length : 0;
 
   function verdictOf(day) {
     const warnings = day.warnings;
@@ -360,7 +364,8 @@
           '<span class="right num contrib"' + (pos ? '' : ' style="color:var(--ink-2)"') + '>' + signed(item.contrib, 3) + '</span>' +
           '<div class="bar"><div class="zero"></div><div class="fill" style="background:' + (pos ? 'var(--model)' : 'var(--ink-4)') + ';left:' + (pos ? 50 : 50 - w) + '%;width:' + w + '%"></div></div></div>';
       }).join('') + '</div>' +
-      '<p class="note">共 ' + fmtInt(data.n_features) + ' 個特徵' + (data.rest ? '，其餘 ' + fmtInt(data.rest.n_features) + ' 個合計 ' + signed(data.rest.contrib, 3) : '') + '。</p>';
+      '<p class="note">共 ' + fmtInt(data.n_features) + ' 個特徵' + (data.rest ? '，其餘 ' + fmtInt(data.rest.n_features) + ' 個合計 ' + signed(data.rest.contrib, 3) : '') + '。</p>' +
+      '<p class="faint small recompute">特徵值取自目前的特徵表，每晚重算近期資料後可能更新，和預測當時不一定相同；貢獻值是預測當時算的。</p>';
   }
 
   function historyRowHtml(row) {
@@ -760,6 +765,11 @@
         return tables.length ? '有資料落在休市日：' + tables.map(([table, days]) => table + '（' + Object.keys(days).join('、') + '）').join('、') : '沒有資料落在休市日';
       }
       case 'index_freshness': return Object.keys(d.stale || {}).length ? '過期：' + Object.keys(d.stale).join('、') : '全部在期限內';
+      case 'adj_factor_changed': {
+        const days = Object.values(d.stocks || {});
+        const earliest = d.earliest || days.slice().sort()[0];
+        return fmtInt(has(d.count) ? d.count : days.length) + ' 檔' + (earliest ? '，最早 ' + earliest : '');
+      }
       case 'us_close': return Object.keys(d.stale || {}).length ? '未更新：' + Object.keys(d.stale).join('、') : '全部已更新';
       case 'etl_runs': {
         const blocking = d.blocking || [], rest = (d.missing || []).filter(key => !blocking.includes(key));
@@ -827,6 +837,21 @@
       [windowText(run.own_rows, run.days, run.mostly_predecessors), modeText(run, date)].filter(Boolean).map(part => '；' + part).join('');
   }
 
+  const leftDetail = d => d.handled === 'by_hand' || has(d.limit);
+  const handNote = '人工重建後，這列會在 ' + QUALITY_DAYS + ' 個交易日內或出現新的人工重建紀錄時消失';
+
+  function rebuildText(d) {
+    if (d.error) return '重建失敗：' + d.error;
+    const span = fmtInt(d.stocks || 0) + ' 檔，自 ' + (d.earliest || '—') + ' 起';
+    const days = has(d.limit_days) ? d.limit_days : '—';
+    switch (d.handled) {
+      case 'by_hand': return '最近 ' + days + ' 個交易日以外，未自動重建：' + span;
+      case 'covered': return '已由每晚 ' + days + ' 日重算涵蓋';
+      case 'rebuilt': return '已重建 ' + span;
+      default: return has(d.limit) ? '超過上限，未自動重建：' + span : '重建 ' + span;
+    }
+  }
+
   function modelCheckState(check, alertShare, date) {
     const d = check.detail || {};
     const stocks = fmtInt(d.flagged || 0) + '／' + fmtInt(d.n_stocks || 0) + ' 檔';
@@ -838,6 +863,9 @@
       case 'monitor_unscored': return ['warn', [fmtInt(sizeOf(d.runs)) + ' 筆']];
       case 'model_alert': return ['warn', (d.runs || []).map(run => alertLine(run, date))];
       case 'model_promotion': return [check.severity === 'info' ? '' : 'warn', promotionLines(d)];
+      case 'research_retrain': return [check.severity === 'info' ? '' : 'warn', ['建 ' + keyCount(d.built) + '、拒 ' + keyCount(d.refused) + '、失敗 ' + keyCount(d.failed)]];
+      case 'research_rebuild': return [check.severity === 'info' ? '' : 'warn', [rebuildText(d), ...(leftDetail(d) ? [handNote] : [])]];
+      case 'research_promote': return ['warn', ['失敗 ' + keyCount(d.failed) + '、完成 ' + sizeOf(d.done), ...Object.entries(d.failed || {}).map(([key, error]) => key + '：' + error)]];
       default: return [check.severity === 'info' ? '' : 'warn', [(SEVERITY[check.severity] || [check.severity])[0]]];
     }
   }
@@ -855,11 +883,32 @@
   const isPromotion = check => check.check_name === 'model_promotion';
   const isResearch = check => check.check_name.startsWith('research_');
   const scopeOf = check => (check.detail || {}).scope || (check.detail || {}).run_key;
+  const RESEARCH_ORDER = ['research_retrain', 'research_promote', 'research_rebuild', 'research_evening', 'research_morning'];
+  const researchRank = check => {
+    const rank = RESEARCH_ORDER.indexOf(check.check_name);
+    return rank < 0 ? RESEARCH_ORDER.length : rank;
+  };
 
   function latestBy(data, wanted, keyOf) {
     const all = data.flatMap(entry => (entry.model_checks || []).filter(wanted).map(check => ({ date: entry.date, check: check })))
       .sort((a, b) => (b.check.id || 0) - (a.check.id || 0));
     return { total: all.length, shown: all.filter((item, i) => all.findIndex(other => keyOf(other.check) === keyOf(item.check)) === i) };
+  }
+
+  const leftByHand = check => check.check_name === 'research_rebuild' && leftDetail(check.detail || {});
+
+  function researchPins(data) {
+    const dayOf = top => ((data.find(entry => entry.date === top.date) || {}).model_checks || [])
+      .filter(check => check.check_name === top.check.check_name)
+      .sort((a, b) => (a.id || 0) - (b.id || 0))
+      .map(check => ({ date: top.date, check: check }));
+    const pins = latestBy(data, isResearch, check => check.check_name).shown
+      .slice().sort((a, b) => researchRank(a.check) - researchRank(b.check))
+      .flatMap(dayOf);
+    const hand = latestBy(data, leftByHand, () => 'by_hand').shown[0];
+    if (!hand || pins.some(item => item.check.id === hand.check.id)) return pins;
+    const at = pins.findIndex(item => item.check.check_name === hand.check.check_name);
+    return [...pins.slice(0, at), hand, ...pins.slice(at)];
   }
 
   function renderModelChecks(data, meta) {
@@ -869,7 +918,7 @@
     sub.textContent = day ? '最近一次寫入的交易日：' + day.date + '；區間寬度比與機率矛盾的標記超過 ' + Math.round(share * 100) + '% 才算警告。' : '';
     const promotions = latestBy(data, isPromotion, scopeOf);
     const count = promotions.total > promotions.shown.length ? '，近 ' + data.length + ' 個交易日共 ' + promotions.total + ' 筆' : '';
-    const research = latestBy(data, isResearch, check => check.check_name).shown;
+    const research = researchPins(data);
     const pinned = promotions.shown.map(item => modelCheckHtml(item.check, share, item.date, item.date + count)).join('') +
       research.map(item => modelCheckHtml(item.check, share, item.date, item.date)).join('');
     const rest = day ? day.model_checks.filter(check => !isPromotion(check) && !isResearch(check)).map(check => modelCheckHtml(check, share, day.date)).join('') : '';

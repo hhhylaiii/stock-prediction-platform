@@ -1,14 +1,19 @@
-from datetime import timedelta
+from datetime import date, timedelta
+from pathlib import Path
 
 import pytest
 from playwright.sync_api import Locator, Page, expect
 from pytest_django.live_server_helper import LiveServer
 
 from apps.etl.models import DataQualityLog
+from apps.market.adjust import ADJ_CHECK, _merged
+from apps.market.calendar import TradingDays
+from apps.research import tasks
 from apps.research.gates import SAMPLE_UNITS, Gate, SlotGates
 from apps.research.monitor import MODE_FIELDS, MODES, alert_problems
 from apps.research.predict import Slot
-from apps.research.promotion import _failed, _note
+from apps.research.promotion import Promoted, _failed, _note
+from apps.research.runs import RunError
 from tests.e2e.conftest import XSS_NAME, Seed
 
 pytestmark = pytest.mark.e2e
@@ -474,10 +479,59 @@ def test_research_schedule_checks_sit_with_the_model_checks(
     expect(page.locator("#status")).to_contain_text("品質檢查通過（1 項警告）")
 
 
+BUILT = {"rank": "rank-2026-11", "return": "return-2026-11"}
+HAND_NOTE = "人工重建後，這列會在 30 個交易日內或出現新的人工重建紀錄時消失"
+NOT_FROZEN = {"interval": tasks.NOT_FROZEN}
+
+
+def retrained(
+    seed: Seed,
+    back: int,
+    built: dict[str, str],
+    refused: dict[str, str],
+    failed: dict[str, str] | None = None,
+) -> None:
+    detail = tasks._retrain_detail(refused, built, failed, 80.0, {})
+    log(seed, tasks.RETRAIN_CHECK, "warning" if refused or failed else "info", detail, back=back)
+
+
+def promote_step(
+    seed: Seed, monkeypatch: pytest.MonkeyPatch, back: int, errors: dict[str, str]
+) -> None:
+    day = seed.sessions[-back]
+
+    def promoted(run_key: str, on: date, directory: Path) -> Promoted:
+        if run_key in errors:
+            raise RunError(errors[run_key])
+        return Promoted(True, [])
+
+    monkeypatch.setattr(tasks, "first_day", lambda run_key: day)
+    monkeypatch.setattr(tasks, "promote", promoted)
+    monkeypatch.setattr(tasks, "dispatch", lambda rows: None)
+    tasks._promote(day)
+
+
+def rebuild_step(
+    seed: Seed,
+    monkeypatch: pytest.MonkeyPatch,
+    error: str | None = None,
+    build: bool = True,
+) -> None:
+    monkeypatch.setattr(tasks, "_command", lambda name, **options: name)
+    monkeypatch.setattr(tasks, "dispatch", lambda rows: None)
+    if error is not None:
+
+        def broken(day: date, build: bool) -> str:
+            raise RuntimeError(error)
+
+        monkeypatch.setattr(tasks, "_rebuild_notes", broken)
+    tasks._rebuild(seed.last_session, build)
+
+
 def test_the_monthly_retrain_stays_pinned_beside_the_day_s_checks(
     page: Page, live_server: LiveServer, seeded: Seed
 ) -> None:
-    log(seeded, "research_retrain", "warning", {}, back=15)
+    retrained(seeded, 15, {}, NOT_FROZEN, {"rank": "MemoryError: "})
     clean = {"share": 0.0, "flagged": 0, "n_stocks": 1842, "stocks": []}
     log(seeded, "output_width_ratio", "info", clean)
 
@@ -486,10 +540,234 @@ def test_the_monthly_retrain_stays_pinned_beside_the_day_s_checks(
     checks = page.locator("#model-checks .check")
     expect(checks).to_have_count(2)
     expect(checks.nth(0)).to_contain_text("每月重訓")
+    expect(checks.nth(0)).to_contain_text("建 0、拒 1、失敗 1")
     expect(checks.nth(0).locator(".pinned")).to_have_text(seeded.sessions[-15].isoformat())
     expect(checks.nth(0).locator("i")).to_have_class("warn")
     expect(checks.nth(1)).to_contain_text("區間寬度比異常")
     expect(page.locator("#model-checks-sub")).to_contain_text(seeded.last_session.isoformat())
+
+
+def test_research_checks_keep_a_fixed_order_whatever_ran_last(
+    page: Page, live_server: LiveServer, seeded: Seed, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log(seeded, "research_evening", "info", {}, back=2)
+    log(seeded, "research_morning", "warning", {})
+    rebuild_step(seeded, monkeypatch, error="boom")
+    retrained(seeded, 1, BUILT, {})
+    promote_step(seeded, monkeypatch, 1, {"rank-2026-11": "boom"})
+
+    page.goto(f"{live_server.url}/#models")
+
+    checks = page.locator("#model-checks .check")
+    expect(checks).to_have_count(5)
+    expected = (
+        ("每月重訓", 1),
+        ("自動換模", 1),
+        ("研究資料重建", 1),
+        ("研究晚間排程", 2),
+        ("研究早盤排程", 1),
+    )
+    for n, (name, back) in enumerate(expected):
+        expect(checks.nth(n)).to_contain_text(name)
+        expect(checks.nth(n).locator(".pinned")).to_have_text(seeded.sessions[-back].isoformat())
+
+
+def test_a_rebuild_shows_every_row_of_its_day_the_one_left_by_hand_first(
+    page: Page, live_server: LiveServer, seeded: Seed, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old = TradingDays.from_db().shift(seeded.last_session, -80)
+    recent = seeded.sessions[-5]
+    log(seeded, ADJ_CHECK, "info", _merged({}, "2330", old), back=3)
+    log(seeded, ADJ_CHECK, "info", _merged(_merged({}, "2330", recent), "9999", recent), back=2)
+    rebuild_step(seeded, monkeypatch)
+
+    page.goto(f"{live_server.url}/#models")
+
+    rebuilds = page.locator("#model-checks .check")
+    expect(rebuilds).to_have_count(2)
+    expect(rebuilds.nth(0)).to_contain_text("研究資料重建")
+    expect(rebuilds.nth(0).locator(".muted")).to_have_text(
+        [
+            f"最近 {tasks.RECENT_SESSIONS} 個交易日以外，未自動重建：1 檔，自 {old.isoformat()} 起",
+            HAND_NOTE,
+        ]
+    )
+    expect(rebuilds.nth(0).locator("i")).to_have_class("warn")
+    rebuilt = f"已重建 2 檔，自 {recent.isoformat()} 起"
+    expect(rebuilds.nth(1).locator(".muted")).to_have_text(rebuilt)
+    expect(rebuilds.nth(1).locator("i")).not_to_have_class("warn")
+    for row in (rebuilds.nth(0), rebuilds.nth(1)):
+        expect(row.locator(".pinned")).to_have_text(seeded.last_session.isoformat())
+
+
+def test_a_rebuild_the_nightly_recompute_covered_says_so(
+    page: Page, live_server: LiveServer, seeded: Seed, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log(seeded, ADJ_CHECK, "info", _merged({}, "2330", seeded.sessions[-5]), back=2)
+    rebuild_step(seeded, monkeypatch, build=False)
+
+    page.goto(f"{live_server.url}/#models")
+
+    covered = page.locator("#model-checks .check")
+    expect(covered).to_have_count(1)
+    expect(covered.locator(".muted")).to_have_text(f"已由每晚 {tasks.RECENT_SESSIONS} 日重算涵蓋")
+    expect(covered.locator("i")).not_to_have_class("warn")
+
+
+def test_a_rebuild_row_from_before_the_window_names_only_the_limit(
+    page: Page, live_server: LiveServer, seeded: Seed
+) -> None:
+    earliest = seeded.sessions[-40].isoformat()
+    legacy = {"earliest": earliest, "stocks": 1, "notes": {}, "limit": 30}
+    log(seeded, tasks.REBUILD_CHECK, "warning", legacy)
+
+    page.goto(f"{live_server.url}/#models")
+
+    expect(page.locator("#model-checks .check .muted")).to_have_text(
+        [f"超過上限，未自動重建：1 檔，自 {earliest} 起", HAND_NOTE]
+    )
+
+
+def test_a_rebuild_row_from_before_the_handling_reads_as_rebuilt(
+    page: Page, live_server: LiveServer, seeded: Seed
+) -> None:
+    earliest = seeded.sessions[-5].isoformat()
+    log(seeded, tasks.REBUILD_CHECK, "info", {"earliest": earliest, "stocks": 2, "notes": {}})
+
+    page.goto(f"{live_server.url}/#models")
+
+    rebuilt = page.locator("#model-checks .check")
+    expect(rebuilt.locator(".muted")).to_have_text(f"重建 2 檔，自 {earliest} 起")
+    expect(rebuilt.locator("i")).not_to_have_class("warn")
+
+
+def moved(check: str, day: date) -> None:
+    """Date the newest row of check on day, as if an earlier chain had written it."""
+    row = DataQualityLog.objects.filter(check_name=check).latest("pk")
+    DataQualityLog.objects.filter(pk=row.pk).update(date=day)
+
+
+def test_only_the_latest_day_of_a_research_check_is_pinned(
+    page: Page, live_server: LiveServer, seeded: Seed, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rebuild_step(seeded, monkeypatch, error="boom")
+    moved(tasks.REBUILD_CHECK, seeded.sessions[-3])
+    monkeypatch.undo()
+    old = TradingDays.from_db().shift(seeded.last_session, -80)
+    log(seeded, ADJ_CHECK, "info", _merged({}, "2330", old), back=2)
+    log(seeded, ADJ_CHECK, "info", _merged({}, "9999", seeded.sessions[-5]), back=2)
+    rebuild_step(seeded, monkeypatch)
+
+    page.goto(f"{live_server.url}/#models")
+
+    rebuilds = page.locator("#model-checks .check")
+    expect(rebuilds).to_have_count(2)
+    expect(rebuilds.locator(".pinned")).to_have_text([seeded.last_session.isoformat()] * 2)
+    expect(page.locator("#model-checks")).not_to_contain_text("重建失敗")
+
+
+def test_a_rebuild_left_by_hand_stays_pinned_after_a_later_rebuild(
+    page: Page, live_server: LiveServer, seeded: Seed, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old = TradingDays.from_db().shift(seeded.last_session, -80)
+    log(seeded, ADJ_CHECK, "info", _merged({}, "2330", old), back=4)
+    rebuild_step(seeded, monkeypatch)
+    moved(tasks.REBUILD_CHECK, seeded.sessions[-3])
+    recent = seeded.sessions[-2]
+    log(seeded, ADJ_CHECK, "info", _merged({}, "9999", recent), back=2)
+    rebuild_step(seeded, monkeypatch)
+
+    page.goto(f"{live_server.url}/#models")
+
+    rebuilds = page.locator("#model-checks .check")
+    expect(rebuilds).to_have_count(2)
+    expect(rebuilds.nth(0).locator(".muted").nth(0)).to_contain_text("未自動重建")
+    expect(rebuilds.nth(0).locator(".muted").nth(1)).to_have_text(HAND_NOTE)
+    expect(rebuilds.nth(0).locator(".pinned")).to_have_text(seeded.sessions[-3].isoformat())
+    expect(rebuilds.nth(0).locator("i")).to_have_class("warn")
+    rebuilt = f"已重建 1 檔，自 {recent.isoformat()} 起"
+    expect(rebuilds.nth(1).locator(".muted")).to_have_text(rebuilt)
+    expect(rebuilds.nth(1).locator(".pinned")).to_have_text(seeded.last_session.isoformat())
+
+
+def test_an_evening_failure_and_a_morning_rebuild_of_one_day_both_stay(
+    page: Page, live_server: LiveServer, seeded: Seed, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recent = seeded.sessions[-2]
+    log(seeded, ADJ_CHECK, "info", _merged({}, "9999", recent), back=2)
+    rebuild_step(seeded, monkeypatch, error="boom")
+    monkeypatch.undo()
+    rebuild_step(seeded, monkeypatch)
+
+    page.goto(f"{live_server.url}/#models")
+
+    rebuilds = page.locator("#model-checks .check")
+    expect(rebuilds).to_have_count(2)
+    expect(rebuilds.nth(0).locator(".muted")).to_have_text("重建失敗：RuntimeError: boom")
+    expect(rebuilds.nth(0).locator("i")).to_have_class("warn")
+    rebuilt = f"已重建 1 檔，自 {recent.isoformat()} 起"
+    expect(rebuilds.nth(1).locator(".muted")).to_have_text(rebuilt)
+    expect(rebuilds.locator(".pinned")).to_have_text([seeded.last_session.isoformat()] * 2)
+
+
+def test_a_failed_rebuild_shows_its_error(
+    page: Page, live_server: LiveServer, seeded: Seed, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rebuild_step(seeded, monkeypatch, error=XSS_NAME)
+
+    page.goto(f"{live_server.url}/#models")
+
+    failed = page.locator("#model-checks .check")
+    expect(failed).to_have_count(1)
+    expect(failed.locator(".muted")).to_have_text(f"重建失敗：RuntimeError: {XSS_NAME}")
+    expect(failed.locator("i")).to_have_class("warn")
+    assert page.evaluate("window.__xss") is None
+
+
+def test_an_adj_factor_change_is_a_data_check_counting_its_stocks(
+    page: Page, live_server: LiveServer, seeded: Seed
+) -> None:
+    named = _merged(_merged({}, "2330", seeded.sessions[-2]), "9999", seeded.sessions[-4])
+    log(seeded, ADJ_CHECK, "info", named)
+
+    page.goto(f"{live_server.url}/#models")
+
+    change = page.locator("#quality .check", has_text="還原因子更新")
+    expect(change).to_contain_text(f"2 檔，最早 {seeded.sessions[-4].isoformat()}")
+    expect(change.locator("i")).not_to_have_class("warn")
+    expect(page.locator("#model-checks")).not_to_contain_text("還原因子")
+
+
+def test_a_collapsed_adj_factor_change_reads_its_count(
+    page: Page, live_server: LiveServer, seeded: Seed
+) -> None:
+    collapsed = {"earliest": seeded.sessions[-9].isoformat(), "count": 249}
+    log(seeded, ADJ_CHECK, "info", _merged(collapsed, "2330", seeded.sessions[-3]))
+
+    page.goto(f"{live_server.url}/#models")
+
+    change = page.locator("#quality .check", has_text="還原因子更新")
+    expect(change).to_contain_text(f"250 檔，最早 {seeded.sessions[-9].isoformat()}")
+
+
+def test_a_failed_automatic_promotion_names_each_build_and_its_error(
+    page: Page, live_server: LiveServer, seeded: Seed, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    retrained(seeded, 1, BUILT, NOT_FROZEN)
+    promote_step(seeded, monkeypatch, 1, {"rank-2026-11": XSS_NAME})
+
+    page.goto(f"{live_server.url}/#models")
+
+    checks = page.locator("#model-checks .check")
+    retrain, promote = checks.nth(0), checks.nth(1)
+    expect(retrain).to_contain_text("建 2、拒 1、失敗 0")
+    expect(retrain.locator("i")).to_have_class("warn")
+    expect(promote).to_contain_text("自動換模")
+    expect(promote.locator(".muted")).to_have_text(
+        ["失敗 1、完成 1", f"rank-2026-11：RunError: {XSS_NAME}"]
+    )
+    expect(promote.locator("i")).to_have_class("warn")
+    assert page.evaluate("window.__xss") is None
 
 
 def test_model_output_checks_leave_the_data_verdict_alone(
