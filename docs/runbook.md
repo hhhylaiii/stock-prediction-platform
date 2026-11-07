@@ -390,28 +390,28 @@ done
 
 ## 交易所逐日表補缺（plan K17c）
 
-FinMind 的外資持股、流通股數、本益比在 2010–2020 有缺，下市股缺得特別多（約 21% 對現存股 0.4–0.7%），模型會把「缺值」學成「之後會下市」。交易所的逐日全市場表列出當天所有掛牌的股票，用它把缺的補上。範圍是 2010 年起到每日排程接手的前一天（2026-10-21）：只補到 2020 年的話，2021 年後才有第一筆股數、或完全沒有股數的股票，會把 2020 年最後一個股數一路帶到下市或下一筆。
+FinMind 的外資持股、流通股數、本益比在 2010–2020 有缺，下市股缺得特別多（約 21% 對現存股 0.4–0.7%），模型會把「缺值」學成「之後會下市」。融資券在 2010–2026 都有缺：抽查 2017 年，下市股整段沒有融資資料的 2.3%、在有資料的期間內漏掉某幾天的 3.6%（現存股 0.27%、0%）。交易所的逐日全市場表列出當天所有掛牌的股票，用它把缺的補上。範圍是 2010 年起到每日排程接手的前一天（2026-10-21）：只補到 2020 年的話，2021 年後才有第一筆股數、或完全沒有股數的股票，會把 2020 年最後一個股數一路帶到下市或下一筆。
 
 兩個市場是不同主機，各開一個終端機平行跑；同一個主機一次只跑一個指令（每個程序各有一份限速，兩個同時打同一主機就會快過 3 秒一次）：
 
 ```bash
-for fill in holdings valuation; do
+for fill in holdings valuation margin; do
   uv run python manage.py fill_from_exchange --source twse --fill $fill --start 2010-01-01 --end 2026-10-21
 done
 ```
 
 櫃買把 `--source` 換成 `tpex`。中斷了用 `--resume <run_id>` 接著跑。
 
-- `holdings`：證交所 MI_QFIIS、櫃買 insti/qfii，一天一個請求，同一頁補外資持股比率（`daily_chip.fi_holding_pct`）和發行股數（`shares_outstanding`）。`valuation`：證交所 BWIBBU_d、櫃買 peQryDate，補 `daily_valuation`。
+- `holdings`：證交所 MI_QFIIS、櫃買 insti/qfii，一天一個請求，同一頁補外資持股比率（`daily_chip.fi_holding_pct`）和發行股數（`shares_outstanding`）。`valuation`：證交所 BWIBBU_d、櫃買 peQryDate，補 `daily_valuation`。`margin`：證交所 MI_MARGN、櫃買 margin/balance，補 `daily_chip` 的融資餘額、融資限額、融券餘額（`margin_balance`、`margin_limit`、`short_balance`，張換成股）。頁面上有的股票才補，不在頁面上的（例如還沒有信用交易資格）不補；停止信用交易的股票有的照樣列在頁面上、數字是 0（例如證交所註記 `OX`），照存 0，和每日抓取相同。
 - 缺才補，不分股票之後有沒有下市：
-  - `daily_chip`：沒有這一列就新增（只有這一欄）；有這一列、這一欄是空的才補；有值的不動。
+  - `daily_chip`：沒有這一列就新增（只有這次補的欄位）；有這一列時，每一欄分開看，空的才補；有值的不動。
   - `daily_valuation`：當天沒有這一列才新增，三個數字都空的不新增。
   - `shares_outstanding`：只補每檔第一筆已存股數之前的日子，照「變動才存」寫變動點；跑完時，補的最後一筆和第一筆已存股數相同的，刪掉那筆重複的已存列（生效中的股數不變），刪掉的列記在 log 的 `dropped`（`[代號, 日期, 股數]`），可以照著寫回。界線取第一次 `holdings` 補缺開跑時的第一筆已存股數（記在那個 `etl_run.checkpoint.windows`），之後的補缺、`--resume`、另一個市場都沿用，所以補進去的列不會被當成已存的界線。
 - 只寫當天在 `daily_price` 有價的代號（不用歷史行情頁，K6）；當天交易所表上的代號一個都沒有價時 SourceNotReady，不會記成成功 0 列。
-- 已有的值和交易所差到公布的最後一位（外資持股比、本益比、淨值比 0.01，殖利率 0.0001）、或界線那天的股數不同時，不改，記在 log 的 `differences`：每種表的筆數、分下市股和現存股的筆數，和前 20 筆 `[代號, 日期, 欄位, 已存值, 交易所值]`（SPEC §8.5）。
-- `etl_run` 的 dataset 是 `fill:holdings`／`fill:valuation`，每天和寫入同一個交易記 checkpoint。跑完記一列 `exchange_fill`（info）：`filled` 是每檔補了哪段日期、幾天，`created` 是其中新增整列的部分，`totals` 分下市股和現存股的列數，`span` 是第一次開跑的起點到結尾。
-- 先跑完 FinMind 的 `daily_price`、`shares_outstanding`、`daily_chip`、`daily_valuation` 回補（含 `--retry-rejected`）再跑補缺：`daily_price` 決定補哪些代號、`shares_outstanding` 決定股數的界線（第一次 `holdings` 補缺時就固定）；FinMind 寫 `daily_chip`、`daily_valuation` 時整列已存在就跳過，補缺新增的列會擋掉之後的 FinMind 回補。之後真的要再回補 FinMind，先刪掉補缺新增的列：`daily_chip` 是只有 `fi_holding_pct` 有值、其他欄位都是空的列；`daily_valuation` 的 `created` 只記每檔的日期範圍，範圍內可能夾著 FinMind 的列，要逐日分辨時從兩邊的 raw 重算。
-- 每個請求約 3.5 秒；一個市場一個 fill 2010-01-04 到 2026-10-21 約 4,130 天、約 4 小時，兩個 fill 約 8 小時。可以跑的時段是平日 02:00–15:00 和週末，和每日 ETL（含 02:00 前的重試）錯開；平日 15:00 前沒跑完就停，之後 `--resume`。
+- 已有的值和交易所差到公布的最後一位（外資持股比、本益比、淨值比 0.01，殖利率 0.0001；融資券兩邊都是張乘 1,000，要完全相同）、或界線那天的股數不同時，不改，記在 log 的 `differences`：每種表的筆數、分下市股和現存股的筆數，和前 20 筆 `[代號, 日期, 欄位, 已存值, 交易所值]`（SPEC §8.5）。
+- `etl_run` 的 dataset 是 `fill:holdings`／`fill:valuation`／`fill:margin`，每天和寫入同一個交易記 checkpoint。跑完記一列 `exchange_fill`（info）：`filled` 是每檔補了哪段日期、幾天，`created` 是其中新增整列的部分，`totals` 分下市股和現存股的列數，`span` 是第一次開跑的起點到結尾。
+- 先跑完 FinMind 的 `daily_price`、`shares_outstanding`、`daily_chip`、`daily_valuation` 回補（含 `--retry-rejected`）再跑補缺：`daily_price` 決定補哪些代號、`shares_outstanding` 決定股數的界線（第一次 `holdings` 補缺時就固定）；FinMind 寫 `daily_chip`、`daily_valuation` 時整列已存在就跳過，補缺新增的列會擋掉之後的 FinMind 回補。之後真的要再回補 FinMind，先刪掉補缺新增的列：`daily_chip` 是 `fi_holding_pct` 和三個融資券欄以外都是空的列（兩種補缺可能落在同一列：holdings 新增的列，margin 會當成已存的列補上融資券，所以不能只看其中一次的 `created`；這樣刪也會刪到 FinMind 只有外資持股比、只有融資券或只有這兩者的列，回補 FinMind 時會寫回來）。FinMind 回補完，對同一段日期再跑一次 `holdings`、`margin` 補缺，把補缺填過、FinMind 沒有的格子補回去；`daily_valuation` 的 `created` 只記每檔的日期範圍，範圍內可能夾著 FinMind 的列，要逐日分辨時從兩邊的 raw 重算。
+- 每個請求約 3.5 秒；一個市場一個 fill 2010-01-04 到 2026-10-21 約 4,130 天、約 4 小時，三個 fill 約 12 小時。可以跑的時段是平日 02:00–15:00 和週末，和每日 ETL（含 02:00 前的重試）錯開；平日 15:00 前沒跑完就停，之後 `--resume`。
 
 ## FinMind 外資持股 0 的覆寫（plan K21）
 

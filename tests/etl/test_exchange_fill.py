@@ -28,6 +28,8 @@ BASE = "https://www.twse.com.tw/rwd/zh"
 DAY = date(2026, 10, 28)
 HOLDINGS = "twse/foreign_holding/mi_qfiis_20261028.json"
 VALUATION = "twse/daily_valuation/bwibbu_20261028.json"
+MARGIN = "twse/margin/mi_margn_20261028.json"
+MARGINS = ("margin_balance", "margin_limit", "short_balance")
 
 pytestmark = pytest.mark.django_db
 
@@ -108,6 +110,53 @@ def test_a_missing_valuation_row_is_added_and_a_stored_row_left_alone(
     rows = {row.stock_id: row for row in DailyValuation.objects.all()}
     assert set(rows) == {"1101", "2317"}
     assert (rows["2317"].pe, rows["1101"].pe, rows["1101"].pb) == (1.0, None, 0.91)
+
+
+def margins(code: str) -> tuple[Any, ...]:
+    return tuple(DailyChip.objects.values_list(*MARGINS).get(stock_id=code))
+
+
+@responses.activate
+def test_missing_margin_rows_are_added_and_only_blank_margin_columns_filled(
+    adapter: TwseAdapter, load_fixture: Callable[[str], Any]
+) -> None:
+    serve(load_fixture, "/marginTrading/MI_MARGN", MARGIN)
+    priced("1101", "1213", "2317", "2330", "2603", "2609")
+    DailyChip.objects.create(stock_id="1101", date=DAY, fi_holding_pct=13.36)
+    stored = dict(zip(MARGINS, (35_332_000, 6_483_092_000, 5_000), strict=True))
+    DailyChip.objects.create(stock_id="2330", date=DAY, **stored)
+    DailyChip.objects.create(stock_id="2317", date=DAY, margin_balance=5)
+    DailyChip.objects.create(stock_id="2609", date=DAY, fi_net=1)
+    run = fill_missing(adapter, "margin", DAY, DAY)
+    assert margins("1101") == (37_423_000, 1_880_795_000, 501_000)
+    assert DailyChip.objects.get(stock_id="1101").fi_holding_pct == 13.36
+    assert margins("2317") == (5, 3_518_936_000, 471_000)
+    assert margins("1213") == (0, 0, 0)
+    assert margins("2609") == (None, None, None)
+    assert margins("2330") == tuple(stored.values())
+    assert not DailyChip.objects.filter(stock_id__in=["0050", "2603"]).exists()
+    (log,) = DataQualityLog.objects.filter(check_name=FILL_CHECK)
+    assert sorted(log.detail["filled"]["margin"]) == ["1101", "1213", "2317"]
+    assert log.detail["created"]["margin"] == {"1213": ["2026-10-28", "2026-10-28", 1]}
+    assert log.detail["differences"]["margin"]["sample"] == [
+        ["2317", "2026-10-28", "margin_balance", 5, 56_619_000]
+    ]
+    assert (run.status, run.rows) == ("success", 3)
+
+
+@responses.activate
+def test_the_otc_market_fills_margins_from_its_balance_page(
+    october_2026: TradingDays, twse_limiter: RateLimiter, load_fixture: Callable[[str], Any]
+) -> None:
+    responses.post(
+        "https://www.tpex.org.tw/www/zh-tw/margin/balance",
+        json=load_fixture("tpex/margin/balance_20261028.json"),
+    )
+    priced("1240", "3293")
+    fill_missing(TpexAdapter(october_2026, twse_limiter), "margin", DAY, DAY)
+    assert margins("1240") == (14_000, 11_610_000, 0)
+    assert margins("3293")[0] == 1_976_000
+    assert len(responses.calls) == 1
 
 
 @responses.activate
