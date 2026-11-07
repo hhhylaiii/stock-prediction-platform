@@ -40,6 +40,7 @@ class BaseAdapter(ABC):
     raw_model: ClassVar[type[RawRecord]]
     datasets: ClassVar[frozenset[str]]
     monthly_datasets: ClassVar[frozenset[str]] = frozenset()
+    raw_pages: ClassVar[Mapping[str, Mapping[str, str]]] = {}
     per_stock: ClassVar[bool] = False
 
     def __init__(self, calendar: TradingDays, limiter: RateLimiter) -> None:

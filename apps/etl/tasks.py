@@ -16,6 +16,7 @@ from django.db.models import Min
 from django.utils import timezone
 
 from apps.etl.adapters import build_adapter
+from apps.etl.adapters.corporate_actions import DIVIDEND_EVENT
 from apps.etl.adapters.mops import REVENUE_SCAN, STATEMENT_SCAN
 from apps.etl.alerts import dispatch
 from apps.etl.catchup import REDONE, catch_up
@@ -49,6 +50,7 @@ GATE_DATASETS = frozenset(
         "sbl",
         "foreign_holding",
         "daily_valuation",
+        DIVIDEND_EVENT,
     }
 )
 Severity = DataQualityLog.Severity
@@ -86,7 +88,7 @@ def _both(*datasets: str, sessions_back: tuple[int, ...] = (0,)) -> list[Fetch]:
 
 
 BATCHES: dict[str, list[Fetch]] = {
-    "prices": [*_both("daily_price", "index_daily"), Fetch("twse", "return_index")],
+    "prices": [*_both("daily_price", "index_daily", DIVIDEND_EVENT), Fetch("twse", "return_index")],
     "afternoon": [
         *_both("institutional", "daily_valuation", "attention", "disposition", "full_delivery"),
         Fetch("twse", "foreign_holding"),
