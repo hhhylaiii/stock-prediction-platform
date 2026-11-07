@@ -13,6 +13,7 @@ from django.db import transaction
 from apps.etl.tasks import ready_for_research
 from apps.market.calendar import TradingDays
 from apps.research.inference import day_rows, run_contributions, run_values
+from apps.research.lock import locked
 from apps.research.models import (
     ModelMonitor,
     ModelObjective,
@@ -198,6 +199,7 @@ def _check_rows(day: date, serving: dict[Slot, ModelRun], replace: bool) -> None
         )
 
 
+@locked("predict")
 def predict(
     day: date, directory: Path, replace: bool = False, slots: Sequence[Slot] = SLOTS
 ) -> Predicted:

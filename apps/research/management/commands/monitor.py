@@ -5,6 +5,7 @@ from django.core.management.base import BaseCommand, CommandError, CommandParser
 from django.utils import timezone
 
 from apps.market.calendar import CalendarError, TradingDays
+from apps.research.lock import ResearchBusyError
 from apps.research.monitor import MonitorError, run_monitor
 
 
@@ -26,7 +27,7 @@ class Command(BaseCommand):
                 else calendar.latest_on_or_before(timezone.localdate() - timedelta(days=1))
             )
             result = run_monitor(day, calendar)
-        except (CalendarError, MonitorError, ValueError) as exc:
+        except (CalendarError, MonitorError, ResearchBusyError, ValueError) as exc:
             raise CommandError(str(exc)) from exc
         degraded = ", ".join(result.degraded) or "none"
         self.stdout.write(

@@ -8,6 +8,7 @@ from django.core.management.base import BaseCommand, CommandError
 
 from apps.etl.management.options import as_date
 from apps.research.labels import latest_price_date
+from apps.research.lock import ResearchBusyError
 from apps.research.predict import PredictionGateError, predict
 from apps.research.runs import RunError
 
@@ -34,7 +35,13 @@ class Command(BaseCommand):
             if day is None:
                 raise ValueError("daily_price is empty")
             result = predict(day, settings.FEATURE_PARQUET_DIR, options["replace"])
-        except (PredictionGateError, RunError, ValueError, FileNotFoundError) as error:
+        except (
+            PredictionGateError,
+            RunError,
+            ResearchBusyError,
+            ValueError,
+            FileNotFoundError,
+        ) as error:
             raise CommandError(str(error)) from error
         for run_id, count in result.written.items():
             self.stdout.write(f"{run_id}: {count} rows")
