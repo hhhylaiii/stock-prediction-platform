@@ -1,4 +1,5 @@
 import math
+import os
 import warnings
 from datetime import date, timedelta
 from decimal import Decimal
@@ -24,9 +25,15 @@ from apps.market.models import (
     TradingCalendar,
     WeeklyHolding,
 )
+from apps.research.features import store
 from apps.research.features.build import FEATURE_COLUMNS, FRAME_COLUMNS, build_feature_frame
 from apps.research.features.registry import feature_names
-from apps.research.features.store import export_year, read_partitions, write_features
+from apps.research.features.store import (
+    export_year,
+    read_columns,
+    read_partitions,
+    write_features,
+)
 from apps.research.models import FeatureDaily
 from apps.research.universe import load_universe_panel
 from tests.research.conftest import weekday_calendar
@@ -313,6 +320,45 @@ def test_training_reads_the_first_batch_even_from_a_partition_without_the_second
     pd.testing.assert_frame_equal(first, stored()[list(first.columns)])
     with pytest.raises(ValueError, match=f"lacks {second[0]}, {second[1]}"):
         read_partitions(d("2016-03-01"), d("2016-03-31"), tmp_path, FRAME_COLUMNS)
+
+
+def swapped_after_open(path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replace the partition with other values the moment its table is read."""
+    other = pd.read_parquet(path).assign(tech_ret_1d=999.0)
+    newer = path.with_name("newer.parquet")
+    other.to_parquet(newer, index=False)
+    read = store.pq.read_table
+
+    def replaced(source: Any, *args: Any, **kwargs: Any) -> Any:
+        if newer.exists():
+            os.replace(newer, path)
+        return read(source, *args, **kwargs)
+
+    monkeypatch.setattr(store.pq, "read_table", replaced)
+
+
+def test_a_partition_replaced_while_read_gives_the_file_that_was_opened(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    listed("2330", "2015-06-01", "2016-03-31")
+    frame = build_feature_frame(CALENDAR, d("2016-03-01"), d("2016-03-31"))
+    write_features(frame, d("2016-03-01"), d("2016-03-31"))
+    path = export_year(2016, tmp_path)
+    assert path is not None
+    expected = stored()
+    first = list(read_partitions(d("2016-03-01"), d("2016-03-31"), tmp_path).columns)
+
+    swapped_after_open(path, monkeypatch)
+    rows = read_partitions(d("2016-03-01"), d("2016-03-31"), tmp_path)
+
+    pd.testing.assert_frame_equal(rows, expected[first])
+    assert pd.read_parquet(path)["tech_ret_1d"].eq(999.0).all()
+
+    pd.read_parquet(path).assign(tech_ret_1d=1.5).to_parquet(path, index=False)
+    swapped_after_open(path, monkeypatch)
+    again = read_columns(d("2016-03-01"), d("2016-03-31"), tmp_path, ["tech_ret_1d"])
+
+    assert again["tech_ret_1d"].eq(1.5).all()
 
 
 def test_an_empty_year_leaves_no_partition_and_the_directory_reads(tmp_path: Path) -> None:
