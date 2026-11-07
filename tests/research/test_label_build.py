@@ -7,7 +7,7 @@ from django.core.management import call_command
 from django.core.management.base import CommandError
 
 from apps.market.calendar import TradingDays
-from apps.market.models import DailyPrice, StockMaster, TradingCalendar
+from apps.market.models import DailyPrice, MarketHistory, StockMaster, TradingCalendar
 from apps.research.labels import LABEL_COLUMNS, build_labels, write_labels
 from apps.research.models import LabelDaily
 from apps.research.ranges import years
@@ -28,7 +28,10 @@ def listed(stock_id: str, **fields: object) -> None:
         "industry": "水泥工業",
         "list_date": d("2016-01-04"),
     }
-    StockMaster.objects.create(stock_id=stock_id, **{**defaults, **fields})
+    stock = StockMaster.objects.create(stock_id=stock_id, **{**defaults, **fields})
+    MarketHistory.objects.create(
+        stock_id=stock_id, start_date=stock.list_date or d("2016-01-04"), market=stock.market
+    )
 
 
 def prices(

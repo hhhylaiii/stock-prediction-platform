@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from apps.market.models import DailyPrice, DispositionEvent, StockMaster
+from apps.market.models import DailyPrice, DispositionEvent, MarketHistory, StockMaster
 from apps.research.universe import (
     EXCLUSIONS,
     MIN_MEDIAN_TURNOVER,
@@ -32,6 +32,7 @@ def panel(stock_id: str = "2330", **columns: object) -> pd.DataFrame:
         "date": list(DAYS),
         "segment": 1,
         "age": np.arange(n) + 500,
+        "listed": True,
         "has_bar": True,
         "close": 10.0,
         "turnover": 2e7,
@@ -59,6 +60,14 @@ def test_a_liquid_listed_stock_is_in_the_universe_after_twenty_days() -> None:
     assert not result.loc[:18, "in_universe"].any()
     assert result.loc[:18, "illiquid"].all()
     assert set(EXCLUSIONS) <= set(result.columns)
+
+
+def test_a_day_the_market_history_does_not_list_is_excluded() -> None:
+    listed = [day != DAYS[25] for day in DAYS]
+    result = apply_universe(panel(listed=listed), NO_EVENTS, CALENDAR)
+    assert excluded(result, "unlisted") == [DAYS[25]]
+    assert not result.loc[25, "in_universe"]
+    assert result.loc[26, "in_universe"]
 
 
 def test_halted_day_is_excluded() -> None:
@@ -218,8 +227,13 @@ LONG = weekday_calendar(date(2013, 1, 1), date(2014, 12, 31))
 CHECKED = ["in_universe", "illiquid", "turnover_med_20d", "reference", "limit_up", "limit_up_close"]
 
 
+def listed_from(stock_id: str, start: date) -> None:
+    MarketHistory.objects.create(stock_id=stock_id, start_date=start, market="TWSE")
+
+
 def seed_prices() -> None:
     StockMaster.objects.create(stock_id="2330", name="2330", market="TWSE", industry="半導體業")
+    listed_from("2330", d("2010-01-04"))
     trading = LONG.between(d("2013-01-02"), d("2014-06-30"))
     closes = [100.0 * 1.001**i for i in range(len(trading))]
     closes[-10] = round(closes[-11] * 1.1 - 0.4, 0)
@@ -257,6 +271,7 @@ def seed_gaps() -> None:
         StockMaster.objects.create(
             stock_id=stock_id, name=stock_id, market="TWSE", industry="水泥工業"
         )
+        listed_from(stock_id, d("2010-01-04"))
     halted = LONG.between(d("2013-04-01"), d("2014-02-28"))
     idle = LONG.between(d("2013-04-01"), d("2014-03-31"))
     rows = []
@@ -287,6 +302,21 @@ def test_window_near_the_calendar_start_warms_up_on_what_exists() -> None:
     early = load_universe_panel(LONG, d("2013-02-01"), d("2013-03-29"))
     assert early["date"].iloc[0] == d("2013-02-01")
     assert early["in_universe"].iloc[0] == (early["age"].iloc[0] >= 60)
+
+
+@pytest.mark.django_db
+def test_days_before_the_first_market_span_are_out_of_the_universe() -> None:
+    seed_prices()
+    MarketHistory.objects.filter(stock_id="2330").update(start_date=d("2014-05-15"))
+
+    panel = load_universe_panel(LONG, d("2014-05-05"), d("2014-06-30"))
+
+    listed = panel["date"].ge(d("2014-05-15"))
+    assert panel.loc[~listed, "unlisted"].all()
+    assert not panel.loc[~listed, "in_universe"].any()
+    assert panel.loc[listed, "in_universe"].all()
+    assert listed.any()
+    assert not listed.all()
 
 
 @pytest.mark.django_db
