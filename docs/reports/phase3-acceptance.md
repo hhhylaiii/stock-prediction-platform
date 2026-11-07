@@ -1,0 +1,117 @@
+# Phase 3 驗收報告
+
+狀態：SPEC §9 Phase 3 的四項條件都通過。另有一項殘餘缺口的驗收（C 的補值比例「下市組／現存組」≤ 3）沒過，正在處理，見「未過與待決」。
+
+報表由 2026-11-08 的定案重建產生，程式在 develop b7e616f（#140 合併後），資料在 twp：
+
+| 步驟 | 結果 | 時間、記憶體峰值 |
+| --- | --- | --- |
+| `build_features` | `feature_daily` 2010-01-01..2026-11-06 共 6,738,556 列 | 1,568 秒、4.6 GB |
+| `build_labels` | `label_daily` 13,477,112 列 | 360 秒、2.7 GB |
+| `ic_report --run-key p3-final-20261108` | `p3-final-20261108.screening`：57 個保留 55 個 | 62 秒、4.7 GB |
+| `phase3_report --run-key p3-final-20261108 --before artifacts/reports/delisting-missing-before.csv` | 缺值、補值、逐月 IC | 295 秒、5.4 GB |
+
+`ic_report` 前先用 `drop_run` 刪掉暫定的篩選列，全庫只留一列篩選（#41）。
+
+## 驗收條件
+
+| 條件（SPEC §9 Phase 3） | 結果 | 證據 |
+| --- | --- | --- |
+| 第 8 節的九個自動化測試全部通過 | 通過 | `tests/spec8_manifest.txt` 共 10 條（漲跌停測試有兩條），標 `@pytest.mark.spec8`；develop b7e616f 的 CI run 42413322824 全綠 |
+| IC 報表產出，含每個特徵的單因子 rank IC | 通過 | [`phase3-ic-report.md`](phase3-ic-report.md)：57 個特徵各算 5 日、20 日的 IC 與 Newey-West t（集保兩欄在篩選窗內沒有資料，IC 是空的）。6 個市場層級特徵不篩選，記在 `params.unscreened` |
+| 成對相關高於 0.95 的只留一個 | 通過 | `tech_vol_60d` 和 `risk_idio_vol_60d` 的日均 Spearman 是 0.963，留 \|IC\| 較高的 `risk_idio_vol_60d` |
+| 低 IC 訊號型特徵依 §6 步驟 7 剔除並記錄 | 通過 | `fund_bp` 兩個 horizon 的 \|IC\| 都低於 0.005，剔除。16 個訊號型特徵的 IC 有值天數不到篩選窗的一半，照規則不判定、保留，逐一列在 IC 報表 |
+
+篩選窗是 2010-12-06 到 2015-08-31，共 1,170 個交易日，也就是測試期落在 2014 到 2015 年的 8 個調參摺的訓練窗。剔除清單在 Phase 4 定案後不再依 2025 年起的 holdout 結果更改。
+
+## 報表
+
+- [`phase3-ic-report.md`](phase3-ic-report.md)：`ic_report` 的輸出，單因子 IC 與篩選結果。
+- [`phase3-data-report.md`](phase3-data-report.md)：`phase3_report` 的輸出，內容有財報類特徵的 IC 覆蓋率、缺值補前與補後兩張表、C 的補值比例、A 的遮罩月份、逐月 IC 前 10 名。
+- [`phase3/`](phase3/)：附錄 CSV。`missing-before.csv` 是 `--before` 讀進來的補前表（報表裡寫的是原檔名 `delisting-missing-before.csv`），`missing-after.csv` 是補後表，`fills.csv` 是 C 的補值比例，`monthly-ic.csv` 是全部特徵的逐月 IC。
+
+兩支指令不加 `--output`、`--appendix` 時預設寫到這三個位置。這次寫在 `artifacts/reports/`，再複製過來。
+
+## 財報公告日（K14、K16）與月營收（K2）
+
+- K14：沒有更正、又晚於法定截止日的財報，`announce_date` 用實際上傳日；有更正的維持「只能提早」。交易日 22:40 以後上傳的算隔天。
+- K16：有「(重編)」報表的期別，公告日用最後一次重編的上傳日。TTM、年增率要讀之後 1 到 7 季，這幾季在重編日之前會是 NaN。
+- 月營收查不到歷史申報日，研究期用 K2 的保守值：法定截止日（次月 10 日，月初遇到休市就順延）的下一個交易日起才看得到。上線後的每日掃描才會記實際日。
+
+財報類特徵的 IC 覆蓋率（兩個 horizon 中較少的 IC 天數 ÷ 1,170）。低於一半的不做低 IC 判定，下面逐一列出：
+
+| 特徵 | IC 天數 | 覆蓋率 | 低 IC 篩選 |
+| --- | --- | --- | --- |
+| `fund_eps_yoy` | 83 | 7.1% | 不判定 |
+| `fund_rev_yoy` | 85 | 7.3% | 不判定 |
+| `fund_rev_3m_yoy` | 85 | 7.3% | 不判定 |
+| `fund_roe_ttm` | 291 | 24.9% | 不判定 |
+| `fund_rev_yoy_q` | 309 | 26.4% | 不判定 |
+| `fund_gm_yoy_chg` | 309 | 26.4% | 不判定 |
+| `fund_opm_yoy_chg` | 309 | 26.4% | 不判定 |
+| `fund_ep` | 351 | 30.0% | 不判定 |
+| `fund_cfo_to_ni` | 369 | 31.5% | 不判定 |
+| `fund_gross_margin` | 555 | 47.4% | 不判定 |
+| `fund_op_margin` | 555 | 47.4% | 不判定 |
+| `fund_debt_ratio` | 555 | 47.4% | 不判定 |
+| `fund_days_since_fs` | 555 | 47.4% | 豁免（條件型） |
+
+覆蓋率是 K14、K16 與 A 遮罩一起套用之後的結果，兩者各自少掉多少天沒有分開量。A 遮掉的大多是開頭段：2013 年以前沒有 XBRL，月營收兩欄遮到 2014-09。財報類以外有 4 個訊號型特徵也不判定：`chip_dealer_self_net_5d`、`chip_dealer_hedge_net_5d`（179 天），以及 `chip_big_holder_pct_chg_1w`、`chip_holder_count_chg_1w`（0 天，集保不回補歷史，只能每週累積）。
+
+## 殘餘缺口：C 與 A
+
+規則在 SPEC §6 步驟 6。只算「來源缺」，t 日當下看得到原因的缺值（PIT 可觀察）保留，不遮也不補。
+
+| 特徵 | 處理 | 遮罩月份數（2010-01..2024-12，共 180 個月） |
+| --- | --- | --- |
+| `fund_rev_yoy` | C（第二來源 `fund_rev_yoy_q`），再加 A | 76 |
+| `fund_rev_3m_yoy` | C（第二來源 `fund_rev_yoy_q`），再加 A | 77 |
+| `fund_eps_yoy` | A | 87 |
+| `fund_ep`、`ind_ep_neutral` | A | 各 60 |
+| `fund_rev_yoy_q` | A | 56 |
+| `fund_gm_yoy_chg`、`fund_opm_yoy_chg` | A | 各 55 |
+| `fund_roe_ttm` | A | 52 |
+| `fund_gross_margin`、`fund_op_margin`、`fund_days_since_fs` | A | 各 41 |
+| `fund_debt_ratio` | A | 32 |
+| `fund_cfo_to_ni` | A | 8 |
+| `fund_days_to_ex_date` | A | 1 |
+| `residual_coverage` 查的 77 欄裡其餘 62 欄 | 不處理（沒有受影響月份） | 0 |
+
+- `MASKED_MONTHS` 共 15 欄、742 個欄位月份，由 2026-11-08 在遮罩前的特徵上跑的 `residual_coverage` 判定（#140）。逐月區間見 `phase3-data-report.md` 的 A 表。
+- 被遮月份超過所查期間 20% 的欄位，填表前先回報了協調。沒有一欄超過整段資料期的一半，最多的是 `fund_eps_yoy` 的 87／180（48%），所以沒有整欄拿掉。
+- #140 選 A（協調決定，可否決）：照現行規則遮，不加「下市組少於 N 檔時不判定」。代價是 2021～2024 的下市組只有約 8～12 檔，2888、5820 的 NULL 欄就讓 `fund_roe_ttm` 在 2023-03～2024-12 遮了 22 個月、`fund_debt_ratio` 遮了 12 個月，而且是全市場一起遮。
+- `tech_mom_250_20`、`ind_mom_neutral` 在上市未滿 250 個交易日時的缺值算 PIT 可觀察（#139）。
+
+補後的缺值全部達到驗收（比值 ≤ 1.5，或差距 ≤ 5 個百分點）。補後兩組差距最大的三欄是 `fund_roe_ttm` 51.2%／38.8%、`fund_cfo_to_ni` 49.2%／37.8%、`fund_debt_ratio` 38.5%／28.5%，比值都在 1.35 以下，但缺值本身高，已轉給 Phase 4，在 `missing_mask`（#103）上當最後檢查。
+
+## 報表種類不同的留空
+
+前後期報表種類不同（合併對個體）而由公式留空的，算 PIT 可觀察。不過下市組的比例如果高於現存組 1.5 倍、而且多出超過 1 個百分點，就可能藏著漏了合併報表的來源缺，要先回報。`residual_coverage` 量到的都沒有觸發，下市組反而比較低：
+
+| 期間 | `fund_gm_yoy_chg`、`fund_opm_yoy_chg`、`fund_rev_yoy_q` 現存／下市 | `fund_cfo_to_ni` 現存／下市 |
+| --- | --- | --- |
+| 2010–2020 | 9.29%／4.68% | 7.89%／4.07% |
+| 2021–2024 | 0.73%／0.00% | 0.58%／0.00% |
+
+## 市場前視（`market_history`）
+
+#137 之前，研究層用 `stock_master.market` 的現值當成歷史上的市場。之後才上櫃轉上市的股票，在上櫃期間會被當成上市，這是前視。受影響的有大盤報酬的對應、`risk_beta_250d`、`risk_idio_vol_60d`、當沖與借券斷點。
+
+修正前的量化（2026-11-07，用 `foreign_holding` 的 raw 頁自行重建區間；`artifacts/reports/market-history-20261107/`，不入庫）：
+
+- 54 檔換過市場：52 檔上櫃轉上市、2 檔上市轉上櫃。Phase 2 的 `rebuild_market_history` 也是 54 檔，但轉換日當天算哪個市場，兩邊可能差一天，比例只當量級看。
+- 標錯市場的 universe 列占 1.00%（30,668／3,061,268）。2010–2020 年每年 1.1%～2.0%，2021 年起 0.64% 以下。
+- `risk_beta_250d` 在換市場之前（50 檔、30,131 列）：用現值算出的平均是 0.887，正確值是 1.035，相關 0.82。換市場後的頭 250 列，相關 0.93；之後兩者相同。`risk_idio_vol_60d` 在換市場之前的相關是 0.987。
+
+修正：Phase 2 的 #134 建了 `market_history`；#137 讓 panel 讀 t 日的區間，同時決定市場和有沒有上市櫃。沒有區間的日子不在訓練 universe（SPEC §8.4）。定案重建已經套用，重建後只剩 2640 有 33 天有價格、卻沒有區間。
+
+## 未過與待決
+
+1. **C 的補值比例沒過**（plan 的殘餘缺口驗收第 3 項：「下市組／現存組」要 ≤ 3，超過的改用 A，或寫明為什麼可以接受）。`fills.csv` 的結果：`fund_rev_yoy` 是 11.2%／0.03%（442 倍），`fund_rev_3m_yoy` 是 11.3%／0.4%（26 倍）。
+   - 2026-11-08 另做了唯讀查詢，讀遮罩後的定案 partition，範圍 2010–2020：
+     - 補值集中在 2016–2020，下市組每年 18%～34%，現存組 0.1% 以下。175 檔下市股裡有 67 檔被補過。
+     - 以下市前的時間看，補值比例在下市前 1 年內是 38%、1～2 年 35%、2～4 年 16%、4 年以上 0.9%。
+   - 原因是來源缺：`monthly_revenue` 裡的下市股大多只有 2012-12 以前的月份。2014–2020 年下市的 111 檔中，21 檔完全沒有月營收，83 檔的最後一筆早於下市 6 個月以上。C 用季營收年增補上之後，`fund_rev_yoy`、`fund_rev_3m_yoy`、`fund_rev_yoy_q` 三欄同值，模型看得出這個樣子，等於看得到「之後會下市」。
+   - 提給協調的處理方式：由 Phase 2 從 MOPS 的月營收彙總頁回補下市股的月營收（要比照 K17c，在 §8.5 開一條例外），之後重建特徵、重跑這兩欄的 `residual_coverage`、`ic_report`、`phase3_report`。回補完成前，Phase 4 不用這兩欄。協調的決定定下來後，寫回這一節。
+2. 待使用者決定：§8.5 第 5 條的殘列規則（報表種類不同時，用檢視頁補已有列的空欄，約 10 檔、約 70 個 stock-period），以及 K14 補強（逾期又更正的 272 期改用更正上傳日）。如果批准，Phase 2 回補後，在 Phase 4 凍結設計（4.8b）之前再重建一次財報特徵。
+3. Phase 4 在摺 24 比對補缺前後的 OOS IC（殘餘缺口驗收第 2 項），由 Phase 4 做。
