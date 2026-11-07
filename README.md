@@ -20,9 +20,9 @@ uv run python manage.py runserver
 | --- | --- | --- | --- |
 | 今日預測 | `/#today` | 全市場 5 日、20 日排名與預測報酬，20 日 80% 價格區間、漲幅超過 5% 的機率；可搜尋、只看追蹤 | 上線中的模型 |
 | 個股 | `/#stock-2330` | K 線或收盤線、這次預測怎麼來的（特徵貢獻）、過去的預測與實際結果 | 行情；預測區塊要上線中的模型 |
-| 模型與資料 | `/#models` | 上線中的模型、每月 rank IC 與 baseline、今日資料更新、資料品質與模型輸出檢查 | ETL 紀錄；模型區塊要上線中的模型 |
+| 模型與資料 | `/#models` | 上線中的模型、每月 rank IC 與 baseline、今日資料更新、資料品質與模型輸出檢查、資料更正紀錄 | ETL 紀錄；模型區塊要上線中的模型 |
 
-還沒有上線中的模型時，預測相關區塊會顯示「預測資料尚未產出」，K 線、ETL 紀錄與品質檢查照常顯示。頂端的狀態列讀 `/api/status`：當天品質檢查有 error 時，當天不產出預測。
+還沒有上線中的模型時，預測相關區塊會顯示「預測資料尚未產出」，K 線、ETL 紀錄與品質檢查照常顯示。頂端的狀態列讀 `/api/status`：當天品質檢查有 error 時，當天不產出預測；`quality.warnings` 是有 warning 的檢查項數，`quality.warning_rows` 是 warning 的列數。
 
 ## 資料與模型的流程
 
@@ -53,7 +53,7 @@ uv run python manage.py runserver
 | 事後監控 | `monitor --date 2026-11-06` |
 | Phase 5 驗收報告 | `phase5_report --out <dir>` |
 
-API 都是唯讀的 GET，回應格式是 `{"success", "data", "error", "meta"}`：`/api/status`、`/api/predictions`、`/api/stocks/<代號>`（加 `/prices`、`/predictions`、`/features`、`/history`）、`/api/models`、`/api/models/ic-monthly`、`/api/etl/runs`、`/api/data-quality`。
+API 都是唯讀的 GET，回應格式是 `{"success", "data", "error", "meta"}`：`/api/status`、`/api/predictions`、`/api/stocks/<代號>`（加 `/prices`、`/predictions`、`/features`、`/history`）、`/api/models`、`/api/models/ic-monthly`、`/api/etl/runs`、`/api/data-quality`（加 `/corrections`）。
 
 ## 目錄
 

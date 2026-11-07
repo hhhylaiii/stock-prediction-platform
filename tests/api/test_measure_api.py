@@ -5,7 +5,9 @@ from typing import Any
 
 import pytest
 from django.core.management import call_command
+from django.db import connection
 from django.test import Client
+from django.test.utils import CaptureQueriesContext
 
 from apps.api.management.commands import measure_api
 from tests.api.conftest import Runs
@@ -44,10 +46,10 @@ def test_every_endpoint_gets_its_median_p95_and_max(
     call_command("measure_api", "--repeat", "20", stdout=out)
 
     rows = rows_of(out)
-    assert len(rows) == 11
+    assert len(rows) == 12
     assert rows[0] == ["`/api/stocks/2330`", "200", "1.5", "2.0", "50.0"]
     assert all(row[1:] == ["200", "1.5", "2.0", "50.0"] for row in rows)
-    assert len(calls) == 11 * (20 + 1)
+    assert len(calls) == 12 * (20 + 1)
 
 
 def test_statuses_other_than_the_first_are_counted(
@@ -76,3 +78,11 @@ def test_the_stock_and_repeat_are_options(runs: Runs, calendar_in_db: list[objec
     call_command("measure_api", "--stock", "6488", "--repeat", "0", stdout=out)
 
     assert "| `/api/stocks/6488/history` |" in out.getvalue()
+
+
+def test_the_corrections_summary_is_timed_without_its_cache(client: Client) -> None:
+    with CaptureQueriesContext(connection) as queries:
+        measure_api.timed(client, "/api/data-quality/corrections", 3)
+
+    summaries = [q for q in queries.captured_queries if "GROUP BY" in q["sql"].upper()]
+    assert len(summaries) == 1 + 3

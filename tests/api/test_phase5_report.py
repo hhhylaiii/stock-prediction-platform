@@ -32,7 +32,7 @@ CHECKS = [
     "5 日排名、預測價格與區間",
     "2330 個股頁兩個期間",
     "2330 的特徵",
-    "11 個端點都回 200",
+    "12 個端點都回 200",
     "p95 都在 500 ms 內",
 ]
 TIMED = CHECKS[-2:]
@@ -275,6 +275,7 @@ def test_a_non_200_status_and_a_slow_p95_fail_the_timing_checks(
             *fast,
             Timing("/api/etl/runs", "200/429×2", 1.0, 2.0, 3.0),
             Timing("/api/data-quality", "200", 300.0, 612.0, 700.0),
+            Timing("/api/data-quality/corrections", "200", 1.0, 2.0, 3.0),
         ]
 
     monkeypatch.setattr(phase5_report, "measure", slow)
@@ -282,7 +283,7 @@ def test_a_non_200_status_and_a_slow_p95_fail_the_timing_checks(
     _, text = failing(tmp_path)
 
     assert failed(text) == set(TIMED)
-    assert checks_of(text)["11 個端點都回 200"][1] == "`/api/etl/runs` 200/429×2"
+    assert checks_of(text)["12 個端點都回 200"][1] == "`/api/etl/runs` 200/429×2"
     assert checks_of(text)["p95 都在 500 ms 內"][1] == "最大 p95 612.0 ms（`/api/data-quality`）"
 
 
@@ -297,7 +298,7 @@ def test_a_server_error_is_reported_rather_than_raised(
     _, text = failing(tmp_path)
 
     assert failed(text) == set(CHECKS) - {"p95 都在 500 ms 內"}
-    assert checks_of(text)["11 個端點都回 200"][1] == "`/api/status` 500"
+    assert checks_of(text)["12 個端點都回 200"][1] == "`/api/status` 500"
     assert checks_of(text)["最新交易日有預測"][1] == "price_date None，prediction_date None"
 
 

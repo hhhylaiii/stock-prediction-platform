@@ -387,7 +387,7 @@ Oct 29, 2026 · @Owen Lai
 | Phase 2 每日增量與品質 | 證交所、櫃買中心、集保、MOPS、yfinance adapter；Celery 排程；`data_quality_log`；告警 | 連續 5 個交易日自動更新，無人工介入；品質檢查能攔下人為注入的錯誤資料 | 1 到 2 週 |
 | Phase 3 特徵與 baseline | `feature_daily`、`label_daily`、PIT 對齊、三類目標的 label 與 baseline（Ridge、logistic、零預測）、walk-forward、IC 報表 | 第 8 節的九個自動化測試全部通過；IC 報表產出，含每個特徵的單因子 rank IC；成對相關高於 0.95 的特徵只留一個，低 IC 的訊號型特徵依第 6 節處理步驟 7 的規則剔除並記錄 | 1 到 2 週 |
 | Phase 4 主模型 | 三類目標（排名、絕對報酬、區間與機率）的 LightGBM 訓練與 5 seed bagging、XGBoost 對照（可選）、walk-forward 含窗長比較、ensemble、`model_run` 與 `prediction` 與 model\_monitor 表、每月重訓與影子模型門檻、事後評估工作、第二批特徵逐組加入並比較、最終 holdout 一次性執行 | 研究期（2014 到 2024，不含調參摺）LightGBM 的 OOS rank IC 大於 0 且 Newey-West t 值大於 2，逐摺贏過 Ridge 的摺數達 60%；中性化 IC 與依成交金額分三組的 IC 報表產出；十分位報酬（持有期等於 horizon、只扣實際換手成本）報表產出；5 日絕對報酬 MAE 以逐摺配對 NW t 大於 2 優於零預測；區間 pinball loss 優於波動率區間 baseline，總體覆蓋率在 75% 到 85% 之間且每摺在 70% 到 90% 之間；分位數不交叉；機率 ECE 低於 0.05；設計定案後 2025 年起的 holdout 只跑一次並記錄；model\_monitor 有資料 | 2 到 3 週，含 walk-forward 計算時間 |
-| Phase 5 服務層 | DRF API：`/predictions`、`/stocks/{id}/features`、`/stocks/{id}/history`、`/models`；報酬到價格與區間的換算（每檔用自己的最新收盤價）；簡單查詢頁面 | API 回傳最新交易日的預測排名、預測價格、價格區間、上漲機率與特徵；回應時間 500 毫秒內 | 1 到 2 週 |
+| Phase 5 服務層 | DRF API：`/predictions`、`/stocks/{id}/features`、`/stocks/{id}/history`、`/models`、`/data-quality/corrections`（依套用、重建或資料本身日期記下的資料更正紀錄，依 check 彙總，不算進每日檢查）；報酬到價格與區間的換算（每檔用自己的最新收盤價）；簡單查詢頁面 | API 回傳最新交易日的預測排名、預測價格、價格區間、上漲機率與特徵；回應時間 500 毫秒內 | 1 到 2 週 |
 | Phase 6 即時（可選） | Fugle 即時報價、Shioaji 下單介面、盤中監控 | 盤中可取得追蹤清單的即時價；下單走模擬帳戶驗證 | 視需求 |
 
 ## 10. 給 Claude Code 的指引
