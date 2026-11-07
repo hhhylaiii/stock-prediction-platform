@@ -22,13 +22,18 @@ class Command(BaseCommand):
         parser.add_argument(
             "--date", help="Trading day to predict; the latest priced day if left out."
         )
+        parser.add_argument(
+            "--replace",
+            action="store_true",
+            help="Replace rows other runs already hold in a slot on the day.",
+        )
 
     def handle(self, *args: Any, **options: Any) -> None:
         try:
             day = as_date(options["date"], "--date") or latest_price_date()
             if day is None:
                 raise ValueError("daily_price is empty")
-            result = predict(day, settings.FEATURE_PARQUET_DIR)
+            result = predict(day, settings.FEATURE_PARQUET_DIR, options["replace"])
         except (PredictionGateError, RunError, ValueError, FileNotFoundError) as error:
             raise CommandError(str(error)) from error
         for run_id, count in result.written.items():

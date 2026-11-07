@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 from django.db import transaction
 
-from apps.etl.quality import should_run_prediction
+from apps.etl.tasks import ready_for_research
 from apps.research.inference import day_rows, run_contributions, run_values
 from apps.research.models import (
     ModelObjective,
@@ -123,9 +123,12 @@ def slot_rows(slot: Slot, run: ModelRun, rows: pd.DataFrame, day: date) -> SlotR
     return SlotRows(slot, run, predictions, contributions)
 
 
+def _same_slot(day: date, slot: Slot) -> dict[str, Any]:
+    return {"date": day, "horizon": slot.horizon, "run__objective": slot.objective}
+
+
 def _write(day: date, written: SlotRows) -> None:
-    slot = written.slot
-    same = {"date": day, "horizon": slot.horizon, "run__objective": slot.objective}
+    same = _same_slot(day, written.slot)
     PredictionContrib.objects.filter(**same).delete()
     Prediction.objects.filter(**same).delete()
     Prediction.objects.bulk_create(written.predictions, batch_size=BATCH)
@@ -133,32 +136,59 @@ def _write(day: date, written: SlotRows) -> None:
         PredictionContrib.objects.bulk_create(written.contributions, batch_size=BATCH)
 
 
-def _recheck(serving: dict[Slot, ModelRun]) -> None:
-    """Lock the chosen runs and refuse if any changed status while the day was scored."""
-    chosen = {run.run_id: run.status for run in serving.values()}
-    locked = ModelRun.objects.select_for_update().filter(run_id__in=chosen)
-    now = dict(locked.values_list("run_id", "status"))
-    moved = sorted(run_id for run_id, status in chosen.items() if now.get(run_id) != status)
+def _chosen(runs: dict[Slot, ModelRun | None]) -> dict[Slot, tuple[str, str] | None]:
+    return {slot: None if run is None else (run.run_id, run.status) for slot, run in runs.items()}
+
+
+def _recheck(runs: dict[Slot, ModelRun | None]) -> None:
+    """Lock the serving runs and refuse if any slot would pick another run than it scored with."""
+    list(ModelRun.objects.select_for_update(no_key=True).filter(status__in=SERVING))
+    before, now = _chosen(runs), _chosen({slot: serving_run(slot) for slot in SLOTS})
+    moved = [str(slot) for slot in SLOTS if before[slot] != now[slot]]
     if moved:
-        raise RunError(f"{', '.join(moved)} changed status while predicting; run predict again")
+        raise RunError(f"the serving run of {', '.join(moved)} changed while predicting; run again")
 
 
-def predict(day: date, directory: Path) -> Predicted:
-    """Write every slot's predictions for day in one transaction, replacing the slot's rows."""
-    if not should_run_prediction(day):
+def _check_day(day: date, serving: dict[Slot, ModelRun], replace: bool) -> None:
+    """Refuse in-sample days, and other runs' rows on the day unless replace was asked for."""
+    trained = sorted(run.run_id for run in serving.values() if day <= run.train_end)
+    if trained:
+        raise RunError(f"{', '.join(trained)} trained through {day}; it would score in-sample")
+    if replace:
+        return
+    others = sorted(
+        {
+            run_id
+            for slot, run in serving.items()
+            for run_id in Prediction.objects.filter(**_same_slot(day, slot))
+            .exclude(run_id=run.run_id)
+            .values_list("run_id", flat=True)
+            .distinct()
+        }
+    )
+    if others:
+        raise RunError(
+            f"{day} already holds rows of {', '.join(others)}; replace them only on purpose"
+        )
+
+
+def predict(day: date, directory: Path, replace: bool = False) -> Predicted:
+    """Write every slot's predictions for day in one transaction; replace swaps other runs' rows."""
+    if not ready_for_research(day):
         raise PredictionGateError(
-            f"{day} has not passed the data quality gate (every check run, no error); "
-            "predictions wait for it"
+            f"{day} has not passed the research gate (every gate snapshot loaded, every quality "
+            "check run, no error); predictions wait for it"
         )
     runs = {slot: serving_run(slot) for slot in SLOTS}
     serving = {slot: run for slot, run in runs.items() if run is not None}
     if not serving:
         raise RunError("no active or degraded run serves any slot")
+    _check_day(day, serving, replace)
     features = [name for run in serving.values() for name in run.feature_list]
     rows = day_rows(day, directory, features)
     prepared = [slot_rows(slot, run, rows, day) for slot, run in serving.items()]
     with transaction.atomic():
-        _recheck(serving)
+        _recheck(runs)
         for written in prepared:
             _write(day, written)
     return Predicted(

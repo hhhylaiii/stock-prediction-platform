@@ -5,14 +5,16 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pandas as pd
 import pytest
 from django.core.management import call_command
 from django.core.management.base import CommandError
 
-from apps.etl.models import DataQualityLog
+from apps.etl import tasks
+from apps.etl.models import DataQualityLog, EtlRun
 from apps.etl.quality import CHECKS
 from apps.research import predict as predict_module
-from apps.research.inference import day_rows, run_values
+from apps.research.inference import day_rows, run_values, top_contributions
 from apps.research.lgbm_runs import run_id
 from apps.research.models import (
     REST_FEATURE,
@@ -21,9 +23,10 @@ from apps.research.models import (
     Prediction,
     PredictionContrib,
 )
-from apps.research.predict import SLOTS, PredictionGateError, Slot, predict
-from apps.research.runs import RunError, load_model, model_path
+from apps.research.predict import FIELDS, SLOTS, PredictionGateError, Slot, predict
+from apps.research.runs import SCREENING_MODEL, RunError, load_model, model_path
 from tests.research.run_panels import research
+from tests.research.test_inference import boosters
 
 LIVE = [fold for fold in research() if fold.research][-1]
 DAY = LIVE.test_end
@@ -36,6 +39,19 @@ LIVE_RUNS = {
     Slot("quantile", 20): ("interval", 20),
     Slot("volatility", 20): ("interval", 20),
     Slot("classification", 20): ("interval", 20),
+}
+OWNED = {
+    "rank": {"score", "rank", "pct"},
+    "regression": {"ret_pred"},
+    "quantile": {"q10", "q50", "q90", "ret_pred"},
+    "volatility": {"vol_pred"},
+    "classification": {"prob_up_5pct"},
+}
+GATE_JOBS = {
+    (job.source, job.dataset)
+    for jobs in tasks.BATCHES.values()
+    for job in jobs
+    if job.dataset in tasks.GATE_DATASETS
 }
 
 
@@ -50,9 +66,21 @@ def serve(*slots: Slot, status: str = ModelStatus.ACTIVE) -> list[ModelRun]:
     return runs
 
 
-def passed(day: date = DAY, severity: str = "info") -> None:
+def landed(day: date = DAY) -> None:
+    for source, dataset in GATE_JOBS:
+        EtlRun.objects.create(
+            source=source, dataset=dataset, start_date=day, end_date=day, status="success"
+        )
+
+
+def checked(day: date = DAY) -> None:
     for name in CHECKS:
-        DataQualityLog.objects.create(date=day, check_name=name, severity=severity, detail={})
+        DataQualityLog.objects.create(date=day, check_name=name, severity="info", detail={})
+
+
+def passed(day: date = DAY) -> None:
+    landed(day)
+    checked(day)
 
 
 def clone(run: ModelRun, suffix: str, status: str) -> ModelRun:
@@ -69,6 +97,12 @@ def stored(run: ModelRun, day: date = DAY) -> dict[str, dict[str, Any]]:
     return {row["stock_id"]: dict(row) for row in rows}
 
 
+def keep_rows(run: ModelRun, day: date, horizon: int, **values: float) -> None:
+    Prediction.objects.create(
+        run=run, stock_id="1100", date=day, horizon=horizon, in_universe=True, **values
+    )
+
+
 @pytest.mark.django_db
 def test_predict_writes_every_slot_for_every_stock_with_features(served_runs: Path) -> None:
     runs = serve(*SLOTS)
@@ -78,34 +112,37 @@ def test_predict_writes_every_slot_for_every_stock_with_features(served_runs: Pa
 
     assert result.written == {run.run_id: 40 for run in runs}
     assert result.missing == []
+    for slot in SLOTS:
+        rows = Prediction.objects.filter(run=live(slot), date=DAY)
+        assert rows.count() == 40
+        assert set(rows.values_list("horizon", flat=True)) == {slot.horizon}
+        for name in set(FIELDS) - OWNED[slot.objective]:
+            assert not rows.filter(**{f"{name}__isnull": False}).exists()
+        for name in OWNED[slot.objective] - {"rank", "pct"}:
+            assert not rows.filter(**{f"{name}__isnull": True}).exists()
     rank = live(Slot("rank", 20))
-    rows = stored(rank)
-    inside = {stock: row for stock, row in rows.items() if row["in_universe"]}
+    ranked = stored(rank)
+    inside = {stock: row for stock, row in ranked.items() if row["in_universe"]}
     assert len(inside) == 39
     assert sorted(row["rank"] for row in inside.values()) == list(range(1, 40))
     assert max(row["pct"] for row in inside.values()) == pytest.approx(1.0)
     best = min(inside.values(), key=lambda row: row["rank"])
     assert best["score"] == max(row["score"] for row in inside.values())
-    assert rows[OUTSIDE]["rank"] is None
-    assert rows[OUTSIDE]["pct"] is None
-    assert rows[OUTSIDE]["score"] is not None
-    assert rows[OUTSIDE]["in_universe"] is False
-    assert all(row["ret_pred"] is None and row["q50"] is None for row in rows.values())
+    assert ranked[OUTSIDE]["rank"] is None
+    assert ranked[OUTSIDE]["pct"] is None
+    assert ranked[OUTSIDE]["score"] is not None
+    assert ranked[OUTSIDE]["in_universe"] is False
     frame = day_rows(DAY, served_runs, rank.feature_list)
     scores = run_values(rank, load_model(rank.run_key, rank.run_id), frame)["score"]
     np.testing.assert_allclose(
-        [rows[stock]["score"] for stock in frame["stock_id"]], scores, rtol=1e-9
+        [ranked[stock]["score"] for stock in frame["stock_id"]], scores, rtol=1e-9
     )
-    quantile = stored(live(Slot("quantile", 20)))
-    assert all(row["ret_pred"] == row["q50"] for row in quantile.values())
-    assert all(row["q10"] <= row["q50"] <= row["q90"] for row in quantile.values())
-    assert all(row["score"] is None and row["vol_pred"] is None for row in quantile.values())
-    regression = stored(live(Slot("regression", 5)))
-    assert all(row["ret_pred"] is not None and row["q50"] is None for row in regression.values())
+    quantile = stored(live(Slot("quantile", 20))).values()
+    assert all(row["ret_pred"] == row["q50"] for row in quantile)
+    assert all(row["q10"] <= row["q50"] <= row["q90"] for row in quantile)
     assert all(row["vol_pred"] > 0 for row in stored(live(Slot("volatility", 20))).values())
     probability = stored(live(Slot("classification", 20))).values()
     assert all(0 <= row["prob_up_5pct"] <= 1 for row in probability)
-    assert {row["horizon"] for row in rows.values()} == {20}
     for horizon in (5, 20):
         contrib = PredictionContrib.objects.filter(run=live(Slot("rank", horizon)), date=DAY)
         assert contrib.count() == 3 * 40
@@ -114,14 +151,16 @@ def test_predict_writes_every_slot_for_every_stock_with_features(served_runs: Pa
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize("severity", [None, "error"])
-def test_predict_waits_for_the_quality_gate(served_runs: Path, severity: str | None) -> None:
+@pytest.mark.parametrize("gate", ["nothing", "no snapshots", "an error"])
+def test_predict_waits_for_the_research_gate(served_runs: Path, gate: str) -> None:
     serve(*SLOTS)
-    if severity is not None:
+    if gate == "no snapshots":
+        checked()
+    if gate == "an error":
         passed()
-        DataQualityLog.objects.create(date=DAY, check_name="row_count", severity=severity)
+        DataQualityLog.objects.create(date=DAY, check_name="row_count", severity="error")
 
-    with pytest.raises(PredictionGateError, match=f"{DAY} has not passed the data quality gate"):
+    with pytest.raises(PredictionGateError, match=f"{DAY} has not passed the research gate"):
         predict(DAY, served_runs)
 
     assert not Prediction.objects.exists()
@@ -134,6 +173,9 @@ def test_predict_reruns_to_the_same_rows(served_runs: Path) -> None:
     predict(DAY, served_runs)
     first = {run.run_id: stored(run) for run in ModelRun.objects.filter(status="active")}
     contrib = sorted(PredictionContrib.objects.values_list("stock_id", "feature", "contrib"))
+    rank = live(Slot("rank", 20))
+    Prediction.objects.filter(run=rank, stock_id="1100", date=DAY).update(score=9.0)
+    PredictionContrib.objects.filter(run=rank, stock_id="1100", date=DAY).update(contrib=9.0)
 
     predict(DAY, served_runs)
 
@@ -143,14 +185,8 @@ def test_predict_reruns_to_the_same_rows(served_runs: Path) -> None:
     )
 
 
-def keep_rows(run: ModelRun, day: date, horizon: int, **values: float) -> None:
-    Prediction.objects.create(
-        run=run, stock_id="1100", date=day, horizon=horizon, in_universe=True, **values
-    )
-
-
 @pytest.mark.django_db
-def test_predict_replaces_only_the_slot_rows_of_other_runs_on_the_day(served_runs: Path) -> None:
+def test_rows_of_other_runs_on_the_day_are_replaced_only_on_purpose(served_runs: Path) -> None:
     ranked = serve(Slot("rank", 5), Slot("rank", 20))
     old = clone(live(Slot("rank", 20)), ".old", ModelStatus.RETIRED)
     interval = clone(live(Slot("quantile", 20)), ".old", ModelStatus.RETIRED)
@@ -169,7 +205,11 @@ def test_predict_replaces_only_the_slot_rows_of_other_runs_on_the_day(served_run
     )
     passed()
 
-    result = predict(DAY, served_runs)
+    with pytest.raises(RunError, match=rf"{DAY} already holds rows of {old.run_id}"):
+        predict(DAY, served_runs)
+    assert Prediction.objects.count() == 3
+
+    result = predict(DAY, served_runs, replace=True)
 
     assert result.written == {run.run_id: 40 for run in ranked}
     assert result.missing == [slot for slot in SLOTS if slot.objective != "rank"]
@@ -190,17 +230,30 @@ def test_predict_serves_the_active_run_then_the_degraded_one(served_runs: Path) 
     clone(live(Slot("rank", 20)), ".cand", ModelStatus.CANDIDATE)
     clone(live(Slot("rank", 20)), ".gone", ModelStatus.RETIRED)
 
-    assert predict(DAY, served_runs).written == {active.run_id: 40}
+    assert predict(DAY, served_runs, replace=True).written == {active.run_id: 40}
     assert not Prediction.objects.filter(run=degraded, date=DAY).exists()
 
 
 @pytest.mark.django_db
-def test_predict_refuses_two_runs_of_one_status_in_a_slot(served_runs: Path) -> None:
+def test_predict_leaves_the_feature_screening_out(served_runs: Path) -> None:
+    passed()
+    serve(Slot("rank", 20))
+    ModelRun.objects.filter(model_type=SCREENING_MODEL).update(
+        status=ModelStatus.ACTIVE, params={"horizon": 20}
+    )
+
+    assert predict(DAY, served_runs).written == {live(Slot("rank", 20)).run_id: 40}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("status", [ModelStatus.ACTIVE, ModelStatus.DEGRADED])
+def test_predict_refuses_two_runs_of_one_status_in_a_slot(served_runs: Path, status: str) -> None:
     passed()
     serve(*SLOTS)
-    twin = clone(live(Slot("rank", 20)), ".twin", ModelStatus.ACTIVE)
+    serve(Slot("rank", 20), status=status)
+    twin = clone(live(Slot("rank", 20)), ".twin", status)
 
-    with pytest.raises(RunError, match=rf"rank-live.*{twin.run_id}.*active.*rank 20"):
+    with pytest.raises(RunError, match=rf"rank-live.*{twin.run_id} are all {status} for rank 20"):
         predict(DAY, served_runs)
 
     assert not Prediction.objects.exists()
@@ -215,22 +268,40 @@ def test_predict_needs_a_serving_run(served_runs: Path) -> None:
 
 
 @pytest.mark.django_db
+def test_predict_refuses_a_day_its_runs_trained_on(served_runs: Path) -> None:
+    serve(*SLOTS)
+    passed(LIVE.train_end)
+
+    with pytest.raises(RunError, match=f"trained through {LIVE.train_end}; it would score"):
+        predict(LIVE.train_end, served_runs)
+
+    assert not Prediction.objects.exists()
+
+
+@pytest.mark.django_db
 def test_a_failed_write_leaves_the_day_as_it_was(
     served_runs: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     serve(*SLOTS)
-    old = clone(live(Slot("regression", 5)), ".old", ModelStatus.RETIRED)
-    keep_rows(old, DAY, 5, ret_pred=0.01)
+    old = clone(live(Slot("rank", 5)), ".old", ModelStatus.RETIRED)
+    keep_rows(old, DAY, 5, score=0.5, rank=1, pct=1.0)
     passed()
+    calls = []
+    write = PredictionContrib.objects.bulk_create
 
-    def broken(*args: Any, **kwargs: Any) -> None:
-        raise RuntimeError("the database went away")
+    def broken(*args: Any, **kwargs: Any) -> Any:
+        calls.append(1)
+        if len(calls) == 2:
+            raise RuntimeError("the database went away")
+        return write(*args, **kwargs)
 
     monkeypatch.setattr(PredictionContrib.objects, "bulk_create", broken)
     with pytest.raises(RuntimeError, match="went away"):
-        predict(DAY, served_runs)
+        predict(DAY, served_runs, replace=True)
 
+    assert len(calls) == 2
     assert list(Prediction.objects.values_list("run_id", flat=True)) == [old.run_id]
+    assert not PredictionContrib.objects.exists()
 
 
 @pytest.mark.django_db
@@ -241,12 +312,32 @@ def test_a_run_retired_while_the_day_is_scored_writes_nothing(
     passed()
     scored = predict_module.slot_rows
 
-    def promoted(*args: Any) -> Any:
+    def retired(*args: Any) -> Any:
         ModelRun.objects.filter(pk=rank.pk).update(status=ModelStatus.RETIRED)
         return scored(*args)
 
+    monkeypatch.setattr(predict_module, "slot_rows", retired)
+    with pytest.raises(RunError, match="serving run of rank 20 日 changed while predicting"):
+        predict(DAY, served_runs)
+
+    assert not Prediction.objects.exists()
+
+
+@pytest.mark.django_db
+def test_a_run_promoted_while_the_day_is_scored_writes_nothing(
+    served_runs: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    serve(Slot("rank", 20), status=ModelStatus.DEGRADED)
+    newer = clone(live(Slot("rank", 20)), ".new", ModelStatus.CANDIDATE)
+    passed()
+    scored = predict_module.slot_rows
+
+    def promoted(*args: Any) -> Any:
+        ModelRun.objects.filter(pk=newer.pk).update(status=ModelStatus.ACTIVE)
+        return scored(*args)
+
     monkeypatch.setattr(predict_module, "slot_rows", promoted)
-    with pytest.raises(RunError, match=f"{rank.run_id} changed status while predicting"):
+    with pytest.raises(RunError, match="serving run of rank 20 日 changed while predicting"):
         predict(DAY, served_runs)
 
     assert not Prediction.objects.exists()
@@ -261,6 +352,34 @@ def test_a_day_without_features_writes_nothing(served_runs: Path) -> None:
         predict(date(2016, 12, 31), served_runs)
 
     assert not Prediction.objects.exists()
+
+
+@pytest.mark.django_db
+def test_contributions_beyond_the_top_five_are_stored_as_the_rest(served_runs: Path) -> None:
+    features = [f"f{k}" for k in range(8)]
+    model = boosters(features)
+    inputs = pd.DataFrame(np.random.default_rng(10).normal(size=(3, 8)), columns=features)
+    rank = live(Slot("rank", 20))
+    rows = top_contributions(model.boosters, inputs, pd.Series(["1100", "1101", "1102"]))
+
+    PredictionContrib.objects.bulk_create(
+        PredictionContrib(
+            run=rank,
+            date=DAY,
+            horizon=20,
+            stock_id=row["stock_id"],
+            feature=row["feature"],
+            position=int(row["position"]),
+            contrib=float(row["contrib"]),
+            n_features=int(row["n_features"]),
+        )
+        for row in rows.to_dict(orient="records")
+    )
+
+    rest = PredictionContrib.objects.filter(run=rank, feature=REST_FEATURE)
+    assert rest.count() == 3
+    assert set(rest.values_list("position", "n_features")) == {(6, 3)}
+    assert PredictionContrib.objects.filter(run=rank).count() == 3 * 6
 
 
 @pytest.mark.django_db
@@ -281,9 +400,30 @@ def test_the_command_reports_each_run_and_the_missing_slots(
 
 
 @pytest.mark.django_db
-def test_the_command_reports_the_gate(served_runs: Path, settings: Any) -> None:
+def test_the_command_replaces_other_runs_only_when_asked(served_runs: Path, settings: Any) -> None:
+    settings.FEATURE_PARQUET_DIR = served_runs
+    serve(Slot("rank", 20))
+    old = clone(live(Slot("rank", 20)), ".old", ModelStatus.RETIRED)
+    keep_rows(old, DAY, 20, score=0.5, rank=1, pct=1.0)
+    passed()
+
+    with pytest.raises(CommandError, match="already holds rows"):
+        call_command("predict", date=DAY.isoformat())
+    call_command("predict", date=DAY.isoformat(), replace=True, stdout=StringIO())
+
+    assert not Prediction.objects.filter(run=old).exists()
+
+
+@pytest.mark.django_db
+def test_the_command_reports_its_errors(served_runs: Path, settings: Any) -> None:
     settings.FEATURE_PARQUET_DIR = served_runs
     serve(*SLOTS)
 
-    with pytest.raises(CommandError, match="data quality gate"):
+    with pytest.raises(CommandError, match="research gate"):
+        call_command("predict", date=DAY.isoformat())
+    with pytest.raises(CommandError, match="daily_price is empty"):
+        call_command("predict")
+    passed()
+    clone(live(Slot("rank", 20)), ".twin", ModelStatus.ACTIVE)
+    with pytest.raises(CommandError, match="are all active for rank 20"):
         call_command("predict", date=DAY.isoformat())
