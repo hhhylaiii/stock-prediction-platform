@@ -182,7 +182,7 @@ uv run python manage.py reapply_dividend_dates --stock 2884 --stock 2885
 | 證交所 | TWT49U 除權除息計算結果；`權/息` 不是「息」的列另查 TWT49UDetail | TWTAUU | TWTB8U |
 | 櫃買 | exDailyQ（逐日查，區間查詢最多回 100 筆） | revivt | pvChgRslt |
 
-- ETF 的分割、反分割（證交所 TWTCAU）不抓：ETF 不在研究母體，研究層也不讀 ETF 的價格；歷史上 FinMind 回補的 ETF 分割照舊留著。
+- ETF 的分割、反分割（證交所 TWTCAU，ETF 分割（反分割）恢復買賣參考價格表）不抓：ETF 不在研究母體，研究層也不讀 ETF 的價格；歷史上 FinMind 回補的 ETF 分割照舊留著。要接回來時放進 2.7b。
 
 - 交易日 D 的一次執行只抓除權息（恢復買賣）日是 D 的列：結果表在 D 開盤前就公布（開盤競價基準要用），15:30 一定查得到，和 D 的行情同一批進來。不往後抓下一個交易日：先寫下的列不會被之後的執行更正，休市順延時會留下錯的那天。
 - 因子：除權息 = 除權息參考價 ÷ 除權息前收盤價，和 FinMind 回補用的 `after_price` 同一個數；減資、面額變更 = 恢復買賣參考價 ÷ 停止買賣前收盤價。同一檔同一天有兩種以上時相乘。寫入或補上因子的股票會重算 `daily_price.adj_factor`。
