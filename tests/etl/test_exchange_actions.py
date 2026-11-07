@@ -14,6 +14,7 @@ from apps.etl.adapters.corporate_actions import (
 )
 from apps.etl.adapters.exchange_actions import (
     TPEX_RESTARTS,
+    TWSE_RESTARTS,
     ExRight,
     restart_actions,
     tpex_ex_rights,
@@ -175,3 +176,30 @@ def test_restart_actions_divide_the_reference_price_by_the_last_close(
         (AUG_31, SEP_1),
     )
     assert changes == [Action("4747", AUG_31, Decimal("0"), Decimal("0"), 0.5, PAR_VALUE_CHANGE)]
+
+
+def test_twse_par_value_restarts_read_the_recorded_answer(
+    load_fixture: Callable[[str], Any],
+) -> None:
+    par_value = TWSE_RESTARTS[1]
+    actions = restart_actions(
+        load_fixture(f"{TWSE}/twtb8u_2026.json"), par_value, (date(2026, 1, 1), date(2026, 10, 31))
+    )
+    assert actions == [
+        Action(
+            "7780",
+            date(2026, 1, 19),
+            Decimal("0"),
+            Decimal("0"),
+            _ratio("18.50", "185.00"),
+            PAR_VALUE_CHANGE,
+        ),
+        Action(
+            "6949",
+            date(2026, 9, 7),
+            Decimal("0"),
+            Decimal("0"),
+            _ratio("74.50", "1490.00"),
+            PAR_VALUE_CHANGE,
+        ),
+    ]
