@@ -17,7 +17,7 @@ from apps.research.metrics.ic import daily_rank_ic, research_ic
 from apps.research.models import ModelObjective, ModelRun, ModelStatus, Prediction
 from apps.research.predict import Slot, serving_run
 from apps.research.prediction_cache import fold_path, load_fold_predictions
-from apps.research.production import SHADOW, shadow_key
+from apps.research.production import GATES, SHADOW, shadow_key
 from apps.research.runs import PRODUCTION, RunError
 from apps.research.training import load_labels
 from apps.research.walkforward import Fold
@@ -28,7 +28,6 @@ GAIN_OVERLAP = 6
 MIN_STOCKS = 30
 MIN_DAYS = 60
 COVERAGE = (0.70, 0.90)
-GATES = "gates"
 NO_SERVING = "不適用（沒有服務中的 run）"
 FIELDS = {
     ModelObjective.RANK: "score",
@@ -139,9 +138,10 @@ def gain_overlap(run: ModelRun, serving: ModelRun | None) -> Gate:
     if not all(gains):
         missing = run.run_id if not gains[0] else serving.run_id
         return Gate("gain_overlap", False, None, threshold, 0, f"{missing} 沒有 importance_gain")
-    tops = [set(sorted(gain, key=lambda name: (-gain[name], name))[:GAIN_TOP]) for gain in gains]
+    used = [{name: value for name, value in gain.items() if value > 0} for gain in gains]
+    tops = [set(sorted(gain, key=lambda name: (-gain[name], name))[:GAIN_TOP]) for gain in used]
     shared = len(tops[0] & tops[1])
-    sample = min(len(gains[0]), len(gains[1]))
+    sample = min(len(used[0]), len(used[1]))
     passed = shared >= GAIN_OVERLAP
     return Gate(
         "gain_overlap", passed, float(shared), threshold, sample, "" if passed else "重疊太少"
@@ -250,10 +250,18 @@ def check_gates(run_key: str, directory: Path) -> list[SlotGates]:
     return [result for _, result in checked]
 
 
+def _without_gates(run: ModelRun) -> dict[str, Any]:
+    return {name: value for name, value in run.params.items() if name != GATES}
+
+
 def _record(run: ModelRun, checked: SlotGates) -> None:
+    """Write the verdict on N, locked and rechecked: N must still be the candidate judged."""
+    current = ModelRun.objects.select_for_update().get(pk=run.pk)
+    if current.status != ModelStatus.CANDIDATE or _without_gates(current) != _without_gates(run):
+        raise RunError(f"{run.run_id} changed while its gates were checked; check them again")
     note: dict[str, Any] = {
         "serving": checked.serving,
         "passed": checked.passed,
         "gates": [asdict(gate) for gate in checked.gates],
     }
-    ModelRun.objects.filter(pk=run.pk).update(params={**run.params, GATES: note})
+    ModelRun.objects.filter(pk=run.pk).update(params={**current.params, GATES: note})

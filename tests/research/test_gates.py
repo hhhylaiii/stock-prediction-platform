@@ -160,6 +160,9 @@ def test_the_comparisons_judge_n_against_the_serving_run(
     assert found["agreement"].value == pytest.approx(-1.0)
     assert found["gain_overlap"].passed is False
     assert found["gain_overlap"].value == 0
+    restored = ModelRun.objects.get(pk=twenty.pk).params["gates"]
+    assert restored["serving"] == flipped.run_id
+    assert restored["passed"] is False
 
 
 @pytest.mark.django_db
@@ -399,6 +402,16 @@ def test_gain_overlap_counts_the_largest_gains_only() -> None:
     assert gains_shared(mine, five) == (5.0, False)
 
 
+def test_gain_overlap_leaves_unused_features_out() -> None:
+    unused = {f"z{k}": 0.0 for k in range(10)}
+    mine = ranked({**{f"a{k}": 10.0 for k in range(3)}, **unused})
+    theirs = ranked({**{f"b{k}": 10.0 for k in range(3)}, **unused})
+
+    found = gates.gain_overlap(mine, theirs)
+
+    assert (found.value, found.passed, found.sample) == (0.0, False, 3)
+
+
 def gains_shared(mine: ModelRun, theirs: ModelRun) -> tuple[float | None, bool | None]:
     found = gates.gain_overlap(mine, theirs)
     return found.value, found.passed
@@ -529,3 +542,27 @@ def test_each_objective_compares_its_own_prediction_field(
     assert found["agreement"].sample >= gates.MIN_STOCKS
     assert found["gain_overlap"].passed is True
     assert ModelRun.objects.get(pk=run.pk).params["gates"]["serving"] == serving.run_id
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("change", ["status", "params"])
+def test_gates_refuse_an_n_that_changed_while_they_were_checked(
+    researched: Path, monkeypatch: pytest.MonkeyPatch, change: str
+) -> None:
+    runs = built("rank", "rank-wf1", researched)
+    logged(runs[0])
+    checked = gates.data_quality
+
+    def moved(run: ModelRun) -> Gate:
+        other = ModelRun.objects.filter(run_id="rank-prod.lightgbm.h5.f000")
+        if change == "status":
+            other.update(status="active")
+        else:
+            other.update(params={**other.get().params, "importance_gain": {"x": 1.0}})
+        return checked(run)
+
+    monkeypatch.setattr(gates, "data_quality", moved)
+    with pytest.raises(RunError, match=r"h5\.f000 changed while its gates were checked"):
+        check_gates("rank-prod", researched)
+
+    assert not ModelRun.objects.filter(run_key="rank-prod", params__has_key="gates").exists()
