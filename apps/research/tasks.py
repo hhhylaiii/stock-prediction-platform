@@ -19,7 +19,9 @@ from django.utils import timezone
 from apps.etl.alerts import dispatch
 from apps.etl.models import DataQualityLog
 from apps.etl.tasks import US_CLOSE_CHECK, ready_for_research
+from apps.market.adjust import ADJ_CHECK
 from apps.market.calendar import OutsideCalendarError, TradingDays
+from apps.research.labels import HORIZONS
 from apps.research.lock import ResearchBusyError, research_lock
 from apps.research.models import HoldoutScope, LabelDaily, ModelRun
 from apps.research.monitor import run_monitor
@@ -34,6 +36,10 @@ EVENING_CHECK = "research_evening"
 MORNING_CHECK = "research_morning"
 RETRAIN_CHECK = "research_retrain"
 PROMOTE_CHECK = "research_promote"
+REBUILD_CHECK = "research_rebuild"
+REBUILD_LIMIT = 30
+NOTE_WINDOW = 90
+CONCURRENT = "the research schedule runs on a single worker process"
 NOT_FROZEN = "the design is not frozen: DESIGNS names no research_run_key"
 ALREADY_BUILT = "already built this month"
 MISSED = "missed"
@@ -125,7 +131,101 @@ def _promote(day: date) -> str:
     return "; ".join([*done, *(f"{key}: failed, see {PROMOTE_CHECK}" for key in failed)])
 
 
+def _taken(since: date) -> dict[str, list[Any]]:
+    """Every content a rebuild took each adj_factor note in at, by the note's pk."""
+    rows = DataQualityLog.objects.filter(
+        check_name=REBUILD_CHECK, date__gte=since - timedelta(days=NOTE_WINDOW)
+    )
+    taken: dict[str, list[Any]] = {}
+    for row in rows:
+        for pk, detail in row.detail.get("notes", {}).items():
+            taken.setdefault(pk, []).append(detail)
+    return taken
+
+
+def _open_notes() -> list[DataQualityLog]:
+    """The recent adj_factor_changed rows no rebuild took in as they read now."""
+    since = timezone.localtime().date() - timedelta(days=NOTE_WINDOW)
+    taken = _taken(since)
+    notes = DataQualityLog.objects.filter(check_name=ADJ_CHECK, date__gte=since).order_by("pk")
+    return [note for note in notes if note.detail not in taken.get(str(note.pk), [])]
+
+
+def _earliest(note: DataQualityLog) -> date:
+    stocks = note.detail.get("stocks", {})
+    return date.fromisoformat(note.detail.get("earliest") or min(stocks.values()))
+
+
+def _stocks(notes: list[DataQualityLog]) -> int:
+    named = {stock for note in notes for stock in note.detail.get("stocks", {})}
+    return len(named) + sum(int(note.detail.get("count", 0)) for note in notes)
+
+
+def _append(day: date, check: str, severity: str, detail: dict[str, Any]) -> None:
+    row = DataQualityLog.objects.create(
+        date=day, check_name=check, severity=severity, detail=detail
+    )
+    if severity != Severity.INFO:
+        dispatch([row])
+
+
+def _rebuild_range(calendar: TradingDays, earliest: date, day: date, labels: bool) -> str:
+    """Labels from h_max+1 sessions before earliest and features up to the day before day."""
+    done = []
+    if labels:
+        start = calendar.shift(earliest, -(max(HORIZONS) + 1))
+        done.append(_command("build_labels", start=start, end=day))
+    if earliest < day:
+        done.append(_command("build_features", start=earliest, end=calendar.shift(day, -1)))
+    return "; ".join(done) or f"nothing before {day} to rebuild"
+
+
+def _summary(notes: list[DataQualityLog]) -> dict[str, Any]:
+    earliest = min(_earliest(note) for note in notes)
+    taken = {str(note.pk): note.detail for note in notes}
+    return {"earliest": earliest.isoformat(), "stocks": _stocks(notes), "notes": taken}
+
+
+def _rebuild_notes(day: date, labels: bool) -> str:
+    """Notes past the limit go to a person; the recent ones are rebuilt from their earliest."""
+    notes = [note for note in _open_notes() if _earliest(note) <= day]
+    if not notes:
+        return f"no adj_factor change up to {day}"
+    calendar = TradingDays.from_db()
+    cutoff = calendar.shift(day, -REBUILD_LIMIT)
+    old = [note for note in notes if _earliest(note) < cutoff]
+    recent = [note for note in notes if _earliest(note) >= cutoff]
+    done = []
+    if old:
+        limited = {**_summary(old), "limit": REBUILD_LIMIT}
+        _append(day, REBUILD_CHECK, Severity.WARNING, limited)
+        done.append(f"adj_factor moved from {limited['earliest']}, over {REBUILD_LIMIT} back")
+    if recent:
+        detail = _summary(recent)
+        built = _rebuild_range(calendar, date.fromisoformat(detail["earliest"]), day, labels)
+        _append(day, REBUILD_CHECK, Severity.INFO, detail)
+        done.append(built)
+    return "; ".join(done)
+
+
+def _rebuild(day: date, labels: bool = True) -> str:
+    """Redo what adj_factor changes moved up to day; a failure warns and leaves them open."""
+    try:
+        return _rebuild_notes(day, labels)
+    except Exception as error:
+        logger.error("research rebuild %s failed: %s", day, error)
+        failed = {"error": f"{type(error).__name__}: {error}"}
+        _append(day, REBUILD_CHECK, Severity.WARNING, failed)
+        return f"rebuild failed, see {REBUILD_CHECK}"
+
+
+def _rebuild_features(day: date) -> str:
+    return _rebuild(day, labels=False)
+
+
 STEPS: dict[str, Callable[[date], str]] = {
+    "rebuild": _rebuild,
+    "rebuild_features": _rebuild_features,
     "labels": _labels,
     "features": _features,
     "predict": _predict,
@@ -162,6 +262,18 @@ def _early(slot: str) -> bool:
         return False
     logger.warning("research skipped %s: fired at %s, before its slot", slot, now.isoformat())
     return True
+
+
+def _concurrency(task: Task[Any, Any]) -> Any:
+    """The worker's configured process count; the schedule runs only when it is exactly 1."""
+    return task.app.conf.get("worker_concurrency")
+
+
+def _with_rebuild(names: tuple[str, ...]) -> tuple[str, ...]:
+    """A last rebuild step when adj_factor changes wait, leaving labels to a labels step."""
+    if not _open_notes():
+        return names
+    return (*names, "rebuild_features" if "labels" in names else "rebuild")
 
 
 def _failed(check: str, day: date, name: str, error: Exception, done: list[Done]) -> None:
@@ -256,6 +368,11 @@ def retrain(self: Task[Any, Any], day: str) -> str:
     if not _retrain_hours():
         logger.warning("research retrain %s not started: outside its hours", day)
         return "late"
+    concurrency = _concurrency(self)
+    if concurrency != 1:
+        refused = dict.fromkeys(HoldoutScope.values, f"worker concurrency {concurrency}, not 1")
+        _record(session, RETRAIN_CHECK, Severity.WARNING, _retrain_detail(refused))
+        return "concurrent"
     free = free_percent()
     if free is not None and free < settings.RESEARCH_RETRAIN_MIN_FREE:
         if self.request.retries < settings.RESEARCH_RETRAIN_RETRIES:
@@ -339,6 +456,11 @@ def evening(self: Task[Any, Any], day: str | None = None) -> str:
         return "closed"
     if _finished(session, EVENING_CHECK):
         return "done"
+    concurrency = _concurrency(self)
+    if concurrency != 1:
+        detail = {"reason": CONCURRENT, "concurrency": concurrency}
+        _record(session, EVENING_CHECK, Severity.WARNING, detail)
+        return "concurrent"
     if not ready_for_research(session):
         if self.request.retries < settings.ETL_NOT_READY_RETRIES:
             raise self.retry(
@@ -346,7 +468,7 @@ def evening(self: Task[Any, Any], day: str | None = None) -> str:
             )
         _record(session, EVENING_CHECK, Severity.WARNING, {"reason": GATE_SHUT})
         return "not ready"
-    _start(EVENING_CHECK, session, EVENING_STEPS, {})
+    _start(EVENING_CHECK, session, _with_rebuild(EVENING_STEPS), {})
     return "started"
 
 
@@ -365,6 +487,11 @@ def morning(self: Task[Any, Any], day: str | None = None) -> str:
         session = date.fromisoformat(day)
     if _finished(session, MORNING_CHECK):
         return "done"
+    concurrency = _concurrency(self)
+    if concurrency != 1:
+        detail = {"reason": CONCURRENT, "concurrency": concurrency}
+        _record(session, MORNING_CHECK, Severity.WARNING, detail)
+        return "concurrent"
     if not ready_for_research(session):
         _record(session, MORNING_CHECK, Severity.WARNING, {"reason": GATE_SHUT})
         return "gate shut"
@@ -373,7 +500,8 @@ def morning(self: Task[Any, Any], day: str | None = None) -> str:
         raise self.retry(
             args=(session.isoformat(),), countdown=settings.RESEARCH_US_CLOSE_COUNTDOWN
         )
-    names = MORNING_STEPS if _finished(session, EVENING_CHECK) else ("labels", *MORNING_STEPS)
-    names = (*names, "promote") if _pending(session) else names
+    first = () if _finished(session, EVENING_CHECK) else ("labels",)
+    last = ("promote",) if _pending(session) else ()
+    names = _with_rebuild((*first, *MORNING_STEPS, *last))
     _start(MORNING_CHECK, session, names, {} if landed else {"us_close": US_CLOSE_MISSING})
     return "started"

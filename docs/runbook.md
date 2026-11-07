@@ -101,12 +101,19 @@ docker compose logs -f worker
   ```bash
   docker compose logs worker | grep -E "research (skipped|.* failed)"
   docker compose exec db psql -U twp -d twp -c \
-    "select date, check_name, severity, detail from data_quality_log where check_name like 'research_%' order by date desc limit 10"
+    "select date, check_name, severity, detail from data_quality_log where check_name like 'research_%' or check_name = 'adj_factor_changed' order by date desc limit 10"
   ```
 
 - Mac 在 06:00 睡著、同一天晚一點醒來時，beat 會補觸發 `research.morning` 照跑（可能已經開盤）；睡過午夜才醒的那次早於排定時間，會略過。平日的 D 沒跑成（閘門沒過、睡過午夜）不會自動補：隔天早上的 D 已經是新的一天。閘門沒過會記 warning 並告警；睡過午夜而被略過的那次，隔天早上會補記一列 `missed` warning（見上）。等 D 的 ETL 補齊（15:10 的補抓）後手動跑 `build_features --date D`、`predict --date D`、`monitor --date D`。
 - 手動長時間重建特徵或 label（`build_features`、`build_labels` 不取研究鎖）時先關掉開關，或避開 23:00–02:30 與 06:00–08:00，否則排程那一步可能和它搶同一批列而失敗（記 warning）。
-- 排程的正確性假設 worker 只有一個（`CELERY_WORKER_CONCURRENCY=1`）：重訓和每日的 chain 靠排隊錯開，重訓本身不取研究鎖。不要調大。
+- 排程的正確性假設 worker 只有一個（`CELERY_WORKER_CONCURRENCY=1`）：重訓和每日的 chain 靠排隊錯開，重訓本身不取研究鎖。`research.evening`、`research.morning`、`research.retrain` 開始時會讀 Celery 的 `worker_concurrency`，不是 1（包括設定成空值；環境變數沒設時預設是 1）就不跑，寫一列 warning（`reason` 寫明、`concurrency` 是讀到的值；重訓那列是每個 scope 都拒建，和記憶體不足一樣算用掉當月的重訓）並告警。只看設定值：`celery worker -c` 從指令列改的、`docker compose up --scale worker=2`、或在主機上另開一個連到同一個 redis 的 worker 都讀不到，不要那樣啟動。
+- 還原因子改寫後的重建：`refresh_adj_factor` 改寫了某檔的歷史因子時，在當天的 `adj_factor_changed`（info，資料層的列，研究層只讀）記下那檔第一個「新舊因子的倍數和前一個價格列不同」的交易日 E（單一事件就是除權息日；多個事件一起改取最早的）。只是整段等比例縮放（例如公布未來的除權息）不記，那些日子的比值不變；新價格列取得因子（`upsert_daily_prices`、FinMind 價格回補）也不記。同一天合成一列，超過 200 檔時 `detail` 只留最早的 E 與 `count`（收合時是檔數，之後每記一次加 1，同一檔再記會多算）。
+  - 23:00 與 06:00 的 chain 在有還沒處理的列時，最後多一步重建（23:00 那條已有 label 步驟，只重建特徵）：E 在 D 之前 30 個交易日內時跑 `build_labels --start <E 前 21 個交易日> --end D`（06:00 沒有 label 步驟時）與 `build_features --start E --end <D 前一個交易日>`（D 由 chain 自己的特徵步驟算）；E 晚於 D 的列留給之後的 chain。
+  - 處理過的列記在研究層自己的 `research_rebuild`：成功是 info，`detail.notes` 是這次處理的列（E ≤ D 的那些，pk 對當時的內容）。E 早於 30 個交易日的列不自動重建，另寫一列 warning（`earliest`、`stocks`、`limit`、`notes`）並告警，照 E 手動跑上面兩個指令；同一批裡較新的列照樣自動重建。之後那天的 `adj_factor_changed` 又併進新股票時，內容和任何一次記下的都不同，會再處理一次。只看最近 90 天（`NOTE_WINDOW`）的列。
+  - 重建這一步裡任何錯誤都只寫 `research_rebuild` warning（只有 `error`）並告警，chain 照常完成（當天的預測與重訓排程不受影響），沒處理完的列留到下一條 chain 再試；一直失敗會每條 chain 告警一次，E 看 `adj_factor_changed`。
+  - 開關關著時這些列照樣累積；打開後第一條 chain 可能對 90 天內較舊的改動告警一次（超過 30 個交易日）。告警的 `notes` 裡每一列的日期都早於開開關前那次手動重建時，才可略過；有較晚的列就照 `earliest` 再重建一次。
+  - 早上的重建排在完成紀錄之前，所以算進重訓「06:00 到 09:00 之間跑完」的時間：重建拖過 09:00 時，那天不排重訓，月初 5 個交易日內的下一個早上再排（重訓因此一定吃到重建後的特徵）。
+  - 特徵只用比值，沒有直接用還原價水準的（市值、本益比用原始收盤價），所以 E 之前的列不用重算。
 - 打開開關前，先在真資料上手動跑一次 `build_run` 量時間與記憶體；重訓一旦跑過午夜，23:00 的 chain 與 ETL 的批次會因為早於排定時間被略過。
 - 打開開關時延長 `ops/launchd` 的 caffeinate：傍晚那次（15:00 起 `-t 39600`，到 02:00）改成 `-t 46800`（到 04:00），清晨那次（05:15 起 `-t 5400`）改成 `-t 9900`（到 08:00）。23:00 的閘門最晚重試到 02:00 才開始 chain，06:00 的 chain 最多等美股收盤 30 分鐘，每一步搶不到鎖還能再等 60 分鐘。
 - 上線前的日子要用 `predict --date D` 回填時（Phase 5 demo、驗收），先照「每日除權息、減資、面額變更」用 `fetch --source twse|tpex --dataset dividend_event` 補那段日子，否則研究閘門不會過。
@@ -219,7 +226,7 @@ uv run python manage.py reapply_dividend_dates --stock 2884 --stock 2885
 - ETF 的分割、反分割（證交所 TWTCAU，ETF 分割（反分割）恢復買賣參考價格表）不抓：ETF 不在研究母體，研究層也不讀 ETF 的價格；歷史上 FinMind 回補的 ETF 分割照舊留著。要接回來時放進 2.7b。
 
 - 交易日 D 的一次執行只抓除權息（恢復買賣）日是 D 的列：結果表在 D 開盤前就公布（開盤競價基準要用），15:30 一定查得到，和 D 的行情同一批進來。不往後抓下一個交易日：先寫下的列不會被之後的執行更正，休市順延時會留下錯的那天。
-- 因子：除權息 = 除權息參考價 ÷ 除權息前收盤價，和 FinMind 回補用的 `after_price` 同一個數；減資、面額變更 = 恢復買賣參考價 ÷ 停止買賣前收盤價。同一檔同一天有兩種以上時相乘。寫入或補上因子的股票會重算 `daily_price.adj_factor`。
+- 因子：除權息 = 除權息參考價 ÷ 除權息前收盤價，和 FinMind 回補用的 `after_price` 同一個數；減資、面額變更 = 恢復買賣參考價 ÷ 停止買賣前收盤價。同一檔同一天有兩種以上時相乘。寫入或補上因子的股票會重算 `daily_price.adj_factor`；改到既有歷史時，研究排程會從受影響的交易日重建（見「研究排程」）。
 - 金額：現金股利（元／股）；股票股利換成元／股（每仟股無償配股 ÷ 100，面額 10 元），和 FinMind 的單位相同。減資、面額變更的列金額是 0。退還股款的減資（例如 2026-10-12 的 2323，恢復買賣參考價 10.88、停止買賣前收盤 11.00）金額也存 0：每股退多少只在 TWTAUU 的詳細資料頁，這支不讀；因子照參考價算，還原價不受影響。
 - 已有的列（FinMind 回補過的）只補空的 `adj_factor`；金額或因子不同時不覆蓋，記一列 `dividend_source_mismatch`（info，每個執行日、每個來源一列，重跑時取代）。新列的 `announce_date` 留空：結果表不是公告，公告日交給 FinMind 重套與之後的預告表（2.7b）。
 - raw 各頁分開存：`ex_rights`、`ex_rights_detail`、`capital_reduction`、`par_value_change`。`reprocess --dataset dividend_event` 會照網址找回各自的頁，但和每日執行一樣只補空的因子，不改已存的列。要用改過的解析重套某段日期：先刪掉那段 `ex_date` 的列（2026-10-31 之後的都是交易所寫的，之前的是 FinMind 回補，不要刪），`reprocess` 那段日期，再 `reapply_dividend_dates` 補回 FinMind 的公告日；刪掉後沒有重寫回來的股票，用 `recompute_adj_factor --stock <代號>` 重算。
