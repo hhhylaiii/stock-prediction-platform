@@ -5,7 +5,6 @@ from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import date
-from types import MappingProxyType
 
 import numpy as np
 import pandas as pd
@@ -41,7 +40,8 @@ from apps.research.metrics.ic import (
 )
 from apps.research.walkforward import Fold
 
-LEAK_LIMITS: Mapping[int, float] = MappingProxyType({5: 0.10, 20: 0.15})
+LEAK_GAP = 0.05
+LEAK_DIGITS = 12
 TOP_FEATURES = 10
 LIQUIDITY_BUCKETS = 3
 VOLATILITY = "tech_vol_20d"
@@ -57,9 +57,23 @@ def tradable_rows(frame: pd.DataFrame) -> pd.DataFrame:
     return frame[frame["in_universe"].astype(bool) & frame["untradable_t1"].eq(False)]
 
 
-def leaks(horizon: int, mean: float) -> bool:
-    """Whether a research-period mean IC is high enough to be chased as a leak first."""
-    return bool(mean > LEAK_LIMITS[horizon])
+def leak_flags(paired: pd.Series, compared: pd.Series) -> pd.Series:
+    """Model fold IC at least LEAK_GAP above the baseline's; NA where either is missing."""
+    ahead = (paired - compared).round(LEAK_DIGITS) >= LEAK_GAP
+    return ahead.astype("boolean").mask(paired.isna() | compared.isna())
+
+
+@dataclass(frozen=True)
+class ShuffleCheck:
+    """SPEC §8 shuffled-label OOS rank IC of one fold and the absolute limit it is held to."""
+
+    fold: int
+    ic: float
+    limit: float
+
+    @property
+    def leak(self) -> bool | None:
+        return None if math.isnan(self.ic) else bool(abs(self.ic) >= self.limit)
 
 
 @dataclass(frozen=True)
@@ -77,9 +91,27 @@ class RankReport:
     monthly: pd.Series
     monthly_days: pd.Series
 
+    def _research_leaks(self) -> pd.Series:
+        research = [fold.index for fold in self.folds if fold.research]
+        if "leak" not in self.by_fold:
+            return pd.Series(pd.NA, index=research, dtype="boolean")
+        return self.by_fold.loc[research, "leak"]
+
+    @property
+    def leak_folds(self) -> tuple[int, ...]:
+        """Research folds whose IC is LEAK_GAP or more above the same fold's baseline."""
+        flags = self._research_leaks()
+        return tuple(int(fold) for fold in flags.index[flags.fillna(False)])
+
+    @property
+    def unjudged_folds(self) -> tuple[int, ...]:
+        """Research folds with no baseline IC to hold the model's against."""
+        flags = self._research_leaks()
+        return tuple(int(fold) for fold in flags.index[flags.isna()])
+
     @property
     def leak(self) -> bool:
-        return leaks(self.horizon, self.total.mean)
+        return bool(self.leak_folds)
 
 
 def _months(ic: pd.Series) -> pd.Index:
@@ -102,7 +134,9 @@ def _beats(
     paired = ic_by_fold(daily_rank_ic(shared, score), folds, horizon)["mean"]
     compared = ic_by_fold(daily_rank_ic(shared, baseline), folds, horizon)["mean"]
     beats = (paired > compared).astype("boolean").mask(paired.isna() | compared.isna())
-    table = by_fold.assign(paired_mean=paired, baseline_mean=compared, beats=beats)
+    table = by_fold.assign(
+        paired_mean=paired, baseline_mean=compared, beats=beats, leak=leak_flags(paired, compared)
+    )
     research = [fold.index for fold in folds if fold.research]
     verdicts = table.loc[research, "beats"].dropna()
     share = float(verdicts.astype(np.float64).mean()) if len(verdicts) else math.nan

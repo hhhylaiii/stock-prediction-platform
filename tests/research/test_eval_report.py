@@ -14,6 +14,7 @@ from apps.research.eval_report import (
 )
 from apps.research.evaluation import (
     RankReport,
+    ShuffleCheck,
     consistency_report,
     coverage_report,
     decile_report,
@@ -91,13 +92,14 @@ def test_report_renders_every_section_from_a_synthetic_prediction_set() -> None:
     assert "| 共同列 IC | baseline IC | 贏 baseline |" in text
     first = five.by_fold.loc[research()[0].index]
     verdict = "是" if first["beats"] else "否"
-    tail = f"| {first['paired_mean']:.4f} | {first['baseline_mean']:.4f} | {verdict} |"
+    leak = "是" if first["leak"] else "否"
+    tail = f"| {first['paired_mean']:.4f} | {first['baseline_mean']:.4f} | {verdict} | {leak} |"
     assert any(
         line.startswith(f"| {research()[0].index} | 研究 ") and line.endswith(tail)
         for line in text.splitlines()
     )
-    assert text.count("🔴 洩漏警訊") == 1
-    assert "20 日研究期 IC 均值 1.0000 高於 0.15" in text
+    assert "研究期 IC 均值 1.0000 高於" not in text
+    assert text.count("- 打亂 label：這次沒跑，未判定") == 2
     assert "| D10-D1 |" in text
     assert "成交金額前三分之一" in text
     total, neutral = five.total, five.neutralized
@@ -125,6 +127,8 @@ def test_report_renders_every_section_from_a_synthetic_prediction_set() -> None:
     assert "| 1 | a, b | — |" in text
     twenty_section = text.split("## 排名 20 日")[1].split("## 特徵重要度")[0]
     assert "贏 baseline" not in twenty_section
+    assert "🔴" not in twenty_section
+    assert f"- 洩漏未判定：沒有 baseline，{research_folds} 個研究摺都不能比" in twenty_section
     calm = cast(pd.Series, coverage.loc[1])
     assert f"| 1 | {calm['coverage'] * 100:.1f}% | {calm['width']:.4f} |" in text
     assert coverage.index.tolist() == [1, 2, 3, 4, 5, "all"]
@@ -157,7 +161,8 @@ def test_report_skips_sections_it_was_not_given() -> None:
     assert "特徵重要度" not in text
     assert "覆蓋率" not in text
     assert "一致性" not in text
-    assert "🔴" not in text
+    assert "打亂 label 後" not in text
+    assert "- 打亂 label：這次沒跑，未判定" in text
 
 
 def test_rank_metrics_hold_total_fold_year_month_and_liquidity_rows() -> None:
@@ -283,7 +288,7 @@ def test_a_fold_without_a_baseline_verdict_renders_empty() -> None:
     row = next(
         line for line in text.splitlines() if line.startswith(f"| {research()[3].index} | 研究 ")
     )
-    assert row.endswith("| — | — | — |")
+    assert row.endswith("| — | — | — | 未判定 |")
     assert "（3／4 摺可比）" in text
 
 
@@ -301,3 +306,55 @@ def test_percent_cells_without_a_value_render_a_bare_dash() -> None:
     assert "—%" not in text
     assert "- IC 為正的研究摺比例：—\n" in text
     assert "nan" not in text
+
+
+def fold_rows(text: str) -> dict[int, str]:
+    """Rows of the fold table keyed by fold index."""
+    table = text.split("### 每摺")[1].split("### 每年")[0]
+    lines = [line for line in table.splitlines() if line.startswith("| ")]
+    return {
+        int(line.split(" | ")[0][2:]): line for line in lines if line.split(" | ")[0][2:].isdigit()
+    }
+
+
+def test_leak_lines_name_folds_ahead_folds_unjudged_and_a_flagged_shuffle_check() -> None:
+    frame = panel()
+    first, second, third, fourth = research()
+    ahead = inside(frame, [first, third])
+    frame["base"] = frame["score"].where(~ahead, frame["ridge"])
+    frame.loc[inside(frame, [fourth]), "base"] = np.nan
+    report = rank_report(frame, "score", 20, folds(), baseline="base")
+    check = ShuffleCheck(fold=second.index, ic=0.0312, limit=0.02)
+
+    text = render_report("rank-x", [report], shuffled=check)
+
+    assert (
+        f"- 🔴 洩漏警訊：第 {first.index}、{third.index} 摺比同摺 baseline 的 IC "
+        "高 0.05 以上，先當成洩漏追查" in text
+    )
+    assert f"- 洩漏未判定：第 {fourth.index} 摺沒有同摺 baseline 的 IC 可比" in text
+    assert (
+        f"- 🔴 洩漏警訊：打亂 label 後第 {second.index} 摺的 OOS rank IC 0.0312，"
+        "絕對值達 0.02，先當成洩漏追查" in text
+    )
+    assert "洩漏判定：每個研究摺" not in text
+    rows = fold_rows(text)
+    assert rows[first.index].endswith("| 是 |")
+    assert rows[second.index].endswith("| 否 |")
+    assert rows[fourth.index].endswith("| 未判定 |")
+    tuning = next(fold for fold in folds() if fold.tuning)
+    assert rows[tuning.index].endswith("| — |")
+    assert_tables_are_rectangular(text)
+
+
+def test_leak_lines_state_a_clean_comparison_and_the_shuffle_check_result() -> None:
+    frame = panel()
+    report = rank_report(frame.assign(base=frame["score"]), "score", 5, folds(), baseline="base")
+
+    clean = render_report("rank-x", [report], shuffled=ShuffleCheck(3, -0.0041, 0.02))
+    empty = render_report("rank-x", [report], shuffled=ShuffleCheck(3, math.nan, 0.02))
+
+    assert "🔴" not in clean
+    assert "- 洩漏判定：每個研究摺比同摺 baseline 的 IC 都高不到 0.05" in clean
+    assert "- 打亂 label：第 3 摺的 OOS rank IC -0.0041，絕對值低於 0.02" in clean
+    assert "- 打亂 label：第 3 摺沒有 OOS 日，未判定" in empty
