@@ -19,6 +19,20 @@
     stock_master: '股票清單異動',
     us_close: '美股收盤',
     adj_factor_changed: '還原因子更新',
+    statement_filed_late: '財報逾期申報',
+    statement_filed_later: '更正財報逾期申報',
+    statement_restated: '財報重編',
+    statement_overwritten: '財報數字以 MOPS 覆寫',
+    statement_margin_cleared: '清除累計期間的利益率',
+    statement_viewer_mismatch: '下市公司財報由 XBRL 檢視頁補',
+    fi_holding_zero_replaced: '外資持股 0 值覆寫',
+    statement_source_mismatch: '財報兩來源數字不同',
+    statement_type_mismatch: '財報種類不同',
+    revenue_history_mismatch: '月營收由 MOPS 歷史彙總頁補缺',
+    statement_history_mismatch: '財報由 MOPS 歷史彙總頁補缺',
+    dividend_source_mismatch: '股利兩來源不同',
+    exchange_fill: '交易所逐日表補缺',
+    industry_fill: '交易所產業補缺',
     output_width_ratio: '區間寬度比異常',
     output_odds_vs_q50: '機率與中位數矛盾',
     monitor_unscored: '到期預測缺 label',
@@ -72,7 +86,7 @@
   function saveWatch() { try { localStorage.setItem('twp-watch', JSON.stringify([...state.watch])); } catch (e) { return; } }
 
   const statusEl = document.getElementById('status');
-  const summaryOf = day => ({ passed: day.passed, worst: day.worst, missing_checks: day.missing_checks, warnings: day.checks.filter(c => c.severity === 'warning').length });
+  const summaryOf = day => ({ passed: day.passed, worst: day.worst, missing_checks: day.missing_checks, warnings: new Set(day.checks.filter(c => c.severity === 'warning').map(c => c.check_name)).size });
   const sizeOf = v => Array.isArray(v) ? v.length : Number(v || 0);
   const keyCount = v => v && typeof v === 'object' ? Object.keys(v).length : 0;
 
@@ -785,6 +799,39 @@
     }
   }
 
+  const SEVERITY_RANK = ['info', 'warning', 'error'];
+  const worstOf = severities => severities.reduce((a, b) => SEVERITY_RANK.indexOf(b) > SEVERITY_RANK.indexOf(a) ? b : a, 'info');
+  const perStock = rows => rows.every(row => row.detail && row.detail.stock_id !== undefined && row.detail.stock_id !== null);
+
+  function lineHtml(name, severity, summary) {
+    const sev = SEVERITY[severity] || [severity, 'idle'];
+    return '<div class="check"><i class="' + (severity === 'info' ? '' : sev[1]) + '"></i><div><div>' + esc(CHECKS[name] || name) + '（' + esc(sev[0]) + '）</div>' +
+      '<div class="muted small">' + esc(summary) + '</div></div></div>';
+  }
+
+  function dayChecksHtml(checks) {
+    const names = [...new Set(checks.map(check => check.check_name))];
+    return names.map(name => {
+      const rows = checks.filter(check => check.check_name === name);
+      if (rows.length < 2 || !perStock(rows)) return rows.map(checkHtml).join('');
+      const stocks = new Set(rows.map(row => row.detail.stock_id)).size;
+      return lineHtml(name, worstOf(rows.map(row => row.severity)), fmtInt(stocks) + ' 檔');
+    }).join('');
+  }
+
+  const spanText = (first, last) => first === last ? first : first + ' 至 ' + last;
+  const correctionHtml = row => lineHtml(row.check_name, row.severity, fmtInt(row.stocks) + ' 檔、' + fmtInt(row.rows) + ' 列，' + spanText(row.first_date, row.last_date));
+
+  async function renderCorrections() {
+    const host = document.getElementById('corrections');
+    try {
+      const { data } = await api.get('data-quality/corrections');
+      host.innerHTML = data.map(correctionHtml).join('') || '<p class="placeholder">沒有資料更正紀錄。</p>';
+    } catch (err) {
+      host.innerHTML = errorBox(err);
+    }
+  }
+
   function checkHtml(check) {
     const sev = SEVERITY[check.severity] || [check.severity, 'idle'];
     return '<div class="check"><i class="' + (check.severity === 'info' ? '' : sev[1]) + '"></i><div><div>' + esc(CHECKS[check.check_name] || check.check_name) + '（' + esc(sev[0]) + '）</div>' +
@@ -931,7 +978,7 @@
       const { data, meta } = await api.get('data-quality', { days: QUALITY_DAYS });
       const latest = data[0];
       sub.textContent = latest.date + '：' + verdictOf(summaryOf(latest)).text;
-      host.innerHTML = latest.checks.map(checkHtml).join('') +
+      host.innerHTML = dayChecksHtml(latest.checks) +
         latest.missing_checks.map(name => '<div class="check"><i class="idle"></i><div><div>' + esc(CHECKS[name] || name) + '</div><div class="muted small">尚未執行</div></div></div>').join('');
       days.innerHTML = '<div class="list">' + data.map(day => {
         const verdict = verdictOf(summaryOf(day));
@@ -962,7 +1009,7 @@
     document.querySelector('[data-nav="stock"]').setAttribute('href', '#stock-' + encodeURIComponent(state.stock));
     if (name === 'today') { state.watchCache = null; loadToday(); }
     if (name === 'stock') renderStock(code);
-    if (name === 'models') { renderModelTable(); renderIcChart(); renderEtl(); renderQuality(); }
+    if (name === 'models') { renderModelTable(); renderIcChart(); renderEtl(); renderQuality(); renderCorrections(); }
     renderStatus();
     window.scrollTo(0, 0);
   }
