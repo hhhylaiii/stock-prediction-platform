@@ -71,7 +71,7 @@ docker compose logs -f worker
 研究層 23:00、06:00 的任務要先確認 `apps.etl.tasks.ready_for_research(day)`：`etl_complete(day)` 且 `should_run_prediction(day)`。
 
 - `etl_complete`：當日快照都有成功的 `etl_run`，也就是兩個交易所的日價量、指數、三大法人、融資融券、借券、外資持股、本益比與淨值比（`GATE_DATASETS`）。這些缺一天，當天的特徵就是空的。
-- 注意、處置、全額交割、股數變動、當沖不擋：前四個是事件或變動紀錄，漏一天只是晚一天反映，隔天 catchup 補；當沖是規格的第二批特徵，T+2 才定案。
+- 注意、處置、全額交割、股數變動、當沖、加權股價報酬指數不擋：前四個是事件或變動紀錄，漏一天只是晚一天反映，隔天 catchup 補；當沖是規格的第二批特徵，T+2 才定案；報酬指數目前沒有特徵或 label 讀它（見下方「加權股價報酬指數」）。
 - `etl_runs` 那一列跟閘門一致：缺快照是 error（規格「error 不執行當日預測」），只缺其他 dataset 是 warning，都到了是 info；`detail` 的 `missing` 列出全部缺的，`blocking` 列出擋閘門的。
 - 品質檢查之後才補進來的資料：那天的 `etl_runs` 不是 info 就重算；五項檢查有 error 就重跑。重算只送之前沒送過的告警（同一個檢查、同一個 severity 不重送）。
 - 排程工作（交易日曆更新、`refresh_master`、週持股、景氣燈號）只由負責那晚的 22:50 檢查列入：交易日曆更新與 `refresh_master` 是每個交易日，週持股與景氣燈號是到期日之後第一個交易日。補審沒審過的交易日時不列；已經列出的，之後重算時會保留，直到補上：
@@ -321,7 +321,7 @@ done
 `index_daily` 的 `TAIEX_TR` 是證交所的發行量加權股價報酬指數（MFI94U）：成分股的現金股利再投入，除息不會讓它下跌。`TAIEX` 是價格指數，除息時照樣扣掉股息，7、8 月除息旺季 20 日內約差 1 個百分點。研究層的 label 用還原價，要比大盤時用 `TAIEX_TR` 才同一個口徑。
 
 - 每日 15:30 的 prices 批抓一次，一個月一個請求；不擋研究閘門，品質檢查的指數新鮮度也不含它，缺了只會在 `etl_run` 失敗時告警，隔天 catchup 補。
-- 回補從 2010 年起，一個月一個請求，約 203 個、12 分鐘。先跑 `migrate`（`market.0003`）：
+- 回補從 2010 年起，一個月一個請求，約 203 個、12 分鐘。先跑 `migrate`（`market.0003`），回補要在 worker 換成新程式後的第一次 15:10 之前做完；否則 `prepare_day` 的 catchup 會一天一個請求補回看期內的日子，並對那些日子重跑品質檢查、把舊告警再送一次：
 
   ```bash
   uv run python manage.py migrate market
