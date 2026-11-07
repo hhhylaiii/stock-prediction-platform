@@ -11,6 +11,7 @@ from apps.etl.models import DataQualityLog
 from apps.etl.quality import CHECKS, should_run_prediction
 from apps.market.models import TradingCalendar
 from apps.research.evaluation import ALERT_SHARE
+from apps.research.promotion import _note
 from tests.api.conftest import envelope_of, sessions_until, taipei
 
 pytestmark = pytest.mark.usefixtures("calendar_in_db")
@@ -128,8 +129,9 @@ def test_research_schedule_checks_sit_with_the_model_checks(client: Client) -> N
 @time_machine.travel(FRIDAY_NIGHT, tick=False)
 def test_model_checks_carry_their_row_id_in_write_order(client: Client) -> None:
     log_all(OCT_30)
-    log(OCT_30, "model_promotion", Severity.WARNING, run_key="rank-a", promoted=False)
-    log(OCT_30, "model_promotion", Severity.WARNING, run_key="rank-a", promoted=True)
+    refused = [{"slot": "rank 20 日", "run_id": "rank-a1", "gates": []}]
+    _note(OCT_30, "rank", "rank-a", refused, "", promoted=False)
+    _note(OCT_30, "rank", "rank-a", [], "", promoted=True)
 
     day = envelope_of(client.get("/api/data-quality", {"days": 1}))["data"][0]
 
