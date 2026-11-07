@@ -326,6 +326,9 @@ def test_production_writes_need_a_standing_claim_a_scope_key_and_no_holdout_key(
     forged = ProductionPass("rank", "rank-final")
     with pytest.raises(HoldoutError, match="rank design is not frozen"):
         authorize_production("rank-prod", forged)
+    claim_holdout("interval", "interval-final", LAST)
+    with pytest.raises(HoldoutError, match="rank design is not frozen"):
+        authorize_production("rank-prod", forged)
 
     claim_holdout("rank", "rank-final", LAST)
 
@@ -334,3 +337,5 @@ def test_production_writes_need_a_standing_claim_a_scope_key_and_no_holdout_key(
         authorize_production("interval-prod", forged)
     with pytest.raises(HoldoutError, match="rank-final is a holdout run"):
         authorize_production("rank-final", forged)
+    with pytest.raises(HoldoutError, match="interval-final is a holdout run"):
+        authorize_production("interval-final", ProductionPass("interval", "interval-final"))

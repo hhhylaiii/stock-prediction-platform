@@ -34,7 +34,7 @@ from apps.research.gbdt import (
     seeded,
 )
 from apps.research.gbdt import MAX_ROUNDS as DEFAULT_MAX_ROUNDS
-from apps.research.holdout import HoldoutError, ProductionPass, is_holdout
+from apps.research.holdout import HoldoutError, ProductionPass, authorize_production, is_holdout
 from apps.research.labels import HORIZONS, VOL_DAYS
 from apps.research.metrics.forecast import (
     expected_calibration_error,
@@ -69,6 +69,7 @@ from apps.research.runs import (
     label_hash,
     lib_versions,
     record_run,
+    refuse_production_key,
     screened_features,
 )
 from apps.research.target_models import (
@@ -546,9 +547,13 @@ def run_fold(
     variant: Variant = SPEC_RECIPE,
     target: TargetVariant = TARGET_RECIPE,
     production: ProductionPass | None = None,
+    annotate: Callable[[ModelRun], Mapping[str, Any]] | None = None,
 ) -> Path:
     """Fit one fold of a scope's boosters; the old cache goes first, the new one last."""
-    if is_holdout(fold) and production is None:
+    if production is not None:
+        check_run_key(scope, run_key)
+        authorize_production(run_key, production, fold)
+    elif is_holdout(fold):
         raise HoldoutError(f"fold {fold.index} is holdout; it runs once with the frozen design")
     require_candidates(run_key, fold)
     fold_path(run_key, MODEL, fold.index).unlink(missing_ok=True)
@@ -562,6 +567,8 @@ def run_fold(
         changed = "label_daily or TAIEX" if target.relative_up else "label_daily"
         raise RuntimeError(f"{changed} changed while fitting fold {fold.index}; run it again")
     for run, model in fitted.trained:
+        if annotate is not None:
+            run.params = {**run.params, **annotate(run)}
         record_run(run, model, fold=fold, production=production)
     rows = read.raw.loc[read.test, ROW_KEYS].reset_index(drop=True)
     notes = {
@@ -590,6 +597,24 @@ def _stale(
     return fold_notes(run_key, MODEL, fold.index) != current
 
 
+def check_design(scope: str, variant: Variant, target: TargetVariant) -> None:
+    """Refuse a rank variant outside rank, a target variant on rank and relative_up on return."""
+    if scope != HoldoutScope.RANK and variant != SPEC_RECIPE:
+        raise ValueError(f"design variants apply to the rank scope only, not {scope}")
+    if scope == HoldoutScope.RANK and target != TARGET_RECIPE:
+        raise ValueError("target variants apply to the return and interval scopes, not rank")
+    if scope == HoldoutScope.RETURN and target.relative_up:
+        raise ValueError("relative_up applies to the interval scope, whose probability uses it")
+
+
+def design_features(scope: str, variant: Variant, target: TargetVariant) -> list[str]:
+    """The screened features a scope fits on under a design, less the masked ones."""
+    features = [name for name in scope_features(scope, target) if name not in variant.masked]
+    if not features:
+        raise ValueError(f"the variant masks every {scope} feature")
+    return features
+
+
 def run_folds(
     scope: str,
     folds: Iterable[Fold],
@@ -603,20 +628,14 @@ def run_folds(
 ) -> list[int]:
     """Run a scope's folds without a current cache, or all with rerun; holdout is refused."""
     check_run_key(scope, run_key)
-    if scope != HoldoutScope.RANK and variant != SPEC_RECIPE:
-        raise ValueError(f"design variants apply to the rank scope only, not {scope}")
-    if scope == HoldoutScope.RANK and target != TARGET_RECIPE:
-        raise ValueError("target variants apply to the return and interval scopes, not rank")
-    if scope == HoldoutScope.RETURN and target.relative_up:
-        raise ValueError("relative_up applies to the interval scope, whose probability uses it")
+    refuse_production_key(run_key)
+    check_design(scope, variant, target)
     chosen = list(folds)
     held = [fold.index for fold in chosen if is_holdout(fold)]
     if held:
         raise HoldoutError(f"folds {held} are holdout; they run once with the frozen design")
     bag_seeds(seed, bags)
-    features = [name for name in scope_features(scope, target) if name not in variant.masked]
-    if not features:
-        raise ValueError(f"the variant masks every {scope} feature")
+    features = design_features(scope, variant, target)
     missing = set(missing_folds(run_key, MODEL, chosen))
     ran = []
     for fold in chosen:

@@ -29,6 +29,7 @@ from apps.research.prediction_cache import fold_cached, fold_record
 from apps.research.ranges import years
 from apps.research.walkforward import Fold
 
+PRODUCTION = "production"
 LIBRARIES = ("django", "numpy", "pandas", "pyarrow", "scikit-learn", "lightgbm")
 MODEL_SUFFIX = ".pkl"
 CHUNK = 1 << 20
@@ -158,7 +159,7 @@ def record_run(
         run.params = {**run.params, "fold": fold_record(fold)}
     run.full_clean(validate_unique=False)
     if production is not None:
-        authorize_production(run.run_key, production)
+        authorize_production(run.run_key, production, fold)
     elif fold is not None:
         _writable(run.run_key, fold, ticket)
     temporary = None if model is None else _pickled(path, model)
@@ -174,6 +175,12 @@ def record_run(
         if temporary is not None:
             Path(temporary).unlink(missing_ok=True)
     return run
+
+
+def refuse_production_key(run_key: str) -> None:
+    """Refuse research fits under a run_key that holds a production build."""
+    if ModelRun.objects.filter(run_key=run_key, params__has_key=PRODUCTION).exists():
+        raise RunError(f"{run_key} holds a production build; build_run refits it")
 
 
 def _remove(directory: Path) -> None:

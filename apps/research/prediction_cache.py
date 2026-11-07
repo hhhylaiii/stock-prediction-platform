@@ -120,7 +120,7 @@ def save_fold_predictions(
     """Write one model's research or production fold atomically, without the index."""
     path = fold_path(run_key, model, fold.index)
     if production is not None:
-        authorize_production(run_key, production)
+        authorize_production(run_key, production, fold)
     elif is_holdout(fold):
         raise HoldoutError(f"fold {fold.index} is holdout; save_holdout_fold writes its models")
     elif _holds_holdout(path) or _marker(run_key, fold.index).exists():

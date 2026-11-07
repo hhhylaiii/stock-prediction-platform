@@ -42,6 +42,7 @@ from apps.research.runs import (
     label_hash,
     lib_versions,
     record_run,
+    refuse_production_key,
     screened_features,
 )
 from apps.research.training import (
@@ -333,6 +334,7 @@ def run_folds(
 ) -> list[int]:
     """Run folds without a current cache, or all with rerun; holdout folds are refused."""
     check_run_key(scope, run_key)
+    refuse_production_key(run_key)
     chosen = list(folds)
     held = [fold.index for fold in chosen if is_holdout(fold)]
     if held:

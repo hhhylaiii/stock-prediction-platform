@@ -518,10 +518,12 @@ def test_model_names_with_path_characters_are_refused(
 
 @pytest.mark.django_db
 def test_a_production_pass_caches_a_fold_past_the_holdout_start(folds: list[Fold]) -> None:
-    fold = holdout_of(folds)
+    fold = replace(holdout_of(folds), index=0, holdout=False)
     forged = ProductionPass("rank", "rank-final")
     with pytest.raises(HoldoutError, match="rank design is not frozen"):
         save_fold_predictions("rank-prod", MODEL, fold, predictions(fold), production=forged)
+    with pytest.raises(HoldoutError):
+        save_fold_predictions("rank-prod", MODEL, fold, predictions(fold))
     assert not fold_cached("rank-prod", fold.index)
 
     claim_holdout("rank", "rank-final", LAST)
@@ -532,3 +534,16 @@ def test_a_production_pass_caches_a_fold_past_the_holdout_start(folds: list[Fold
     assert load_fold_predictions("rank-prod", MODEL, fold)["score"].iloc[0] == pytest.approx(0.5)
     with pytest.raises(HoldoutError, match="rank-final is a holdout run"):
         save_fold_predictions("rank-final", MODEL, fold, predictions(fold), production=granted)
+
+
+@pytest.mark.django_db
+def test_a_production_pass_does_not_cache_walk_forward_holdout_folds(folds: list[Fold]) -> None:
+    held = holdout_of(folds)
+    claim_holdout("rank", "rank-final", LAST)
+    granted = production_pass("rank")
+
+    for fold in (held, replace(held, holdout=False)):
+        with pytest.raises(HoldoutError, match="production folds only"):
+            save_fold_predictions("rank-prod", MODEL, fold, predictions(fold), production=granted)
+
+    assert not fold_cached("rank-prod", held.index)

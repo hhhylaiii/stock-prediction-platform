@@ -1,6 +1,7 @@
 import importlib.metadata
 import math
 import platform
+from dataclasses import replace
 from datetime import date, timedelta
 from io import StringIO
 from pathlib import Path
@@ -219,8 +220,11 @@ def test_a_holdout_fold_is_rewritten_until_any_model_caches_it(artifacts: Path, 
     assert load_model("wf1", "wf1.ridge.h20.f044") == {"weights": [2.0]}
 
 
+PRODUCED = replace(HELD, index=0, holdout=False)
+
+
 def production_run(**changes: Any) -> ModelRun:
-    return run("rank-prod.lightgbm.h20.f044", run_key="rank-prod", **changes)
+    return run("rank-prod.lightgbm.h20.f000", run_key="rank-prod", **changes)
 
 
 def test_a_production_run_records_a_fold_past_the_holdout_start_once_the_design_froze(
@@ -228,21 +232,41 @@ def test_a_production_run_records_a_fold_past_the_holdout_start_once_the_design_
 ) -> None:
     forged = ProductionPass("rank", "rank-final")
     with pytest.raises(HoldoutError, match="rank design is not frozen"):
-        record_run(production_run(), {"weights": [1.0]}, fold=HELD, production=forged)
+        record_run(production_run(), {"weights": [1.0]}, fold=PRODUCED, production=forged)
+    with pytest.raises(HoldoutError):
+        record_run(production_run(), {"weights": [1.0]}, fold=PRODUCED)
     assert not ModelRun.objects.exists()
-    assert not model_path("rank-prod", "rank-prod.lightgbm.h20.f044").exists()
+    assert not model_path("rank-prod", "rank-prod.lightgbm.h20.f000").exists()
 
     claim_holdout("rank", "rank-final", d("2025-03-31"))
     granted = production_pass("rank")
-    record_run(production_run(ic_mean=0.01), {"weights": [1.0]}, fold=HELD, production=granted)
-    fold_path("rank-prod", "lightgbm", HELD.index).parent.mkdir(parents=True)
-    fold_path("rank-prod", "lightgbm", HELD.index).write_bytes(b"cached")
-    record_run(production_run(ic_mean=0.02), {"weights": [2.0]}, fold=HELD, production=granted)
+    record_run(production_run(ic_mean=0.01), {"weights": [1.0]}, fold=PRODUCED, production=granted)
+    fold_path("rank-prod", "lightgbm", PRODUCED.index).parent.mkdir(parents=True)
+    fold_path("rank-prod", "lightgbm", PRODUCED.index).write_bytes(b"cached")
+    record_run(production_run(ic_mean=0.02), {"weights": [2.0]}, fold=PRODUCED, production=granted)
 
     stored = ModelRun.objects.get()
     assert stored.ic_mean == pytest.approx(0.02)
-    assert stored.params["fold"] == fold_record(HELD)
-    assert load_model("rank-prod", "rank-prod.lightgbm.h20.f044") == {"weights": [2.0]}
+    assert stored.params["fold"] == fold_record(PRODUCED)
+    assert load_model("rank-prod", "rank-prod.lightgbm.h20.f000") == {"weights": [2.0]}
+
+
+def test_a_production_pass_does_not_open_walk_forward_holdout_folds(artifacts: Path) -> None:
+    claim_holdout("rank", "rank-final", d("2025-03-31"))
+    granted = production_pass("rank")
+    unflagged = replace(HELD, holdout=False)
+
+    for held in (HELD, unflagged, replace(PRODUCED, holdout=True)):
+        with pytest.raises(HoldoutError, match="production folds only"):
+            record_run(
+                run(f"rank-prod.lightgbm.h20.f{held.index:03d}", run_key="rank-prod"),
+                {"weights": [1.0]},
+                fold=held,
+                production=granted,
+            )
+
+    assert not ModelRun.objects.exists()
+    assert not (artifacts / "rank-prod").exists()
 
 
 def test_research_folds_of_a_claimed_run_stay_rewritable(artifacts: Path) -> None:
