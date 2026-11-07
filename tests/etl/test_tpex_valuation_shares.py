@@ -146,11 +146,12 @@ def test_valuation_not_available_in_any_ratio_column_is_missing(
 @responses.activate
 @pytest.mark.django_db
 @pytest.mark.parametrize("column", [2, 5, 6], ids=["pe", "yield", "pb"])
+@pytest.mark.parametrize("value", [None, "null"], ids=["json-null", "null-text"])
 def test_valuation_null_in_any_ratio_column_is_missing(
-    adapter: TpexAdapter, load_fixture: Callable[[str], Any], column: int
+    adapter: TpexAdapter, load_fixture: Callable[[str], Any], column: int, value: str | None
 ) -> None:
     payload = load_fixture(VALUATION)
-    next(row for row in payload["tables"][0]["data"] if row[0] == "6488")[column] = None
+    next(row for row in payload["tables"][0]["data"] if row[0] == "6488")[column] = value
     rows = _valuation(adapter, payload)
     assert rows["6488"][{2: "pe", 5: "dividend_yield", 6: "pb"}[column]] is None
     assert rows["1240"]["pe"] == pytest.approx(10.02)
