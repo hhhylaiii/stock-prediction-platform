@@ -49,16 +49,14 @@ def predicted(
     condition = Q()
     for slot in slots:
         condition |= Q(run__objective=slot.objective, horizon=slot.horizon)
-    rows = out_of_sample(
-        list(
-            eligible()
-            .filter(condition, stock_id=stock_id, date__range=(first, last))
-            .filter(date__gt=F("run__train_end"))
-            .values(*SERVING_FIELDS, *ROW_FIELDS)
-        )
+    rows = list(
+        eligible()
+        .filter(condition, stock_id=stock_id, date__range=(first, last))
+        .filter(date__gt=F("run__train_end"))
+        .values(*SERVING_FIELDS, *ROW_FIELDS)
     )
     grouped: dict[date, list[dict[str, Any]]] = defaultdict(list)
-    for row in rows:
+    for row in out_of_sample(rows, load_calendar()) if rows else []:
         grouped[row["date"]].append(row)
     return grouped
 

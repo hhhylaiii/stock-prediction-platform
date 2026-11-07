@@ -255,14 +255,8 @@ def first_oos_day(calendar: TradingDays, run_id: str, train_end: date, horizon: 
         return None
 
 
-def out_of_sample(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def out_of_sample(rows: list[dict[str, Any]], calendar: TradingDays) -> list[dict[str, Any]]:
     """Rows on or after their run's first out-of-sample day for the row's own horizon."""
-    if not rows:
-        return []
-    try:
-        calendar = TradingDays.from_db()
-    except CalendarError:
-        return []
     trained = {(row["run_id"], row["horizon"]): row["run__train_end"] for row in rows}
     starts = {
         (run_id, horizon): first_oos_day(calendar, run_id, end, horizon)
@@ -275,6 +269,17 @@ def out_of_sample(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
+def monitor_calendar() -> TradingDays | None:
+    """The calendar for monitor rows; None, logged as an error, when it cannot be read."""
+    try:
+        return TradingDays.from_db()
+    except CalendarError as error:
+        logger.error(
+            "trading calendar cannot be read (%s); no monitor row counts as out of sample", error
+        )
+        return None
+
+
 def served_monitor(windows: dict[Slot, tuple[date, date]]) -> dict[Slot, list[dict[str, Any]]]:
     """Per slot and day in (after, through], the monitor row of the run that served it, OOS only."""
     if not windows:
@@ -284,16 +289,15 @@ def served_monitor(windows: dict[Slot, tuple[date, date]]) -> dict[Slot, list[di
         condition |= Q(
             run__objective=slot.objective, horizon=slot.horizon, date__gt=after, date__lte=through
         )
-    rows = out_of_sample(
-        list(
-            ModelMonitor.objects.filter(condition, date__gt=F("run__train_end"))
-            .exclude(run__status=ModelStatus.CANDIDATE)
-            .exclude(run__model_type=SCREENING_MODEL)
-            .values("date", *MONITOR_FIELDS, *SERVING_FIELDS)
-        )
+    rows = list(
+        ModelMonitor.objects.filter(condition, date__gt=F("run__train_end"))
+        .exclude(run__status=ModelStatus.CANDIDATE)
+        .exclude(run__model_type=SCREENING_MODEL)
+        .values("date", *MONITOR_FIELDS, *SERVING_FIELDS)
     )
+    calendar = monitor_calendar() if rows else None
     by_day: dict[tuple[Slot, date], list[dict[str, Any]]] = defaultdict(list)
-    for row in rows:
+    for row in [] if calendar is None else out_of_sample(rows, calendar):
         by_day[(Slot(row["run__objective"], row["horizon"]), row["date"])].append(row)
     served: dict[Slot, list[dict[str, Any]]] = defaultdict(list)
     for (slot, _), candidates in sorted(by_day.items(), key=lambda item: item[0][1]):

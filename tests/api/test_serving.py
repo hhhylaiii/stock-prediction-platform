@@ -146,10 +146,16 @@ def test_a_train_end_off_the_sessions_leaves_the_run_out_with_one_warning(
     assert warnings_in(caplog) == [unplaced("rank-a", f"{saturday} is not a trading day")]
 
 
-def test_without_a_calendar_no_monitor_row_counts() -> None:
+def test_an_unreadable_calendar_counts_no_monitor_row_and_logs_why(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     monitor(add_model_run("rank-a", "rank", train_end=TRAINED), 20, sessions_after(TRAINED, 25))
 
     assert served_monitor({RANK20: (TRAINED, SESSIONS[-1])}) == {}
+    assert [r.getMessage() for r in caplog.records if r.levelname == "ERROR"] == [
+        "trading calendar cannot be read (trading_calendar is empty);"
+        " no monitor row counts as out of sample"
+    ]
 
 
 @pytest.mark.usefixtures("calendar_in_db")

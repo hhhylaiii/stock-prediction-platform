@@ -7,6 +7,7 @@ from django.test import Client
 from pytest_django import DjangoAssertNumQueries
 
 from apps.api.serving import warn_undated, warn_unreadable_periods
+from apps.market.models import TradingCalendar
 from apps.research.models import FeatureDaily, LabelDaily, ModelRun
 from tests.api.conftest import (
     EARLY_CALENDAR_START,
@@ -292,6 +293,17 @@ def test_history_still_answers_when_a_boundary_is_past_the_calendar(
 
     assert response.status_code == 200
     assert rows_of(envelope_of(response)) == []
+
+
+def test_a_broken_calendar_reports_it_unavailable_rather_than_an_empty_history(
+    client: Client, history: ModelRun
+) -> None:
+    TradingCalendar.objects.filter(date=date(2026, 8, 3)).delete()
+
+    response = client.get("/api/stocks/2330/history")
+
+    assert response.status_code == 503
+    assert envelope_of(response)["error"]["code"] == "calendar_unavailable"
 
 
 def test_unlabelled_or_null_labels_are_not_matured(client: Client, history: ModelRun) -> None:

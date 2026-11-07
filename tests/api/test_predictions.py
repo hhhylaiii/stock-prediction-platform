@@ -289,14 +289,26 @@ def test_on_a_model_switch_the_previous_rank_comes_from_the_retired_run(
     assert by_code(body)["2330"]["prev_rank"] == 2
 
 
-def test_a_broken_calendar_only_drops_the_previous_rank(client: Client, runs: Runs) -> None:
+def test_a_broken_calendar_drops_the_previous_rank_and_logs_the_empty_monitor(
+    client: Client, runs: Runs, caplog: pytest.LogCaptureFixture
+) -> None:
+    ModelMonitor.objects.bulk_create(
+        ModelMonitor(run=runs.rank20, date=day, horizon=20, ic=0.05, n_stocks=3)
+        for day in (OCT_29, OCT_30)
+    )
     TradingCalendar.objects.filter(date=date(2026, 8, 3)).delete()
 
     response = client.get("/api/predictions")
 
     assert response.status_code == 200
-    rows = by_code(envelope_of(response))
+    body = envelope_of(response)
+    rows = by_code(body)
     assert (rows["2330"]["rank"], rows["2330"]["prev_rank"]) == (1, None)
+    assert body["meta"]["monitor"]["rank_ic"] is None
+    assert [r.getMessage() for r in caplog.records if r.levelname == "ERROR"] == [
+        "trading calendar cannot be read (trading_calendar has 1 missing day(s));"
+        " no monitor row counts as out of sample"
+    ]
 
 
 @pytest.mark.parametrize(
