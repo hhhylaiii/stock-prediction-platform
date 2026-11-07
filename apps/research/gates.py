@@ -29,6 +29,12 @@ MIN_STOCKS = 30
 MIN_DAYS = 60
 COVERAGE = (0.70, 0.90)
 NO_SERVING = "不適用（沒有服務中的 run）"
+SAMPLE_UNITS = {
+    "agreement": "stocks",
+    "gain_overlap": "features",
+    "shadow_oos": "days",
+    "data_quality": "days",
+}
 FIELDS = {
     ModelObjective.RANK: "score",
     ModelObjective.REGRESSION: "ret_pred",

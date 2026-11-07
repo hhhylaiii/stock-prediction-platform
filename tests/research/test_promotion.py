@@ -166,8 +166,13 @@ def test_failed_gates_keep_the_serving_runs_and_alert(
     failed = {entry["slot"]: entry for entry in alert.detail["failed"]}
     assert set(failed) == {str(slot) for slot in RANK_SLOTS}
     for entry in failed.values():
-        assert [gate["name"] for gate in entry["gates"]] == ["shadow_oos"]
-        assert "少於 500" in entry["gates"][0]["reason"]
+        [gate] = entry["gates"]
+        assert gate["name"] == "shadow_oos"
+        assert "少於 500" in gate["reason"]
+        assert gate["sample_unit"] == "days"
+        assert 0 < gate["sample"] < 500
+        assert gate["threshold"] == "rank IC > 0"
+        assert isinstance(gate["value"], float)
 
 
 @pytest.mark.django_db
@@ -415,7 +420,14 @@ def test_one_failing_slot_keeps_the_whole_build_out_unless_forced(
     assert f"{five.run_id}：data_quality（{LAST} row_count）" in out.getvalue()
     assert fresh(five).params["promotion"]["forced"] is True
     assert fresh(five).params["promotion"]["failed"][0]["gates"] == [
-        {"name": "data_quality", "reason": f"{LAST} row_count"}
+        {
+            "name": "data_quality",
+            "reason": f"{LAST} row_count",
+            "value": 1.0,
+            "threshold": "no error",
+            "sample": 1,
+            "sample_unit": "days",
+        }
     ]
     assert fresh(twenty).params["promotion"] == {
         "forced": False,
