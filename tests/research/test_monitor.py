@@ -44,6 +44,8 @@ HOLIDAY = date(2026, 9, 25)
 STOCKS = [str(1000 + n) for n in range(40)]
 OUTSIDE = [str(9000 + n) for n in range(5)]
 VOL = 0.3
+LIVE = date(2026, 1, 2)
+MARKER = "9999"
 
 
 @pytest.fixture(autouse=True)
@@ -89,7 +91,7 @@ def make_run(
         lib_versions={},
         feature_hash="0" * 64,
         status=status,
-        params=params or {},
+        params={"promoted_on": LIVE.isoformat(), **(params or {})},
     )
 
 
@@ -354,6 +356,13 @@ def test_consistency_without_flags_is_logged_as_info_and_without_inputs_not_at_a
     assert dispatched == []
 
 
+def serves(run: ModelRun, horizon: int, day: date = DAY) -> None:
+    """One out-of-universe row marking the run as the one serving the slot that day."""
+    Prediction.objects.get_or_create(
+        run=run, stock_id=MARKER, date=day, horizon=horizon, defaults={"in_universe": False}
+    )
+
+
 def history(
     run: ModelRun, field: str, values: list[float], horizon: int = 20, end: date | None = None
 ) -> None:
@@ -363,6 +372,8 @@ def history(
         ModelMonitor(run=run, date=day, horizon=horizon, n_stocks=40, **{field: value})
         for day, value in zip(days, values, strict=True)
     )
+    if run.status in ("active", "degraded"):
+        serves(run, horizon)
 
 
 def status(run: ModelRun) -> str:
@@ -399,6 +410,14 @@ def test_a_rank_run_below_its_rolling_threshold_is_degraded_and_alerted(
             "threshold": 0.0,
             "days": 60,
             "reason": "below_threshold",
+            "mode": "judged",
+            "own_rows": 60,
+            "mostly_predecessors": False,
+            "grace_start": None,
+            "grace_end": None,
+            "restored_on": None,
+            "reset_rows": None,
+            "reset_needed": None,
         }
     ]
     assert logged(ALERT_CHECK).severity == "warning"
@@ -572,11 +591,28 @@ def test_rerunning_a_past_day_judges_the_run_that_served_it_not_todays() -> None
     history(old, "ic", [-0.5] * 60, end=date(2026, 6, 5))
     history(old, "ic", [0.1] * 60)
     past = calendar().shift(date(2026, 6, 5), 20)
+    serves(old, 20, past)
+    serves(new, 20)
 
     run_monitor(past, calendar())
 
     assert (status(new), alerts_on(past)) == ("active", [])
     assert DEGRADED_ON not in ModelRun.objects.get(pk=new.pk).params
+
+
+def test_rerunning_a_past_day_alerts_the_degraded_run_that_served_it() -> None:
+    limits = {IC_THRESHOLD: {"20": 0.0}}
+    old = make_run("prod.rank.old", "rank", "degraded", limits, train_end=date(2025, 12, 31))
+    new = make_run("prod.rank", "rank", params=limits, train_end=date(2026, 9, 1))
+    history(old, "ic", [-0.5] * 60, end=date(2026, 6, 5))
+    past = calendar().shift(date(2026, 6, 5), 20)
+    serves(old, 20, past)
+    serves(new, 20)
+
+    result = run_monitor(past, calendar())
+
+    assert [entry["run_id"] for entry in alerts_on(past)] == [old.run_id]
+    assert (status(old), status(new), result.degraded) == ("degraded", "active", ())
 
 
 @pytest.mark.parametrize(("short", "long", "breached"), [(-0.01, -0.01, 5), (0.01, -0.03, 20)])
@@ -596,7 +632,7 @@ def test_either_rank_horizon_below_its_own_threshold_degrades(
 def test_model_checks_never_write_errors_so_the_day_still_predicts() -> None:
     limits = {IC_THRESHOLD: {"5": 0.0, "20": 0.0}, BRIER_BASELINE: 0.1}
     runs = seed_today(narrow=30, against=30)
-    ModelRun.objects.update(params=limits)
+    ModelRun.objects.update(params={**limits, "promoted_on": LIVE.isoformat()})
     history(runs["quantile"], "coverage", [0.2] * 60)
     history(runs["classification"], "brier", [0.9] * 60)
     for run in (make_run("prod.rank", "rank", params=limits), make_run("prod.bare", "rank")):

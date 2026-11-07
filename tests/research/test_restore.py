@@ -55,7 +55,8 @@ def served(run: ModelRun, *days: date) -> None:
 @pytest.mark.django_db
 def test_restore_closes_the_degraded_period_and_reactivates_the_run(run_panel: Path) -> None:
     earlier = {"start": DAYS[-40].isoformat(), "end": DAYS[-30].isoformat(), "reason": "old"}
-    run = degraded(alert_periods=[earlier])
+    window = {"own_rows": 0, "days": 60, "mostly_predecessors": True}
+    run = degraded(alert_periods=[earlier], degraded_window=window)
     served(run, DAYS[-8], BACK)
 
     restored = restore(run.run_id, BACK, "  the window held the previous run's days ")
@@ -64,6 +65,7 @@ def test_restore_closes_the_degraded_period_and_reactivates_the_run(run_panel: P
     stored = ModelRun.objects.get(pk=run.pk)
     assert stored.status == ModelStatus.ACTIVE
     assert "degraded_on" not in stored.params
+    assert "degraded_window" not in stored.params
     assert stored.params["restored_on"] == BACK.isoformat()
     assert stored.params["alert_periods"] == [
         earlier,

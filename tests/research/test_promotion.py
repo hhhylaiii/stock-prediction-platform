@@ -9,7 +9,7 @@ from django.core.management.base import CommandError
 
 from apps.etl.models import DataQualityLog
 from apps.research import gates, promotion
-from apps.research.gates import Gate
+from apps.research.gates import Gate, SlotGates
 from apps.research.holdout import HoldoutError
 from apps.research.models import HoldoutRun, ModelRun, ModelStatus, Prediction
 from apps.research.predict import PredictionGateError, Slot
@@ -62,7 +62,7 @@ def failing_h5(monkeypatch: pytest.MonkeyPatch) -> None:
 
     def quality(run: ModelRun) -> Gate:
         if run.params["horizon"] == 5:
-            return Gate("data_quality", False, 1.0, "no error", 1, f"{LAST} row_count")
+            return Gate("data_quality", False, 1.0, "無 error", 1, f"{LAST} row_count")
         return checked_quality(run)
 
     monkeypatch.setattr(gates, "data_quality", quality)
@@ -166,8 +166,13 @@ def test_failed_gates_keep_the_serving_runs_and_alert(
     failed = {entry["slot"]: entry for entry in alert.detail["failed"]}
     assert set(failed) == {str(slot) for slot in RANK_SLOTS}
     for entry in failed.values():
-        assert [gate["name"] for gate in entry["gates"]] == ["shadow_oos"]
-        assert "少於 500" in entry["gates"][0]["reason"]
+        [gate] = entry["gates"]
+        assert gate["name"] == "shadow_oos"
+        assert "少於 500" in gate["reason"]
+        assert gate["sample_unit"] == "days"
+        assert 0 < gate["sample"] < 500
+        assert gate["threshold"] == "rank IC > 0"
+        assert isinstance(gate["value"], float)
 
 
 @pytest.mark.django_db
@@ -415,7 +420,14 @@ def test_one_failing_slot_keeps_the_whole_build_out_unless_forced(
     assert f"{five.run_id}：data_quality（{LAST} row_count）" in out.getvalue()
     assert fresh(five).params["promotion"]["forced"] is True
     assert fresh(five).params["promotion"]["failed"][0]["gates"] == [
-        {"name": "data_quality", "reason": f"{LAST} row_count"}
+        {
+            "name": "data_quality",
+            "reason": f"{LAST} row_count",
+            "value": 1.0,
+            "threshold": "無 error",
+            "sample": 1,
+            "sample_unit": "days",
+        }
     ]
     assert fresh(twenty).params["promotion"] == {
         "forced": False,
@@ -522,3 +534,25 @@ def test_rows_written_past_the_day_while_the_gates_run_stop_the_swap(
 
     untouched(runs)
     assert not Prediction.objects.exists()
+
+
+def test_failed_gates_carry_the_unit_of_their_sample() -> None:
+    checked = [
+        SlotGates(
+            Slot("rank", 20),
+            "rank-prod.lightgbm.h20.f000",
+            "rank-old.lightgbm.h20.f000",
+            [
+                Gate("agreement", False, 0.4, ">= 0.7", 38, "相關太低"),
+                Gate("gain_overlap", False, 3.0, "前 10 名重疊 >= 6", 12, "重疊太少"),
+                Gate("shadow_oos", True, 0.02, "rank IC > 0", 120, ""),
+            ],
+        )
+    ]
+
+    [failed] = promotion._failed(checked)
+
+    assert [(gate["name"], gate["sample"], gate["sample_unit"]) for gate in failed["gates"]] == [
+        ("agreement", 38, "stocks"),
+        ("gain_overlap", 12, "features"),
+    ]

@@ -146,7 +146,11 @@ def _chosen(runs: dict[Slot, ModelRun | None]) -> dict[Slot, tuple[str, str] | N
 
 def _recheck(runs: dict[Slot, ModelRun | None]) -> None:
     """Lock the serving runs and refuse if any slot would pick another run than it scored with."""
-    list(ModelRun.objects.select_for_update(no_key=True).filter(status__in=SERVING))
+    list(
+        ModelRun.objects.select_for_update(no_key=True)
+        .filter(status__in=SERVING)
+        .order_by("run_id")
+    )
     before, now = _chosen(runs), _chosen({slot: serving_run(slot) for slot in runs})
     moved = [str(slot) for slot in runs if before[slot] != now[slot]]
     if moved:

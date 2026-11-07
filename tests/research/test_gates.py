@@ -119,6 +119,7 @@ def test_a_first_launch_skips_the_comparisons_and_judges_the_shadow(researched: 
         "data_quality",
     ]
     assert set(stored["gates"][2]) == {"name", "passed", "value", "threshold", "sample", "reason"}
+    assert set(gates.SAMPLE_UNITS) == {gate["name"] for gate in stored["gates"]}
     assert ModelRun.objects.filter(run_key="rank-prod", status="candidate").count() == 2
 
 
@@ -568,3 +569,8 @@ def test_gates_refuse_an_n_that_changed_while_they_were_checked(
         check_gates("rank-prod", researched)
 
     assert not ModelRun.objects.filter(run_key="rank-prod", params__has_key="gates").exists()
+
+
+def test_every_gate_names_the_unit_of_its_sample() -> None:
+    assert set(gates.SAMPLE_UNITS) == {"agreement", "gain_overlap", "shadow_oos", "data_quality"}
+    assert set(gates.SAMPLE_UNITS.values()) <= {"stocks", "features", "days"}

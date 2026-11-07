@@ -29,6 +29,12 @@ MIN_STOCKS = 30
 MIN_DAYS = 60
 COVERAGE = (0.70, 0.90)
 NO_SERVING = "不適用（沒有服務中的 run）"
+SAMPLE_UNITS = {
+    "agreement": "stocks",
+    "gain_overlap": "features",
+    "shadow_oos": "days",
+    "data_quality": "days",
+}
 FIELDS = {
     ModelObjective.RANK: "score",
     ModelObjective.REGRESSION: "ret_pred",
@@ -131,7 +137,7 @@ def agreement(run: ModelRun, serving: ModelRun | None, as_of: date) -> Gate:
 
 def gain_overlap(run: ModelRun, serving: ModelRun | None) -> Gate:
     """Gate 2: shared features among the GAIN_TOP largest gains of N and the serving run."""
-    threshold = f">= {GAIN_OVERLAP} of top {GAIN_TOP}"
+    threshold = f"前 {GAIN_TOP} 名重疊 >= {GAIN_OVERLAP}"
     if serving is None:
         return Gate("gain_overlap", None, None, threshold, 0, NO_SERVING)
     gains = [run.params.get("importance_gain") or {}, serving.params.get("importance_gain") or {}]
@@ -230,13 +236,13 @@ def data_quality(run: ModelRun) -> Gate:
     days = window.values("date").distinct().count()
     if not days:
         reason = f"{run.train_start}–{as_of} 沒有任何品質檢查紀錄"
-        return Gate("data_quality", False, None, "no error", 0, reason)
+        return Gate("data_quality", False, None, "無 error", 0, reason)
     errors = sorted(
         set(window.filter(severity=DataQualityLog.Severity.ERROR).values_list("date", "check_name"))
     )
     listed = ", ".join(f"{day} {name}" for day, name in errors)
     passed = not errors
-    return Gate("data_quality", passed, float(len(errors)), "no error", days, listed)
+    return Gate("data_quality", passed, float(len(errors)), "無 error", days, listed)
 
 
 def check_gates(run_key: str, directory: Path) -> list[SlotGates]:
