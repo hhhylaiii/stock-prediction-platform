@@ -10,7 +10,7 @@ from django.core.management import call_command
 
 from apps.etl.models import DataQualityLog, RawTpex, RawTwse
 from apps.etl.zero_holdings import REPLACED_CHECK, replace_zero_holdings
-from apps.market.models import DailyChip
+from apps.market.models import DailyChip, StockMaster
 
 pytestmark = pytest.mark.django_db
 
@@ -25,6 +25,10 @@ TPEX_HOLDING = 7
 def _twse_page(load_fixture: Callable[[str], Any], day: date, values: Mapping[str, float]) -> int:
     payload = copy.deepcopy(load_fixture(TWSE_PAGE))
     payload["date"] = f"{day:%Y%m%d}"
+    listed = {row[0] for row in payload["data"]}
+    for code in sorted(set(values) - listed):
+        payload["data"].append([code, code, *payload["data"][2][2:]])
+    payload["total"] = len(payload["data"])
     for row in payload["data"]:
         row[TWSE_HOLDING] = values.get(row[0], row[TWSE_HOLDING])
     params = {"date": f"{day:%Y%m%d}", "selectType": "ALLBUT0999", "response": "json"}
@@ -172,3 +176,15 @@ def test_an_unreadable_page_counts_as_unchecked(
     assert report["left"]["unchecked"] == 1
     assert _holdings("2317")[days[1]] == 0.0
     assert "unreadable" in caplog.text
+
+
+def test_depositary_receipts_are_left_alone(load_fixture: Callable[[str], Any]) -> None:
+    days = DAYS[:3]
+    StockMaster.objects.create(stock_id="2317", name="2317", market="TWSE", industry="存託憑證")
+    for code in ("9105", "2317"):
+        _stored(code, {days[0]: 3.0, days[1]: 0.0, days[2]: 3.0})
+    for day in days:
+        _twse_page(load_fixture, day, {"9105": 3.0, "2317": 3.0})
+    assert replace_zero_holdings()["replaced"] == {}
+    assert _holdings("9105")[days[1]] == 0.0
+    assert _holdings("2317")[days[1]] == 0.0

@@ -12,7 +12,11 @@ from apps.etl.adapters import tpex_tables, twse_tables
 from apps.etl.adapters.exchange_tables import DailyTable, source_rows, standard_rows
 from apps.etl.errors import SourceError
 from apps.etl.models import DataQualityLog, RawRecord, RawTpex, RawTwse
-from apps.market.common_stock import COMMON_STOCK_PATTERN
+from apps.market.common_stock import (
+    COMMON_STOCK_PATTERN,
+    DEPOSITARY_INDUSTRY,
+    DEPOSITARY_PREFIX,
+)
 from apps.market.models import DailyChip
 
 logger = logging.getLogger(__name__)
@@ -29,7 +33,8 @@ select stock_id, date, run from (
         row_number() over (partition by stock_id order by date)
         - row_number() over (partition by stock_id, fi_holding_pct = 0 order by date) as run
     from daily_chip
-    where fi_holding_pct is not null and stock_id ~ %s
+    where fi_holding_pct is not null and stock_id ~ %s and stock_id not like %s
+        and stock_id not in (select stock_id from stock_master where industry = %s)
 ) ordered
 where zero
 order by stock_id, date
@@ -78,12 +83,11 @@ def replace_zero_holdings(dry_run: bool = False) -> dict[str, Any]:
         {day for days in runs.values() for day in days}, {code for code, _ in runs}
     )
     found, mixed = classify(runs, seen)
-    if not dry_run:
-        _write(found)
+    written = found if dry_run else _write(found)
     unchecked = sum((code, day) not in seen for (code, _), days in runs.items() for day in days)
     return {
         "dry_run": dry_run,
-        "replaced": _tally(found, lambda row: f"{row.source}/{row.kind}"),
+        "replaced": _tally(written, lambda row: f"{row.source}/{row.kind}"),
         "left": {
             MIXED_RUN: _tally(mixed, lambda row: MIXED_RUN).get(MIXED_RUN, {}),
             "unchecked": unchecked,
@@ -92,10 +96,12 @@ def replace_zero_holdings(dry_run: bool = False) -> dict[str, Any]:
 
 
 def zero_runs() -> dict[tuple[str, int], list[date]]:
-    """Each common stock's runs of consecutive stored zeros, ordered by date."""
+    """Each common stock's runs of consecutive stored zeros; depositary receipts are left out."""
     runs: dict[tuple[str, int], list[date]] = defaultdict(list)
     with connection.cursor() as cursor:
-        cursor.execute(ZERO_RUNS_SQL, [COMMON_STOCK_PATTERN])
+        cursor.execute(
+            ZERO_RUNS_SQL, [COMMON_STOCK_PATTERN, DEPOSITARY_PREFIX, DEPOSITARY_INDUSTRY]
+        )
         for stock_id, day, run in cursor.fetchall():
             runs[(stock_id, run)].append(day)
     return dict(runs)
@@ -158,7 +164,7 @@ def classify(
     return found, mixed
 
 
-def _write(found: list[Replacement]) -> None:
+def _write(found: list[Replacement]) -> list[Replacement]:
     by_code: dict[str, dict[date, Replacement]] = defaultdict(dict)
     for row in found:
         by_code[row.stock_id][row.date] = row
@@ -173,6 +179,7 @@ def _write(found: list[Replacement]) -> None:
                 written.append(rows[chip.date])
             DailyChip.objects.bulk_update(stored, [HOLDING])
         DataQualityLog.objects.bulk_create(_logs(written))
+    return written
 
 
 def _logs(written: list[Replacement]) -> list[DataQualityLog]:
