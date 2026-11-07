@@ -226,7 +226,7 @@ Oct 29, 2026 · @Owen Lai
 | 籌碼面 | `chip_fi_net_1d` `chip_fi_net_5d` `chip_fi_net_20d` | daily\_chip、shares\_outstanding | t 日晚間 | 外資買賣超股數 / 流通股數 |
 | 籌碼面 | `chip_it_net_5d` `chip_dealer_self_net_5d` `chip_dealer_hedge_net_5d` | daily\_chip、shares\_outstanding | t 日晚間 | 投信；自營商分自行買賣與避險；皆除以流通股數 |
 | 籌碼面 | `chip_margin_chg_5d` `chip_margin_usage` `chip_short_ratio` | daily\_chip、shares\_outstanding | t 日晚間 | 融資餘額 5 日變化 / 流通股數；融資使用率 = 融資餘額 / 融資限額；券資比 |
-| 籌碼面 | `chip_fi_holding_pct` `chip_sbl_short_chg_5d` | daily\_chip、shares\_outstanding | t 日晚間 | 外資持股比；借券賣出餘額 5 日變化 / 流通股數，用借券賣出餘額而非借券餘額。證交所 2012-03-19 起改了借券賣出餘額的計算方式並公告，上市股票的 5 日變化讀到的兩筆借券賣出餘額分屬這天前後時（停牌日沿用前一筆餘額，沒有停牌時就是 t 在 3/19 到其後第 4 個交易日），`chip_sbl_short_chg_5d` 為 NaN，算 PIT 可觀察（補上該有卻沒有的借券列後就不跨這天的，照來源缺算）；上櫃沒有這個斷點。市場以 `stock_master` 現在的市場判斷，2012 年後換過市場的股票會多遮或漏遮這幾天 |
+| 籌碼面 | `chip_fi_holding_pct` `chip_sbl_short_chg_5d` | daily\_chip、shares\_outstanding | t 日晚間 | 外資持股比；借券賣出餘額 5 日變化 / 流通股數，用借券賣出餘額而非借券餘額。證交所 2012-03-19 起改了借券賣出餘額的計算方式並公告，上市股票的 5 日變化讀到的兩筆借券賣出餘額分屬這天前後時（停牌日沿用前一筆餘額，沒有停牌時就是 t 在 3/19 到其後第 4 個交易日），`chip_sbl_short_chg_5d` 為 NaN，算 PIT 可觀察（補上該有卻沒有的借券列後就不跨這天的，照來源缺算）；上櫃沒有這個斷點。市場依 t 日的市場歷史（第 6 節處理步驟 1） |
 | 籌碼面 | `chip_big_holder_pct_chg_1w` `chip_holder_count_chg_1w` | weekly\_holding | publish\_date，即 data\_date 隔日 | 400 張以上級距占比週變化、總股東人數週變化；取 publish\_date ≤ t 的最近一期；level 16、17 排除 |
 | 基本面 | `fund_rev_yoy` `fund_rev_3m_yoy` | monthly\_revenue；來源缺時 financial\_statement | announce\_date | 單月 yoy、近 3 個月合計 yoy。月營收來源缺（最近一期月營收可見超過 62 天（日曆日）沒有新一期，或要讀的月份沒有紀錄）時改用同一天的 `fund_rev_yoy_q`；月份都有紀錄但讀到 2013-01 兩側或去年同期營收 ≤ 0 時照舊為 NaN，不補 |
 | 基本面 | `fund_rev_mom` | monthly\_revenue | announce\_date | 不用。單月 mom；月營收來源缺、讀到 2013-01 兩側或上月營收 ≤ 0 時為 NaN。2016 到 2020 年下市的股票沒有月營收來源（第 3 節），mom 沒有季資料可替代，進模型時缺值會透露之後下市 |
@@ -236,7 +236,7 @@ Oct 29, 2026 · @Owen Lai
 | 基本面 | `fund_gm_yoy_chg` `fund_opm_yoy_chg` `fund_cfo_to_ni` | financial\_statement | announce\_date | 毛利率、營益率較去年同季的變化；營業現金流 / 淨利，TTM；過期上限 200 天，同 `fund_ep` |
 | 基本面 | `fund_days_since_fs` | financial\_statement | announce\_date | 距最近一期財報公告的交易日數；不套 200 天上限，最近一期公告超過 936 天（日曆日，往回讀財報的範圍）時為 NaN |
 | 基本面 | `fund_rev_yoy_q` | financial\_statement | announce\_date | 單季營收對 4 季前的年增率，4 季前 ≤ 0 時 NaN；下市股缺月營收時仍有營收訊號；過期上限 200 天，同 `fund_ep` |
-| 產業與風險 | `risk_beta_250d` `risk_idio_vol_60d` | daily\_price、index\_daily | t 日晚間 | 250 日回歸的 beta，上市股對加權指數、上櫃股對櫃買指數；60 日殘差報酬標準差 |
+| 產業與風險 | `risk_beta_250d` `risk_idio_vol_60d` | daily\_price、index\_daily | t 日晚間 | 250 日回歸的 beta，上市股對加權指數、上櫃股對櫃買指數（市場依 t 日的市場歷史，轉換市場前後的報酬各對各自的指數）；60 日殘差報酬標準差 |
 | 產業與風險 | `ind_sector_ret_20d` `ind_rel_ret_20d` | daily\_price、stock\_master | t 日晚間 | 個股所屬產業 20 日平均報酬；個股 20 日報酬減產業平均 |
 | 市場層級 | `mkt_taiex_ret_5d` `mkt_taiex_ret_20d` `mkt_sox_ret_5d` | index\_daily | 台股 t 日晚間；美股用美國 t 日收盤，台北 t+1 約 05:00 可得 | 大盤、費半；全市場同值，排名模型不用、不做橫截面 z-score |
 | 市場層級 | `mkt_tsm_adr_gap` `mkt_usdtwd_chg_20d` | index\_daily | TSM ADR 用美國 t 日收盤，台北 t+1 約 05:00 可得；美元兌台幣用倫敦日 ≤ t−1 的收盤 | ADR 溢價 = TSM ADR 收盤 × 美元兌台幣 / 5 / 2330 台股 t 日收盤 − 1，1 ADR 為 5 股；匯率 20 日變化；同上 |
@@ -251,7 +251,7 @@ Oct 29, 2026 · @Owen Lai
 
 **處理步驟（每日對全市場執行）**
 
-1. 定義 universe：特徵與預測對全部上市、上櫃普通股計算；訓練 universe 排除停牌、上市未滿 60 個交易日、處置期間、全額交割、當日無成交、20 日成交金額中位數低於 1,000 萬元的股票；注意股不排除，以 `tech_attention_t` 當特徵；處置與全額交割期間來自 `disposition_event`。以下所有橫截面統計與 label 的百分位都只在當日訓練 universe 內計算；universe 外的股票套用同一天的轉換參數照常推論，`feature_daily` 與 `prediction` 都帶 `in_universe` 旗標，API 回傳時標示，事後評估不計入。
+1. 定義 universe：特徵與預測對全部上市、上櫃普通股計算；每檔股票在 t 日屬於哪個市場，依 `market_history` 在 t 日的區間（由交易所外資持股頁重建），決定市場指數、當沖表與借券斷點；t 日沒有區間的股票日（例如第一次出現在外資持股頁之前的掛牌前價量）不在訓練 universe，這些日子的市場只用在特徵的暖身，取之前最近的一段，沒有就取之後的第一段，整檔都沒有區間的用 `stock_master` 現在的市場；訓練 universe 另外排除停牌、上市未滿 60 個交易日、處置期間、全額交割、當日無成交、20 日成交金額中位數低於 1,000 萬元的股票；注意股不排除，以 `tech_attention_t` 當特徵；處置與全額交割期間來自 `disposition_event`。以下所有橫截面統計與 label 的百分位都只在當日訓練 universe 內計算；universe 外的股票套用同一天的轉換參數照常推論，`feature_daily` 與 `prediction` 都帶 `in_universe` 旗標，API 回傳時標示，事後評估不計入。
 2. 可用時點對齊：每個特徵依表中「可用時點」以 merge\_asof 對齊到 t；基本面與總經用 announce\_date，weekly\_holding 用 publish\_date，美股用美國日曆日 ≤ t 的最近一個收盤，美國休市日自動取前一日；美元兌台幣用倫敦日 ≤ t−1 的最近一個收盤，週五與連假前也一樣。財報的 announce\_date：沒有更正紀錄的照實際上傳日，晚於法定截止日也延後；有更正紀錄的只拿來提早、不延後；有重編報表的期別用最後一次重編的上傳日；交易日 22:40 以後或非交易日上傳的算下一個交易日。財報數字：2013-Q1 起，revenue、net\_income、operating\_cf、debt\_ratio、roe 用該期報表當時公布的 MOPS 原值（彙總表、XBRL 檢視頁）覆寫 FinMind 重分類過的比較期數字，eps 只補 FinMind 的空值；gross\_margin、op\_margin 在 FinMind 已有的列保留 FinMind 值，清空與 MOPS 補列的規則見第 8 節第 5 條。前後期報表種類（個體、合併）不同時，revenue、gross\_margin、op\_margin、operating\_cf 不跨種類取前期，相關的年增與 TTM 為 NaN；月營收訊號讀到 2013-01 兩側的月份時為 NaN（2013 年起改為 IFRS 合併營收）。
 3. 極值處理：個股層級特徵以當日 universe 內 1% / 99% 分位 winsorize；某一側的截斷界會讓 universe 全部變成同值時（稀疏的 0/1 與計數特徵），那一側改用 universe 的極值當界；市場層級特徵與 `ind_sector_id` 不做。
 4. 標準化：個股層級特徵做當日橫截面 z-score，均值與標準差只用 universe 內的股票算。Ridge 與 logistic baseline 一律用 z-score 值；排名模型的 LightGBM 也用 z-score 值，原值跨年度有漂移，樹模型看不出相對當日市場的高低；絕對報酬、區間、波動、機率模型的 LightGBM 用原值並加入市場層級特徵，市場層級特徵進模型前先在訓練窗內依分位切成 5 級，見第 7 節模型表。市場層級特徵與 `ind_sector_id` 不做橫截面 z-score，市場層級特徵排名模型不使用。當日 universe 沒有離散度時 z 為 0，不是 NaN。
@@ -346,7 +346,7 @@ Oct 29, 2026 · @Owen Lai
 1. **Point-in-time 對齊**：基本面特徵一律用 `announce_date` 對齊。查 t 日特徵時，只能取 `announce_date <= t` 的最新一期財報或月營收。Q1 財報在 5/15 前公布，不能在 4 月就讓模型看到。月營收在每月 10 日前公布。做法：特徵計算用 `merge_asof(by=stock_id, on=date, right_on=announce_date)`。
 2. **還原權息**：label 一律用還原價，否則除息日會出現假跌幅，模型會學到「除息前賣出」這種假訊號。除權息資料來自 `dividend_event`，`adj_factor` 回溯調整。
 3. **存活者偏差**：`stock_master` 必須包含已下市股票，訓練集不得過濾掉它們。只用現存股票訓練，模型只學到「活下來的公司長什麼樣」。
-4. **不看未來**：台股特徵只能用 `<= t` 日收盤的資料，含移動平均的視窗也是；美股只能用美國日曆日 ≤ t 的收盤，匯率只能用倫敦日 ≤ t−1 的收盤，兩者都早於 t+1 開盤進場。回測進場價用 t+1 還原開盤價，不用 t 日收盤價。
+4. **不看未來**：台股特徵只能用 `<= t` 日收盤的資料，含移動平均的視窗也是；美股只能用美國日曆日 ≤ t 的收盤，匯率只能用倫敦日 ≤ t−1 的收盤，兩者都早於 t+1 開盤進場。回測進場價用 t+1 還原開盤價，不用 t 日收盤價。股票在 t 日屬於哪個市場、有沒有在上市櫃交易，讀 `market_history` 那天的區間，不用 `stock_master.market` 的現值（現值是之後才知道的事，例如之後才上櫃轉上市）；那天沒有區間的不在訓練 universe。
 5. **來源衝突**：每類資料只有一個 primary source，secondary 只做比對。同一欄位在兩個來源數字不同時寫 `data_quality_log`，不得取平均或混用。例外只有下面幾條，其他欄位、其他情況一律照前一句。這幾條都不取平均：每個欄位一次只採用一個來源，兩邊的 raw 都保留；除了下面註明的，兩邊數字不同照樣寫 `data_quality_log`。
    - **財報（FinMind 回補的季別，也就是每日財報掃描接手的那一季之前；plan K18）**：2013-Q1 起，同一檔、同一季、同一種報表（個體或合併）的 `revenue`、`net_income`、`operating_cf`、`debt_ratio`、`roe` 以 MOPS 當期原值為 primary，MOPS 空或只有另一種報表時用 FinMind；`eps`、`gross_margin`、`op_margin` 以 FinMind 為 primary，`eps` 空時用 MOPS。FinMind 已有的列，兩個利益率不用 MOPS 補；只判 Q2 到 Q4（Q1 的累計就是單季）：FinMind 的值不是那一季自己的（跨季累計算出的）就清空，查不到同一種報表的 MOPS 數字而 FinMind 的 `revenue` 也是空的時同樣清空（2013 年前沒有 MOPS 頁面，`revenue` 空就清），判斷不了的留著。掃描接手那一季起，財報由 MOPS 直接寫入，照第 5 節「已有的列只新增不改」。
    - **MOPS 補 FinMind 沒有的月份與季（plan K17，2013-Q1 起）**：FinMind 沒有某檔某期的月營收或財報列時，整列用 MOPS 歷史彙總頁或 XBRL 檢視頁新增，財報的兩個利益率由 MOPS 的損益表算；這一步不改 FinMind 已有的列（已有列的覆寫與清空照上一條），數字不同記 `revenue_history_mismatch`、`statement_history_mismatch`、`statement_viewer_mismatch`。
