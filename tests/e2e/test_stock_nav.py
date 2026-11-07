@@ -195,7 +195,9 @@ def test_an_exact_code_on_today_links_its_stock_page_without_predictions(
     link = page.locator("#today-goto a")
     expect(link).to_have_text("查看 6488 環球晶 個股頁")
     expect(link).to_have_attribute("href", "#stock-6488")
-    expect(page.locator("#today-empty, #rows .empty")).to_be_visible()
+    expect(page.locator("#rows .empty")).to_have_text(
+        "今日預測裡沒有符合「6488」的股票。試試代號或公司名稱的一部分。"
+    )
     link.click()
     expect(page.locator("#stock-name")).to_have_text("環球晶")
 

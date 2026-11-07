@@ -79,7 +79,7 @@ def test_market_and_search_filter_on_the_server(
     page.locator("#q").fill("zzz<b>")
 
     expect(page.locator("#rows .empty")).to_have_text(
-        "沒有符合「zzz<b>」的股票。試試代號或公司名稱的一部分。"
+        "今日預測裡沒有符合「zzz<b>」的股票。試試代號或公司名稱的一部分。"
     )
 
 
@@ -207,7 +207,7 @@ def test_watch_only_follows_the_horizon_and_the_search(
     expect(page.locator("#today-meta")).to_contain_text("Ridge 2026-09")
     page.locator("#q").fill("zzz")
     expect(page.locator("#rows .empty")).to_have_text(
-        "沒有符合「zzz」的股票。試試代號或公司名稱的一部分。"
+        "今日預測裡沒有符合「zzz」的股票。試試代號或公司名稱的一部分。"
     )
     assert not [url for url in requests if "/api/stocks/" in url]
 

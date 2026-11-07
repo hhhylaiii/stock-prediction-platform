@@ -213,7 +213,7 @@
   }
 
   function emptyHtml(meta) {
-    if (state.q.trim()) return '<div class="empty">沒有符合「' + esc(state.q.trim()) + '」的股票。試試代號或公司名稱的一部分。</div>';
+    if (state.q.trim()) return '<div class="empty">今日預測裡沒有符合「' + esc(state.q.trim()) + '」的股票。試試代號或公司名稱的一部分。</div>';
     if (watchingOnly()) return '<div class="empty">追蹤的股票沒有這一期的預測。</div>';
     if (!meta.date) return '<div class="empty" id="today-empty">預測資料尚未產出。模型上線後，這裡會列出全市場的排名。</div>';
     return '<div class="empty">沒有符合條件的股票。</div>';
