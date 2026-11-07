@@ -97,7 +97,7 @@ docker compose logs -f worker
     "select date, check_name, severity, detail from data_quality_log where check_name like 'research_%' order by date desc limit 10"
   ```
 
-- 平日的 D 在 06:00 沒跑成（閘門沒過、Mac 睡過頭）不會自動補：隔天早上的 D 已經是新的一天。等 D 的 ETL 補齊（15:10 的補抓）後手動跑 `build_features --date D`、`predict --date D`、`monitor --date D`。
+- Mac 在 06:00 睡著、同一天晚一點醒來時，beat 會補觸發 `research.morning` 照跑（可能已經開盤）；睡過午夜才醒的那次早於排定時間，會略過。平日的 D 沒跑成（閘門沒過、睡過午夜）不會自動補：隔天早上的 D 已經是新的一天。閘門沒過會記 warning 並告警；睡過午夜而被略過的那次只在 worker log（`research skipped MORNING`）與狀態頁的預測日期看得到，不告警。等 D 的 ETL 補齊（15:10 的補抓）後手動跑 `build_features --date D`、`predict --date D`、`monitor --date D`。
 - 手動長時間重建特徵或 label（`build_features`、`build_labels` 不取研究鎖）時先關掉開關，或避開 23:00–02:30 與 06:00–08:00，否則排程那一步可能和它搶同一批列而失敗（記 warning）。
 - 打開開關時延長 `ops/launchd` 的 caffeinate：傍晚那次（15:00 起 `-t 39600`，到 02:00）改成 `-t 46800`（到 04:00），清晨那次（05:15 起 `-t 5400`）改成 `-t 9900`（到 08:00）。23:00 的閘門最晚重試到 02:00 才開始 chain，06:00 的 chain 最多等美股收盤 30 分鐘，每一步搶不到鎖還能再等 60 分鐘。
 - 上線前的日子要用 `predict --date D` 回填時（Phase 5 demo、驗收），先照「每日除權息、減資、面額變更」用 `fetch --source twse|tpex --dataset dividend_event` 補那段日子，否則研究閘門不會過。
