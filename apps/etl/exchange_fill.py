@@ -31,10 +31,18 @@ HOLDINGS = "holdings"
 FILLS: dict[str, tuple[str, tuple[str, ...]]] = {
     HOLDINGS: ("foreign_holding", ("foreign_holding", "shares_outstanding")),
     "valuation": ("daily_valuation", ("daily_valuation",)),
+    "margin": ("margin", ("margin",)),
 }
 TABLES: dict[str, dict[str, DailyTable]] = {"twse": TWSE_TABLES, "tpex": TPEX_TABLES}
 FIGURES = ("pe", "pb", "dividend_yield")
-DIGITS = {"fi_holding_pct": 0.01, "pe": 0.01, "pb": 0.01, "dividend_yield": 1e-4}
+MARGINS = ("margin_balance", "margin_limit", "short_balance")
+DIGITS = {
+    "fi_holding_pct": 0.01,
+    "pe": 0.01,
+    "pb": 0.01,
+    "dividend_yield": 1e-4,
+    **dict.fromkeys(MARGINS, 1.0),
+}
 SAMPLES = 20
 Filled = dict[str, dict[str, list[Any]]]
 
@@ -168,33 +176,41 @@ def first_counts() -> dict[str, str]:
 
 def _write(target: str, frame: pd.DataFrame, day: date, shares: Shares) -> Written:
     writers: dict[str, Callable[[], Written]] = {
-        "foreign_holding": lambda: _fill_chip(frame, day, "fi_holding_pct"),
+        "foreign_holding": lambda: _fill_chip(frame, day, ("fi_holding_pct",)),
+        "margin": lambda: _fill_chip(frame, day, MARGINS),
         "daily_valuation": lambda: _add_valuations(frame, day),
         "shares_outstanding": lambda: shares.fill(frame, day),
     }
     return writers[target]()
 
 
-def _fill_chip(frame: pd.DataFrame, day: date, column: str) -> Written:
-    """New rows for codes without one; a stored row gets the value only where it has none."""
+def _fill_chip(frame: pd.DataFrame, day: date, columns: tuple[str, ...]) -> Written:
+    """New rows for codes without one; a stored row gets each value only where it has none."""
     values = {
-        code: value
-        for code, value in zip(frame["stock_id"], frame[column], strict=True)
-        if value is not None
+        record["stock_id"]: given
+        for record in frame.to_dict("records")
+        if (given := {name: record[name] for name in columns if record[name] is not None})
     }
     stored = {row.stock_id: row for row in DailyChip.objects.filter(date=day, stock_id__in=values)}
     differ = [
-        [code, str(day), column, getattr(row, column), values[code]]
+        [code, str(day), name, getattr(row, name), value]
         for code, row in sorted(stored.items())
-        if _differs(column, getattr(row, column), values[code])
+        for name, value in values[code].items()
+        if _differs(name, getattr(row, name), value)
     ]
-    blank = [row for row in stored.values() if getattr(row, column) is None]
+    blank = [
+        row
+        for row in stored.values()
+        if any(getattr(row, name) is None for name in values[row.stock_id])
+    ]
     for row in blank:
-        setattr(row, column, values[row.stock_id])
-    DailyChip.objects.bulk_update(blank, [column])
+        for name, value in values[row.stock_id].items():
+            if getattr(row, name) is None:
+                setattr(row, name, value)
+    DailyChip.objects.bulk_update(blank, list(columns))
     new = [
-        DailyChip(stock_id=code, date=day, **{column: value})
-        for code, value in values.items()
+        DailyChip(stock_id=code, date=day, **given)
+        for code, given in values.items()
         if code not in stored
     ]
     DailyChip.objects.bulk_create(new, ignore_conflicts=True)
