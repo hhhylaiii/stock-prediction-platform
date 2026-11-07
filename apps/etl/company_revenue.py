@@ -16,6 +16,7 @@ from apps.market.common_stock import COMMON_STOCK_PATTERN, DEPOSITARY_INDUSTRY, 
 from apps.market.models import DailyPrice, MonthlyRevenue, StockMaster
 
 ANSWERED = 200
+NO_MATCH = (406, "查無相符資料")
 THIS_MONTH, LAST_YEAR = "本月", "去年同期"
 TWD = "新台幣"
 AMOUNT = re.compile(r"^-?\d+$")
@@ -30,10 +31,12 @@ Figures = tuple[int, int | None]
 def parse_company_revenue(payload: Mapping[str, Any], period: str) -> Figures | None:
     """This month and the same month last year in TWD; None for a month MOPS holds nothing for.
 
-    The API gives thousands like MOPS's revenue pages; foreign issuers add a column in their own
-    currency after the TWD one.
+    Amounts come in thousands; foreign issuers add a column in their own currency after the TWD
+    one, and a month never filed comes back as 406 with no result rather than as an error.
     """
     label = f"MOPS t05st10_ifrs {period}"
+    if (payload.get("code"), payload.get("message")) == NO_MATCH:
+        return None
     if payload.get("code") != ANSWERED:
         reply = f"{payload.get('code')}: {payload.get('message')}"
         raise SchemaChangedError(f"{label} answered {reply}")

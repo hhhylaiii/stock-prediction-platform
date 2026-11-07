@@ -345,9 +345,9 @@ uv run python manage.py backfill --source mops --dataset revenue_company --from 
 - 每 6 秒一個請求（MOPS 的速率上限），避開交易日 19:00 和 22:40 前後的每日掃描。2026-11-08 在 twp 試算：走過 2,579 檔，159 檔有缺、4,177 個請求，約 7 小時。
 - 數字取新台幣欄（KY 公司另有功能性貨幣欄），單位千元，乘 1,000 存成元；2026-11-08 抽 5347、4137（KY）、2823（下市）和 FinMind 已有的列比，逐位相同。yoy 用回應裡的去年同期；回應沒有上月，mom 只在前一個月也是這次查到的時候算，不拿 FinMind 的列當分母，否則留空（研究層的特徵只讀 `revenue`）。只寫 standard 表沒有的列，FinMind 已有的列不改；公告日用保守值 `revenue_visible_from`，和 FinMind 回補相同。
 - raw 存在 `raw_mops`，dataset `revenue_company`；回應裡的查詢時間（`datetime`）不算，同樣的回答只存一份。
-- log 和下市公司的財報相同：`revenue_company_mismatch` 每檔一列（`detail.stock_id`），區間結尾是最後一個可以問的月份的月底；下市股，以及每日掃描接手之後的上市股，這個月份不再移動，所以重跑到哪一天都是同一列。`added` 是補進來的月份；`absent` 是查了但沒有數字的月份，例如下市前停止申報。只問沒有列的月份，所以不會有 `rows`、`types`。
-- 一個月的回答讀不懂（不是問的月份、沒有新台幣欄、本月沒有數字，或 code 不是 200），整檔不寫、記成 rejected，和檢視頁相同；raw 已存，但沒有從 raw 重套的指令，修好之後用 `--retry-rejected` 重問。
-- 連續被拒的守門（`ETL_MAX_CONSECUTIVE_REJECTIONS`）在這裡幾乎不會觸發：沒有缺的股票不發請求、算成功，會把連續次數歸零。來源擋住時，HTTP 429 或 5xx 會讓整次停下，用 `--resume` 接著跑；回 200 但 code 不是 200 的，只會一檔一檔變成 rejected，跑完是 failed，用 `--retry-rejected` 重問。
+- log 和下市公司的財報相同：`revenue_company_mismatch` 每檔一列（`detail.stock_id`），區間結尾是最後一個可以問的月份的月底；下市股，以及每日掃描接手之後的上市股，這個月份不再移動，所以重跑到哪一天都是同一列。`added` 是補進來的月份；`absent` 是查了但沒有數字的月份（回「查詢成功」但沒有 data，或 code 406「查無相符資料」），例如下市前最後一個月（申報期在下市之後）或下市前停止申報。跑完看一下夾在兩個已有列中間的 `absent` 月份：MOPS 若整批改回 406，run 仍會 success，只會在這裡看出來。只問沒有列的月份，所以不會有 `rows`、`types`。
+- 一個月的回答讀不懂（不是問的月份、沒有新台幣欄、本月沒有數字，或 code 不是 200 也不是 406「查無相符資料」），整檔不寫、記成 rejected，和檢視頁相同；raw 已存，但沒有從 raw 重套的指令，修好之後用 `--retry-rejected` 重問。
+- 連續被拒的守門（`ETL_MAX_CONSECUTIVE_REJECTIONS`）在這裡幾乎不會觸發：沒有缺的股票不發請求、算成功，會把連續次數歸零。來源擋住時，HTTP 429 或 5xx 會讓整次停下，用 `--resume` 接著跑；回 200 但 code 不是 200（406「查無相符資料」除外）的，只會一檔一檔變成 rejected，跑完是 failed，用 `--retry-rejected` 重問。
 - 中斷後用 `--resume` 從停下的股票之後接著跑；整個重跑會再問一次還缺的月份，包含上次 `absent` 的。
 
 ## FinMind 財報改用 MOPS 原始數字（plan K18）
