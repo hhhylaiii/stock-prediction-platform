@@ -17,6 +17,7 @@ from apps.market.models import DailyPrice, MonthlyRevenue, StockMaster
 
 ANSWERED = 200
 NO_MATCH = (406, "查無相符資料")
+NOT_PUBLIC = (500, "公開發行公司不繼續公開發行")
 THIS_MONTH, LAST_YEAR = "本月", "去年同期"
 TWD = "新台幣"
 AMOUNT = re.compile(r"^-?\d+$")
@@ -53,6 +54,12 @@ def parse_company_revenue(payload: Mapping[str, Any], period: str) -> Figures | 
     if now is None:
         raise SchemaChangedError(f"{label} has no amount for {THIS_MONTH}: {rows.get(THIS_MONTH)}")
     return now * THOUSAND, None if last_year is None else last_year * THOUSAND
+
+
+def no_longer_public(payload: Mapping[str, Any]) -> bool:
+    """MOPS's refusal for a month the company was no longer public, such as its delisting month."""
+    code, words = NOT_PUBLIC
+    return payload.get("code") == code and words in str(payload.get("message", ""))
 
 
 def without_query_time(payload: Mapping[str, Any]) -> dict[str, Any]:

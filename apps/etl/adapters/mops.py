@@ -21,6 +21,7 @@ from apps.etl.company_revenue import (
     company_frame,
     company_months,
     listed_months,
+    no_longer_public,
     parse_company_revenue,
     without_query_time,
 )
@@ -84,7 +85,15 @@ SUMMARY_PATH = "/mops/web/ajax_"
 VIEWER_PATH = "/server-java/t164sb01"
 COMPANY_REVENUE_PATH = "/mops/api/t05st10_ifrs"
 REVENUE_DATA_TYPE = "2"
-NOTES = ("incomplete", "stock_id", "absent", "stored_absent", "no_revenue", "stored_no_revenue")
+NOTES = (
+    "incomplete",
+    "stock_id",
+    "absent",
+    "not_public",
+    "stored_absent",
+    "no_revenue",
+    "stored_no_revenue",
+)
 SUMMARY_ENCODING = "utf-8"
 EXPORT_NAME = re.compile(r"name='filename' value='[^']*'")
 LISTING_PATH = "/server-java/t57sb01"
@@ -575,9 +584,13 @@ class MopsAdapter(BaseAdapter):
         months = listed_months(stock_id, start, end, today, days_after, scanned)
         found: dict[str, CompanyFigures] = {}
         absent: list[str] = []
+        not_public: list[str] = []
         for period in company_months(stock_id, start, end, today, days_after, scanned):
             params, payload = self.summaries.company_revenue(stock_id, period)
             self.save_raw(REVENUE_COMPANY, params, payload, without_query_time(payload))
+            if no_longer_public(payload):
+                not_public.append(period)
+                continue
             figures = parse_company_revenue(payload, period)
             if figures is None:
                 absent.append(period)
@@ -585,7 +598,9 @@ class MopsAdapter(BaseAdapter):
                 found[period] = figures
         frame = company_frame(stock_id, found)
         last = _month_end(months[-1]) if months else end
-        frame.attrs.update(start=start, end=last, stock_id=stock_id, absent=absent)
+        frame.attrs.update(
+            start=start, end=last, stock_id=stock_id, absent=absent, not_public=not_public
+        )
         return frame
 
     def scanned_from(self, dataset: str) -> str | None:
