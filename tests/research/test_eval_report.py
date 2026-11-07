@@ -361,3 +361,14 @@ def test_leak_lines_state_a_clean_comparison_and_the_shuffle_check_result() -> N
     assert "- 洩漏判定：每個研究摺比同摺 baseline 的 IC 都高不到 0.05" in clean
     assert "- 打亂 label（20 日 Ridge）：第 3 摺的 OOS rank IC -0.0041，絕對值低於 0.02" in clean
     assert "- 打亂 label（20 日 Ridge）：第 3 摺沒有 OOS 日，未判定" in empty
+
+
+def test_a_report_without_research_folds_claims_no_clean_comparison() -> None:
+    frame = panel()
+    early = [fold for fold in folds() if not fold.research]
+    report = rank_report(frame.assign(base=frame["score"]), "score", 5, early, baseline="base")
+
+    text = render_report("rank-x", [report])
+
+    assert "洩漏判定：每個研究摺" not in text
+    assert "- 洩漏未判定：沒有研究摺" in text

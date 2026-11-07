@@ -215,8 +215,8 @@ def test_liquidity_terciles_and_neutralized_ic() -> None:
 
 
 def test_leak_flags_need_the_model_ahead_of_the_baseline_by_the_gap() -> None:
-    paired = pd.Series([0.20, 0.15, 0.10, math.nan, 0.30, -0.01])
-    compared = pd.Series([0.14, 0.10, 0.06, 0.10, math.nan, -0.07])
+    paired = pd.Series([0.20, 0.15, 0.10, math.nan, 0.30, -0.01, 0.0999])
+    compared = pd.Series([0.14, 0.10, 0.06, 0.10, math.nan, -0.07, 0.05])
 
     flags = leak_flags(paired, compared)
 
@@ -224,6 +224,7 @@ def test_leak_flags_need_the_model_ahead_of_the_baseline_by_the_gap() -> None:
     assert pd.isna(flags[3])
     assert pd.isna(flags[4])
     assert flags[5]
+    assert not flags[6]
     assert str(flags.dtype) == "boolean"
 
 
@@ -238,6 +239,18 @@ def test_a_research_fold_far_ahead_of_its_baseline_is_flagged_as_a_leak() -> Non
     assert report.leak_folds == (ahead.index,)
     assert report.unjudged_folds == ()
     assert report.by_fold.loc[ahead.index, "leak"]
+
+
+def test_leak_is_judged_on_rows_both_score() -> None:
+    frame = panel()
+    unshared = frame["stock_id"].isin(STOCKS[:40])
+    frame["ridge"] = frame["score"].mask(unshared)
+    frame.loc[unshared, "score"] = frame.loc[unshared, "fwd_ret_open"]
+
+    report = rank_report(frame, "score", 20, folds(), baseline="ridge")
+
+    assert report.leak_folds == ()
+    assert report.unjudged_folds == ()
 
 
 def test_an_equal_baseline_clears_every_research_fold() -> None:

@@ -134,7 +134,9 @@ def _leak_lines(report: RankReport, shuffled: ShuffleCheck | None) -> list[str]:
             f"高 {LEAK_GAP} 以上，先當成洩漏追查"
         )
     unjudged = report.unjudged_folds
-    if unjudged and not _compared(report):
+    if not any(fold.research for fold in report.folds):
+        lines.append("- 洩漏未判定：沒有研究摺")
+    elif unjudged and not _compared(report):
         lines.append(f"- 洩漏未判定：沒有 baseline，{len(unjudged)} 個研究摺都不能比")
     elif unjudged:
         lines.append(f"- 洩漏未判定：第 {_folds(unjudged)} 摺沒有同摺 baseline 的 IC 可比")
