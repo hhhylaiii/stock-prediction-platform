@@ -71,6 +71,17 @@ def test_day_after_the_last_published_row_is_not_ready(
 
 @responses.activate
 @pytest.mark.django_db
+def test_month_without_rows_is_not_ready_and_not_kept(
+    adapter: TwseAdapter, payload: dict[str, Any]
+) -> None:
+    responses.get(URL, json={**payload, "data": [], "total": 0})
+    with pytest.raises(SourceNotReadyError, match=r"^TWSE MFI94U "):
+        adapter.fetch("return_index", DAY, DAY)
+    assert not RawTwse.objects.exists()
+
+
+@responses.activate
+@pytest.mark.django_db
 def test_trading_day_missing_inside_the_month_is_a_schema_change(
     adapter: TwseAdapter, payload: dict[str, Any]
 ) -> None:
