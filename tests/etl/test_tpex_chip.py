@@ -218,17 +218,41 @@ def test_margin_short_balance_in_shares_matches_the_sbl_table(
     }
 
 
+def _unbalanced_sbl(
+    load_fixture: Callable[[str], Any], codes: tuple[str, ...], column: int
+) -> dict[str, Any]:
+    payload: dict[str, Any] = load_fixture(DATASETS["sbl"][2])
+    for row in payload["tables"][0]["data"]:
+        if row[0] in codes:
+            row[column] = "1"
+    responses.post(DATASETS["sbl"][0], json=payload)
+    return payload
+
+
 @responses.activate
 @pytest.mark.django_db
 @pytest.mark.parametrize("column", [6, 12], ids=["short", "lent"])
-def test_sbl_balance_that_does_not_roll_forward_is_a_schema_change(
+def test_sbl_rows_beyond_the_few_that_may_not_roll_forward_are_a_schema_change(
     adapter: TpexAdapter, load_fixture: Callable[[str], Any], column: int
 ) -> None:
-    payload = load_fixture(DATASETS["sbl"][2])
-    next(row for row in payload["tables"][0]["data"] if row[0] == "6488")[column] = "1"
-    responses.post(DATASETS["sbl"][0], json=payload)
-    with pytest.raises(SchemaChangedError, match="6488"):
+    _unbalanced_sbl(load_fixture, ("1240", "2064", "3293", "6488"), column)
+    with pytest.raises(SchemaChangedError, match=r"4 rows .*6488"):
         adapter.normalize("sbl", adapter.fetch("sbl", DAY, DAY))
+
+
+@responses.activate
+@pytest.mark.django_db
+@pytest.mark.usefixtures("quotes_loaded")
+def test_a_few_sbl_rows_that_do_not_roll_forward_keep_their_published_balance(
+    adapter: TpexAdapter, load_fixture: Callable[[str], Any], caplog: pytest.LogCaptureFixture
+) -> None:
+    _unbalanced_sbl(load_fixture, ("1240", "2064", "6488"), 12)
+    with caplog.at_level(logging.WARNING, logger="apps.etl.adapters.exchange_tables"):
+        rows = _load(adapter, "sbl")
+    assert [rows[code]["sbl_short_balance"] for code in ("1240", "2064", "6488")] == [1, 1, 1]
+    assert rows["3293"]["sbl_short_balance"] == 4_159_575
+    (record,) = caplog.records
+    assert "['1240', '2064', '6488']" in record.getMessage()
 
 
 @responses.activate

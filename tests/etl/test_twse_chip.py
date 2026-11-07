@@ -10,9 +10,9 @@ import responses
 from django.core.management import call_command
 from django.utils import timezone
 
-from apps.etl.adapters.exchange_tables import priced_codes
+from apps.etl.adapters.exchange_tables import priced_codes, source_rows, standard_rows
 from apps.etl.adapters.twse import TwseAdapter
-from apps.etl.adapters.twse_tables import TABLES
+from apps.etl.adapters.twse_tables import TABLES, check_answer
 from apps.etl.errors import SchemaChangedError, SourceNotReadyError
 from apps.etl.models import EtlRun, RawTwse
 from apps.etl.ratelimit import RateLimiter
@@ -51,6 +51,7 @@ DATASETS = {
         "twse/day_trade/twtb4u_20261028.json",
     ),
 }
+OLD_LENDING = "twse/sbl/twt93u_20100104_old_layout.json"
 NOT_PUBLISHED = {
     "institutional": "twse/institutional/t86_20261101_no_data.json",
     "margin": "twse/margin/mi_margn_20261101_no_data.json",
@@ -340,6 +341,47 @@ def test_sbl_reads_the_lending_balance_and_skips_the_total_row(
     rows = _load(adapter, "sbl")
     assert rows["2330"] == {"stock_id": "2330", "date": DAY, "sbl_short_balance": 15_528_514}
     assert set(rows) == {"0050", "1101", "1213", "2317", "2330"}
+
+
+def _old_lending(load_fixture: Callable[[str], Any], day: date) -> dict[str, Any]:
+    return {**load_fixture(OLD_LENDING), "date": f"{day:%Y%m%d}"}
+
+
+def test_sbl_before_the_march_2012_formula_reads_the_old_balance_column(
+    load_fixture: Callable[[str], Any],
+) -> None:
+    day = date(2012, 3, 16)
+    table = TABLES["sbl"]
+    rows = source_rows(_old_lending(load_fixture, day), day, table, check_answer)
+    frame = standard_rows(rows, table)
+    assert dict(zip(frame["stock_id"], frame["sbl_short_balance"], strict=True)) == {
+        "1101": 1_035_500,
+        "1213": 0,
+        "2317": 10_184_100,
+        "2330": 41_036_580,
+        "2603": 10_375_860,
+    }
+
+
+def test_the_old_lending_layout_from_the_march_2012_formula_on_is_a_schema_change(
+    load_fixture: Callable[[str], Any],
+) -> None:
+    day = date(2012, 3, 19)
+    with pytest.raises(SchemaChangedError, match="借券賣出當日餘額"):
+        source_rows(_old_lending(load_fixture, day), day, TABLES["sbl"], check_answer)
+
+
+def test_a_lending_page_with_both_balance_names_is_a_schema_change(
+    load_fixture: Callable[[str], Any],
+) -> None:
+    day = date(2012, 3, 16)
+    payload = _old_lending(load_fixture, day)
+    payload["fields"] = [*payload["fields"][:-1], "當日餘額", payload["fields"][-1]]
+    stock, short, _, note = payload["groups"]
+    payload["groups"] = [stock, short, {"span": 6, "title": "借券賣出"}, note]
+    payload["data"] = [[*row[:-1], row[11], row[-1]] for row in payload["data"]]
+    with pytest.raises(SchemaChangedError, match="repeated columns"):
+        source_rows(payload, day, TABLES["sbl"], check_answer)
 
 
 @responses.activate

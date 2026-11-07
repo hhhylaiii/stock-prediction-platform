@@ -30,6 +30,7 @@ HOLDINGS = "twse/foreign_holding/mi_qfiis_20261028.json"
 VALUATION = "twse/daily_valuation/bwibbu_20261028.json"
 MARGIN = "twse/margin/mi_margn_20261028.json"
 LENDING = "twse/sbl/twt93u_20261028.json"
+OLD_LENDING = "twse/sbl/twt93u_20100104_old_layout.json"
 MARGINS = ("margin_balance", "margin_limit", "short_balance")
 
 pytestmark = pytest.mark.django_db
@@ -192,6 +193,21 @@ def test_missing_lending_balances_are_added_and_stored_ones_left_alone(
         ["2330", "2026-10-28", "sbl_short_balance", 15_528_513, 15_528_514],
     ]
     assert (run.status, run.rows) == ("success", 2)
+
+
+@responses.activate
+def test_lending_pages_before_the_march_2012_formula_fill_from_their_old_balance(
+    january_2010: TradingDays, twse_limiter: RateLimiter, load_fixture: Callable[[str], Any]
+) -> None:
+    day = date(2010, 1, 4)
+    serve(load_fixture, "/marginTrading/TWT93U", OLD_LENDING, day)
+    priced("1101", "2330", day=day)
+    DailyChip.objects.create(stock_id="2330", date=day, sbl_short_balance=41_036_580)
+    run = fill_missing(TwseAdapter(january_2010, twse_limiter), "sbl", day, day)
+    assert [lent(code) for code in ("1101", "2330")] == [1_035_500, 41_036_580]
+    (log,) = DataQualityLog.objects.filter(check_name=FILL_CHECK)
+    assert log.detail["differences"]["sbl"]["count"] == 0
+    assert (run.status, run.rows) == ("success", 1)
 
 
 @responses.activate
