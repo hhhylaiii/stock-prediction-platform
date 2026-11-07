@@ -68,6 +68,7 @@ def test_a_company_mops_finds_no_match_for_that_month_reads_as_none(
     "broken",
     [
         lambda payload: {**payload, "code": 500, "message": "查詢過量"},
+        lambda payload: {"code": 406, "result": None, "message": "參數錯誤"},
         lambda payload: {**payload, "result": {**payload["result"], "yymm": "10605"}},
         lambda payload: {
             **payload,
@@ -81,7 +82,7 @@ def test_a_company_mops_finds_no_match_for_that_month_reads_as_none(
         },
         lambda payload: {**payload, "result": {**payload["result"], "data": [["本月", "─"]]}},
     ],
-    ids=["failed", "another-month", "no-twd-column", "no-amount"],
+    ids=["failed", "another-406", "another-month", "no-twd-column", "no-amount"],
 )
 def test_an_answer_that_is_not_the_month_asked_in_twd_is_refused(
     answer: Callable[[str], dict[str, Any]], broken: Callable[[dict[str, Any]], dict[str, Any]]
