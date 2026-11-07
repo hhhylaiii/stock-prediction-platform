@@ -685,6 +685,26 @@ def test_a_rebuild_left_by_hand_stays_pinned_after_a_later_rebuild(
     expect(rebuilds.nth(1).locator(".pinned")).to_have_text(seeded.last_session.isoformat())
 
 
+def test_an_evening_failure_and_a_morning_rebuild_of_one_day_both_stay(
+    page: Page, live_server: LiveServer, seeded: Seed, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recent = seeded.sessions[-2]
+    log(seeded, ADJ_CHECK, "info", _merged({}, "9999", recent), back=2)
+    rebuild_step(seeded, monkeypatch, error="boom")
+    monkeypatch.undo()
+    rebuild_step(seeded, monkeypatch)
+
+    page.goto(f"{live_server.url}/#models")
+
+    rebuilds = page.locator("#model-checks .check")
+    expect(rebuilds).to_have_count(2)
+    expect(rebuilds.nth(0).locator(".muted")).to_have_text("重建失敗：RuntimeError: boom")
+    expect(rebuilds.nth(0).locator("i")).to_have_class("warn")
+    rebuilt = f"已重建 1 檔，自 {recent.isoformat()} 起"
+    expect(rebuilds.nth(1).locator(".muted")).to_have_text(rebuilt)
+    expect(rebuilds.locator(".pinned")).to_have_text([seeded.last_session.isoformat()] * 2)
+
+
 def test_a_failed_rebuild_shows_its_error(
     page: Page, live_server: LiveServer, seeded: Seed, monkeypatch: pytest.MonkeyPatch
 ) -> None:
