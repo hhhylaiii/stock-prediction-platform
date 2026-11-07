@@ -134,7 +134,7 @@ def observable_frame(
     current: bool = False,
     masked: Mapping[str, frozenset[str]] = MASKED_MONTHS,
 ) -> pd.DataFrame:
-    """Per listed stock and day in [start, end], which OBSERVABLE gaps have a known cause.
+    """Per stock and day in [start, end], whether each OBSERVABLE or LISTING_WINDOWS gap is known.
 
     With current, also each CHECKED feature as today's database gives it, masked.
     """

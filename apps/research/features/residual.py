@@ -94,11 +94,10 @@ def _recorded(panel: pd.DataFrame, signal: str, column: str) -> pd.Series:
 def observable_gaps(
     panel: pd.DataFrame, exempt: Mapping[str, frozenset[str]] = NO_MARGINS
 ) -> pd.DataFrame:
-    """Per row, whether each OBSERVABLE gap reads only inputs on record or its industry lacks it.
+    """Per row, whether each OBSERVABLE or LISTING_WINDOWS gap has a cause known on its day.
 
-    A value read from inputs all on record is missing by its formula, not by the source; a
-    fallback left NaN by a report-basis switch does not explain its column's gap. A
-    LISTING_WINDOWS gap is known when the listing is younger than the window.
+    Inputs all on record or an industry without the item explain an OBSERVABLE gap, a fallback
+    left NaN by a report-basis switch does not; a listing younger than the window explains one.
     """
     industry = canonical_industry(panel["industry"])
     observed = {}

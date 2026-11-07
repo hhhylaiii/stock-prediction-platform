@@ -784,6 +784,8 @@ def test_observable_gaps_mark_formula_and_industry_gaps_but_not_missing_inputs()
         if (stock_id, day) != ("2330", d("2016-03-02"))
     )
 
+    listed("2883", "2015-06-01", "2016-03-31")
+    StockMaster.objects.filter(stock_id="2883").update(list_date=None)
     listed("2882", "2015-06-01", "2016-03-31")
     SharesOutstanding.objects.create(
         stock_id="2882", effective_date=d("2015-01-02"), shares=1_000_000
@@ -822,6 +824,7 @@ def test_observable_gaps_mark_formula_and_industry_gaps_but_not_missing_inputs()
     assert gap("2330", "fund_ep") == (False, True)
     assert gap("2330", "tech_mom_250_20") == (True, True)
     assert gap("2330", "ind_mom_neutral") == (True, True)
+    assert gap("2883", "tech_mom_250_20") == (True, False)
     assert gap("2881", "fund_gross_margin") == (True, True)
     assert gap("2881", "fund_gm_yoy_chg") == (True, True)
     assert gap("2881", "fund_debt_ratio") == (True, False)
