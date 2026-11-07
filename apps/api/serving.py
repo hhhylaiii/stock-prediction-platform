@@ -306,14 +306,27 @@ def served_monitor(windows: dict[Slot, tuple[date, date]]) -> dict[Slot, list[di
     return served
 
 
-def recent_mean(run: ServingRun | None, day: date | None, field: str) -> tuple[float | None, int]:
-    """Mean of a monitor column over the slot's last 60 evaluated days up to the day."""
-    if run is None or day is None:
-        return None, 0
-    slot = Slot(run.objective, run.horizon)
-    window = {slot: (months_before(day, MONITOR_LOOKBACK_MONTHS), day)}
-    rows = served_monitor(window).get(slot, [])
+def column_mean(rows: list[dict[str, Any]], field: str) -> tuple[float | None, int]:
+    """Mean of a monitor column over the last 60 evaluated days among the rows."""
     values = [row[field] for row in reversed(rows) if row[field] is not None][:MONITOR_DAYS]
     if not values:
         return None, 0
     return round(fmean(values), MONITOR_DIGITS), len(values)
+
+
+def recent_means(
+    day: date | None, picks: list[tuple[ServingRun | None, str]]
+) -> list[tuple[float | None, int]]:
+    """Each run's column mean over its slot's last 60 evaluated days, from one monitor read."""
+    slots = {Slot(run.objective, run.horizon) for run, _ in picks if run is not None}
+    if day is None or not slots:
+        return [(None, 0)] * len(picks)
+    served = served_monitor(
+        dict.fromkeys(slots, (months_before(day, MONITOR_LOOKBACK_MONTHS), day))
+    )
+    return [
+        (None, 0)
+        if run is None
+        else column_mean(served.get(Slot(run.objective, run.horizon), []), field)
+        for run, field in picks
+    ]
