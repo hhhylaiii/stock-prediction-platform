@@ -167,6 +167,22 @@ def test_alert_entries_say_how_each_run_was_judged(
     )
 
 
+def test_a_mode_without_its_dates_still_says_it_only_warns(
+    page: Page, live_server: LiveServer, seeded: Seed
+) -> None:
+    graced = {**ALERT, **UNSET, "run_id": "rank-b", "mode": "grace", "grace_start": "2026-10-01"}
+    reset = {**ALERT, **UNSET, "run_id": "rank-c", "mode": "reset", "reset_rows": 12}
+    log(seeded, "model_alert", "warning", {"runs": [graced, reset]})
+
+    page.goto(f"{live_server.url}/#models")
+
+    lines = page.locator("#model-checks .check").filter(has_text="模型告警").locator(".run")
+    expect(lines.nth(0)).to_have_text(f"rank-b{ALERT_TEXT}；寬限期內，只告警不降級")
+    expect(lines.nth(1)).to_have_text(
+        f"rank-c{ALERT_TEXT}；此 slot 在 restore 重設期（已累積 12／— 列），只告警不降級"
+    )
+
+
 def test_a_refused_build_names_each_failed_slot_and_gate(
     page: Page, live_server: LiveServer, seeded: Seed
 ) -> None:
@@ -191,6 +207,7 @@ def test_a_refused_build_names_each_failed_slot_and_gate(
     page.goto(f"{live_server.url}/#models")
 
     promotion = page.locator("#model-checks .check").filter(has_text="換模")
+    expect(promotion.get_by_text("換模", exact=True)).to_have_count(1)
     expect(promotion.locator("i")).to_have_class("warn")
     lines = promotion_lines(page)
     expect(lines).to_have_count(3)

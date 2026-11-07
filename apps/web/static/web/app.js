@@ -786,10 +786,11 @@
   }
 
   function modeText(run) {
-    if (run.mode === 'grace' && run.grace_start && run.grace_end) return '寬限期 ' + run.grace_start + '–' + run.grace_end + '，只告警不降級';
-    if (run.mode !== 'reset' || !run.restored_on) return '';
+    if (run.mode === 'grace') return (run.grace_start && run.grace_end ? '寬限期 ' + run.grace_start + '–' + run.grace_end : '寬限期內') + '，只告警不降級';
+    if (run.mode !== 'reset') return '';
     const count = v => has(v) ? v : '—';
-    return '此 slot 在 restore 重設期（' + run.restored_on + ' restore，已累積 ' + count(run.reset_rows) + '／' + count(run.reset_needed) + ' 列），只告警不降級';
+    const parts = [run.restored_on ? run.restored_on + ' restore' : '', '已累積 ' + count(run.reset_rows) + '／' + count(run.reset_needed) + ' 列'];
+    return '此 slot 在 restore 重設期（' + parts.filter(Boolean).join('，') + '），只告警不降級';
   }
 
   function slotText(slot) {

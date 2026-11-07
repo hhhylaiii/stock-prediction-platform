@@ -132,12 +132,14 @@ def test_the_serving_models_are_listed_with_their_scores(
     expect(rules).to_contain_text("換版後接著累積")
     expect(rules).to_contain_text("報酬區間模型 20 日覆蓋率不在 70%–90%")
     expect(rules).to_contain_text("上漲機率模型 20 日 Brier 高於 baseline")
+    expect(rules).to_contain_text("降級不會自動恢復，要人工 restore")
+    expect(rules).to_contain_text("換模後的寬限期與 restore 後的重設期只告警、不降級")
 
 
 def test_a_degraded_model_says_since_when_and_whose_rows_judged_it(
     page: Page, live_server: LiveServer, scored: Seed
 ) -> None:
-    window = {"own_rows": 40, "days": 60, "mostly_predecessors": True}
+    window = {"own_rows": 20, "days": 60, "mostly_predecessors": True}
     ModelRun.objects.filter(pk="prob-h20").update(
         status="degraded", params={"degraded_on": "2026-10-20", "degraded_window": window}
     )
@@ -150,7 +152,7 @@ def test_a_degraded_model_says_since_when_and_whose_rows_judged_it(
     rows = page.locator("#model-table .trow")
     expect(rows.nth(5)).to_contain_text("降級中")
     expect(rows.nth(5).locator(".degraded")).to_have_text(
-        "2026-10-20 起；窗口 40／60 列為本 run（67%），多為前任 run 的列"
+        "2026-10-20 起；窗口 20／60 列為本 run（33%），多為前任 run 的列"
     )
     expect(rows.nth(3).locator(".degraded")).to_have_text("2026-10-21 起")
     expect(rows.nth(0).locator(".degraded")).to_have_count(0)
