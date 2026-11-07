@@ -25,6 +25,7 @@
     statement_overwritten: '財報數字以 MOPS 覆寫',
     statement_margin_cleared: '清除累計期間的利益率',
     statement_viewer_mismatch: '下市公司財報由 XBRL 檢視頁補',
+    revenue_company_mismatch: '月營收由 MOPS 單一公司查詢補缺',
     fi_holding_zero_replaced: '外資持股 0 值覆寫',
     market_history_rebuilt: '市場歷史表重建',
     statement_source_mismatch: '財報兩來源數字不同',
