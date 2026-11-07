@@ -18,7 +18,7 @@
 - 量到的時間包含 view、查詢與序列化，不含網路與 gunicorn。
 - `manage.py phase5_report` 用同一套量法，另外透過 API 逐條檢查驗收條件、記下資料量，寫成一份 markdown。
 - 環境：本機 macOS、Docker 的 PostgreSQL 16。twp 那一輪是在 2026-11-05 15:54 量的，正好在 ETL 時段內。
-- 表一在本 PR 的 commit「fix: keep negative monthly ic bars inside the chart」上量測，當時已含 #64、#65。截圖在加深 seed 之後截，當時已含 #68。表二在本 PR 的分支上用 `phase5_report` 重量，分支以 develop 977c31b 為底，已含 #76。
+- 表一在 #72 的 commit「fix: keep negative monthly ic bars inside the chart」上量測，當時已含 #64、#65。截圖在加深 seed 之後截，當時已含 #68。表二在 #104 的分支上用 `phase5_report` 重量，分支以 develop 977c31b 為底，已含 #76。
 
 twp 那一輪用唯讀交易連線，任何寫入都會被資料庫拒絕。throttle 每個 process 各自計數，預設 300/min；`--repeat 20` 共 231 次，用不到調高，調高只是讓 `--repeat` 可以設得更大。指令會記下每一次呼叫的狀態碼，只要有一次不同，狀態欄就會寫成像 `200/429×3` 的樣子：
 
