@@ -8,7 +8,7 @@ from apps.etl.models import DataQualityLog
 from apps.research.gates import SAMPLE_UNITS, Gate, SlotGates
 from apps.research.monitor import MODE_FIELDS, MODES, alert_problems
 from apps.research.predict import Slot
-from apps.research.promotion import _alert, _failed
+from apps.research.promotion import _failed, _note
 from tests.e2e.conftest import XSS_NAME, Seed
 
 pytestmark = pytest.mark.e2e
@@ -238,9 +238,15 @@ def refused(slot: Slot, run_id: str, *gates: Gate) -> SlotGates:
 
 
 def promotion_alert(
-    seed: Seed, run_key: str, results: list[SlotGates], reason: str = "", back: int = 1
+    seed: Seed,
+    run_key: str,
+    results: list[SlotGates],
+    reason: str = "",
+    back: int = 1,
+    scope: str = "rank",
 ) -> None:
-    _alert(seed.sessions[-back], run_key, _failed(results), reason)
+    day = seed.sessions[-back]
+    _note(day, scope, run_key, _failed(results), reason, promoted=bool(reason))
 
 
 def test_a_refused_build_names_each_failed_slot_and_gate(
@@ -303,7 +309,10 @@ def test_a_same_day_force_replaces_the_refusal_and_other_builds_stay(
     promotion_alert(seeded, "rank-2026-11", rank)
     promotion_alert(seeded, "rank-2026-11", rank, reason="人工確認後強制換模")
     promotion_alert(
-        seeded, "interval-2026-11", [refused(Slot("quantile", 20), "q-n", DATA_QUALITY)]
+        seeded,
+        "interval-2026-11",
+        [refused(Slot("quantile", 20), "q-n", DATA_QUALITY)],
+        scope="interval",
     )
 
     page.goto(f"{live_server.url}/#models")

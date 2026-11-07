@@ -62,7 +62,12 @@ def failing_h5(monkeypatch: pytest.MonkeyPatch) -> None:
 
     def quality(run: ModelRun) -> Gate:
         if run.params["horizon"] == 5:
-            return Gate("data_quality", False, 1.0, "無 error", 1, f"{LAST} row_count")
+            reason = f"1 天有 error，最近 {LAST} row_count"
+            errors = {
+                "errors": [{"date": LAST.isoformat(), "check": "row_count"}],
+                "errors_total": 1,
+            }
+            return Gate("data_quality", False, 1.0, "無 error", 1, reason, errors)
         return checked_quality(run)
 
     monkeypatch.setattr(gates, "data_quality", quality)
@@ -108,7 +113,16 @@ def test_a_first_launch_goes_live_with_its_rows(
         rows = Prediction.objects.filter(run=run, date=LAST)
         assert rows.count() == result.written[run.run_id] > 0
     assert set(result.written) == {run.run_id for run in runs}
-    assert not alerts()
+    [record] = alerts()
+    assert (record.date, record.severity) == (LAST, DataQualityLog.Severity.INFO)
+    assert record.detail == {
+        "scope": "rank",
+        "run_key": "rank-prod",
+        "forced": False,
+        "reason": None,
+        "failed": [],
+        "promoted": True,
+    }
     assert dispatched == []
     shadows = ModelRun.objects.filter(run_key="rank-prod-shadow")
     assert set(shadows.values_list("status", flat=True)) == {ModelStatus.CANDIDATE}
@@ -161,8 +175,9 @@ def test_failed_gates_keep_the_serving_runs_and_alert(
     assert dispatched == [alert]
     assert alert.date == LAST
     assert alert.severity == DataQualityLog.Severity.WARNING
-    assert alert.detail["run_key"] == "rank-prod"
+    assert (alert.detail["scope"], alert.detail["run_key"]) == ("rank", "rank-prod")
     assert alert.detail["forced"] is False
+    assert alert.detail["promoted"] is False
     failed = {entry["slot"]: entry for entry in alert.detail["failed"]}
     assert set(failed) == {str(slot) for slot in RANK_SLOTS}
     for entry in failed.values():
@@ -200,6 +215,9 @@ def test_force_swaps_in_a_build_that_failed_and_records_why(
     assert dispatched == [alert]
     assert alert.detail["forced"] is True
     assert alert.detail["reason"] == why
+    assert alert.detail["promoted"] is True
+    assert alert.detail["scope"] == "rank"
+    assert alert.severity == DataQualityLog.Severity.WARNING
     assert len(alert.detail["failed"]) == 2
 
 
@@ -209,12 +227,23 @@ def test_force_without_failures_is_not_recorded_as_forced(
 ) -> None:
     runs = built("rank", "rank-wf1", researched)
     passed(LAST)
-    sent(monkeypatch)
+    dispatched = sent(monkeypatch)
 
     promote("rank-prod", LAST, researched, force=True, reason="routine")
 
-    assert {fresh(run).params["promotion"]["forced"] for run in runs} == {False}
-    assert not alerts()
+    for run in map(fresh, runs):
+        assert run.params["promotion"] == {"forced": False, "reason": None, "failed": []}
+    [record] = alerts()
+    assert record.severity == DataQualityLog.Severity.INFO
+    assert record.detail == {
+        "scope": "rank",
+        "run_key": "rank-prod",
+        "forced": False,
+        "reason": None,
+        "failed": [],
+        "promoted": True,
+    }
+    assert dispatched == []
 
 
 @pytest.mark.django_db
@@ -365,6 +394,10 @@ def test_a_late_promotion_serves_and_alerts_from_its_own_day(
     for run in map(fresh, runs):
         assert run.params["promoted_on"] == LAST.isoformat()
         assert set(Prediction.objects.filter(run=run).values_list("date", flat=True)) == {LAST}
+    assert [row.detail["promoted"] for row in sorted(alerts(), key=lambda row: row.pk)] == [
+        False,
+        True,
+    ]
 
 
 @pytest.mark.django_db
@@ -417,12 +450,12 @@ def test_one_failing_slot_keeps_the_whole_build_out_unless_forced(
     call_command("promote", run_key="rank-prod", force=True, reason="checked by hand", stdout=out)
 
     assert "強制換模（checked by hand）" in out.getvalue()
-    assert f"{five.run_id}：data_quality（{LAST} row_count）" in out.getvalue()
+    assert f"{five.run_id}：data_quality（1 天有 error，最近 {LAST} row_count）" in out.getvalue()
     assert fresh(five).params["promotion"]["forced"] is True
     assert fresh(five).params["promotion"]["failed"][0]["gates"] == [
         {
             "name": "data_quality",
-            "reason": f"{LAST} row_count",
+            "reason": f"1 天有 error，最近 {LAST} row_count",
             "value": 1.0,
             "threshold": "無 error",
             "sample": 1,

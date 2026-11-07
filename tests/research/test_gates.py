@@ -14,6 +14,7 @@ from apps.research import gates
 from apps.research.baseline_runs import BASELINE
 from apps.research.gates import NO_SERVING, Gate, SlotGates, check_gates
 from apps.research.lgbm_runs import MODEL
+from apps.research.management.commands.check_gates import verdict
 from apps.research.models import (
     HoldoutRun,
     LabelDaily,
@@ -119,6 +120,8 @@ def test_a_first_launch_skips_the_comparisons_and_judges_the_shadow(researched: 
         "data_quality",
     ]
     assert set(stored["gates"][2]) == {"name", "passed", "value", "threshold", "sample", "reason"}
+    assert stored["gates"][3]["errors"] == []
+    assert stored["gates"][3]["errors_total"] == 0
     assert set(gates.SAMPLE_UNITS) == {gate["name"] for gate in stored["gates"]}
     assert ModelRun.objects.filter(run_key="rank-prod", status="candidate").count() == 2
 
@@ -272,6 +275,7 @@ def test_the_quality_gate_lists_errors_and_needs_some_checks(researched: Path) -
     assert empty.passed is False
     assert empty.sample == 0
     assert "沒有任何品質檢查紀錄" in empty.reason
+    assert empty.extra == {"errors": [], "errors_total": 0}
 
     logged(run)
     logged(run, "error", run.train_end)
@@ -287,10 +291,47 @@ def test_the_quality_gate_lists_errors_and_needs_some_checks(researched: Path) -
 
     assert found.passed is False
     assert found.value == 3
-    assert found.reason == (
-        f"{run.train_end} etl_runs, {run.train_end} row_count, {LAST} row_count"
-    )
+    assert found.reason == f"2 天有 error，最近 {LAST} row_count"
     assert found.sample == 3
+    assert found.extra == {
+        "errors": [
+            {"date": LAST.isoformat(), "check": "row_count"},
+            {"date": run.train_end.isoformat(), "check": "etl_runs"},
+            {"date": run.train_end.isoformat(), "check": "row_count"},
+        ],
+        "errors_total": 3,
+    }
+
+
+@pytest.mark.django_db
+def test_the_quality_gate_names_every_check_of_its_latest_error_day_and_caps_the_list(
+    researched: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs = built("rank", "rank-wf1", researched)
+    run = runs[0]
+    twenty = next(item for item in runs if item.params["horizon"] == 20)
+    logged(run)
+    logged(run, "error", run.train_end)
+    for name in ("row_count", "missing_values", "etl_runs"):
+        DataQualityLog.objects.create(date=LAST, check_name=name, severity="error", detail={})
+    monkeypatch.setattr(gates, "ERROR_LIMIT", 2)
+
+    found = by_slot(check_gates("rank-prod", researched))[Slot("rank", 20)]["data_quality"]
+
+    assert found.reason == f"2 天有 error，最近 {LAST} etl_runs、missing_values、row_count"
+    assert found.value == 4
+    assert found.extra == {
+        "errors": [
+            {"date": LAST.isoformat(), "check": "etl_runs"},
+            {"date": LAST.isoformat(), "check": "missing_values"},
+        ],
+        "errors_total": 4,
+    }
+    stored = ModelRun.objects.get(pk=twenty.pk).params["gates"]["gates"]
+    quality = next(gate for gate in stored if gate["name"] == "data_quality")
+    assert quality["errors"] == found.extra["errors"]
+    assert quality["errors_total"] == 4
+    assert all("errors" not in gate for gate in stored if gate["name"] != "data_quality")
 
 
 @pytest.mark.django_db
@@ -399,6 +440,21 @@ def built_n(run_key: str) -> ModelRun:
 
 def gate(passed: bool | None) -> Gate:
     return Gate("agreement", passed, None, "", 0, "")
+
+
+def test_the_report_points_a_failed_quality_gate_to_its_full_error_list() -> None:
+    listed = {"errors": [{"date": "2026-10-30", "check": "etl_runs"}], "errors_total": 3}
+    failed = Gate("data_quality", False, 3.0, "無 error", 5, "2 天有 error", listed)
+    clean = Gate("data_quality", True, 0.0, "無 error", 5, "", {"errors": [], "errors_total": 0})
+
+    assert verdict(failed) == (
+        "不過（2 天有 error），值 3.0000，門檻 無 error，樣本 5；"
+        '共 3 組 error，最近 3 組的清單在 N 的 params["gates"]'
+    )
+    many = Gate("data_quality", False, 250.0, "無 error", 9, "9 天有 error", {"errors_total": 250})
+    assert verdict(many).endswith('共 250 組 error，最近 200 組的清單在 N 的 params["gates"]')
+    assert verdict(clean) == "通過，值 0.0000，門檻 無 error，樣本 5"
+    assert verdict(gate(False)) == "不過（），值 —，門檻 ，樣本 0"
 
 
 def test_a_slot_passes_unless_some_gate_fails() -> None:
