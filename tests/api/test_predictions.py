@@ -10,6 +10,7 @@ from pytest_django import DjangoAssertNumQueries
 from apps.market.models import TradingCalendar
 from apps.research.models import FeatureDaily, ModelMonitor, ModelRun, Prediction
 from tests.api.conftest import (
+    EARLY_CALENDAR_START,
     NOV_2,
     OCT_28,
     OCT_29,
@@ -22,9 +23,16 @@ from tests.api.conftest import (
     envelope_of,
     sessions_until,
     taipei,
+    trained_until,
 )
 
 pytestmark = pytest.mark.usefixtures("calendar_in_db")
+
+
+@pytest.fixture
+def calendar_start() -> date:
+    """Runs here train before July, so their out-of-sample days start inside the calendar."""
+    return EARLY_CALENDAR_START
 
 
 def by_code(body: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -347,6 +355,7 @@ def test_monitor_chains_the_runs_that_served_and_skips_in_sample_days(
 ) -> None:
     switch = date(2026, 9, 30)
     days = sessions_until(OCT_30)[-30:]
+    ModelRun.objects.filter(pk="rank-h20").update(train_end=trained_until(switch))
     old = add_model_run("rank-old", "rank", status="retired", train_end=date(2026, 6, 30))
     ModelMonitor.objects.bulk_create(
         ModelMonitor(

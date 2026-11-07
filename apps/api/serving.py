@@ -13,8 +13,10 @@ from typing import Any
 
 from django.db.models import F, OuterRef, Q, QuerySet, Subquery
 
+from apps.market.calendar import CalendarError, TradingDays
 from apps.research.models import ModelMonitor, ModelObjective, ModelRun, ModelStatus, Prediction
 from apps.research.runs import SCREENING_MODEL
+from apps.research.walkforward import oos_start
 
 STATUS_ORDER = (ModelStatus.ACTIVE, ModelStatus.DEGRADED, ModelStatus.RETIRED)
 SERVING = (ModelStatus.ACTIVE, ModelStatus.DEGRADED)
@@ -234,6 +236,45 @@ def months_before(day: date, count: int) -> date:
     return date(year, month + 1, min(day.day, calendar.monthrange(year, month + 1)[1]))
 
 
+@functools.cache
+def warn_unplaced(run_id: str, horizon: int, reason: str) -> None:
+    logger.warning(
+        "run %s has no %s-day out-of-sample day in the calendar (%s); its rows are left out",
+        run_id,
+        horizon,
+        reason,
+    )
+
+
+def first_oos_day(calendar: TradingDays, run_id: str, train_end: date, horizon: int) -> date | None:
+    """predict's out-of-sample boundary; None, with a warning, when the calendar cannot place it."""
+    try:
+        return oos_start(calendar, train_end, horizon)
+    except CalendarError as error:
+        warn_unplaced(run_id, horizon, str(error))
+        return None
+
+
+def out_of_sample(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Rows on or after their run's first out-of-sample day for the row's own horizon."""
+    if not rows:
+        return []
+    try:
+        calendar = TradingDays.from_db()
+    except CalendarError:
+        return []
+    trained = {(row["run_id"], row["horizon"]): row["run__train_end"] for row in rows}
+    starts = {
+        (run_id, horizon): first_oos_day(calendar, run_id, end, horizon)
+        for (run_id, horizon), end in trained.items()
+    }
+    return [
+        row
+        for row in rows
+        if (start := starts[(row["run_id"], row["horizon"])]) is not None and row["date"] >= start
+    ]
+
+
 def served_monitor(windows: dict[Slot, tuple[date, date]]) -> dict[Slot, list[dict[str, Any]]]:
     """Per slot and day in (after, through], the monitor row of the run that served it, OOS only."""
     if not windows:
@@ -243,11 +284,13 @@ def served_monitor(windows: dict[Slot, tuple[date, date]]) -> dict[Slot, list[di
         condition |= Q(
             run__objective=slot.objective, horizon=slot.horizon, date__gt=after, date__lte=through
         )
-    rows = (
-        ModelMonitor.objects.filter(condition, date__gt=F("run__train_end"))
-        .exclude(run__status=ModelStatus.CANDIDATE)
-        .exclude(run__model_type=SCREENING_MODEL)
-        .values("date", *MONITOR_FIELDS, *SERVING_FIELDS)
+    rows = out_of_sample(
+        list(
+            ModelMonitor.objects.filter(condition, date__gt=F("run__train_end"))
+            .exclude(run__status=ModelStatus.CANDIDATE)
+            .exclude(run__model_type=SCREENING_MODEL)
+            .values("date", *MONITOR_FIELDS, *SERVING_FIELDS)
+        )
     )
     by_day: dict[tuple[Slot, date], list[dict[str, Any]]] = defaultdict(list)
     for row in rows:

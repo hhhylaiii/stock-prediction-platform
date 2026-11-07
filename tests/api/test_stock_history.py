@@ -9,6 +9,7 @@ from pytest_django import DjangoAssertNumQueries
 from apps.api.serving import warn_undated, warn_unreadable_periods
 from apps.research.models import FeatureDaily, LabelDaily, ModelRun
 from tests.api.conftest import (
+    EARLY_CALENDAR_START,
     SESSIONS,
     add_model_run,
     add_predictions,
@@ -19,11 +20,18 @@ from tests.api.conftest import (
 
 pytestmark = pytest.mark.usefixtures("calendar_in_db")
 
+
+@pytest.fixture
+def calendar_start() -> date:
+    """Runs here train before July, so their out-of-sample days start inside the calendar."""
+    return EARLY_CALENDAR_START
+
+
 LAST_LABELLED = date(2026, 10, 1)
 LABELLED = [day for day in SESSIONS if date(2026, 7, 6) <= day <= LAST_LABELLED]
 PREDICTED = [day for day in SESSIONS if date(2026, 7, 6) <= day <= date(2026, 10, 30)]
 QUANTILES = {"q10": -0.05, "q50": 0.01, "q90": 0.08, "ret_pred": 0.01}
-TRAINED_TO = date(2026, 6, 30)
+TRAINED_TO = date(2026, 6, 1)
 UNDATED = (
     "degraded run quantile-h20 has no readable params.degraded_on;"
     " its band is set aside on every day"
@@ -260,14 +268,30 @@ def test_a_gap_inside_a_window_does_not_shift_the_picks(client: Client, history:
     assert [row["date"] for row in rows] == [day.isoformat() for day in expected]
 
 
-def test_days_inside_the_run_s_training_window_are_not_history(
+def test_history_starts_on_the_run_s_first_out_of_sample_day(
     client: Client, history: ModelRun
 ) -> None:
-    ModelRun.objects.filter(pk="quantile-h20").update(train_end=date(2026, 9, 15))
+    at = SESSIONS.index(LAST_LABELLED)
+    ModelRun.objects.filter(pk="quantile-h20").update(train_end=SESSIONS[at - 20])
+    on_the_boundary = rows_of(envelope_of(client.get("/api/stocks/2330/history")))
+    ModelRun.objects.filter(pk="quantile-h20").update(train_end=SESSIONS[at - 19])
+    one_session_short = rows_of(envelope_of(client.get("/api/stocks/2330/history")))
 
-    rows = rows_of(envelope_of(client.get("/api/stocks/2330/history")))
+    assert [row["date"] for row in on_the_boundary] == [LAST_LABELLED.isoformat()]
+    assert one_session_short == []
 
-    assert [row["date"] for row in rows] == [LAST_LABELLED.isoformat()]
+
+def test_history_still_answers_when_a_boundary_is_past_the_calendar(
+    client: Client, history: ModelRun
+) -> None:
+    ModelRun.objects.filter(pk="quantile-h20").update(train_end=SESSIONS[-10])
+    add_predictions(history, SESSIONS[-5], 20, {"2330": QUANTILES})
+    add_labels(20, {SESSIONS[-5]: 0.03})
+
+    response = client.get("/api/stocks/2330/history")
+
+    assert response.status_code == 200
+    assert rows_of(envelope_of(response)) == []
 
 
 def test_unlabelled_or_null_labels_are_not_matured(client: Client, history: ModelRun) -> None:

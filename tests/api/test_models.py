@@ -10,6 +10,7 @@ from apps.api.model_runs import MONTH_DAYS, MONTH_IC
 from apps.research.eval_report import RANK_METRICS
 from apps.research.models import BacktestMetric, HoldoutRun, ModelMonitor, ModelRun, Prediction
 from tests.api.conftest import (
+    EARLY_CALENDAR_START,
     OCT_29,
     OCT_30,
     Runs,
@@ -18,9 +19,17 @@ from tests.api.conftest import (
     envelope_of,
     sessions_until,
     taipei,
+    trained_until,
 )
 
 pytestmark = pytest.mark.usefixtures("calendar_in_db")
+
+
+@pytest.fixture
+def calendar_start() -> date:
+    """Runs here train before July, so their out-of-sample days start inside the calendar."""
+    return EARLY_CALENDAR_START
+
 
 RESEARCH = (date(2014, 1, 2), date(2024, 12, 3))
 
@@ -64,6 +73,7 @@ def ic_on(n: int) -> float:
 def monitored(runs: Runs) -> Runs:
     """The rank line: an old run serves until the switch, the current one after it."""
     days = sessions_until(OCT_30)
+    ModelRun.objects.filter(pk="rank-h20").update(train_end=trained_until(SWITCH))
     old = add_model_run("rank-old", "rank", status="retired", train_end=date(2026, 1, 30))
     ModelMonitor.objects.bulk_create(
         ModelMonitor(
@@ -154,6 +164,7 @@ def test_recent_scores_average_the_last_six_months_of_monitoring(
 
 def test_recent_scores_skip_days_inside_a_run_s_training_window(client: Client, runs: Runs) -> None:
     days = sessions_until(OCT_30)
+    ModelRun.objects.filter(pk="rank-h20").update(train_end=trained_until(SWITCH))
     ModelMonitor.objects.bulk_create(
         ModelMonitor(
             run=runs.rank20, date=day, horizon=20, ic=0.5 if day <= SWITCH else 0.01, n_stocks=9
