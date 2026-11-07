@@ -498,3 +498,27 @@ def test_every_serving_run_of_a_slot_is_retired(
     assert stale.run_id in result.retired
     assert fresh(stale).status == ModelStatus.RETIRED
     assert {fresh(run).status for run in old} == {ModelStatus.RETIRED}
+
+
+@pytest.mark.django_db
+def test_rows_written_past_the_day_while_the_gates_run_stop_the_swap(
+    researched: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs = built("rank", "rank-wf1", researched)
+    rebased("rank-prod", PREV)
+    logged(runs[0])
+    passed(PREV)
+    sent(monkeypatch)
+    judge = promotion.check_gates
+
+    def judged_while_predicting(run_key: str, directory: Path) -> list[Any]:
+        found = judge(run_key, directory)
+        retired_copies(runs)
+        return found
+
+    monkeypatch.setattr(promotion, "check_gates", judged_while_predicting)
+    with pytest.raises(RunError, match=f"already hold rows through {LAST}"):
+        promote("rank-prod", PREV, researched)
+
+    untouched(runs)
+    assert not Prediction.objects.exists()

@@ -81,12 +81,16 @@ def _check_build(run_key: str, day: date, frozen_by: str) -> dict[Slot, ModelRun
     as_of = _as_of(runs)
     if day < as_of:
         raise RunError(f"{run_key} is built as of {as_of}; promote it on that day or later")
+    _refuse_later_rows(run_key, runs, day)
+    return runs
+
+
+def _refuse_later_rows(run_key: str, runs: dict[Slot, ModelRun], day: date) -> None:
     last = _last_rows(runs)
     if last is not None and last > day:
         raise RunError(
             f"the slots of {run_key} already hold rows through {last}; promote on {last} or later"
         )
-    return runs
 
 
 def _failed(checked: list[SlotGates]) -> list[dict[str, Any]]:
@@ -178,6 +182,7 @@ def promote(
             result = Promoted(False, checked, failed=failed)
         else:
             retired = _swap(runs, checked, day, failed, reason)
+            _refuse_later_rows(run_key, runs, day)
             written = predict(day, directory, replace=True, slots=list(runs)).written
             alert = _alert(day, run_key, failed, reason) if failed else None
             result = Promoted(True, checked, retired, written, failed)
