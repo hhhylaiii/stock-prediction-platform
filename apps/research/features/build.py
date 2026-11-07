@@ -1,5 +1,6 @@
 """Every stored feature of a date range, both batches, assembled from the groups (SPEC §6)."""
 
+from collections.abc import Mapping
 from datetime import date
 
 import pandas as pd
@@ -22,7 +23,7 @@ from apps.research.features.market import (
     load_market_features,
 )
 from apps.research.features.registry import feature_names
-from apps.research.features.residual import apply_residual_rules
+from apps.research.features.residual import MASKED_MONTHS, apply_fallbacks, mask_months
 from apps.research.features.size_risk import (
     industry_risk_features,
     second_batch_industry_features,
@@ -50,13 +51,15 @@ def _with_inputs(panel: pd.DataFrame, calendar: TradingDays, end: date) -> pd.Da
     return attach_market_features(funds, load_market_features(calendar, first, end))
 
 
-def compute_features(panel: pd.DataFrame) -> pd.DataFrame:
-    """Stock, date, universe flag and every stored feature of each panel row.
+def compute_features(
+    panel: pd.DataFrame, masked: Mapping[str, frozenset[str]] = MASKED_MONTHS
+) -> pd.DataFrame:
+    """Stock, date, universe flag and every stored feature of each panel row, source-gap rules on.
 
     The second batch is stored for later evaluation; screening and training read the first only.
     """
     technical = technical_features(panel)
-    fundamental = apply_residual_rules(fundamental_features(panel))
+    fundamental = apply_fallbacks(fundamental_features(panel), panel)
     groups = [
         technical,
         second_batch_technical_features(panel),
@@ -72,10 +75,15 @@ def compute_features(panel: pd.DataFrame) -> pd.DataFrame:
         [group.drop(columns=["stock_id", "date"], errors="ignore") for group in groups], axis=1
     )
     keys = panel[["stock_id", "date"]].assign(in_universe=panel["in_universe"].astype(bool))
-    return pd.concat([keys, values[FEATURE_COLUMNS].astype("float64")], axis=1)
+    return mask_months(pd.concat([keys, values[FEATURE_COLUMNS].astype("float64")], axis=1), masked)
 
 
-def build_feature_frame(calendar: TradingDays, start: date, end: date) -> pd.DataFrame:
+def build_feature_frame(
+    calendar: TradingDays,
+    start: date,
+    end: date,
+    masked: Mapping[str, frozenset[str]] = MASKED_MONTHS,
+) -> pd.DataFrame:
     """Features of every listed stock on the trading days in [start, end], after the warm-up.
 
     Always the whole market: industry averages need the full cross-section of each day.
@@ -86,6 +94,6 @@ def build_feature_frame(calendar: TradingDays, start: date, end: date) -> pd.Dat
     panel = load_feature_panel(calendar, start, end)
     if panel.empty:
         return pd.DataFrame(columns=FRAME_COLUMNS).astype(FRAME_TYPES)
-    features = compute_features(_with_inputs(panel, calendar, end))
+    features = compute_features(_with_inputs(panel, calendar, end), masked)
     inside = features[features["date"].between(start, end)]
     return inside.sort_values(["date", "stock_id"], ignore_index=True)[FRAME_COLUMNS]

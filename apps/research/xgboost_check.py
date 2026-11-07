@@ -8,7 +8,6 @@ import pandas as pd
 import xgboost as xgb
 
 from apps.research import lgbm_runs
-from apps.research.baseline_runs import fold_inputs
 from apps.research.gbdt import EARLY_STOPPING_ROUNDS, DailyRankIC, split_validation
 from apps.research.gbdt import MAX_ROUNDS as DEFAULT_MAX_ROUNDS
 from apps.research.labels import HORIZONS
@@ -20,7 +19,7 @@ from apps.research.prediction_cache import (
     fold_path,
     load_fold_predictions,
 )
-from apps.research.rank_model import RANK_LABEL, rank_inputs
+from apps.research.rank_model import RANK_LABEL
 from apps.research.runs import feature_hash
 from apps.research.training import KEYS, load_labels, training_rows
 from apps.research.walkforward import Fold
@@ -119,9 +118,9 @@ def _window(inputs: pd.DataFrame, labels: pd.DataFrame, fold: Fold, test: bool) 
 def _fold_ics(
     run_key: str, fold: Fold, features: list[str], directory: Path, seed: int
 ) -> list[pd.DataFrame]:
-    read = fold_inputs(fold, fold.train_start, fold.test_end, directory, features)
+    read = lgbm_runs.rank_fold_inputs(fold, directory, features)
     _refuse(run_key, [fold.index] if _stale(run_key, fold, read.feature_hash) else [])
-    inputs = rank_inputs(read.raw, features)
+    inputs = read.raw
     cached = load_fold_predictions(run_key, lgbm_runs.MODEL, fold)
     parts = []
     for horizon in HORIZONS:

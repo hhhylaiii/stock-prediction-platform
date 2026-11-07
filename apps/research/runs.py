@@ -16,12 +16,20 @@ from django.conf import settings
 from django.db import connection, transaction
 
 from apps.research.features.store import existing_partition
-from apps.research.holdout import HoldoutTicket, authorize_folds, is_holdout, require_key
+from apps.research.holdout import (
+    HoldoutTicket,
+    ProductionPass,
+    authorize_folds,
+    authorize_production,
+    is_holdout,
+    require_key,
+)
 from apps.research.models import BacktestMetric, HoldoutRun, ModelRun, ModelStatus
 from apps.research.prediction_cache import fold_cached, fold_record
 from apps.research.ranges import years
 from apps.research.walkforward import Fold
 
+PRODUCTION = "production"
 LIBRARIES = ("django", "numpy", "pandas", "pyarrow", "scikit-learn", "lightgbm")
 MODEL_SUFFIX = ".pkl"
 CHUNK = 1 << 20
@@ -141,6 +149,7 @@ def record_run(
     *,
     fold: Fold | None = None,
     ticket: HoldoutTicket | None = None,
+    production: ProductionPass | None = None,
 ) -> ModelRun:
     """Write a candidate run of a fold with its model file, replacing only a candidate."""
     path = model_path(run.run_key, run.run_id)
@@ -149,7 +158,9 @@ def record_run(
     if fold is not None:
         run.params = {**run.params, "fold": fold_record(fold)}
     run.full_clean(validate_unique=False)
-    if fold is not None:
+    if production is not None:
+        authorize_production(run.run_key, production, fold)
+    elif fold is not None:
         _writable(run.run_key, fold, ticket)
     temporary = None if model is None else _pickled(path, model)
     try:
@@ -164,6 +175,12 @@ def record_run(
         if temporary is not None:
             Path(temporary).unlink(missing_ok=True)
     return run
+
+
+def refuse_production_key(run_key: str) -> None:
+    """Refuse research fits under a run_key that holds a production build."""
+    if ModelRun.objects.filter(run_key=run_key, params__has_key=PRODUCTION).exists():
+        raise RunError(f"{run_key} holds a production build; build_run refits it")
 
 
 def _remove(directory: Path) -> None:

@@ -10,10 +10,13 @@ from apps.market.calendar import TradingDays
 from apps.research.holdout import (
     HoldoutError,
     HoldoutTicket,
+    ProductionPass,
     authorize_folds,
+    authorize_production,
     claim_holdout,
     holdout_claimed,
     latest_ticket,
+    production_pass,
     require_key,
 )
 from apps.research.models import HoldoutRun
@@ -303,3 +306,36 @@ def test_holdout_folds_past_the_claimed_last_date_are_refused(
     authorize_folds(generate_folds(long_calendar, cutoff), "rank-v1", ticket)
     with pytest.raises(HoldoutError, match="past the claimed last_date"):
         authorize_folds(folds, "rank-v1", ticket)
+
+
+@pytest.mark.django_db
+def test_a_production_pass_waits_for_the_holdout_claim_of_its_scope() -> None:
+    with pytest.raises(HoldoutError, match="rank design is not frozen"):
+        production_pass("rank")
+    claim_holdout("interval", "interval-final", LAST)
+    with pytest.raises(HoldoutError, match="rank design is not frozen"):
+        production_pass("rank")
+
+    claim_holdout("rank", "rank-final", LAST)
+
+    assert production_pass("rank") == ProductionPass("rank", "rank-final")
+
+
+@pytest.mark.django_db
+def test_production_writes_need_a_standing_claim_a_scope_key_and_no_holdout_key() -> None:
+    forged = ProductionPass("rank", "rank-final")
+    with pytest.raises(HoldoutError, match="rank design is not frozen"):
+        authorize_production("rank-prod", forged)
+    claim_holdout("interval", "interval-final", LAST)
+    with pytest.raises(HoldoutError, match="rank design is not frozen"):
+        authorize_production("rank-prod", forged)
+
+    claim_holdout("rank", "rank-final", LAST)
+
+    authorize_production("rank-prod", forged)
+    with pytest.raises(HoldoutError, match="covers rank- run_keys"):
+        authorize_production("interval-prod", forged)
+    with pytest.raises(HoldoutError, match="rank-final is a holdout run"):
+        authorize_production("rank-final", forged)
+    with pytest.raises(HoldoutError, match="interval-final is a holdout run"):
+        authorize_production("interval-final", ProductionPass("interval", "interval-final"))

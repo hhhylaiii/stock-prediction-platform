@@ -28,6 +28,17 @@ ECE_BINS = 10
 MARKET_LEVEL = [spec.name for spec in REGISTRY if spec.batch == 1 and spec.market_level]
 
 
+@dataclass(frozen=True)
+class TargetVariant:
+    """A return or interval design choice under comparison; the defaults are the SPEC recipe."""
+
+    market: bool = True
+    relative_up: bool = False
+
+
+TARGET_RECIPE = TargetVariant()
+
+
 def raw_features(screened: Screened) -> list[str]:
     """Screened stock-level features, then the market features the screening left out."""
     misplaced = [name for name in screened.kept if name not in STOCK_LEVEL]

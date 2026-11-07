@@ -1,19 +1,26 @@
+import json
 import math
 from datetime import date
 
 import pandas as pd
 import pytest
 
+from apps.research.features.fundamental import sourced_name
 from apps.research.features.residual import (
-    COVERAGE_FLOOR,
+    ACCEPT_GAP,
+    ACCEPT_RATIO,
     FALLBACKS,
     MASKED_MONTHS,
+    MAX_MASKED_SHARE,
     affected_months,
-    apply_residual_rules,
+    apply_fallbacks,
+    mask_months,
     monthly_coverage,
+    rules_signature,
 )
 
 NAN = math.nan
+COLUMNS = ["fund_rev_yoy", "fund_rev_3m_yoy", "fund_rev_mom", "fund_rev_yoy_q"]
 
 
 def d(text: str) -> date:
@@ -21,36 +28,54 @@ def d(text: str) -> date:
 
 
 def frame(rows: list[tuple[str, str, float, float, float, float]]) -> pd.DataFrame:
-    columns = ["fund_rev_yoy", "fund_rev_3m_yoy", "fund_rev_mom", "fund_rev_yoy_q"]
     return pd.DataFrame(
         {
             "stock_id": [row[0] for row in rows],
             "date": [d(row[1]) for row in rows],
-            **{name: [row[k + 2] for row in rows] for k, name in enumerate(columns)},
+            **{name: [row[k + 2] for row in rows] for k, name in enumerate(COLUMNS)},
         }
     )
 
 
-def test_monthly_revenue_growth_falls_back_to_the_quarterly_growth_for_every_stock() -> None:
+def sourcing(flags: list[float]) -> pd.DataFrame:
+    """The same on-record flag for every revenue signal of each row."""
+    names = ["fund_rev_yoy", "fund_rev_3m_yoy", "fund_rev_mom"]
+    return pd.DataFrame({sourced_name(name): flags for name in names})
+
+
+def test_revenue_growth_takes_the_quarterly_growth_only_where_its_months_are_off_record() -> None:
     features = frame(
         [
             ("2330", "2017-03-01", 0.10, 0.20, 0.01, 0.30),
             ("2330", "2017-03-02", NAN, NAN, NAN, 0.30),
-            ("1101", "2017-03-02", NAN, NAN, NAN, NAN),
+            ("2317", "2017-03-02", NAN, NAN, NAN, 0.40),
+            ("1101", "2017-03-02", NAN, NAN, NAN, 0.50),
+            ("2002", "2017-03-02", NAN, NAN, NAN, NAN),
         ]
     )
 
-    ruled = apply_residual_rules(features)
+    ruled = apply_fallbacks(features, sourcing([1.0, NAN, 0.0, 1.0, NAN]))
 
-    assert ruled["fund_rev_yoy"].tolist()[:2] == [0.10, 0.30]
-    assert ruled["fund_rev_3m_yoy"].tolist()[:2] == [0.20, 0.30]
-    assert math.isnan(ruled["fund_rev_yoy"].iloc[2])
-    assert math.isnan(ruled["fund_rev_mom"].iloc[1])
-    assert ruled["fund_rev_yoy_q"].tolist()[:2] == [0.30, 0.30]
-    assert features["fund_rev_yoy"].isna().sum() == 2
+    assert ruled["fund_rev_yoy"].tolist()[:3] == [0.10, 0.30, 0.40]
+    assert ruled["fund_rev_3m_yoy"].tolist()[:3] == [0.20, 0.30, 0.40]
+    assert math.isnan(ruled["fund_rev_yoy"].iloc[3])
+    assert math.isnan(ruled["fund_rev_yoy"].iloc[4])
+    assert ruled["fund_rev_mom"].isna().sum() == 4
+    assert ruled["fund_rev_yoy_q"].tolist()[:4] == [0.30, 0.30, 0.40, 0.50]
+    assert features["fund_rev_yoy"].isna().sum() == 4
 
 
-def test_month_on_month_revenue_is_masked_for_every_stock_in_the_affected_months() -> None:
+def test_each_fallback_reads_its_own_on_record_flag() -> None:
+    features = frame([("2330", "2017-03-02", NAN, NAN, NAN, 0.30)])
+    flags = sourcing([1.0]).assign(**{sourced_name("fund_rev_3m_yoy"): [0.0]})
+
+    ruled = apply_fallbacks(features, flags)
+
+    assert math.isnan(ruled["fund_rev_yoy"].iloc[0])
+    assert ruled["fund_rev_3m_yoy"].iloc[0] == 0.30
+
+
+def test_any_column_is_masked_for_every_stock_in_its_affected_months() -> None:
     features = frame(
         [
             ("2330", "2017-02-28", 0.1, 0.1, 0.01, 0.1),
@@ -58,71 +83,96 @@ def test_month_on_month_revenue_is_masked_for_every_stock_in_the_affected_months
             ("1101", "2017-03-31", 0.1, 0.1, 0.03, 0.1),
             ("1101", "2017-04-03", 0.1, 0.1, 0.04, 0.1),
         ]
-    )
+    ).assign(ind_sector_id=[1.0, 2.0, 3.0, 4.0])
+    rules = {"fund_rev_mom": frozenset({"2017-03"}), "ind_sector_id": frozenset({"2017-04"})}
 
-    ruled = apply_residual_rules(features, masked={"fund_rev_mom": frozenset({"2017-03"})})
+    masked = mask_months(features, rules)
 
-    mom = ruled["fund_rev_mom"].tolist()
-    assert mom[0] == 0.01
-    assert math.isnan(mom[1])
-    assert math.isnan(mom[2])
-    assert mom[3] == 0.04
-    assert ruled["fund_rev_yoy"].tolist() == [0.1] * 4
+    assert masked["fund_rev_mom"].tolist()[0] == 0.01
+    assert masked["fund_rev_mom"].iloc[1:3].isna().all()
+    assert masked["fund_rev_mom"].tolist()[3] == 0.04
+    assert masked["ind_sector_id"].tolist()[:3] == [1.0, 2.0, 3.0]
+    assert math.isnan(masked["ind_sector_id"].iloc[3])
+    others = ["fund_rev_mom", "ind_sector_id"]
+    pd.testing.assert_frame_equal(masked.drop(columns=others), features.drop(columns=others))
+    assert features["fund_rev_mom"].notna().all()
 
 
-def test_the_rules_are_parameters_with_the_agreed_defaults() -> None:
+def test_defaults_are_the_decided_rules_and_empty_rules_change_nothing() -> None:
     assert dict(FALLBACKS) == {
         "fund_rev_yoy": "fund_rev_yoy_q",
         "fund_rev_3m_yoy": "fund_rev_yoy_q",
     }
-    assert set(MASKED_MONTHS) == {"fund_rev_mom"}
-    assert COVERAGE_FLOOR == 0.9
-    features = frame([("2330", "2017-03-01", NAN, 0.2, 0.01, 0.3)])
+    assert dict(MASKED_MONTHS) == {"fund_rev_mom": frozenset()}
+    assert (ACCEPT_RATIO, ACCEPT_GAP, MAX_MASKED_SHARE) == (1.5, 0.05, 0.2)
+    features = frame([("2330", "2017-03-02", NAN, 0.2, 0.01, 0.30)])
 
-    untouched = apply_residual_rules(features, fallbacks={}, masked={})
+    pd.testing.assert_frame_equal(apply_fallbacks(features, sourcing([NAN]), {}), features)
+    pd.testing.assert_frame_equal(mask_months(features), features)
+    pd.testing.assert_frame_equal(mask_months(features, {}), features)
 
-    pd.testing.assert_frame_equal(untouched, features)
 
-
-def test_monthly_coverage_counts_universe_rows_with_a_value_per_group() -> None:
+def test_monthly_coverage_splits_universe_rows_by_later_delisting() -> None:
     rows = pd.DataFrame(
         {
-            "stock_id": ["9999", "9999", "2330", "2330", "2330", "1101"],
-            "date": [
-                d(day)
-                for day in ("2017-03-01", "2017-03-02", "2017-03-01", "2017-03-02", "2017-04-03")
-            ]
-            + [d("2017-03-01")],
-            "in_universe": [True, True, True, True, True, False],
-            "fund_rev_mom": [0.1, NAN, 0.1, 0.2, NAN, NAN],
+            "stock_id": ["2330", "2317", "1101", "9999", "2330", "1101"],
+            "date": [d(text) for text in ["2017-03-01"] * 4 + ["2017-04-03"] * 2],
+            "in_universe": [True, True, True, False, True, True],
+            "fund_rev_mom": [0.1, NAN, NAN, 0.3, 0.1, 0.2],
         }
     )
-    delisted = pd.Series({"9999": True, "2330": False, "1101": False})
+    delisted = pd.Series({"2330": False, "2317": False, "1101": True, "9999": True})
 
     coverage = monthly_coverage(rows, "fund_rev_mom", delisted)
 
-    assert list(coverage.columns) == ["delisted", "current"]
-    cell = coverage.to_dict()
-    assert cell["delisted"]["2017-03"] == 0.5
-    assert cell["current"]["2017-03"] == 1.0
-    assert math.isnan(cell["delisted"]["2017-04"])
-    assert cell["current"]["2017-04"] == 0.0
+    assert coverage.loc["2017-03", "current"] == 0.5
+    assert coverage.loc["2017-03", "delisted"] == 0.0
+    assert coverage.loc["2017-04", "delisted"] == 1.0
+    no_delisted = monthly_coverage(rows[rows["stock_id"] != "1101"], "fund_rev_mom", delisted)
+    assert no_delisted["delisted"].isna()["2017-03"]
 
 
-def test_affected_months_are_those_where_delisted_coverage_falls_under_the_floor() -> None:
+@pytest.mark.parametrize(
+    ("current", "delisted", "affected"),
+    [
+        (0.99, 0.90, True),
+        (0.99, 0.94, False),
+        (0.93, 0.88, False),
+        (0.80, 0.70, False),
+        (0.80, 0.69, True),
+        (1.00, 0.95, False),
+        (1.00, 0.94, True),
+        (0.99, NAN, False),
+    ],
+)
+def test_a_month_is_affected_when_it_fails_the_acceptance_on_its_own(
+    current: float, delisted: float, affected: bool
+) -> None:
+    coverage = pd.DataFrame({"current": [current], "delisted": [delisted]}, index=["2017-03"])
+
+    assert affected_months(coverage) == (["2017-03"] if affected else [])
+
+
+def test_affected_months_are_sorted() -> None:
     coverage = pd.DataFrame(
-        {"delisted": [0.95, 0.80, 0.50, NAN, 0.0], "current": [1.0, 0.90, 1.0, 1.0, 0.0]},
-        index=["2016-01", "2016-02", "2016-03", "2016-04", "2016-05"],
+        {"current": [1.0, 1.0, 1.0], "delisted": [0.5, 1.0, 0.5]},
+        index=["2017-05", "2017-04", "2017-03"],
     )
 
-    assert affected_months(coverage) == ["2016-02", "2016-03"]
-    assert affected_months(coverage, floor=0.6) == ["2016-03"]
-    assert affected_months(coverage, floor=0.4) == []
+    assert affected_months(coverage) == ["2017-03", "2017-05"]
 
 
-@pytest.mark.parametrize("floor", [0.0, 1.5])
-def test_a_floor_outside_zero_to_one_is_refused(floor: float) -> None:
-    coverage = pd.DataFrame({"delisted": [0.5], "current": [1.0]}, index=["2016-01"])
+def test_the_rules_signature_names_the_fallbacks_and_the_masked_months() -> None:
+    signature = json.loads(
+        rules_signature(
+            {"fund_rev_yoy": "fund_rev_yoy_q"}, {"fund_rev_mom": frozenset({"2017-04", "2017-03"})}
+        )
+    )
 
-    with pytest.raises(ValueError, match="floor"):
-        affected_months(coverage, floor=floor)
+    assert signature == {
+        "fallbacks": {"fund_rev_yoy": "fund_rev_yoy_q"},
+        "masked": {"fund_rev_mom": ["2017-03", "2017-04"]},
+        "fills": "off_record",
+    }
+    assert rules_signature() == rules_signature(FALLBACKS, MASKED_MONTHS)
+    assert rules_signature() != rules_signature(FALLBACKS, {"fund_rev_mom": frozenset({"2017-03"})})

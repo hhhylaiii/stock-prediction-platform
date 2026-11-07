@@ -20,6 +20,7 @@ from apps.etl.catchup import (
     catch_up,
     covered_days,
     missing_days,
+    plan_catch_up,
     rows_present,
     select_jobs,
 )
@@ -36,6 +37,8 @@ from apps.market.models import (
 
 MI_INDEX = "https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX"
 MI_QFIIS = "https://www.twse.com.tw/rwd/zh/fund/MI_QFIIS"
+TWTB4U = "https://www.twse.com.tw/rwd/zh/dayTrading/TWTB4U"
+DAY_TRADES = "twse/day_trade/twtb4u_20261028.json"
 PRICES = "twse/daily_price/mi_index_20261028.json"
 SHARES = "twse/shares_outstanding/mi_qfiis_20261028.json"
 PRICE_JOB = Job("twse", "daily_price", rows_present(DailyPrice, "TWSE"))
@@ -149,6 +152,43 @@ def test_missing_days_are_fetched_in_order_and_checked_again(
     assert asked == [["20261028"], ["20261029"]]
     assert set(DataQualityLog.objects.values_list("date", flat=True)) == set(DAYS[1:])
     assert report.lines()[-1] == "checked quality again: 2026-10-28, 2026-10-29"
+
+
+@responses.activate
+def test_two_missed_nights_caught_up_leave_the_final_day_trades_of_t_minus_2(
+    october_2026_in_db: TradingDays, load_fixture: Callable[[str], Any]
+) -> None:
+    redone = [date(2026, 10, 22), *DAYS]
+    for day in redone:
+        _quoted(load_fixture, day)
+        _serve(TWTB4U, load_fixture(DAY_TRADES), day, selectType="All")
+    DailyChip.objects.create(stock_id="2330", date=DAYS[0], day_trade_volume=1)
+    job = {job.key: job for job in JOBS}["twse/day_trade"]
+    report = catch_up(DAYS[0], DAYS[-1], october_2026_in_db, [job])
+    assert report.written == {"twse/day_trade": [day.isoformat() for day in redone]}
+    final = DailyChip.objects.get(stock_id="2330", date=DAYS[0]).day_trade_volume
+    assert final == 4_142_000
+
+
+def test_a_dry_run_lists_the_day_trade_sessions_redone_before_a_missed_night(
+    october_2026_in_db: TradingDays,
+) -> None:
+    for day in DAYS[:2]:
+        DailyChip.objects.create(stock_id="2330", date=day, day_trade_volume=1)
+    jobs = [job for job in JOBS if job.key in ("twse/day_trade", "twse/margin")]
+    planned = plan_catch_up(DAYS[-1], DAYS[-1], october_2026_in_db, jobs)
+    assert planned == {
+        "twse/day_trade": ["2026-10-27", "2026-10-28", "2026-10-29"],
+        "twse/margin": ["2026-10-29"],
+    }
+
+
+def test_sessions_before_the_calendar_are_not_redone(october_2026_in_db: TradingDays) -> None:
+    jobs = [job for job in JOBS if job.key == "twse/day_trade"]
+    first = date(2026, 10, 1)
+    assert plan_catch_up(first, first, october_2026_in_db, jobs) == {
+        "twse/day_trade": ["2026-10-01"]
+    }
 
 
 @responses.activate
@@ -361,6 +401,6 @@ def test_a_dry_run_lists_the_missing_days_and_fetches_nothing(
         dataset="daily_price",
         dry_run=True,
     )
-    assert capsys.readouterr().out.strip() == "missing twse/daily_price: 2026-10-28, 2026-10-29"
+    assert capsys.readouterr().out.strip() == "to fetch twse/daily_price: 2026-10-28, 2026-10-29"
     assert len(responses.calls) == 0
     assert not EtlRun.objects.exists()

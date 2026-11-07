@@ -1,0 +1,275 @@
+"""Production runs (SPEC §7): the frozen design fit through the latest labels, and its shadow."""
+
+import json
+import math
+from collections.abc import Callable
+from dataclasses import asdict, dataclass, field
+from datetime import date, timedelta
+from pathlib import Path
+from typing import Any
+
+from apps.market.calendar import TradingDays
+from apps.research.baseline_runs import check_run_key
+from apps.research.holdout import (
+    PRODUCTION_FOLD,
+    ProductionPass,
+    authorize_production,
+    production_pass,
+)
+from apps.research.lgbm_runs import (
+    MODEL,
+    check_design,
+    design_features,
+    run_fold,
+    target_note,
+    variant_note,
+)
+from apps.research.models import (
+    OUTPUT_HORIZONS,
+    HoldoutScope,
+    ModelObjective,
+    ModelRun,
+    ModelStatus,
+)
+from apps.research.monitor import BRIER_BASELINE, IC_THRESHOLD, WINDOW
+from apps.research.monitor_refs import research_brier, research_ic_thresholds
+from apps.research.rank_model import SPEC_RECIPE, Variant
+from apps.research.runs import PRODUCTION, RunError
+from apps.research.target_models import TARGET_RECIPE, TargetVariant
+from apps.research.walkforward import (
+    Fold,
+    WalkForwardConfig,
+    WalkForwardError,
+    add_months,
+    generate_folds,
+    training_window,
+)
+
+SHADOW_MONTHS = 6
+
+
+def _fold(
+    calendar: TradingDays,
+    config: WalkForwardConfig,
+    train_end: date,
+    test: tuple[date, date],
+    eval_end: date,
+) -> Fold:
+    window = training_window(calendar, config, train_end, test[0])
+    if window is None:
+        raise WalkForwardError(
+            f"the training window before {test[0]} starts before data_start {config.data_start}"
+        )
+    train_start, fit_end, valid_start = window
+    return Fold(
+        index=PRODUCTION_FOLD,
+        train_start=train_start,
+        fit_end=fit_end,
+        valid_start=valid_start,
+        train_end=train_end,
+        test_start=test[0],
+        test_end=test[1],
+        eval_end=eval_end,
+        tuning=False,
+        holdout=False,
+    )
+
+
+def production_fold(calendar: TradingDays, as_of: date, config: WalkForwardConfig) -> Fold:
+    """Fold of model N: training ends where as_of's labels end, the test is as_of alone."""
+    train_end = calendar.shift(as_of, -config.embargo)
+    return _fold(calendar, config, train_end, (as_of, as_of), train_end)
+
+
+def shadow_fold(calendar: TradingDays, as_of: date, config: WalkForwardConfig) -> Fold:
+    """Fold of shadow N′: it tests the SHADOW_MONTHS through as_of after the usual embargo."""
+    test_start = calendar.between(add_months(as_of, -SHADOW_MONTHS) + timedelta(days=1), as_of)[0]
+    train_end = calendar.shift(test_start, -(config.embargo + 1))
+    eval_end = calendar.shift(as_of, -config.embargo)
+    return _fold(calendar, config, train_end, (test_start, as_of), eval_end)
+
+
+@dataclass(frozen=True)
+class Design:
+    """A scope's frozen design: walk-forward layout, rank variant and target variant."""
+
+    config: WalkForwardConfig = field(default_factory=WalkForwardConfig)
+    variant: Variant = SPEC_RECIPE
+    target: TargetVariant = TARGET_RECIPE
+
+
+@dataclass(frozen=True)
+class Built:
+    model: list[str]
+    shadow: list[str]
+    references: dict[str, Any]
+
+
+DESIGNS: dict[str, Design] = {scope: Design() for scope in HoldoutScope.values}
+BAGS = 5
+SHADOW = "shadow"
+REFERENCED: dict[str, str] = {
+    ModelObjective.RANK: IC_THRESHOLD,
+    ModelObjective.CLASSIFICATION: BRIER_BASELINE,
+}
+
+
+def shadow_key(run_key: str) -> str:
+    """The run_key of a production run's shadow N′."""
+    return f"{run_key}-{SHADOW}"
+
+
+def design_note(design: Design) -> dict[str, Any]:
+    """The design as production params record it."""
+    config = {
+        name: value.isoformat() if isinstance(value, date) else value
+        for name, value in asdict(design.config).items()
+    }
+    return {
+        "config": config,
+        "variant": variant_note(design.variant),
+        "target": target_note(design.target),
+    }
+
+
+def _references(scope: str, research_run_key: str, folds: list[Fold]) -> dict[str, Any]:
+    """The monitor references N carries, from the research run's folds; none may be missing."""
+    if scope == HoldoutScope.RANK:
+        thresholds = research_ic_thresholds(research_run_key, MODEL, folds)
+        missing = [h for h in OUTPUT_HORIZONS if not math.isfinite(thresholds.get(h, math.nan))]
+        if missing:
+            raise RunError(
+                f"{research_run_key} gives no rolling IC threshold at {missing} days; "
+                f"its research folds need {WINDOW} IC days"
+            )
+        return {IC_THRESHOLD: {str(h): float(thresholds[h]) for h in OUTPUT_HORIZONS}}
+    if scope == HoldoutScope.INTERVAL:
+        brier = research_brier(research_run_key, folds)
+        if not math.isfinite(brier):
+            raise RunError(f"{research_run_key} gives no logistic baseline Brier")
+        return {BRIER_BASELINE: brier}
+    return {}
+
+
+def _annotation(
+    note: dict[str, Any], references: dict[str, Any]
+) -> Callable[[ModelRun], dict[str, Any]]:
+    def annotate(run: ModelRun) -> dict[str, Any]:
+        wanted = REFERENCED.get(str(run.objective))
+        return {**note, **{key: value for key, value in references.items() if key == wanted}}
+
+    return annotate
+
+
+def _check_keys(scope: str, run_key: str, research_run_key: str, granted: ProductionPass) -> None:
+    keys = (run_key, shadow_key(run_key))
+    for key in (*keys, research_run_key):
+        check_run_key(scope, key)
+    if run_key.endswith(f"-{SHADOW}"):
+        raise RunError(f"{run_key} names a shadow; a production run_key does not end in -{SHADOW}")
+    if research_run_key in keys:
+        raise RunError(f"{research_run_key} is the research run; production needs its own run_key")
+    for key in keys:
+        authorize_production(key, granted)
+        if ModelRun.objects.filter(run_key=key).exclude(params__has_key=PRODUCTION).exists():
+            raise RunError(f"{key} holds runs that are not a production build")
+    settled = ModelRun.objects.filter(run_key__in=keys).exclude(status=ModelStatus.CANDIDATE)
+    if (run := settled.first()) is not None:
+        raise RunError(f"{run.run_id} is {run.status}; a new production build takes a new run_key")
+    research = ModelRun.objects.filter(run_key=research_run_key)
+    if not research.exists():
+        raise RunError(f"no model_run of the research run {research_run_key}")
+    if research.filter(params__has_key=PRODUCTION).exists():
+        raise RunError(f"{research_run_key} is a production build, not a research run")
+
+
+def _check_research(scope: str, research_run_key: str, design: Design, features: list[str]) -> None:
+    """Refuse rank thresholds from a research run fit on another variant or feature list."""
+    if scope != HoldoutScope.RANK:
+        return
+    variant = json.loads(json.dumps(variant_note(design.variant)))
+    fits = ModelRun.objects.filter(run_key=research_run_key, model_type=MODEL)
+    if not fits.exists() or any(
+        run.params.get("variant") != variant or run.feature_list != features for run in fits
+    ):
+        raise RunError(f"{research_run_key} was not fit on the frozen rank design")
+
+
+def _fit(
+    scope: str,
+    fold: Fold,
+    key: str,
+    directory: Path,
+    features: list[str],
+    seed: int,
+    design: Design,
+    granted: ProductionPass,
+    annotate: Callable[[ModelRun], dict[str, Any]],
+) -> list[str]:
+    run_fold(
+        scope,
+        fold,
+        key,
+        directory,
+        features,
+        seed,
+        BAGS,
+        design.variant,
+        design.target,
+        production=granted,
+        annotate=annotate,
+    )
+    return list(
+        ModelRun.objects.filter(run_key=key).order_by("run_id").values_list("run_id", flat=True)
+    )
+
+
+def build_run(
+    scope: str, run_key: str, research_run_key: str, as_of: date, directory: Path, seed: int = 0
+) -> Built:
+    """Fit shadow N′, then N, on scope's frozen design through as_of; N carries the references."""
+    granted = production_pass(scope)
+    _check_keys(scope, run_key, research_run_key, granted)
+    design = DESIGNS[scope]
+    check_design(scope, design.variant, design.target)
+    calendar = TradingDays.from_db()
+    research = [fold for fold in generate_folds(calendar, as_of, design.config) if fold.research]
+    features = design_features(scope, design.variant, design.target)
+    _check_research(scope, research_run_key, design, features)
+    references = _references(scope, research_run_key, research)
+    shared = {
+        "as_of": as_of.isoformat(),
+        "frozen_by": granted.frozen_by,
+        "design": design_note(design),
+    }
+    roles = {
+        "shadow": {**shared, "role": SHADOW, "shadow_of": run_key},
+        "model": {**shared, "role": "model", "shadow_run_key": shadow_key(run_key)},
+    }
+    notes = {
+        role: {"research_run_key": research_run_key, PRODUCTION: note}
+        for role, note in roles.items()
+    }
+    shadow = _fit(
+        scope,
+        shadow_fold(calendar, as_of, design.config),
+        shadow_key(run_key),
+        directory,
+        features,
+        seed,
+        design,
+        granted,
+        _annotation(notes["shadow"], {}),
+    )
+    model = _fit(
+        scope,
+        production_fold(calendar, as_of, design.config),
+        run_key,
+        directory,
+        features,
+        seed,
+        design,
+        granted,
+        _annotation(notes["model"], references),
+    )
+    return Built(model, shadow, references)

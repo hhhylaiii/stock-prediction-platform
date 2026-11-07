@@ -23,6 +23,8 @@ uv run pytest -m e2e
 
 `-m e2e` 是 Playwright 的瀏覽器冒煙測試，要先跑過一次 `playwright install chromium`。
 
+要平行跑就加 `-n auto`，同時設 `OMP_NUM_THREADS=1`：`OMP_NUM_THREADS=1 uv run pytest -m "not e2e" -n auto`。不設的話，每個 worker 裡的 LightGBM、XGBoost 都會吃滿全部核心、互相搶 CPU，反而比不平行還慢。
+
 ## 全部容器
 
 ```bash

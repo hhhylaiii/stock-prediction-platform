@@ -42,6 +42,7 @@ from apps.research.runs import (
     label_hash,
     lib_versions,
     record_run,
+    refuse_production_key,
     screened_features,
 )
 from apps.research.training import (
@@ -260,13 +261,17 @@ def recipe(features: list[str]) -> str:
     return f"{RECIPE_VERSION}-{hashlib.sha256(listed).hexdigest()[:12]}"
 
 
-def _current_notes(scope: str, fold: Fold, directory: Path, features: list[str]) -> dict[str, str]:
-    """Notes a fold cached now would carry: its features, labels and recipe."""
+def input_notes(scope: str, fold: Fold, directory: Path) -> dict[str, str]:
+    """Fingerprints of the feature partitions and labels a scope's baseline fold reads today."""
     return {
         "feature_hash": feature_hash(first_day(scope, fold), fold.test_end, directory),
         "label_hash": label_digest(scope, fold),
-        "recipe": recipe(features),
     }
+
+
+def _current_notes(scope: str, fold: Fold, directory: Path, features: list[str]) -> dict[str, str]:
+    """Notes a fold cached now would carry: its features, labels and recipe."""
+    return {**input_notes(scope, fold, directory), "recipe": recipe(features)}
 
 
 def fold_inputs(
@@ -329,6 +334,7 @@ def run_folds(
 ) -> list[int]:
     """Run folds without a current cache, or all with rerun; holdout folds are refused."""
     check_run_key(scope, run_key)
+    refuse_production_key(run_key)
     chosen = list(folds)
     held = [fold.index for fold in chosen if is_holdout(fold)]
     if held:

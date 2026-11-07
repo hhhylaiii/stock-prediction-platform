@@ -10,13 +10,14 @@ import responses
 from django.core.management import call_command
 from django.utils import timezone
 
+from apps.etl.adapters.exchange_tables import priced_codes
 from apps.etl.adapters.twse import TwseAdapter
 from apps.etl.adapters.twse_tables import TABLES
 from apps.etl.errors import SchemaChangedError, SourceNotReadyError
 from apps.etl.models import EtlRun, RawTwse
 from apps.etl.ratelimit import RateLimiter
 from apps.market.calendar import NotATradingDayError, TradingDays
-from apps.market.models import DailyChip
+from apps.market.models import DailyChip, DailyPrice
 
 BASE = "https://www.twse.com.tw/rwd/zh"
 DAY = date(2026, 10, 28)
@@ -626,3 +627,95 @@ def test_fetch_command_after_daily_price_zeroes_quiet_stocks(
     assert DailyChip.objects.get(stock_id="2330", date=DAY).fi_net == -3_175_021
     run = EtlRun.objects.get(dataset="institutional")
     assert (run.status, run.rows) == ("success", 6)
+
+
+def _priced(*codes: str) -> None:
+    DailyPrice.objects.bulk_create(
+        DailyPrice(stock_id=code, date=DAY, close=10, volume=1, turnover=10) for code in codes
+    )
+
+
+@responses.activate
+@pytest.mark.django_db
+def test_a_day_without_kept_quotes_takes_its_day_trades_for_the_stocks_priced(
+    adapter: TwseAdapter, serve: Callable[[str], dict[str, Any]]
+) -> None:
+    serve("day_trade")
+    _priced("2330", "2317")
+    rows = _load(adapter, "day_trade")
+    assert set(rows) == {"2330", "2317"}
+    assert rows["2330"]["day_trade_volume"] == 4_142_000
+
+
+@pytest.mark.django_db
+def test_foreign_currency_etfs_are_not_among_the_priced_codes() -> None:
+    _priced("2330", "00636K")
+    assert priced_codes(DAY, None) == {"2330"}
+
+
+@responses.activate
+@pytest.mark.django_db
+@pytest.mark.parametrize("dataset", ["day_trade", "institutional"])
+def test_a_day_without_quotes_or_prices_is_not_ready(
+    adapter: TwseAdapter, serve: Callable[[str], dict[str, Any]], dataset: str
+) -> None:
+    serve(dataset)
+    if dataset == "institutional":
+        _priced("2330")
+    with pytest.raises(SourceNotReadyError, match="chip rows need its quotes"):
+        _load(adapter, dataset)
+
+
+def _kept_quotes(load_fixture: Callable[[str], Any], day: date) -> None:
+    payload = {**load_fixture(QUOTES_FIXTURE), "date": f"{day:%Y%m%d}"}
+    RawTwse.objects.create(
+        dataset="daily_price",
+        source_hash=f"quotes-{day:%Y%m%d}",
+        request_params={"date": f"{day:%Y%m%d}", "type": "ALLBUT0999", "response": "json"},
+        payload=payload,
+    )
+
+
+@responses.activate
+@pytest.mark.django_db
+def test_a_day_since_the_first_kept_quotes_waits_for_its_own(
+    adapter: TwseAdapter, serve: Callable[[str], dict[str, Any]], load_fixture: Callable[[str], Any]
+) -> None:
+    serve("day_trade")
+    _kept_quotes(load_fixture, date(2026, 10, 27))
+    _priced("2330", "2317")
+    with pytest.raises(SourceNotReadyError, match="chip rows need its quotes"):
+        _load(adapter, "day_trade")
+
+
+@responses.activate
+@pytest.mark.django_db
+def test_a_day_before_the_first_kept_quotes_takes_the_priced_codes(
+    adapter: TwseAdapter, serve: Callable[[str], dict[str, Any]], load_fixture: Callable[[str], Any]
+) -> None:
+    serve("day_trade")
+    _kept_quotes(load_fixture, date(2026, 10, 29))
+    _priced("2330", "2317")
+    assert set(_load(adapter, "day_trade")) == {"2330", "2317"}
+
+
+@responses.activate
+@pytest.mark.django_db
+def test_day_trades_priced_only_on_the_other_market_are_not_ready(
+    adapter: TwseAdapter, serve: Callable[[str], dict[str, Any]]
+) -> None:
+    serve("day_trade")
+    _priced("6488")
+    with pytest.raises(SourceNotReadyError, match="none of its codes is quoted or priced"):
+        _load(adapter, "day_trade")
+
+
+@responses.activate
+@pytest.mark.django_db
+@pytest.mark.usefixtures("quotes_loaded")
+def test_a_kept_quote_page_wins_over_the_priced_codes(
+    adapter: TwseAdapter, serve: Callable[[str], dict[str, Any]]
+) -> None:
+    serve("day_trade")
+    _priced("2330")
+    assert set(_load(adapter, "day_trade")) == {"0050", "1101", "2317", "2330"}

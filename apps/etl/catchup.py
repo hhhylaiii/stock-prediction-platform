@@ -38,16 +38,21 @@ from apps.market.models import (
 logger = logging.getLogger(__name__)
 Presence = Callable[[Sequence[date]], set[date]]
 NOTHING = "nothing to catch up"
+REDONE = {"day_trade": 2}
 
 
 @dataclass(frozen=True)
 class Job:
-    """One dataset of one source; days count as done by its rows, else by its etl_run spans."""
+    """One dataset of one source; days count as done by its rows, else by its etl_run spans.
+
+    redone: sessions before each day that its nightly run fetches again, as the source revises them.
+    """
 
     source: str
     dataset: str
     present: Presence | None = None
     rebuild_later: bool = False
+    redone: int = 0
 
     @property
     def key(self) -> str:
@@ -125,7 +130,8 @@ def _table_job(source: str, market: str, dataset: str, table: DailyTable) -> Job
     if table.model is SharesOutstanding:
         return Job(source, dataset, rebuild_later=True)
     columns = tuple(table.columns) if table.model is DailyChip else ()
-    return Job(source, dataset, rows_present(table.model, market, columns))
+    present = rows_present(table.model, market, columns)
+    return Job(source, dataset, present, redone=REDONE.get(dataset, 0))
 
 
 def _exchange_jobs(
@@ -155,13 +161,20 @@ def plan_catch_up(
 ) -> dict[str, list[str]]:
     """The days each job would fetch, without fetching anything."""
     days = calendar.between(since, until)
-    planned = {job.key: missing_days(job, days) for job in jobs}
+    planned = {job.key: days_to_fetch(job, days, calendar) for job in jobs}
     return {key: [day.isoformat() for day in found] for key, found in planned.items() if found}
 
 
 def missing_days(job: Job, days: Sequence[date]) -> list[date]:
     done = job.present(days) if job.present else covered_days(job.source, job.dataset, days)
     return [day for day in days if day not in done]
+
+
+def days_to_fetch(job: Job, days: Sequence[date], calendar: TradingDays) -> list[date]:
+    """Missing days, with the sessions their missed nightly runs would have fetched again."""
+    missing = missing_days(job, days)
+    again = (_shifted(calendar, day, -back) for day in missing for back in range(1, job.redone + 1))
+    return sorted({*missing, *(day for day in again if day is not None)})
 
 
 def catch_up(
@@ -188,7 +201,7 @@ def catch_up(
 
 def _days_to_check(written: Sequence[date], calendar: TradingDays) -> list[date]:
     """Written days, plus each next session already checked against the gap before it."""
-    sessions = (_next_session(calendar, day) for day in written)
+    sessions = (_shifted(calendar, day, 1) for day in written)
     following = {day for day in sessions if day is not None} - set(written)
     checked = DataQualityLog.objects.filter(date__in=following, check_name__in=CHECKS).values_list(
         "date", flat=True
@@ -196,9 +209,9 @@ def _days_to_check(written: Sequence[date], calendar: TradingDays) -> list[date]
     return sorted({*written, *checked})
 
 
-def _next_session(calendar: TradingDays, day: date) -> date | None:
+def _shifted(calendar: TradingDays, day: date, sessions: int) -> date | None:
     try:
-        return calendar.shift(day, 1)
+        return calendar.shift(day, sessions)
     except OutsideCalendarError:
         return None
 
@@ -214,7 +227,7 @@ def _dated(outcomes: dict[str, JobOutcome], name: str) -> dict[str, list[str]]:
 def _catch_up_job(job: Job, days: Sequence[date], calendar: TradingDays) -> JobOutcome:
     try:
         adapter = build_adapter(job.source, calendar)
-        missing = missing_days(job, days)
+        missing = days_to_fetch(job, days, calendar)
     except Exception as exc:
         return JobOutcome([], [], {}, {f"{job.key} setup": _failure(job, "setup", exc)})
     written: list[date] = []

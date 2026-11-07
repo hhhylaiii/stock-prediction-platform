@@ -21,7 +21,9 @@ from apps.etl.adapters.dispositions import (
 from apps.etl.adapters.exchange_tables import (
     check_published,
     parsed_quotes,
+    priced_codes,
     quoted_only,
+    require_kept,
     share_changes,
     source_rows,
     standard_rows,
@@ -66,6 +68,7 @@ DAILY_PRICE = "daily_price"
 INDEX_DAILY = "index_daily"
 INSTITUTIONAL = "institutional"
 SHARES_OUTSTANDING = "shares_outstanding"
+DAY_TRADE = "day_trade"
 EVENT_DATASETS = frozenset({ATTENTION, DISPOSITION, FULL_DELIVERY})
 
 
@@ -188,9 +191,12 @@ class TpexAdapter(BaseAdapter):
         table = TABLES[dataset]
         frame = standard_rows(raw_df, table)
         if table.model is DailyChip:
-            quoted = {day: self._quoted_codes(day) for day in sorted(set(raw_df["date"]))}
+            quoted = {day: self._quoted_codes(day, dataset) for day in sorted(set(raw_df["date"]))}
             zeros = tuple(table.columns) if dataset == INSTITUTIONAL else ()
-            return quoted_only(frame, quoted, table.where, zeros)
+            kept = quoted_only(frame, quoted, table.where, zeros)
+            if dataset == DAY_TRADE:
+                require_kept(frame, kept, table.where)
+            return kept
         if dataset == SHARES_OUTSTANDING:
             return share_changes(frame, latest_counts(min(raw_df["date"])))
         return frame
@@ -265,7 +271,12 @@ class TpexAdapter(BaseAdapter):
             raise SchemaChangedError(f"TPEx {path} answered with stat {payload.get('stat')!r}")
         return payload
 
-    def _quoted_codes(self, day: date) -> set[str]:
+    def _quotes_kept_from(self) -> str | None:
+        """The first day whose quote page was kept; from then on each day waits for its own."""
+        kept = RawTpex.objects.filter(dataset=DAILY_PRICE, request_params__type=QUOTED_TYPE)
+        return kept.order_by("payload__date").values_list("payload__date", flat=True).first()
+
+    def _quoted_codes(self, day: date, dataset: str) -> set[str]:
         """Local-currency codes of the latest stored EW quotes answered for the day."""
         stored = (
             RawTpex.objects.filter(
@@ -277,6 +288,9 @@ class TpexAdapter(BaseAdapter):
             .first()
         )
         if stored is None:
+            priced = priced_codes(day, self._quotes_kept_from()) if dataset == DAY_TRADE else set()
+            if priced:
+                return priced
             raise SourceNotReadyError(
                 f"TPEx daily_price for {day} is not loaded; chip rows need its quotes"
             )

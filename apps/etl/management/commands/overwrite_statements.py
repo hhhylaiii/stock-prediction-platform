@@ -7,6 +7,7 @@ import pandas as pd
 from django.core.management.base import BaseCommand
 from django.db import transaction
 
+from apps.etl.cumulative_margins import clear_cumulative_margins
 from apps.etl.statement_overwrite import (
     overwrite_statements,
     summary_frame,
@@ -30,10 +31,24 @@ class Command(BaseCommand):
         found = pd.concat([summaries, viewers], ignore_index=True)
         with transaction.atomic():
             changed = overwrite_statements(found) if not found.empty else 0
+            cleared = clear_cumulative_margins(stocks)
             if options["dry_run"]:
                 transaction.set_rollback(True)
         verb = "would change" if options["dry_run"] else "changed"
         self.stdout.write(f"{changed} statements {verb} from {len(found)} MOPS rows")
+        kinds = ", ".join(f"{kind} {count}" for kind, count in sorted(cleared.kinds.items()))
+        done = "would be cleared" if options["dry_run"] else "cleared"
+        self.stdout.write(f"{sum(cleared.kinds.values())} margins {done} ({kinds or 'none'})")
+        self.stdout.write(
+            f"{cleared.unmatched} margins match no span and stay, "
+            f"{cleared.untried} cannot be tried against their own quarter and stay, "
+            f"{cleared.unchecked} have no MOPS figures to judge"
+        )
+        if cleared.unreadable:
+            codes = ", ".join(cleared.unreadable)
+            self.stdout.write(
+                f"margins of {codes} not judged: their kept viewer pages do not parse"
+            )
         if viewers.attrs["unreadable"]:
             codes = ", ".join(viewers.attrs["unreadable"])
             self.stdout.write(f"set aside {codes}: their kept viewer pages do not parse")

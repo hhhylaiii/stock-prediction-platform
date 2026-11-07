@@ -47,6 +47,7 @@ SIGNAL_COLUMNS = [
 REVENUE_STALE = timedelta(days=62)
 STATEMENT_STALE = timedelta(days=200)
 MONTH_SPAN = timedelta(days=31)
+SOURCED = "_sourced"
 QUARTER_SPAN = timedelta(days=92)
 REVENUE_LOOKBACK = REVENUE_STALE + MONTH_SPAN * (max(map(max, REVENUE_INPUTS.values())) + 1)
 STATEMENT_LOOKBACK = STATEMENT_STALE + QUARTER_SPAN * (
@@ -122,10 +123,35 @@ def _growth(now: pd.Series, base: pd.Series) -> pd.Series:
     return now / base.where(base > 0) - 1
 
 
+def sourced_name(name: str) -> str:
+    """Panel column that is 1 when every month a revenue signal reads is on record, else 0."""
+    return f"{name}{SOURCED}"
+
+
+def _monthly(revenue: pd.DataFrame) -> _Lags:
+    return _Lags(_numbered(revenue.assign(revenue=revenue["revenue"].astype("float64")), "-", 12))
+
+
+def revenue_sourcing(revenue: pd.DataFrame) -> pd.DataFrame:
+    """Per announced month and revenue signal, 1 when all the months it reads are on record."""
+    lag = _monthly(revenue)
+    values = {
+        sourced_name(name): pd.concat(
+            [lag.frame["revenue"], *(lag("revenue", k) for k in lags)], axis=1
+        )
+        .notna()
+        .all(axis=1)
+        .astype("float64")
+        for name, lags in REVENUE_INPUTS.items()
+    }
+    inputs = {sourced_name(name): lags for name, lags in REVENUE_INPUTS.items()}
+    return _signals(lag, values, inputs)
+
+
 def revenue_signals(revenue: pd.DataFrame) -> pd.DataFrame:
     """Single-month yoy, three-month yoy and mom of each announced month, one row per signal."""
-    frame = _numbered(revenue.assign(revenue=revenue["revenue"].astype("float64")), "-", 12)
-    lag = _Lags(frame)
+    lag = _monthly(revenue)
+    frame = lag.frame
     now = frame["revenue"]
     three = now + lag("revenue", 1) + lag("revenue", 2)
     base = lag("revenue", 12) + lag("revenue", 13) + lag("revenue", 14)
@@ -324,6 +350,7 @@ def attach_fundamentals(
     starts = segment_starts(panel, calendar)
     empty = pd.DataFrame(columns=SIGNAL_COLUMNS)
     monthly = revenue_signals(revenue) if not revenue.empty else empty
+    sourcing = revenue_sourcing(revenue) if not revenue.empty else empty
     quarterly = statement_signals(statements) if not statements.empty else empty
     filings = _filings(statements) if not statements.empty else empty
     seen = _latest(panel, filings, STATEMENT_LOOKBACK, starts, "known_from")
@@ -331,6 +358,9 @@ def attach_fundamentals(
     daily = valuation.set_index(["stock_id", "date"]).astype("float64").reindex(keys)
     return panel.assign(
         **_attached(panel, monthly, list(REVENUE_INPUTS), REVENUE_STALE, starts),
+        **_attached(
+            panel, sourcing, list(map(sourced_name, REVENUE_INPUTS)), REVENUE_STALE, starts
+        ),
         **_attached(panel, quarterly, list(STATEMENT_INPUTS), STATEMENT_STALE, starts),
         fund_days_since_fs=_days_since(panel, pd.to_datetime(seen), calendar),
         pb=daily["pb"].to_numpy(),

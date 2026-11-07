@@ -13,6 +13,7 @@ from apps.research.walkforward import Fold, WalkForwardConfig
 
 KEY_PATTERN = re.compile(r"[a-z0-9][a-z0-9_.-]{0,63}", re.ASCII)
 SPEC_HOLDOUT_START = WalkForwardConfig().holdout_start
+PRODUCTION_FOLD = 0
 
 
 class HoldoutError(RuntimeError):
@@ -25,6 +26,14 @@ class HoldoutTicket:
     run_key: str
     attempt: int
     last_date: date
+
+
+@dataclass(frozen=True)
+class ProductionPass:
+    """Leave for production runs to write past the holdout start once a claim froze the design."""
+
+    scope: str
+    frozen_by: str
 
 
 def require_key(value: str) -> str:
@@ -79,6 +88,37 @@ def latest_ticket(scope: str) -> HoldoutTicket | None:
     if row is None:
         return None
     return HoldoutTicket(row.scope, row.run_key, row.attempt, row.last_date)
+
+
+def _not_frozen(scope: str) -> HoldoutError:
+    return HoldoutError(
+        f"the {scope} design is not frozen; production runs wait for its holdout claim"
+    )
+
+
+def production_pass(scope: str) -> ProductionPass:
+    """The scope's production pass, granted only once its holdout is claimed."""
+    ticket = latest_ticket(scope)
+    if ticket is None:
+        raise _not_frozen(scope)
+    return ProductionPass(scope, ticket.run_key)
+
+
+def authorize_production(run_key: str, granted: ProductionPass, fold: Fold | None = None) -> None:
+    """Refuse a production write before the claim, off its scope, on a holdout key or fold."""
+    if not holdout_claimed(granted.scope):
+        raise _not_frozen(granted.scope)
+    if not run_key.startswith(f"{granted.scope}-"):
+        raise HoldoutError(
+            f"a {granted.scope} production pass covers {granted.scope}- run_keys, not {run_key!r}"
+        )
+    if HoldoutRun.objects.filter(run_key=run_key).exists():
+        raise HoldoutError(f"{run_key} is a holdout run; production runs use their own run_key")
+    if fold is not None and (fold.holdout or fold.index != PRODUCTION_FOLD):
+        raise HoldoutError(
+            f"a production pass writes production folds only, not fold {fold.index}"
+            f"{' of the holdout' if fold.holdout else ''}"
+        )
 
 
 def is_holdout(fold: Fold) -> bool:
