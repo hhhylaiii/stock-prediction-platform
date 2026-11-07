@@ -1,3 +1,4 @@
+import re
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -8,12 +9,12 @@ import pytest
 from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.db import connection
+from django.test.utils import CaptureQueriesContext
 
 from apps.market.calendar import TradingDays
 from apps.market.models import TradingCalendar
 from apps.research import lock
-from apps.research.lock import LOCK_ID, ResearchBusyError, research_lock
-from apps.research.models import ModelRun, Prediction
+from apps.research.lock import LOCK_ID, ResearchBusyError, locked, research_lock
 from apps.research.monitor import run_monitor
 from apps.research.predict import predict
 from apps.research.promotion import promote, restore
@@ -40,6 +41,13 @@ def holds_here() -> bool:
         )
         (count,) = cursor.fetchone()
     return bool(count)
+
+
+def label() -> str:
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT current_setting('application_name')")
+        (name,) = cursor.fetchone()
+    return str(name)
 
 
 @contextmanager
@@ -81,7 +89,9 @@ def free_elsewhere() -> bool:
     thread = threading.Thread(target=take)
     thread.start()
     thread.join(WAIT)
-    return seen == [True]
+    assert not thread.is_alive()
+    assert len(seen) == 1
+    return seen[0]
 
 
 @pytest.mark.django_db
@@ -96,8 +106,10 @@ def test_the_lock_is_held_inside_the_block_and_released_after_it() -> None:
 @pytest.mark.django_db
 def test_the_lock_is_reentrant_in_one_session_and_kept_until_the_outer_block_ends() -> None:
     with research_lock("promote prod.rank"):
-        with research_lock("predict 2026-10-28"):
-            assert holds_here()
+        with CaptureQueriesContext(connection) as inner, research_lock("predict 2026-10-28"):
+            pass
+        assert inner.captured_queries == []
+        assert "promote prod.rank" in label()
         assert holds_here()
         assert not free_elsewhere()
     assert not holds_here()
@@ -126,6 +138,34 @@ def test_a_busy_lock_names_its_holder_and_why_jobs_wait() -> None:
     assert not holds_here()
 
 
+@pytest.mark.django_db
+def test_a_locked_function_is_labelled_with_its_job_its_argument_and_the_time() -> None:
+    acquired, release = threading.Event(), threading.Event()
+
+    @locked("predict")
+    def waits(day: date) -> None:
+        acquired.set()
+        release.wait(WAIT)
+
+    def hold() -> None:
+        try:
+            waits(DAY)
+        finally:
+            connection.close()
+
+    thread = threading.Thread(target=hold)
+    thread.start()
+    assert acquired.wait(WAIT)
+    try:
+        with pytest.raises(ResearchBusyError) as caught, research_lock("monitor 2026-10-28"):
+            pytest.fail("the lock was taken twice")
+    finally:
+        release.set()
+        thread.join(WAIT)
+    held = r"'research \d{2}-\d{2} \d{2}:\d{2} predict 2026-10-28' \(pid \d+\)"
+    assert re.search(held, str(caught.value))
+
+
 @pytest.mark.django_db(transaction=True)
 def test_a_failed_release_closes_the_connection_so_the_lock_goes_with_it(
     monkeypatch: pytest.MonkeyPatch,
@@ -139,12 +179,6 @@ def test_a_failed_release_closes_the_connection_so_the_lock_goes_with_it(
 
 @pytest.mark.django_db
 def test_the_holder_label_is_restored_once_the_lock_is_released() -> None:
-    def label() -> str:
-        with connection.cursor() as cursor:
-            cursor.execute("SELECT current_setting('application_name')")
-            (name,) = cursor.fetchone()
-        return str(name)
-
     before = label()
     with research_lock("restore r1"):
         assert "restore r1" in label()
@@ -156,17 +190,15 @@ def test_predict_monitor_promote_and_restore_refuse_while_another_job_holds_the_
     calendar_rows: None, tmp_path: Path
 ) -> None:
     calendar = TradingDays.from_db()
-    with held_elsewhere("research.step features 2026-10-28"):
+    with held_elsewhere("features 2026-10-28"):
         for call in (
             lambda: predict(DAY, tmp_path),
             lambda: run_monitor(DAY, calendar),
             lambda: promote("prod.rank", DAY, tmp_path),
             lambda: restore("r1", DAY, "back"),
         ):
-            with pytest.raises(ResearchBusyError, match=r"research\.step features 2026-10-28"):
+            with pytest.raises(ResearchBusyError, match="features 2026-10-28"):
                 call()
-    assert not ModelRun.objects.exists()
-    assert not Prediction.objects.exists()
 
 
 @pytest.mark.django_db

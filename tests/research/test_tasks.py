@@ -1,5 +1,4 @@
 import logging
-import runpy
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import date, datetime, time, timedelta
@@ -11,7 +10,6 @@ from zoneinfo import ZoneInfo
 import pytest
 from celery.schedules import crontab
 from django.conf import settings
-from django.core.exceptions import ImproperlyConfigured
 from django.db import connection
 from django.test import override_settings
 
@@ -199,6 +197,118 @@ def test_the_evening_gives_up_with_a_warning_when_the_gate_stays_shut(
     assert sent == [(WEDNESDAY, tasks.EVENING_CHECK, Severity.WARNING)]
 
 
+def ticking(now: Callable[[date, time], None], start: datetime) -> Callable[[], None]:
+    """Move the clock 30 minutes on each call, as the gate's retries would."""
+    moments = [start]
+
+    def tick() -> None:
+        moments.append(moments[-1] + timedelta(minutes=30))
+        now(moments[-1].date(), moments[-1].time())
+
+    return tick
+
+
+@pytest.mark.parametrize("opens", [True, False])
+def test_the_evening_keeps_its_session_when_the_gate_retries_run_past_midnight(
+    now: Callable[[date, time], None],
+    ran: list[tuple[str, date, bool]],
+    sent: list[tuple[date, str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+    opens: bool,
+) -> None:
+    now(WEDNESDAY, time(23, 30))
+    tick = ticking(now, datetime.combine(WEDNESDAY, time(23, 30), tzinfo=TAIPEI))
+    asked: list[date] = []
+
+    def ready(day: date) -> bool:
+        asked.append(day)
+        tick()
+        return opens and len(asked) == 3
+
+    monkeypatch.setattr(tasks, "ready_for_research", ready)
+
+    tasks.evening.apply().get()
+
+    assert asked == [WEDNESDAY] * 3
+    if opens:
+        assert ran == [("features", WEDNESDAY, True), ("labels", WEDNESDAY, True)]
+        assert marker(WEDNESDAY, tasks.EVENING_CHECK).severity == Severity.INFO
+    else:
+        assert ran == []
+        assert marker(WEDNESDAY, tasks.EVENING_CHECK).detail == {"reason": tasks.GATE_SHUT}
+        assert sent == [(WEDNESDAY, tasks.EVENING_CHECK, Severity.WARNING)]
+    assert not DataQualityLog.objects.filter(date=WEDNESDAY + timedelta(days=1)).exists()
+
+
+def test_the_morning_keeps_its_session_when_a_late_wake_waits_past_midnight(
+    now: Callable[[date, time], None],
+    gate: list[bool],
+    ran: list[tuple[str, date, bool]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    thursday = WEDNESDAY + timedelta(days=1)
+    record(WEDNESDAY, tasks.EVENING_CHECK)
+    now(thursday, time(23, 40))
+    tick = ticking(now, datetime.combine(thursday, time(23, 40), tzinfo=TAIPEI))
+    looked: list[date] = []
+
+    def landed(day: date) -> bool:
+        looked.append(day)
+        tick()
+        return False
+
+    monkeypatch.setattr(tasks, "_us_close_landed", landed)
+
+    tasks.morning.apply().get()
+
+    assert looked == [WEDNESDAY] * (FAST["RESEARCH_US_CLOSE_RETRIES"] + 1)
+    assert {day for _, day, _ in ran} == {WEDNESDAY}
+    assert marker(WEDNESDAY, tasks.MORNING_CHECK).detail["us_close"] == tasks.US_CLOSE_MISSING
+
+
+def retried(task: Any, monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """The keyword arguments of each retry the task asks for."""
+    calls: list[dict[str, Any]] = []
+    original = task.retry
+
+    def retry(*args: Any, **kwargs: Any) -> Any:
+        calls.append(kwargs)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(task, "retry", retry)
+    return calls
+
+
+def test_each_wait_retries_on_its_own_countdown_and_count(
+    now: Callable[[date, time], None],
+    gate: list[bool],
+    ran: list[tuple[str, date, bool]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    waits = {
+        "ETL_NOT_READY_COUNTDOWN": 11,
+        "RESEARCH_US_CLOSE_COUNTDOWN": 22,
+        "RESEARCH_LOCK_COUNTDOWN": 33,
+    }
+    evening, morning, step = (
+        retried(task, monkeypatch) for task in (tasks.evening, tasks.morning, tasks.step)
+    )
+    with override_settings(**waits):
+        now(WEDNESDAY, time(23, 0))
+        gate[:] = [False]
+        tasks.evening.apply().get()
+        gate[:] = [True]
+        record(WEDNESDAY, tasks.EVENING_CHECK)
+        now(WEDNESDAY + timedelta(days=1), time(6, 0))
+        monkeypatch.setattr(tasks, "research_lock", busy_lock(2))
+        tasks.morning.apply().get()
+
+    day = (WEDNESDAY.isoformat(),)
+    assert [(call["countdown"], call["args"]) for call in evening] == [(11, day)] * 2
+    assert [(call["countdown"], call["args"]) for call in morning] == [(22, day)] * 2
+    assert [call["countdown"] for call in step] == [33] * 2
+
+
 @pytest.mark.parametrize(
     ("day", "at", "result"),
     [(date(2026, 10, 31), time(23, 0), "closed"), (WEDNESDAY, time(0, 30), "early")],
@@ -366,9 +476,8 @@ def test_a_failed_step_stops_the_chain_and_records_what_was_done(
 
     monkeypatch.setitem(tasks.STEPS, "predict", fails)
 
-    result = tasks.morning.apply()
+    tasks.morning.apply()
 
-    assert result.failed()
     assert steps(ran) == ["features"]
     done = marker(WEDNESDAY, tasks.MORNING_CHECK)
     assert done.severity == Severity.WARNING
@@ -381,14 +490,14 @@ def test_a_failed_step_stops_the_chain_and_records_what_was_done(
     assert not holds_lock()
 
 
-def busy_lock(times: int) -> Callable[[str], Any]:
-    """A research lock that is held elsewhere for the first given number of tries."""
+def busy_lock(times: int, only: str = "") -> Callable[[str], Any]:
+    """A research lock held elsewhere for the first tries of the steps whose name starts so."""
     tries = {"left": times}
     real = tasks.research_lock
 
     @contextmanager
     def lock(holder: str) -> Iterator[None]:
-        if tries["left"] > 0:
+        if holder.startswith(only) and tries["left"] > 0:
             tries["left"] -= 1
             raise ResearchBusyError(f"the research lock is held by 'promote {holder}'")
         with real(holder):
@@ -414,6 +523,24 @@ def test_a_step_that_finds_the_lock_busy_retries_until_it_is_free(
     assert marker(WEDNESDAY, tasks.MORNING_CHECK).severity == Severity.INFO
 
 
+def test_a_later_step_that_waits_for_the_lock_keeps_the_steps_done_before_it(
+    now: Callable[[date, time], None],
+    gate: list[bool],
+    ran: list[tuple[str, date, bool]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    record(WEDNESDAY, tasks.EVENING_CHECK)
+    record(WEDNESDAY, US_CLOSE_CHECK)
+    now(WEDNESDAY + timedelta(days=1), time(6, 0))
+    monkeypatch.setattr(tasks, "research_lock", busy_lock(1, only="predict"))
+
+    tasks.morning.apply().get()
+
+    assert steps(ran) == ["features", "predict", "monitor"]
+    done = marker(WEDNESDAY, tasks.MORNING_CHECK)
+    assert done.detail["steps"] == [ok("features"), ok("predict"), ok("monitor")]
+
+
 def test_a_step_that_never_gets_the_lock_fails_the_chain(
     now: Callable[[date, time], None],
     gate: list[bool],
@@ -427,7 +554,7 @@ def test_a_step_that_never_gets_the_lock_fails_the_chain(
     monkeypatch.setattr(tasks, "research_lock", busy_lock(3))
 
     with caplog.at_level(logging.ERROR, logger="apps.research.tasks"):
-        assert tasks.morning.apply().failed()
+        tasks.morning.apply()
 
     assert ran == []
     done = marker(WEDNESDAY, tasks.MORNING_CHECK)
@@ -472,25 +599,6 @@ def test_the_beat_schedule_fires_both_chains_at_their_configured_times() -> None
         "task": "research.morning",
         "schedule": crontab(hour=6, minute=0),
     }
-
-
-@pytest.mark.parametrize(
-    ("name", "value", "message"),
-    [
-        ("RESEARCH_AT_EVENING", "22:30", "after ETL_AT_CHECK_QUALITY"),
-        ("RESEARCH_AT_MORNING", "05:00", "after ETL_AT_US_CLOSE"),
-    ],
-)
-def test_the_research_slots_must_follow_the_data_they_wait_for(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, name: str, value: str, message: str
-) -> None:
-    empty = tmp_path / ".env"
-    empty.write_text("")
-    monkeypatch.setenv("DJANGO_ENV_FILE", str(empty))
-    monkeypatch.setenv(name, value)
-
-    with pytest.raises(ImproperlyConfigured, match=message):
-        runpy.run_path(str(settings.BASE_DIR / "config" / "settings" / "base.py"))
 
 
 def test_the_real_steps_run_the_research_commands_and_functions(

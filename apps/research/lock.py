@@ -14,7 +14,7 @@ from django.utils import timezone
 
 logger = logging.getLogger(__name__)
 LOCK_ID = 74_600_001
-LABEL = "research {holder} since {since}"
+LABEL = "research {since} {holder}"
 JOBS = "predict, monitor, promote, restore and the scheduled research steps run one at a time"
 LOCK_SQL = "SELECT pg_try_advisory_lock(%s), current_setting('application_name')"
 LABEL_SQL = "SELECT set_config('application_name', %s, false)"
@@ -69,7 +69,7 @@ def research_lock(holder: str) -> Iterator[None]:
         raise ResearchBusyError(f"the research lock is held by {_holder()}; {JOBS}")
     token = _depth.set(1)
     try:
-        since = timezone.localtime().strftime("%Y-%m-%d %H:%M")
+        since = timezone.localtime().strftime("%m-%d %H:%M")
         with connection.cursor() as cursor:
             cursor.execute(LABEL_SQL, [LABEL.format(holder=holder, since=since)])
         yield

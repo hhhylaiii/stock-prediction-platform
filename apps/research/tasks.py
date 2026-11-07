@@ -141,43 +141,50 @@ def finish(done: list[Done], check: str, day: str, extra: dict[str, str]) -> str
 
 
 @shared_task(bind=True, max_retries=None, name="research.evening")
-def evening(self: Task[Any, Any]) -> str:
+def evening(self: Task[Any, Any], day: str | None = None) -> str:
     """Today's features and the recent labels, once the session's research gate passes."""
     if not settings.RESEARCH_SCHEDULE_ENABLED:
         return "disabled"
-    if _early("EVENING"):
+    if day is None and _early("EVENING"):
         return "early"
-    day = timezone.localtime().date()
-    if not TradingDays.from_db().is_trading_day(day):
+    session = timezone.localtime().date() if day is None else date.fromisoformat(day)
+    if not TradingDays.from_db().is_trading_day(session):
         return "closed"
-    if _finished(day, EVENING_CHECK):
+    if _finished(session, EVENING_CHECK):
         return "done"
-    if not ready_for_research(day):
+    if not ready_for_research(session):
         if self.request.retries < settings.ETL_NOT_READY_RETRIES:
-            raise self.retry(countdown=settings.ETL_NOT_READY_COUNTDOWN)
-        _record(day, EVENING_CHECK, Severity.WARNING, {"reason": GATE_SHUT})
+            raise self.retry(
+                args=(session.isoformat(),), countdown=settings.ETL_NOT_READY_COUNTDOWN
+            )
+        _record(session, EVENING_CHECK, Severity.WARNING, {"reason": GATE_SHUT})
         return "not ready"
-    _start(EVENING_CHECK, day, EVENING_STEPS, {})
+    _start(EVENING_CHECK, session, EVENING_STEPS, {})
     return "started"
 
 
 @shared_task(bind=True, max_retries=None, name="research.morning")
-def morning(self: Task[Any, Any]) -> str:
+def morning(self: Task[Any, Any], day: str | None = None) -> str:
     """Before the open: the last session's features with the US close, predictions, monitor."""
     if not settings.RESEARCH_SCHEDULE_ENABLED:
         return "disabled"
-    if _early("MORNING"):
+    if day is None and _early("MORNING"):
         return "early"
-    calendar = TradingDays.from_db()
-    day = calendar.latest_on_or_before(timezone.localtime().date() - timedelta(days=1))
-    if _finished(day, MORNING_CHECK):
+    if day is None:
+        yesterday = timezone.localtime().date() - timedelta(days=1)
+        session = TradingDays.from_db().latest_on_or_before(yesterday)
+    else:
+        session = date.fromisoformat(day)
+    if _finished(session, MORNING_CHECK):
         return "done"
-    if not ready_for_research(day):
-        _record(day, MORNING_CHECK, Severity.WARNING, {"reason": GATE_SHUT})
+    if not ready_for_research(session):
+        _record(session, MORNING_CHECK, Severity.WARNING, {"reason": GATE_SHUT})
         return "gate shut"
-    landed = _us_close_landed(day)
+    landed = _us_close_landed(session)
     if not landed and self.request.retries < settings.RESEARCH_US_CLOSE_RETRIES:
-        raise self.retry(countdown=settings.RESEARCH_US_CLOSE_COUNTDOWN)
-    names = MORNING_STEPS if _finished(day, EVENING_CHECK) else ("labels", *MORNING_STEPS)
-    _start(MORNING_CHECK, day, names, {} if landed else {"us_close": US_CLOSE_MISSING})
+        raise self.retry(
+            args=(session.isoformat(),), countdown=settings.RESEARCH_US_CLOSE_COUNTDOWN
+        )
+    names = MORNING_STEPS if _finished(session, EVENING_CHECK) else ("labels", *MORNING_STEPS)
+    _start(MORNING_CHECK, session, names, {} if landed else {"us_close": US_CLOSE_MISSING})
     return "started"

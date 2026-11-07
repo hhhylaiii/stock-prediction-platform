@@ -52,6 +52,28 @@ def test_database_is_reachable_postgres() -> None:
 
 
 @pytest.mark.usefixtures("isolated_env")
+def test_the_research_schedule_is_off_unless_switched_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("RESEARCH_SCHEDULE_ENABLED", raising=False)
+    assert _fresh_import("config.settings.dev").RESEARCH_SCHEDULE_ENABLED is False
+
+
+@pytest.mark.usefixtures("isolated_env")
+@pytest.mark.parametrize(
+    ("name", "value", "message"),
+    [
+        ("RESEARCH_AT_EVENING", "22:30", "after ETL_AT_CHECK_QUALITY"),
+        ("RESEARCH_AT_MORNING", "05:00", "after ETL_AT_US_CLOSE"),
+    ],
+)
+def test_the_research_slots_must_follow_the_data_they_wait_for(
+    monkeypatch: pytest.MonkeyPatch, name: str, value: str, message: str
+) -> None:
+    monkeypatch.setenv(name, value)
+    with pytest.raises(ImproperlyConfigured, match=message):
+        _fresh_import("config.settings.dev")
+
+
+@pytest.mark.usefixtures("isolated_env")
 def test_dev_settings_enable_debug() -> None:
     module = _fresh_import("config.settings.dev")
     assert module.DEBUG is True
