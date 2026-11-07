@@ -14,11 +14,15 @@ from apps.etl.management.options import as_date
 from apps.market.calendar import TradingDays
 from apps.market.models import StockMaster
 from apps.research.features.build import FEATURE_COLUMNS, build_feature_frame, observable_frame
+from apps.research.features.fundamental import BASIS_SIGNALS
 from apps.research.features.residual import (
+    ACCEPT_RATIO,
+    BASIS_GAP,
     FALLBACKS,
     MASKED_MONTHS,
     MAX_MASKED_SHARE,
     affected_months,
+    basis_counts,
     monthly_coverage,
 )
 from apps.research.ranges import years
@@ -71,6 +75,19 @@ class Command(BaseCommand):
         months = ", ".join(f'"{month}"' for month in affected)
         self.stdout.write(f'    "{column}": frozenset({{{months}}}),')
 
+    def _basis(self, column: str, counts: pd.Series) -> None:
+        current = counts["current"] / max(counts["rows_current"], 1)
+        delisted = counts["delisted"] / max(counts["rows_delisted"], 1)
+        self.stdout.write(
+            f"{column}: gaps read across report bases, "
+            f"current {current:.2%}, delisted {delisted:.2%}"
+        )
+        if delisted > ACCEPT_RATIO * current and delisted - current > BASIS_GAP:
+            self.stdout.write(
+                "    warning: these gaps lean on stocks later delisted; "
+                "report before keeping them as having a known cause"
+            )
+
     def handle(self, *args: Any, **options: Any) -> None:
         columns = self._columns(options["columns"])
         start = as_date(options["start"], "--start") or DEFAULT_START
@@ -79,15 +96,23 @@ class Command(BaseCommand):
             raise CommandError(f"--start {start} is after --end {end}")
         calendar, delisted = TradingDays.from_db(), _delisted()
         parts: dict[str, list[pd.DataFrame]] = {column: [] for column in columns}
+        crossed = [column for column in columns if column in BASIS_SIGNALS]
+        bases = dict.fromkeys(crossed, pd.Series(0, index=["current", "delisted"]))
         for low, high in years(start, end):
             built = build_feature_frame(calendar, low, high, masked={})
             gaps = observable_frame(calendar, low, high)
             frame = built.merge(gaps, on=["stock_id", "date"], how="left")
             for column in columns:
                 parts[column].append(monthly_coverage(frame, column, delisted))
+            for column in crossed:
+                bases[column] = basis_counts(frame, column, delisted).add(
+                    bases[column], fill_value=0
+                )
         tables = {column: pd.concat(chunks) for column, chunks in parts.items()}
         for column, coverage in tables.items():
             self._report(column, coverage)
+        for column, counts in bases.items():
+            self._basis(column, counts)
         if options["output"]:
             rows = [
                 coverage.rename_axis("month").reset_index().assign(column=column)

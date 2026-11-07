@@ -6,12 +6,18 @@ from types import MappingProxyType
 
 import pandas as pd
 
-from apps.research.features.fundamental import STATEMENT_INPUTS, sourced_name
+from apps.research.features.fundamental import (
+    BASIS_SIGNALS,
+    STATEMENT_INPUTS,
+    crossed_name,
+    sourced_name,
+)
 from apps.research.features.size_risk import canonical_industry
 
 ACCEPT_RATIO = 1.5
 ACCEPT_GAP = 0.05
 MAX_MASKED_SHARE = 0.2
+BASIS_GAP = 0.01
 SHARE_DIGITS = 12
 FALLBACKS: Mapping[str, str] = MappingProxyType(
     {"fund_rev_yoy": "fund_rev_yoy_q", "fund_rev_3m_yoy": "fund_rev_yoy_q"}
@@ -82,7 +88,23 @@ def observable_gaps(
     for name, signals in OBSERVABLE.items():
         recorded = panel[[sourced_name(signal) for signal in signals]].eq(1.0).any(axis=1)
         observed[observable_name(name)] = recorded | industry.isin(exempt.get(name, frozenset()))
-    return panel[["stock_id", "date"]].assign(**observed)
+    crossed = {crossed_name(name): panel[crossed_name(name)].eq(1.0) for name in BASIS_SIGNALS}
+    return panel[["stock_id", "date"]].assign(**observed, **crossed)
+
+
+def basis_counts(rows: pd.DataFrame, column: str, delisted: pd.Series) -> pd.Series:
+    """Universe rows missing a value read across report bases, and all universe rows, by fate."""
+    inside = rows[rows["in_universe"].astype(bool)]
+    fate = inside["stock_id"].map(delisted).eq(True)
+    hit = inside[column].isna() & inside[crossed_name(column)].eq(True)
+    return pd.Series(
+        {
+            "current": int(hit[~fate].sum()),
+            "delisted": int(hit[fate].sum()),
+            "rows_current": int((~fate).sum()),
+            "rows_delisted": int(fate.sum()),
+        }
+    )
 
 
 def masked_as_observable(

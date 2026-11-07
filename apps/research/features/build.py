@@ -15,7 +15,12 @@ from apps.research.features.chip import (
     second_batch_chip_features,
 )
 from apps.research.features.dividend import attach_ex_dates
-from apps.research.features.fundamental import attach_fundamentals, fundamental_features
+from apps.research.features.fundamental import (
+    BASIS_SIGNALS,
+    attach_fundamentals,
+    crossed_name,
+    fundamental_features,
+)
 from apps.research.features.inputs import load_feature_panel
 from apps.research.features.market import (
     MARKET_NAMES,
@@ -125,7 +130,12 @@ def observable_frame(
 
     With current, also each fundamental of OBSERVABLE as today's database gives it, masked.
     """
-    keys = ["stock_id", "date", *map(observable_name, OBSERVABLE)]
+    keys = [
+        "stock_id",
+        "date",
+        *map(observable_name, OBSERVABLE),
+        *map(crossed_name, BASIS_SIGNALS),
+    ]
     columns = [*keys, *(map(current_name, CHECKED) if current else ())]
     low, high = max(start, calendar.start), min(end, calendar.end)
     panel = load_feature_panel(calendar, start, end) if low <= high else pd.DataFrame()

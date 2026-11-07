@@ -6,7 +6,12 @@ import pandas as pd
 import pytest
 
 from apps.research.features.build import MODEL_COLUMNS
-from apps.research.features.fundamental import STATEMENT_INPUTS, sourced_name
+from apps.research.features.fundamental import (
+    BASIS_SIGNALS,
+    STATEMENT_INPUTS,
+    crossed_name,
+    sourced_name,
+)
 from apps.research.features.residual import (
     ACCEPT_GAP,
     ACCEPT_RATIO,
@@ -16,6 +21,7 @@ from apps.research.features.residual import (
     OBSERVABLE,
     affected_months,
     apply_fallbacks,
+    basis_counts,
     mask_months,
     masked_as_observable,
     monthly_coverage,
@@ -202,13 +208,20 @@ def test_a_gap_is_observable_only_when_every_input_its_value_reads_is_on_record(
         }
     )
     panel.loc[[0, 3], sourced_name("fund_rev_yoy_q")] = 1.0
+    panel = panel.assign(**{crossed_name(name): [0.0, 1.0, NAN, 0.0] for name in BASIS_SIGNALS})
 
     gaps = observable_gaps(panel)
 
     def column(name: str) -> list[bool]:
         return gaps[observable_name(name)].tolist()
 
-    assert list(gaps.columns) == ["stock_id", "date", *map(observable_name, OBSERVABLE)]
+    assert list(gaps.columns) == [
+        "stock_id",
+        "date",
+        *map(observable_name, OBSERVABLE),
+        *map(crossed_name, BASIS_SIGNALS),
+    ]
+    assert gaps[crossed_name("fund_cfo_to_ni")].tolist() == [False, True, False, False]
     assert set(OBSERVABLE) <= set(MODEL_COLUMNS)
     assert set(OBSERVABLE) == {
         *(name for name in STATEMENT_INPUTS if name != "eps_ttm"),
@@ -265,3 +278,20 @@ def test_masked_months_count_as_gaps_with_a_known_cause() -> None:
     assert marked[observable_name("chip_short_ratio")].tolist() == [False, False, True]
     assert rows[observable_name("fund_eps_yoy")].tolist() == [True, None, False]
     pd.testing.assert_frame_equal(masked_as_observable(rows, {}), rows)
+
+
+def test_basis_counts_take_gaps_read_across_report_bases_by_later_fate() -> None:
+    rows = pd.DataFrame(
+        {
+            "stock_id": ["2330", "2317", "1101", "1101", "9999"],
+            "date": [d("2017-03-01")] * 5,
+            "in_universe": [True, True, True, True, False],
+            "fund_rev_yoy_q": [NAN, NAN, NAN, 0.1, NAN],
+            crossed_name("fund_rev_yoy_q"): [True, None, True, False, True],
+        }
+    )
+    delisted = pd.Series({"2330": False, "2317": False, "1101": True, "9999": True})
+
+    counts = basis_counts(rows, "fund_rev_yoy_q", delisted)
+
+    assert counts.to_dict() == {"current": 1, "delisted": 1, "rows_current": 2, "rows_delisted": 2}

@@ -45,6 +45,11 @@ STATEMENT_FIELDS: Mapping[str, tuple[str, ...]] = {
     "fund_rev_yoy_q": ("revenue",),
 }
 BASIS_COLUMNS = frozenset({"revenue", "gross_margin", "op_margin", "operating_cf"})
+BASIS_SIGNALS = [
+    name
+    for name, fields in STATEMENT_FIELDS.items()
+    if BASIS_COLUMNS.intersection(fields) and STATEMENT_INPUTS[name]
+]
 CONSOLIDATED_MONTH = 2013 * 12
 SIGNAL_COLUMNS = [
     "stock_id",
@@ -60,6 +65,7 @@ REVENUE_STALE = timedelta(days=62)
 STATEMENT_STALE = timedelta(days=200)
 MONTH_SPAN = timedelta(days=31)
 SOURCED = "_sourced"
+CROSSED = "_crossed"
 QUARTER_SPAN = timedelta(days=92)
 REVENUE_LOOKBACK = REVENUE_STALE + MONTH_SPAN * (max(map(max, REVENUE_INPUTS.values())) + 1)
 STATEMENT_LOOKBACK = STATEMENT_STALE + QUARTER_SPAN * (
@@ -81,6 +87,10 @@ STATEMENT_COLUMNS = [
 ]
 NUMERIC = STATEMENT_COLUMNS[3:-1]
 PASSED = [*REVENUE_INPUTS, *list(STATEMENT_INPUTS)[1:], "fund_days_since_fs"]
+RECORDED = [
+    *(f"{name}{SOURCED}" for name in STATEMENT_INPUTS),
+    *(f"{name}{CROSSED}" for name in BASIS_SIGNALS),
+]
 
 
 class _Lags:
@@ -138,6 +148,11 @@ def _growth(now: pd.Series, base: pd.Series) -> pd.Series:
 def sourced_name(name: str) -> str:
     """Panel column that is 1 when every period and field a signal reads is on record, else 0."""
     return f"{name}{SOURCED}"
+
+
+def crossed_name(name: str) -> str:
+    """Panel column that is 1 when a consolidation-scope signal reads a quarter on another basis."""
+    return f"{name}{CROSSED}"
 
 
 def _monthly(revenue: pd.DataFrame) -> _Lags:
@@ -200,13 +215,19 @@ def _ttm(lag: _Lags, frame: pd.DataFrame, column: str, offset: int = 0) -> pd.Se
     return pd.concat(parts, axis=1).sum(axis=1, min_count=TTM_QUARTERS)
 
 
+def _crosses(kinds: _Lags, frame: pd.DataFrame, lags: Sequence[int]) -> pd.Series:
+    """Whether a quarter read, when on record, was filed on another basis than the current one."""
+    earlier = pd.concat([kinds("fin_type", k) for k in lags], axis=1)
+    return (earlier.notna() & earlier.ne(frame["fin_type"], axis=0)).any(axis=1)
+
+
 def statement_sourcing(statements: pd.DataFrame) -> pd.DataFrame:
     """Per chosen statement and signal, 1 when every field it reads is on record in each quarter.
 
-    Quarters on the other basis count as on record: their gap is the basis rule, not the source.
+    Quarters on the other basis count as on record; BASIS_SIGNALS also flag that they read one.
     """
     frame = _preferred(statements)
-    lag = _Lags(frame.drop(columns="fin_type"))
+    lag, kinds = _Lags(frame.drop(columns="fin_type")), _Lags(frame)
     values = {
         sourced_name(name): pd.concat(
             [
@@ -220,8 +241,13 @@ def statement_sourcing(statements: pd.DataFrame) -> pd.DataFrame:
         .astype("float64")
         for name, fields in STATEMENT_FIELDS.items()
     }
+    crossed = {
+        crossed_name(name): _crosses(kinds, frame, STATEMENT_INPUTS[name]).astype("float64")
+        for name in BASIS_SIGNALS
+    }
     inputs = {sourced_name(name): STATEMENT_INPUTS[name] for name in STATEMENT_FIELDS}
-    return _signals(lag, values, inputs)
+    inputs |= {crossed_name(name): STATEMENT_INPUTS[name] for name in BASIS_SIGNALS}
+    return _signals(lag, values | crossed, inputs)
 
 
 def statement_signals(statements: pd.DataFrame) -> pd.DataFrame:
@@ -399,9 +425,7 @@ def attach_fundamentals(
             panel, sourcing, list(map(sourced_name, REVENUE_INPUTS)), REVENUE_STALE, starts
         ),
         **_attached(panel, quarterly, list(STATEMENT_INPUTS), STATEMENT_STALE, starts),
-        **_attached(
-            panel, recorded, list(map(sourced_name, STATEMENT_INPUTS)), STATEMENT_STALE, starts
-        ),
+        **_attached(panel, recorded, RECORDED, STATEMENT_STALE, starts),
         fund_days_since_fs=_days_since(panel, pd.to_datetime(seen), calendar),
         pb=daily["pb"].to_numpy(),
         dividend_yield=daily["dividend_yield"].to_numpy(),

@@ -6,7 +6,12 @@ import pandas as pd
 import pytest
 
 from apps.market.models import DailyValuation, FinancialStatement, MonthlyRevenue
-from apps.research.features.fundamental import attach_fundamentals, sourced_name
+from apps.research.features.fundamental import (
+    BASIS_SIGNALS,
+    attach_fundamentals,
+    crossed_name,
+    sourced_name,
+)
 from tests.research.conftest import weekday_calendar
 
 CALENDAR = weekday_calendar(date(2013, 1, 1), date(2016, 12, 31))
@@ -289,6 +294,7 @@ def test_statement_flags_attach_and_go_stale_like_their_signals() -> None:
     stale = attach(panel_of("2330", "2016-10-24", "2016-10-24")).iloc[0]
 
     assert {sourced_name(name) for name in STATEMENT_NAMES} <= set(early.columns)
+    assert early[[crossed_name(name) for name in BASIS_SIGNALS]].eq(0.0).all().all()
     assert early[sourced_name("eps_ttm")].tolist() == [0.0, 0.0, 0.0, 1.0, 1.0]
     assert early[sourced_name("fund_gross_margin")].tolist() == [1.0, 1.0, 1.0, 0.0, 0.0]
     assert math.isnan(stale["eps_ttm"])

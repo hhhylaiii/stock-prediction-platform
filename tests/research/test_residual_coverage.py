@@ -10,6 +10,7 @@ from django.core.management.base import CommandError
 
 from apps.market.calendar import TradingDays
 from apps.market.models import StockMaster, TradingCalendar
+from apps.research.features.fundamental import crossed_name
 from apps.research.features.residual import observable_name
 from apps.research.management.commands import residual_coverage
 from tests.research.conftest import weekday_calendar
@@ -151,3 +152,27 @@ def test_coverage_counts_a_gap_with_a_known_cause_as_covered(
     ]
     assert "fund_rev_yoy: 0 of 24 months affected (0%)" in out.getvalue()
     assert "fund_rev_3m_yoy: 1 of 24 months affected (4%)" in out.getvalue()
+
+
+def test_coverage_counts_gaps_read_across_report_bases_and_warns_when_they_lean_on_delisted(
+    built: list[tuple[date, date, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def crossed(calendar: TradingDays, start: date, end: date) -> pd.DataFrame:
+        low, high = max(start, calendar.start), min(end, calendar.end)
+        days = calendar.between(low, high) if low <= high else ()
+        rows = [(stock, day, stock == "1101") for day in days for stock in ("2330", "1101")]
+        return pd.DataFrame(rows, columns=["stock_id", "date", crossed_name("fund_rev_yoy_q")])
+
+    def build(calendar: TradingDays, start: date, end: date, masked: Any) -> pd.DataFrame:
+        return synthetic(calendar, start, end).assign(fund_rev_yoy_q=float("nan"))
+
+    monkeypatch.setattr(residual_coverage, "observable_frame", crossed)
+    monkeypatch.setattr(residual_coverage, "build_feature_frame", build)
+    out = StringIO()
+
+    call_command("residual_coverage", columns="fund_rev_yoy_q,fund_rev_yoy", stdout=out)
+
+    text = out.getvalue()
+    assert "fund_rev_yoy_q: gaps read across report bases, current 0.00%, delisted 100.00%" in text
+    assert "warning: these gaps lean on stocks later delisted; report before keeping them" in text
+    assert "fund_rev_yoy: gaps read across" not in text
