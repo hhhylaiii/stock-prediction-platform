@@ -25,7 +25,8 @@
     model_promotion: '換模',
     research_evening: '研究晚間排程',
     research_morning: '研究早盤排程',
-    research_retrain: '每月重訓'
+    research_retrain: '每月重訓',
+    research_promote: '自動換模'
   };
   const ALERT_REASONS = { below_threshold: '低於門檻', outside_range: '超出範圍', above_baseline: '輸給 baseline', missing_reference: '缺參考值' };
   const ALERT_METRICS = { ic: 'IC', coverage: '覆蓋率', brier: 'Brier' };
@@ -71,6 +72,7 @@
   const statusEl = document.getElementById('status');
   const summaryOf = day => ({ passed: day.passed, worst: day.worst, missing_checks: day.missing_checks, warnings: day.checks.filter(c => c.severity === 'warning').length });
   const sizeOf = v => Array.isArray(v) ? v.length : Number(v || 0);
+  const keyCount = v => v && typeof v === 'object' ? Object.keys(v).length : 0;
 
   function verdictOf(day) {
     const warnings = day.warnings;
@@ -838,6 +840,8 @@
       case 'monitor_unscored': return ['warn', [fmtInt(sizeOf(d.runs)) + ' 筆']];
       case 'model_alert': return ['warn', (d.runs || []).map(run => alertLine(run, date))];
       case 'model_promotion': return [check.severity === 'info' ? '' : 'warn', promotionLines(d)];
+      case 'research_retrain': return [check.severity === 'info' ? '' : 'warn', ['建 ' + keyCount(d.built) + '、拒 ' + keyCount(d.refused) + '、失敗 ' + keyCount(d.failed)]];
+      case 'research_promote': return ['warn', ['失敗 ' + keyCount(d.failed) + '、完成 ' + sizeOf(d.done), ...Object.entries(d.failed || {}).map(([key, error]) => key + '：' + error)]];
       default: return [check.severity === 'info' ? '' : 'warn', [(SEVERITY[check.severity] || [check.severity])[0]]];
     }
   }
@@ -855,7 +859,7 @@
   const isPromotion = check => check.check_name === 'model_promotion';
   const isResearch = check => check.check_name.startsWith('research_');
   const scopeOf = check => (check.detail || {}).scope || (check.detail || {}).run_key;
-  const RESEARCH_ORDER = ['research_retrain', 'research_evening', 'research_morning'];
+  const RESEARCH_ORDER = ['research_retrain', 'research_promote', 'research_evening', 'research_morning'];
   const researchRank = check => {
     const rank = RESEARCH_ORDER.indexOf(check.check_name);
     return rank < 0 ? RESEARCH_ORDER.length : rank;

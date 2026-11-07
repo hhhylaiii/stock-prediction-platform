@@ -14,6 +14,7 @@ from apps.research.evaluation import ALERT_SHARE
 from apps.research.gates import Gate, SlotGates
 from apps.research.predict import Slot
 from apps.research.promotion import _failed, _note
+from apps.research.tasks import NOT_FROZEN, _retrain_detail
 from tests.api.conftest import envelope_of, sessions_until, taipei
 
 pytestmark = pytest.mark.usefixtures("calendar_in_db")
@@ -116,7 +117,8 @@ def test_research_schedule_checks_sit_with_the_model_checks(client: Client) -> N
     log_all(OCT_30)
     log(OCT_30, "research_morning", Severity.WARNING, step="predict")
     log(OCT_30, "research_evening", Severity.INFO)
-    log(OCT_30, "research_retrain", Severity.WARNING, refused=["rank"])
+    log(OCT_30, "research_retrain", Severity.WARNING, **_retrain_detail({"rank": NOT_FROZEN}))
+    log(OCT_30, "research_promote", Severity.WARNING, failed={"rank-a": "RunError: x"}, done=[])
 
     day = envelope_of(client.get("/api/data-quality", {"days": 1}))["data"][0]
     quality = envelope_of(client.get("/api/status"))["data"]["quality"]
@@ -124,6 +126,7 @@ def test_research_schedule_checks_sit_with_the_model_checks(client: Client) -> N
     assert [check["check_name"] for check in day["model_checks"]] == [
         "research_evening",
         "research_morning",
+        "research_promote",
         "research_retrain",
     ]
     assert not [check for check in day["checks"] if check["check_name"].startswith("research_")]

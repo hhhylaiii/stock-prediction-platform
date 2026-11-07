@@ -1,14 +1,17 @@
-from datetime import timedelta
+from datetime import date, timedelta
+from pathlib import Path
 
 import pytest
 from playwright.sync_api import Locator, Page, expect
 from pytest_django.live_server_helper import LiveServer
 
 from apps.etl.models import DataQualityLog
+from apps.research import tasks
 from apps.research.gates import SAMPLE_UNITS, Gate, SlotGates
 from apps.research.monitor import MODE_FIELDS, MODES, alert_problems
 from apps.research.predict import Slot
-from apps.research.promotion import _failed, _note
+from apps.research.promotion import Promoted, _failed, _note
+from apps.research.runs import RunError
 from tests.e2e.conftest import XSS_NAME, Seed
 
 pytestmark = pytest.mark.e2e
@@ -474,10 +477,41 @@ def test_research_schedule_checks_sit_with_the_model_checks(
     expect(page.locator("#status")).to_contain_text("品質檢查通過（1 項警告）")
 
 
+BUILT = {"rank": "rank-2026-11", "return": "return-2026-11"}
+NOT_FROZEN = {"interval": tasks.NOT_FROZEN}
+
+
+def retrained(
+    seed: Seed,
+    back: int,
+    built: dict[str, str],
+    refused: dict[str, str],
+    failed: dict[str, str] | None = None,
+) -> None:
+    detail = tasks._retrain_detail(refused, built, failed, 80.0, {})
+    log(seed, tasks.RETRAIN_CHECK, "warning" if refused or failed else "info", detail, back=back)
+
+
+def promote_step(
+    seed: Seed, monkeypatch: pytest.MonkeyPatch, back: int, errors: dict[str, str]
+) -> None:
+    day = seed.sessions[-back]
+
+    def promoted(run_key: str, on: date, directory: Path) -> Promoted:
+        if run_key in errors:
+            raise RunError(errors[run_key])
+        return Promoted(True, [])
+
+    monkeypatch.setattr(tasks, "first_day", lambda run_key: day)
+    monkeypatch.setattr(tasks, "promote", promoted)
+    monkeypatch.setattr(tasks, "dispatch", lambda rows: None)
+    tasks._promote(day)
+
+
 def test_the_monthly_retrain_stays_pinned_beside_the_day_s_checks(
     page: Page, live_server: LiveServer, seeded: Seed
 ) -> None:
-    log(seeded, "research_retrain", "warning", {}, back=15)
+    retrained(seeded, 15, {}, NOT_FROZEN, {"rank": "MemoryError: "})
     clean = {"share": 0.0, "flagged": 0, "n_stocks": 1842, "stocks": []}
     log(seeded, "output_width_ratio", "info", clean)
 
@@ -486,6 +520,7 @@ def test_the_monthly_retrain_stays_pinned_beside_the_day_s_checks(
     checks = page.locator("#model-checks .check")
     expect(checks).to_have_count(2)
     expect(checks.nth(0)).to_contain_text("每月重訓")
+    expect(checks.nth(0)).to_contain_text("建 0、拒 1、失敗 1")
     expect(checks.nth(0).locator(".pinned")).to_have_text(seeded.sessions[-15].isoformat())
     expect(checks.nth(0).locator("i")).to_have_class("warn")
     expect(checks.nth(1)).to_contain_text("區間寬度比異常")
@@ -493,19 +528,41 @@ def test_the_monthly_retrain_stays_pinned_beside_the_day_s_checks(
 
 
 def test_research_checks_keep_a_fixed_order_whatever_ran_last(
-    page: Page, live_server: LiveServer, seeded: Seed
+    page: Page, live_server: LiveServer, seeded: Seed, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    log(seeded, "research_retrain", "info", {}, back=15)
     log(seeded, "research_evening", "info", {}, back=2)
     log(seeded, "research_morning", "warning", {})
+    retrained(seeded, 1, BUILT, {})
+    promote_step(seeded, monkeypatch, 1, {"rank-2026-11": "boom"})
 
     page.goto(f"{live_server.url}/#models")
 
     checks = page.locator("#model-checks .check")
-    expect(checks).to_have_count(3)
-    for n, (name, back) in enumerate((("每月重訓", 15), ("研究晚間排程", 2), ("研究早盤排程", 1))):
+    expect(checks).to_have_count(4)
+    expected = (("每月重訓", 1), ("自動換模", 1), ("研究晚間排程", 2), ("研究早盤排程", 1))
+    for n, (name, back) in enumerate(expected):
         expect(checks.nth(n)).to_contain_text(name)
         expect(checks.nth(n).locator(".pinned")).to_have_text(seeded.sessions[-back].isoformat())
+
+
+def test_a_failed_automatic_promotion_names_each_build_and_its_error(
+    page: Page, live_server: LiveServer, seeded: Seed, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    retrained(seeded, 1, BUILT, NOT_FROZEN)
+    promote_step(seeded, monkeypatch, 1, {"rank-2026-11": XSS_NAME})
+
+    page.goto(f"{live_server.url}/#models")
+
+    checks = page.locator("#model-checks .check")
+    retrain, promote = checks.nth(0), checks.nth(1)
+    expect(retrain).to_contain_text("建 2、拒 1、失敗 0")
+    expect(retrain.locator("i")).to_have_class("warn")
+    expect(promote).to_contain_text("自動換模")
+    expect(promote.locator(".muted")).to_have_text(
+        ["失敗 1、完成 1", f"rank-2026-11：RunError: {XSS_NAME}"]
+    )
+    expect(promote.locator("i")).to_have_class("warn")
+    assert page.evaluate("window.__xss") is None
 
 
 def test_model_output_checks_leave_the_data_verdict_alone(
