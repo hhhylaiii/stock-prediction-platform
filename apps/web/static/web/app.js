@@ -294,14 +294,15 @@
   const waiting = '<p class="placeholder">預測資料尚未產出。</p>';
   const stockTop = () => '<div class="stock-top">' + backLink + '<form class="search stock-go" id="stock-go" role="search">' +
     '<input type="search" id="stock-q" placeholder="前往個股：代號或名稱" aria-label="前往個股：代號或名稱" autocomplete="off" maxlength="' + SEARCH_MAX + '">' +
-    '<div class="stock-hits" id="stock-hits" role="listbox" aria-label="符合的股票" hidden></div></form></div>';
-  const hitHtml = hit => '<a role="option" href="#stock-' + encodeURIComponent(hit.stock_id) + '"><span class="code">' + esc(hit.stock_id) + '</span> ' + esc(hit.name) +
+    '<div class="stock-hits" id="stock-hits" hidden></div></form></div>';
+  const hitHtml = hit => '<a href="#stock-' + encodeURIComponent(hit.stock_id) + '"><span class="code">' + esc(hit.stock_id) + '</span> ' + esc(hit.name) +
     ' <span class="faint small">' + esc(hit.market_label) + (hit.delisted ? ' 已下市' : '') + '</span></a>';
 
   function bindStockSearch() {
-    const input = document.getElementById('stock-q'), list = document.getElementById('stock-hits');
+    const form = document.getElementById('stock-go'), input = document.getElementById('stock-q'), list = document.getElementById('stock-hits');
     let timer = null, ticket = 0, shown = { text: null, hits: [] };
     const show = html => { list.innerHTML = html; list.hidden = !html; };
+    const close = () => { clearTimeout(timer); ticket += 1; show(''); };
     const lookup = async text => {
       const mine = ++ticket;
       try {
@@ -321,14 +322,20 @@
       if (!text) { ticket += 1; show(''); return; }
       timer = setTimeout(() => lookup(text), 250);
     });
-    document.getElementById('stock-go').addEventListener('submit', async e => {
+    form.addEventListener('submit', async e => {
       e.preventDefault();
       clearTimeout(timer);
       const text = input.value.trim();
       if (!text) return;
       const hits = shown.text === text ? shown.hits : await lookup(text);
-      if (hits && hits.length) location.hash = '#stock-' + encodeURIComponent(hits[0].stock_id);
+      if (!hits || !hits.length) return;
+      close();
+      location.hash = '#stock-' + encodeURIComponent(hits[0].stock_id);
     });
+    form.addEventListener('keydown', e => { if (e.key === 'Escape') close(); });
+    form.addEventListener('focusout', e => { if (!form.contains(e.relatedTarget)) close(); });
+    list.addEventListener('mousedown', e => e.preventDefault());
+    list.addEventListener('click', e => { if (e.target.closest('a')) close(); });
   }
 
   function showStockProblem(html) {
