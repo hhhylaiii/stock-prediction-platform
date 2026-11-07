@@ -1,7 +1,5 @@
 """Each stock's exchange on a given day, so history is not read under today's market (SPEC §8.4)."""
 
-from bisect import bisect_right
-from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from datetime import date, timedelta
@@ -67,27 +65,6 @@ def merge_spans(
         Span(code, start, end, market)
         for (start, market), end in zip(merged, [*ends, None], strict=True)
     ]
-
-
-def market_on(stock_ids: Sequence[str], days: Sequence[date]) -> list[str | None]:
-    """The market of each stock on the day paired with it; None where no span covers the day."""
-    spans: dict[str, list[tuple[date, date | None, str]]] = defaultdict(list)
-    rows = MarketHistory.objects.filter(stock_id__in=set(stock_ids)).order_by(
-        "stock_id", "start_date"
-    )
-    for stock_id, start, end, market in rows.values_list(
-        "stock_id", "start_date", "end_date", "market"
-    ):
-        spans[stock_id].append((start, end, market))
-    return [_covering(spans.get(code, []), day) for code, day in zip(stock_ids, days, strict=True)]
-
-
-def _covering(spans: list[tuple[date, date | None, str]], day: date) -> str | None:
-    index = bisect_right([start for start, _, _ in spans], day) - 1
-    if index < 0:
-        return None
-    _, end, market = spans[index]
-    return market if end is None or day <= end else None
 
 
 def record_markets(day: date, markets: Mapping[str, str]) -> list[str]:
