@@ -240,7 +240,7 @@ def test_monthly_revenue_growth_falls_back_to_the_quarterly_growth_in_the_frame(
         ]
     )
 
-    frame = build_feature_frame(CALENDAR, d("2016-03-01"), d("2016-03-04"))
+    frame = build_feature_frame(CALENDAR, d("2016-03-01"), d("2016-03-04"), masked={})
 
     row = frame[frame["date"] == d("2016-03-02")].iloc[0]
     assert row["fund_rev_yoy_q"] == pytest.approx(0.2)
@@ -269,7 +269,7 @@ def test_monthly_revenue_growth_left_missing_on_record_takes_no_fallback() -> No
         for month in range(1, 13)
     )
 
-    frame = build_feature_frame(CALENDAR, d("2016-03-01"), d("2016-03-04"))
+    frame = build_feature_frame(CALENDAR, d("2016-03-01"), d("2016-03-04"), masked={})
 
     row = frame[frame["date"] == d("2016-03-02")].iloc[0]
     assert row["fund_rev_yoy_q"] == pytest.approx(0.2)
@@ -303,7 +303,9 @@ def test_monthly_revenue_takes_the_quarter_only_once_it_goes_stale() -> None:
         for month in range(1, 13)
     )
 
-    frame = build_feature_frame(CALENDAR, d("2016-03-10"), d("2016-03-15")).set_index("date")
+    frame = build_feature_frame(CALENDAR, d("2016-03-10"), d("2016-03-15"), masked={}).set_index(
+        "date"
+    )
 
     assert frame["fund_rev_yoy"].loc[d("2016-03-11")] == pytest.approx(0.1)
     assert frame["fund_rev_mom"].loc[d("2016-03-11")] == pytest.approx(0.1)
@@ -336,7 +338,7 @@ def test_month_masks_reach_any_column_of_the_frame_after_the_fallbacks() -> None
     )
     masked = {"fund_rev_yoy_q": frozenset({"2016-03"}), "tech_vol_20d": frozenset({"2016-04"})}
 
-    plain = build_feature_frame(CALENDAR, d("2016-03-28"), d("2016-04-04"))
+    plain = build_feature_frame(CALENDAR, d("2016-03-28"), d("2016-04-04"), masked={})
     frame = build_feature_frame(CALENDAR, d("2016-03-28"), d("2016-04-04"), masked=masked)
 
     march = frame["date"] < d("2016-04-01")
@@ -805,7 +807,7 @@ def test_observable_gaps_mark_formula_and_industry_gaps_but_not_missing_inputs()
         for source in ("twse", "tpex")
     )
 
-    frame = build_feature_frame(CALENDAR, d("2016-03-01"), d("2016-03-04"))
+    frame = build_feature_frame(CALENDAR, d("2016-03-01"), d("2016-03-04"), masked={})
     gaps = observable_frame(CALENDAR, d("2016-03-01"), d("2016-03-04"))
 
     keys = ["stock_id", "date"]
@@ -838,7 +840,7 @@ def test_observable_gaps_mark_formula_and_industry_gaps_but_not_missing_inputs()
     shown = gaps[(gaps["date"] == d("2016-03-03")) & (gaps["stock_id"] == "1101")]
     assert shown[observable_name("chip_short_ratio")].tolist() == [True]
     assert set(SOURCED_CHIPS) <= set(CHECKED)
-    now = observable_frame(CALENDAR, d("2016-03-01"), d("2016-03-04"), current=True)
+    now = observable_frame(CALENDAR, d("2016-03-01"), d("2016-03-04"), current=True, masked={})
     both = frame.merge(now, on=keys)
     assert len(both) == len(frame)
     for name in CHECKED:

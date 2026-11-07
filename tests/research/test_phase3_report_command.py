@@ -90,7 +90,10 @@ def before_table(path: Path) -> Path:
     return path
 
 
-def test_the_report_covers_gaps_fallbacks_and_monthly_ic(stored: Path) -> None:
+def test_the_report_covers_gaps_fallbacks_and_monthly_ic(
+    stored: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(phase3_report, "MASKED_MONTHS", {})
     StockMaster.objects.create(
         stock_id=STOCKS[0],
         name="x",
