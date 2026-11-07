@@ -8,8 +8,9 @@ import numpy as np
 import pandas as pd
 from django.db.models import Min, Q
 
+from apps.etl.models import RawRecord, RawTpex, RawTwse
 from apps.market.calendar import TradingDays
-from apps.market.models import DailyChip, WeeklyHolding
+from apps.market.models import DailyChip, Market, WeeklyHolding
 from apps.research.features.common import (
     carried,
     feature_frame,
@@ -53,6 +54,13 @@ SOURCED_CHIPS = (
     "chip_short_ratio",
     "chip_sbl_short_chg_5d",
 )
+PAGES: Mapping[str, str] = MappingProxyType(
+    {"margin_balance": "margin", "sbl_short_balance": "sbl"}
+)
+PAGE_DAYS: Mapping[str, tuple[type[RawRecord], str]] = MappingProxyType(
+    {Market.TWSE: (RawTwse, "%Y%m%d"), Market.TPEX: (RawTpex, "%Y/%m/%d")}
+)
+PAGE_COLUMNS = ["market", "source", "date"]
 FILLER = 1.0
 HOLDING_LOOKBACK = timedelta(days=42)
 HOLDING_STALE = pd.Timedelta(21, unit="D")
@@ -203,16 +211,35 @@ def load_chip_starts() -> pd.DataFrame:
     return frame.set_index("stock_id")
 
 
-def chip_sourcing(panel: pd.DataFrame, starts: pd.DataFrame) -> pd.DataFrame:
+def load_chip_pages() -> pd.DataFrame:
+    """Market, source balance and day of each margin or lending page kept raw."""
+    frames = []
+    for market, (model, form) in PAGE_DAYS.items():
+        for marker, dataset in PAGES.items():
+            texts = model._default_manager.filter(dataset=dataset).values_list(
+                "request_params__date", flat=True
+            )
+            days = pd.to_datetime(pd.Series(sorted(set(texts)), dtype="object"), format=form)
+            frames.append(pd.DataFrame({"market": market, "source": marker, "date": days.dt.date}))
+    return pd.concat(frames, ignore_index=True)[PAGE_COLUMNS]
+
+
+def chip_sourcing(panel: pd.DataFrame, starts: pd.DataFrame, pages: pd.DataFrame) -> pd.DataFrame:
     """Per row, 0 where a lending feature is missing only for rows or shares the stock should have.
 
-    Rows are expected from a stock's first one on, and every day for a stock without any.
+    A row is expected on a traded day whose market page is not kept raw, from the stock's first
+    row on or every day for a stock without any; halted days carry a row as the features do.
     """
     days = pd.to_datetime(panel["date"])
+    priced = panel["has_bar"].astype(bool)
+    keys = pd.MultiIndex.from_frame(panel[["market", "date"]])
     filled = panel.assign(shares=panel["shares"].fillna(FILLER))
     for marker, cells in LENDING.items():
         first = pd.to_datetime(panel["stock_id"].map(starts[marker]))
-        missing = panel[marker].isna() & (first.isna() | days.ge(first))
+        shown = pages.loc[pages["source"] == marker, ["market", "date"]]
+        paged = keys.isin(pd.MultiIndex.from_frame(shown))
+        expected = priced & ~paged & (first.isna() | days.ge(first))
+        missing = panel[marker].isna() & expected
         filled = filled.assign(**{cell: filled[cell].mask(missing, FILLER) for cell in cells})
     actual, whole = lending_features(panel), lending_features(filled)
     flags = {

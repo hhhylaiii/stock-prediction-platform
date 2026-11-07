@@ -4,6 +4,7 @@ from datetime import date
 import pandas as pd
 import pytest
 
+from apps.etl.models import RawTpex, RawTwse
 from apps.market.models import DailyChip
 from apps.research.features.chip import (
     LENDING,
@@ -11,6 +12,7 @@ from apps.research.features.chip import (
     chip_features,
     chip_sourcing,
     lending_features,
+    load_chip_pages,
     load_chip_starts,
 )
 from apps.research.features.fundamental import sourced_name
@@ -39,9 +41,18 @@ def starts(margin: date | None = DAYS[0], sbl: date | None = DAYS[0]) -> pd.Data
     )
 
 
-def gaps(rows: pd.DataFrame, first: pd.DataFrame | None = None) -> dict[str, list[int]]:
+def pages(*shown: tuple[str, str, int]) -> pd.DataFrame:
+    """Pages kept raw, as market, source balance and row of DAYS."""
+    rows = [(market, source, DAYS[k]) for market, source, k in shown]
+    return pd.DataFrame(rows, columns=["market", "source", "date"])
+
+
+def gaps(
+    rows: pd.DataFrame, first: pd.DataFrame | None = None, kept: pd.DataFrame | None = None
+) -> dict[str, list[int]]:
     """Rows of each lending feature that are missing and whose flag is 0."""
-    flags = chip_sourcing(rows, starts() if first is None else first)
+    shown = pages() if kept is None else kept
+    flags = chip_sourcing(rows, starts() if first is None else first, shown)
     values = lending_features(rows)
     return {
         name: [
@@ -86,7 +97,7 @@ def test_a_missing_margin_row_after_the_first_is_a_source_gap_on_each_day_readin
     assert found["chip_margin_usage"] == [6]
     assert found["chip_short_ratio"] == [6]
     assert found["chip_sbl_short_chg_5d"] == []
-    flags = chip_sourcing(rows, starts())
+    flags = chip_sourcing(rows, starts(), pages())
     assert flags[sourced_name("chip_margin_chg_5d")].iloc[:5].tolist() == [1.0] * 5
     assert list(flags.columns) == ["stock_id", "date", *map(sourced_name, SOURCED_CHIPS)]
     pd.testing.assert_frame_equal(rows, before)
@@ -163,6 +174,83 @@ def test_a_halted_day_without_a_row_carries_the_balance() -> None:
     ).assign(close=closes, has_bar=pd.Series(closes).notna())
 
     assert gaps(rows)["chip_margin_usage"] == []
+
+
+def test_a_halted_day_without_a_row_follows_the_row_it_carries() -> None:
+    closes = rising(N)
+    closes[6] = closes[7] = NAN
+    missing = {"r6": NAN, "r7": NAN}
+    rows = panel(
+        margin_balance=column([10_000.0] * N, r5=0.0, **missing),
+        margin_limit=column([50_000.0] * N, **missing),
+        short_balance=column([2_000.0] * N, **missing),
+    ).assign(close=closes, has_bar=pd.Series(closes).notna())
+
+    found = gaps(rows)
+
+    assert found["chip_short_ratio"] == []
+    assert lending_features(rows)["chip_short_ratio"].isna().tolist() == [
+        k in (5, 6, 7) for k in range(N)
+    ]
+
+
+def test_a_stock_missing_from_its_markets_page_kept_raw_is_observable() -> None:
+    none = panel(margin_balance=NAN, margin_limit=NAN, short_balance=NAN)
+    kept = pages(("TWSE", "margin_balance", 6), ("TPEx", "margin_balance", 7))
+    kept = pd.concat([kept, pages(("TWSE", "sbl_short_balance", 8))], ignore_index=True)
+
+    found = gaps(none, starts(margin=None), kept)
+
+    assert found["chip_margin_usage"] == [k for k in range(N) if k != 6]
+    assert found["chip_short_ratio"] == [k for k in range(N) if k != 6]
+
+
+def test_a_day_without_its_page_keeps_the_first_row_rules() -> None:
+    gone = {"r6": NAN, "r9": NAN}
+    rows = panel(
+        margin_balance=column([10_000.0] * N, **gone),
+        margin_limit=column([50_000.0] * N, **gone),
+        short_balance=column([2_000.0] * N, **gone),
+    )
+
+    found = gaps(rows, kept=pages(("TWSE", "margin_balance", 6)))
+
+    assert found["chip_margin_usage"] == [9]
+    assert found["chip_margin_chg_5d"] == [9]
+
+
+def test_a_null_balance_on_a_row_on_record_follows_its_page() -> None:
+    rows = panel(margin_balance=column([10_000.0] * N, r4=NAN, r5=NAN))
+
+    found = gaps(rows, kept=pages(("TWSE", "margin_balance", 4)))
+
+    assert found["chip_margin_usage"] == [5]
+    assert found["chip_short_ratio"] == [5]
+
+
+@pytest.mark.django_db
+def test_chip_pages_are_the_days_each_market_kept_a_margin_or_lending_page() -> None:
+    def kept(model: type[RawTwse] | type[RawTpex], dataset: str, day: str, name: str) -> None:
+        model.objects.create(
+            dataset=dataset,
+            request_params={"date": day, "response": "json"},
+            payload={},
+            source_hash=name,
+        )
+
+    kept(RawTwse, "margin", "20140102", "a")
+    kept(RawTwse, "margin", "20140102", "b")
+    kept(RawTwse, "sbl", "20140103", "c")
+    kept(RawTpex, "margin", "2014/01/06", "d")
+    kept(RawTwse, "daily_price", "20140107", "e")
+
+    found = load_chip_pages().sort_values(["market", "source", "date"], ignore_index=True)
+
+    assert found.to_dict("records") == [
+        {"market": "TPEx", "source": "margin_balance", "date": date(2014, 1, 6)},
+        {"market": "TWSE", "source": "margin_balance", "date": date(2014, 1, 2)},
+        {"market": "TWSE", "source": "sbl_short_balance", "date": date(2014, 1, 3)},
+    ]
 
 
 @pytest.mark.django_db

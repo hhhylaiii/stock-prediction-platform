@@ -12,6 +12,7 @@ import pytest
 from django.core.management import call_command
 from django.core.management.base import CommandError
 
+from apps.etl.models import RawTwse
 from apps.market.calendar import TradingDays
 from apps.market.models import (
     DailyChip,
@@ -763,16 +764,29 @@ def test_observable_gaps_mark_formula_and_industry_gaps_but_not_missing_inputs()
         for k, (year, quarter) in enumerate(periods)
     )
 
-    lent = {"margin_balance": 1_000, "margin_limit": 5_000, "short_balance": 100}
+    for stock_id in ("2330", "2881", "1101"):
+        SharesOutstanding.objects.create(
+            stock_id=stock_id, effective_date=d("2015-01-02"), shares=1_000_000
+        )
     DailyChip.objects.bulk_create(
         DailyChip(
             stock_id=stock_id,
             date=day,
-            **(lent if stock_id == "2330" else {**lent, "margin_limit": None}),
+            margin_balance=1_000 + 10 * k,
+            margin_limit=5_000 if stock_id == "2330" else None,
+            short_balance=100,
+            sbl_short_balance=500 + 5 * k,
         )
         for stock_id in ("2330", "2881")
-        for day in CALENDAR.between(d("2015-06-01"), d("2016-03-31"))
+        for k, day in enumerate(CALENDAR.between(d("2015-06-01"), d("2016-03-31")))
         if (stock_id, day) != ("2330", d("2016-03-02"))
+    )
+
+    RawTwse.objects.create(
+        dataset="margin",
+        request_params={"date": "20160303", "response": "json", "selectType": "ALL"},
+        payload={},
+        source_hash="margin-20160303",
     )
 
     frame = build_feature_frame(CALENDAR, d("2016-03-01"), d("2016-03-04"))
@@ -801,9 +815,18 @@ def test_observable_gaps_mark_formula_and_industry_gaps_but_not_missing_inputs()
     assert gap("2881", "chip_margin_usage") == (True, True)
     assert gap("2881", "chip_short_ratio") == (False, True)
     assert gap("1101", "chip_short_ratio") == (True, False)
+    shown = gaps[(gaps["date"] == d("2016-03-03")) & (gaps["stock_id"] == "1101")]
+    assert shown[observable_name("chip_short_ratio")].tolist() == [True]
     assert set(SOURCED_CHIPS) <= set(CHECKED)
     now = observable_frame(CALENDAR, d("2016-03-01"), d("2016-03-04"), current=True)
     both = frame.merge(now, on=keys)
     assert len(both) == len(frame)
     for name in CHECKED:
-        assert both[name].isna().equals(both[current_name(name)].isna()), name
+        pd.testing.assert_series_equal(both[name], both[current_name(name)], check_names=False)
+    assert all(both[name].notna().any() for name in SOURCED_CHIPS)
+    hidden = {name: frozenset({"2016-03"}) for name in SOURCED_CHIPS}
+    masked = build_feature_frame(CALENDAR, d("2016-03-01"), d("2016-03-04"), masked=hidden)
+    later = observable_frame(CALENDAR, d("2016-03-01"), d("2016-03-04"), True, hidden)
+    paired = masked.merge(later, on=keys)
+    hidden_columns = [*SOURCED_CHIPS, *map(current_name, SOURCED_CHIPS)]
+    assert paired[hidden_columns].isna().all().all()
