@@ -63,6 +63,7 @@ def test_the_research_schedule_is_off_unless_switched_on(monkeypatch: pytest.Mon
     [
         ("RESEARCH_AT_EVENING", "22:30", "after ETL_AT_CHECK_QUALITY"),
         ("RESEARCH_AT_MORNING", "05:00", "after ETL_AT_US_CLOSE"),
+        ("RESEARCH_RETRAIN_BEFORE", "06:00", "after RESEARCH_AT_MORNING"),
     ],
 )
 def test_the_research_slots_must_follow_the_data_they_wait_for(
@@ -71,6 +72,14 @@ def test_the_research_slots_must_follow_the_data_they_wait_for(
     monkeypatch.setenv(name, value)
     with pytest.raises(ImproperlyConfigured, match=message):
         _fresh_import("config.settings.dev")
+
+
+@pytest.mark.usefixtures("isolated_env")
+def test_the_monthly_retrain_starts_before_nine_with_half_the_memory_free() -> None:
+    module = _fresh_import("config.settings.dev")
+    assert module.RESEARCH_RETRAIN_BEFORE == "09:00"
+    assert module.RESEARCH_RETRAIN_MIN_FREE == 50
+    assert (module.RESEARCH_RETRAIN_COUNTDOWN, module.RESEARCH_RETRAIN_RETRIES) == (1800, 6)
 
 
 @pytest.mark.usefixtures("isolated_env")

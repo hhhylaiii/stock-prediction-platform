@@ -53,7 +53,8 @@ WIDTH_CHECK = "output_width_ratio"
 ODDS_CHECK = "output_odds_vs_q50"
 UNSCORED_CHECK = "monitor_unscored"
 ALERT_CHECK = "model_alert"
-CHECKS = (WIDTH_CHECK, ODDS_CHECK, UNSCORED_CHECK, ALERT_CHECK)
+OUTPUT_CHECKS = (WIDTH_CHECK, ODDS_CHECK)
+CHECKS = (*OUTPUT_CHECKS, UNSCORED_CHECK, ALERT_CHECK)
 IC_THRESHOLD = "rolling_ic_threshold"
 BRIER_BASELINE = "brier_baseline"
 DEGRADED_ON = "degraded_on"
@@ -514,6 +515,16 @@ def _alerting(row: DataQualityLog) -> bool:
     if row.check_name in (UNSCORED_CHECK, ALERT_CHECK):
         return True
     return bool(row.detail["share"] > ALERT_SHARE)
+
+
+def recheck_outputs(day: date) -> list[DataQualityLog]:
+    """Redo the day's output consistency rows, as a swap that rewrote its predictions needs."""
+    logs = consistency_checks(day)
+    with transaction.atomic():
+        DataQualityLog.objects.filter(date=day, check_name__in=OUTPUT_CHECKS).delete()
+        DataQualityLog.objects.bulk_create(logs)
+    dispatch([row for row in logs if _alerting(row)])
+    return logs
 
 
 @dataclass(frozen=True)
