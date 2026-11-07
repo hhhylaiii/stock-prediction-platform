@@ -450,10 +450,10 @@ def test_a_numeric_threshold_off_the_contract_still_shows_zero(
 def test_research_schedule_checks_sit_with_the_model_checks(
     page: Page, live_server: LiveServer, seeded: Seed
 ) -> None:
-    log(seeded, "research_morning", "warning", {}, back=2)
+    log(seeded, "research_morning", "info", {}, back=2)
     clean = {"share": 0.0, "flagged": 0, "n_stocks": 1842, "stocks": []}
     log(seeded, "output_width_ratio", "info", clean, back=2)
-    log(seeded, "research_evening", "info", {})
+    log(seeded, "research_evening", "warning", {})
 
     page.goto(f"{live_server.url}/#models")
 
@@ -461,13 +461,13 @@ def test_research_schedule_checks_sit_with_the_model_checks(
     expect(checks).to_have_count(3)
     evening = checks.nth(0)
     expect(evening).to_contain_text("研究晚間排程")
+    expect(evening).to_contain_text("警告")
     expect(evening.locator(".pinned")).to_have_text(seeded.last_session.isoformat())
-    expect(evening.locator("i")).not_to_have_class("warn")
+    expect(evening.locator("i")).to_have_class("warn")
     morning = checks.nth(1)
     expect(morning).to_contain_text("研究早盤排程")
-    expect(morning).to_contain_text("警告")
     expect(morning.locator(".pinned")).to_have_text(seeded.sessions[-2].isoformat())
-    expect(morning.locator("i")).to_have_class("warn")
+    expect(morning.locator("i")).not_to_have_class("warn")
     expect(checks.nth(2)).to_contain_text("區間寬度比異常")
     expect(page.locator("#model-checks-sub")).to_contain_text(seeded.sessions[-2].isoformat())
     expect(page.locator("#quality")).not_to_contain_text("研究")

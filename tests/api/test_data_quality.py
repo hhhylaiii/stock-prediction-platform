@@ -11,7 +11,9 @@ from apps.etl.models import DataQualityLog
 from apps.etl.quality import CHECKS, should_run_prediction
 from apps.market.models import TradingCalendar
 from apps.research.evaluation import ALERT_SHARE
-from apps.research.promotion import _note
+from apps.research.gates import Gate, SlotGates
+from apps.research.predict import Slot
+from apps.research.promotion import _failed, _note
 from tests.api.conftest import envelope_of, sessions_until, taipei
 
 pytestmark = pytest.mark.usefixtures("calendar_in_db")
@@ -129,7 +131,8 @@ def test_research_schedule_checks_sit_with_the_model_checks(client: Client) -> N
 @time_machine.travel(FRIDAY_NIGHT, tick=False)
 def test_model_checks_carry_their_row_id_in_write_order(client: Client) -> None:
     log_all(OCT_30)
-    refused = [{"slot": "rank 20 日", "run_id": "rank-a1", "gates": []}]
+    gate = Gate("agreement", False, 0.62, "相關 >= 0.7", 1842, "相關太低")
+    refused = _failed([SlotGates(Slot("rank", 20), "rank-a1", "serving-old", [gate])])
     _note(OCT_30, "rank", "rank-a", refused, "", promoted=False)
     _note(OCT_30, "rank", "rank-a", [], "", promoted=True)
 
