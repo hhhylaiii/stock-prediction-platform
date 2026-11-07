@@ -48,6 +48,7 @@ def from_table(known: bool, drift: str = "") -> Explained:
 @pytest.fixture(autouse=True)
 def unexplained(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(phase3_report, "observable_frame", from_table(known=False))
+    monkeypatch.setattr(phase3_report, "MASKED_MONTHS", {})
 
 
 def report(stored: Path, **options: str) -> pd.DataFrame:
@@ -90,10 +91,7 @@ def before_table(path: Path) -> Path:
     return path
 
 
-def test_the_report_covers_gaps_fallbacks_and_monthly_ic(
-    stored: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(phase3_report, "MASKED_MONTHS", {})
+def test_the_report_covers_gaps_fallbacks_and_monthly_ic(stored: Path) -> None:
     StockMaster.objects.create(
         stock_id=STOCKS[0],
         name="x",

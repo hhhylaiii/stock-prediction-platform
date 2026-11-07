@@ -1,3 +1,4 @@
+import hashlib
 import json
 import math
 from datetime import date
@@ -155,6 +156,10 @@ def test_masked_months_are_the_months_residual_coverage_found_on_2026_11_08() ->
     assert MASKED_MONTHS["fund_ep"] == MASKED_MONTHS["ind_ep_neutral"]
     assert len(MASKED_MONTHS["fund_eps_yoy"]) == 87
     assert sum(map(len, MASKED_MONTHS.values())) == 742
+    text = json.dumps({name: sorted(months) for name, months in sorted(MASKED_MONTHS.items())})
+    assert hashlib.sha256(text.encode()).hexdigest() == (
+        "0fbb02c4eb9dc31ed0e392b4176dca31c1c79b5c5d9e25cc6b625d10ecc615a0"
+    )
     for name, chosen in MASKED_MONTHS.items():
         assert chosen <= set(months), name
         assert len(chosen) <= len(months) / 2, name
