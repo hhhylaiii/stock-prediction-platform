@@ -352,12 +352,38 @@ def test_statement_sourcing_marks_signals_whose_quarters_and_fields_are_on_recor
     assert one(nulls, "2016-Q4")[sourced_name("fund_gross_margin")] == 1.0
 
 
+FIELD_READERS = {
+    "eps": {"eps_ttm", "fund_eps_yoy"},
+    "roe": {"fund_roe_ttm"},
+    "gross_margin": {"fund_gross_margin", "fund_gm_yoy_chg"},
+    "op_margin": {"fund_op_margin", "fund_opm_yoy_chg"},
+    "debt_ratio": {"fund_debt_ratio"},
+    "operating_cf": {"fund_cfo_to_ni"},
+    "net_income": {"fund_cfo_to_ni"},
+    "revenue": {"fund_rev_yoy_q"},
+}
+
+
+@pytest.mark.parametrize("field", list(FIELD_READERS))
+def test_a_null_field_clears_the_flags_of_exactly_the_signals_that_read_it(field: str) -> None:
+    statements = quarters("2014-Q1", 12)
+    statements.loc[statements["period"] == "2016-Q4", field] = NAN
+
+    flags = one(statement_sourcing(statements), "2016-Q4")
+
+    cleared = {name for name in STATEMENT_READS if flags[sourced_name(name)] == 0.0}
+    assert cleared == FIELD_READERS[field]
+
+
 def test_statement_sourcing_holds_formula_and_basis_gaps_as_on_record() -> None:
     losses = quarters("2014-Q1", 8, eps=[-1.0] * 4 + [1.0] * 4)
+    deficit = quarters("2014-Q1", 4, net_income=[-100.0] * 4)
     switched = quarters("2012-Q1", 12).assign(fin_type=["individual"] * 4 + ["consolidated"] * 8)
 
     assert math.isnan(one(statement_signals(losses), "2015-Q4")["fund_eps_yoy"])
     assert one(statement_sourcing(losses), "2015-Q4")[sourced_name("fund_eps_yoy")] == 1.0
+    assert math.isnan(one(statement_signals(deficit), "2014-Q4")["fund_cfo_to_ni"])
+    assert one(statement_sourcing(deficit), "2014-Q4")[sourced_name("fund_cfo_to_ni")] == 1.0
     assert math.isnan(one(statement_signals(switched), "2013-Q4")["fund_gm_yoy_chg"])
     assert one(statement_sourcing(switched), "2013-Q4")[sourced_name("fund_gm_yoy_chg")] == 1.0
 

@@ -145,6 +145,9 @@ def test_a_reused_code_reads_only_filings_of_the_new_listing() -> None:
     assert after["fund_rev_mom"].tolist() == pytest.approx([0.1, 0.1])
     assert after[sourced_name("fund_rev_mom")].tolist() == [1.0, 1.0]
     assert after[sourced_name("fund_rev_yoy")].isna().all()
+    assert before[sourced_name("fund_gross_margin")].isna().all()
+    assert after[sourced_name("eps_ttm")].isna().all()
+    assert after[sourced_name("fund_gross_margin")].tolist() == [1.0, 1.0]
     waiting = before[sourced_name("fund_rev_mom")]
     assert waiting.loc[: d("2016-04-08")].isna().all()
     assert waiting.loc[d("2016-04-11") : d("2016-05-09")].eq(0.0).all()
