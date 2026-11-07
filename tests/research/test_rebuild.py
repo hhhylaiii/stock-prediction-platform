@@ -8,6 +8,7 @@ from apps.etl.models import DataQualityLog
 from apps.etl.tasks import US_CLOSE_CHECK
 from apps.market.adjust import ADJ_CHECK
 from apps.market.calendar import TradingDays
+from apps.market.models import TradingCalendar
 from apps.research import tasks
 from apps.research.models import HoldoutScope
 from config.celery import app
@@ -30,7 +31,17 @@ pytestmark = pytest.mark.django_db
 FIXTURES = (calendar_rows, fast, gate, now, ran, retrains, retries_run_in_place, sent)
 DAY = date(2026, 11, 25)
 RECENT = date(2026, 11, 20)
-OLD = date(2026, 10, 2)
+OLD = date(2026, 8, 3)
+
+
+@pytest.fixture(autouse=True)
+def summer_sessions() -> None:
+    """Weekday sessions back to June, so sixty sessions before DAY are on the calendar."""
+    first = date(2026, 6, 1)
+    days = (first + timedelta(days=n) for n in range((date(2026, 10, 1) - first).days))
+    TradingCalendar.objects.bulk_create(
+        TradingCalendar(date=day, is_trading_day=day.weekday() < 5) for day in days
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -85,6 +96,8 @@ def test_a_recent_change_rebuilds_labels_and_features_from_its_earliest_session(
         "earliest": RECENT.isoformat(),
         "stocks": 902,
         "notes": {str(first.pk): first.detail, str(second.pk): second.detail},
+        "limit_days": 60,
+        "handled": "rebuilt",
     }
     assert sent == []
     assert tasks._open_notes() == []
@@ -101,16 +114,6 @@ def test_the_rebuild_never_writes_to_the_data_layer_s_rows(
     assert note.detail == {"stocks": {"2330": RECENT.isoformat()}}
 
 
-def test_a_chain_with_its_own_labels_step_rebuilds_features_only(
-    commands: list[tuple[str, dict[str, Any]]],
-) -> None:
-    changed({"stocks": {"2330": RECENT.isoformat()}})
-
-    tasks.STEPS["rebuild_features"](DAY)
-
-    assert [name for name, _ in commands] == ["build_features"]
-
-
 def test_a_change_on_the_day_itself_needs_only_its_labels(
     commands: list[tuple[str, dict[str, Any]]],
 ) -> None:
@@ -122,20 +125,13 @@ def test_a_change_on_the_day_itself_needs_only_its_labels(
         ("build_labels", {"start": TradingDays.from_db().shift(DAY, -21), "end": DAY})
     ]
     assert tasks._open_notes() == []
-    commands.clear()
-    changed({"stocks": {"2317": DAY.isoformat()}})
-
-    assert tasks.STEPS["rebuild_features"](DAY) == f"nothing before {DAY} to rebuild"
-
-    assert commands == []
-    assert tasks._open_notes() == []
 
 
-def test_a_change_older_than_thirty_sessions_is_sent_for_a_rebuild_by_hand(
+def test_a_change_older_than_sixty_sessions_is_sent_for_a_rebuild_by_hand(
     commands: list[tuple[str, dict[str, Any]]], sent: list[Any]
 ) -> None:
     named = changed({"stocks": {"2330": OLD.isoformat(), "2317": RECENT.isoformat()}})
-    counted = changed({"earliest": "2026-10-05", "count": 900})
+    counted = changed({"earliest": "2026-08-10", "count": 900})
 
     tasks.STEPS["rebuild"](DAY)
 
@@ -145,8 +141,9 @@ def test_a_change_older_than_thirty_sessions_is_sent_for_a_rebuild_by_hand(
     assert warning.detail == {
         "earliest": OLD.isoformat(),
         "stocks": 902,
-        "limit": 30,
         "notes": {str(named.pk): named.detail, str(counted.pk): counted.detail},
+        "limit_days": 60,
+        "handled": "by_hand",
     }
     assert sent == [(DAY, tasks.REBUILD_CHECK, Severity.WARNING)]
     assert tasks._open_notes() == []
@@ -171,7 +168,7 @@ def test_an_old_note_goes_by_hand_while_the_recent_ones_are_rebuilt(
 def test_a_change_right_at_the_limit_is_still_rebuilt(
     commands: list[tuple[str, dict[str, Any]]], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(tasks, "REBUILD_LIMIT", 10)
+    monkeypatch.setattr(tasks, "RECENT_SESSIONS", 11)
     calendar = TradingDays.from_db()
     edge = calendar.shift(DAY, -10)
     changed({"stocks": {"2330": edge.isoformat()}})
@@ -187,8 +184,33 @@ def test_a_change_right_at_the_limit_is_still_rebuilt(
     assert commands == []
 
 
-def test_the_limit_is_thirty_sessions() -> None:
-    assert tasks.REBUILD_LIMIT == 30
+def test_the_evening_recomputes_sixty_sessions() -> None:
+    assert tasks.RECENT_SESSIONS == 60
+
+
+def test_the_evening_records_recent_notes_as_covered_and_sends_old_ones(
+    commands: list[tuple[str, dict[str, Any]]], sent: list[Any]
+) -> None:
+    old = changed({"stocks": {"2330": OLD.isoformat()}})
+    edge = TradingDays.from_db().shift(DAY, -59)
+    recent = changed({"stocks": {"2317": edge.isoformat()}})
+
+    summary = tasks.STEPS["rebuild_covered"](DAY)
+
+    assert commands == []
+    warning, covered = rebuilds()
+    assert (warning.severity, set(warning.detail["notes"])) == (Severity.WARNING, {str(old.pk)})
+    assert covered.severity == Severity.INFO
+    assert covered.detail == {
+        "earliest": edge.isoformat(),
+        "stocks": 1,
+        "notes": {str(recent.pk): recent.detail},
+        "limit_days": 60,
+        "handled": "covered",
+    }
+    assert summary.endswith(tasks.COVERED)
+    assert sent == [(DAY, tasks.REBUILD_CHECK, Severity.WARNING)]
+    assert tasks._open_notes() == []
 
 
 def test_a_change_after_the_day_waits_for_a_later_session(
@@ -257,7 +279,11 @@ def test_a_failed_rebuild_warns_and_leaves_its_notes_open(
 
     assert summary == f"rebuild failed, see {tasks.REBUILD_CHECK}"
     [warning] = rebuilds()
-    assert warning.detail == {"error": "RuntimeError: feature_daily is locked"}
+    assert warning.detail == {
+        "error": "RuntimeError: feature_daily is locked",
+        "limit_days": 60,
+        "handled": "failed",
+    }
     assert sent == [(DAY, tasks.REBUILD_CHECK, Severity.WARNING)]
     assert len(tasks._open_notes()) == 1
 
@@ -296,14 +322,14 @@ def test_a_failed_rebuild_lets_the_morning_predict(
     assert marker(DAY, tasks.MORNING_CHECK).severity == Severity.INFO
 
 
-def test_an_open_note_adds_a_last_features_rebuild_to_the_evening(
+def test_an_open_note_adds_a_last_covered_step_to_the_evening(
     gate: list[bool], ran: list[tuple[str, date, bool]]
 ) -> None:
     changed({"stocks": {"2330": RECENT.isoformat()}})
 
     tasks.evening.apply().get()
 
-    assert steps(ran) == ["features", "labels", "rebuild_features"]
+    assert steps(ran) == ["recent_features", "labels", "rebuild_covered"]
 
 
 def test_an_open_note_adds_a_last_rebuild_to_the_morning(
@@ -319,6 +345,20 @@ def test_an_open_note_adds_a_last_rebuild_to_the_morning(
     assert steps(ran) == ["features", "predict", "monitor", "rebuild"]
 
 
+def test_a_morning_that_makes_up_a_missed_evening_recomputes_its_sixty_sessions(
+    now: Callable[[date, time], None], gate: list[bool], ran: list[tuple[str, date, bool]]
+) -> None:
+    changed({"stocks": {"2330": RECENT.isoformat()}})
+    record(DAY, tasks.EVENING_CHECK, Severity.WARNING)
+    record(DAY, US_CLOSE_CHECK)
+    now(DAY + timedelta(days=1), time(6, 0))
+
+    tasks.morning.apply().get()
+
+    made_up = ["labels", "features", "predict", "monitor", "recent_features"]
+    assert steps(ran) == [*made_up, "rebuild_covered"]
+
+
 def test_no_open_note_no_rebuild(
     gate: list[bool], ran: list[tuple[str, date, bool]], commands: list[tuple[str, dict[str, Any]]]
 ) -> None:
@@ -327,7 +367,7 @@ def test_no_open_note_no_rebuild(
 
     tasks.evening.apply().get()
 
-    assert steps(ran) == ["features", "labels"]
+    assert steps(ran) == ["recent_features", "labels"]
 
 
 @pytest.mark.usefixtures("two_workers")
