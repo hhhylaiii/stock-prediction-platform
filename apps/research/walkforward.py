@@ -89,11 +89,10 @@ def _eval_end(calendar: TradingDays, config: WalkForwardConfig, test_end: date) 
     return end
 
 
-def _fold(calendar: TradingDays, config: WalkForwardConfig, index: int, last: date) -> Fold | None:
-    period = add_months(config.first_test, index * config.step_months)
-    period_end = add_months(config.first_test, index * config.step_months + config.test_months)
-    test_days = calendar.between(period, min(period_end - timedelta(days=1), last))
-    train_end = calendar.shift(test_days[0], -(config.embargo + 1))
+def training_window(
+    calendar: TradingDays, config: WalkForwardConfig, train_end: date, period: date
+) -> tuple[date, date, date] | None:
+    """train_start, fit_end and valid_start of a window through train_end; None before data."""
     window_start = (
         config.data_start
         if config.window == "expanding"
@@ -109,6 +108,18 @@ def _fold(calendar: TradingDays, config: WalkForwardConfig, index: int, last: da
     fit_end = calendar.shift(valid_start, -(config.embargo + 1))
     if fit_end < train_start:
         raise WalkForwardError(f"fold at {period} leaves no fit rows before validation")
+    return train_start, fit_end, valid_start
+
+
+def _fold(calendar: TradingDays, config: WalkForwardConfig, index: int, last: date) -> Fold | None:
+    period = add_months(config.first_test, index * config.step_months)
+    period_end = add_months(config.first_test, index * config.step_months + config.test_months)
+    test_days = calendar.between(period, min(period_end - timedelta(days=1), last))
+    train_end = calendar.shift(test_days[0], -(config.embargo + 1))
+    window = training_window(calendar, config, train_end, period)
+    if window is None:
+        return None
+    train_start, fit_end, valid_start = window
     return Fold(
         index=index,
         train_start=train_start,
