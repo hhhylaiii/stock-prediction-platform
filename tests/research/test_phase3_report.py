@@ -320,6 +320,8 @@ def test_render_lists_only_flagged_gaps_and_marks_incomplete_months() -> None:
     assert "| fund_rev_mom | 2016-01–2016-02 |" in text
     assert "| fund_roe_ttm | 30／30 | 30.0% | 不判定 |" in text
     assert "月營收查不到歷史公告日，研究期用法定截止日的下一個交易日（K2 保守值）" in text
+    assert "K14（照實際上傳日，晚於法定截止日也延後，有更正紀錄的也一樣）" in text
+    assert "確定晚交" not in text
     assert "| 2014-01 | 0.0123 |" in text
     assert "| 2014-02 | -0.0200† |" in text
 
