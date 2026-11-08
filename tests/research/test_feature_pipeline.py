@@ -38,8 +38,9 @@ from apps.research.features.build import (
     observable_frame,
 )
 from apps.research.features.chip import SOURCED_CHIPS
+from apps.research.features.fundamental import sourced_name
 from apps.research.features.registry import FEATURES, feature_names
-from apps.research.features.residual import observable_name, rules_signature
+from apps.research.features.residual import FALLBACKS, observable_name, rules_signature
 from apps.research.features.store import (
     export_year,
     partition_rules,
@@ -816,6 +817,9 @@ def test_observable_gaps_mark_formula_and_industry_gaps_but_not_missing_inputs()
         gaps[keys].sort_values(keys, ignore_index=True),
         frame[keys].sort_values(keys, ignore_index=True),
     )
+    assert {sourced_name(name) for name in FALLBACKS} <= set(gaps.columns)
+    flags = gaps[[sourced_name(name) for name in FALLBACKS]]
+    assert (flags.isin([0.0, 1.0]) | flags.isna()).all().all()
     row = frame[frame["date"] == d("2016-03-02")].set_index("stock_id")
     seen = gaps[gaps["date"] == d("2016-03-02")].set_index("stock_id")
 

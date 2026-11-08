@@ -10,7 +10,8 @@ from django.core.management.base import CommandError
 
 from apps.market.models import StockMaster
 from apps.research.features.build import CHECKED, MODEL_COLUMNS, current_name
-from apps.research.features.residual import OBSERVABLE, observable_name
+from apps.research.features.fundamental import sourced_name
+from apps.research.features.residual import FALLBACKS, OBSERVABLE, observable_name
 from apps.research.features.store import existing_partition, export_year
 from apps.research.management.commands import phase3_report
 from apps.research.models import FeatureDaily, ModelRun
@@ -39,6 +40,7 @@ def from_table(known: bool, drift: str = "") -> Explained:
             now = pd.DataFrame(float("nan"), index=rows.index, columns=CHECKED)
         return rows[["stock_id", "date"]].assign(
             **{observable_name(name): known for name in OBSERVABLE},
+            **{sourced_name(name): 1.0 for name in FALLBACKS},
             **{current_name(name): now[name] for name in CHECKED},
         )
 

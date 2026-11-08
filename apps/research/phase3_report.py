@@ -102,7 +102,7 @@ def fill_counts(
     """Universe rows whose value equals the fallback source, i.e. rows the fallback filled."""
     inside, fate = _inside(rows, delisted)
     filled = pd.DataFrame(
-        {name: fallback_filled(inside, name, fallbacks) for name in fallbacks},
+        {name: fallback_filled(inside, name) for name in fallbacks},
         index=inside.index,
     )
     return _split(filled.groupby(fate).sum().T, fate, "filled")
@@ -324,8 +324,7 @@ def render(
         "",
         "C 全期套用：主來源缺值時，對所有股票一律改用第二來源，沒有受影響期間。"
         f"補值比例的比值 > {MAX_FILL_RATIO:g}，或只有下市組被補過，表示「被補過」仍分得出下市與否。"
-        "主來源剛好等於第二來源的列也算補過，所以補值比例偏高。"
-        "第二來源被遮的月份，這裡看不到補值；受影響月份與補值比例以 `residual_coverage` 為準。",
+        "補過是指主來源的月份不在錄、值來自第二來源；在錄的值剛好等於第二來源不算。",
         "",
         "| 特徵 | 第二來源 | 補值比例 下市／現存 | 比值 | 超標 |",
         "| --- | --- | --- | --- | --- |",

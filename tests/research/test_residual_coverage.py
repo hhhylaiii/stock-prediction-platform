@@ -10,8 +10,8 @@ from django.core.management.base import CommandError
 
 from apps.market.calendar import TradingDays
 from apps.market.models import StockMaster, TradingCalendar
-from apps.research.features.fundamental import crossed_name
-from apps.research.features.residual import observable_name
+from apps.research.features.fundamental import crossed_name, sourced_name
+from apps.research.features.residual import FALLBACKS, observable_name
 from apps.research.management.commands import residual_coverage
 from tests.research.conftest import weekday_calendar
 
@@ -65,8 +65,11 @@ def built(monkeypatch: pytest.MonkeyPatch) -> list[tuple[date, date, Any]]:
     return calls
 
 
+UNSOURCED = {sourced_name(name): float("nan") for name in FALLBACKS}
+
+
 def unexplained() -> pd.DataFrame:
-    return pd.DataFrame(columns=["stock_id", "date", observable_name("fund_rev_yoy")])
+    return pd.DataFrame(columns=["stock_id", "date", observable_name("fund_rev_yoy"), *UNSOURCED])
 
 
 def test_coverage_builds_each_year_unmasked_and_names_the_affected_months(
@@ -164,7 +167,7 @@ def test_coverage_counts_a_gap_with_a_known_cause_as_covered(
         days = calendar.between(low, high) if low <= high else ()
         rows = [(stock, day, True, True) for day in days for stock in ("2330", "1101")]
         names = [observable_name("fund_rev_mom"), observable_name("fund_rev_yoy")]
-        return pd.DataFrame(rows, columns=["stock_id", "date", *names])
+        return pd.DataFrame(rows, columns=["stock_id", "date", *names]).assign(**UNSOURCED)
 
     monkeypatch.setattr(residual_coverage, "observable_frame", explained)
     out = StringIO()
@@ -189,7 +192,8 @@ def test_coverage_counts_gaps_read_across_report_bases_and_warns_when_they_lean_
         low, high = max(start, calendar.start), min(end, calendar.end)
         days = calendar.between(low, high) if low <= high else ()
         rows = [(stock, day, stock == "1101") for day in days for stock in ("2330", "1101")]
-        return pd.DataFrame(rows, columns=["stock_id", "date", crossed_name("fund_rev_yoy_q")])
+        columns = ["stock_id", "date", crossed_name("fund_rev_yoy_q")]
+        return pd.DataFrame(rows, columns=columns).assign(**UNSOURCED)
 
     def build(calendar: TradingDays, start: date, end: date, masked: Any) -> pd.DataFrame:
         return synthetic(calendar, start, end).assign(fund_rev_yoy_q=float("nan"))

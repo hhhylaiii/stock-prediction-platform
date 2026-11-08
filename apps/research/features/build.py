@@ -25,6 +25,7 @@ from apps.research.features.fundamental import (
     attach_fundamentals,
     crossed_name,
     fundamental_features,
+    sourced_name,
 )
 from apps.research.features.inputs import load_feature_panel
 from apps.research.features.market import (
@@ -34,6 +35,7 @@ from apps.research.features.market import (
 )
 from apps.research.features.registry import FEATURES, Group, feature_names
 from apps.research.features.residual import (
+    FALLBACKS,
     LISTING_WINDOWS,
     MASKED_MONTHS,
     OBSERVABLE,
@@ -136,13 +138,14 @@ def observable_frame(
 ) -> pd.DataFrame:
     """Per stock and day in [start, end], whether each OBSERVABLE or LISTING_WINDOWS gap is known.
 
-    With current, also each CHECKED feature as today's database gives it, masked.
+    Also each fallback's source flag; with current, each CHECKED feature as the database gives it.
     """
     keys = [
         "stock_id",
         "date",
         *map(observable_name, [*OBSERVABLE, *LISTING_WINDOWS]),
         *map(crossed_name, BASIS_SIGNALS),
+        *map(sourced_name, FALLBACKS),
     ]
     columns = [*keys, *(map(current_name, CHECKED) if current else ())]
     low, high = max(start, calendar.start), min(end, calendar.end)
@@ -155,7 +158,9 @@ def observable_frame(
     sourcing = chip_sourcing(chips, load_chip_starts(), written)
     flags = sourcing.drop(columns=["stock_id", "date"])
     attached = chips.assign(**flags)
-    gaps = observable_gaps(attached)
+    gaps = observable_gaps(attached).assign(
+        **{sourced_name(name): attached[sourced_name(name)] for name in FALLBACKS}
+    )
     if current:
         fundamental = apply_fallbacks(fundamental_features(attached), attached)
         lending = lending_features(attached).drop(columns=["stock_id", "date"])
