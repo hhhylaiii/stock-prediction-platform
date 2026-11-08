@@ -33,7 +33,7 @@ def stocks() -> None:
 def synthetic(calendar: TradingDays, start: date, end: date) -> pd.DataFrame:
     """Two stocks a day; 1101 lacks fund_rev_mom in 2016-03 and the holding after 2016-02.
 
-    In 2016-03 only 1101 has fund_rev_yoy, and it equals the fallback, so it counts as filled.
+    In 2016-03 only 1101 has fund_rev_yoy; the stand-in has no source flag, so it counts as filled.
     """
     low, high = max(start, calendar.start), min(end, calendar.end)
     days = calendar.between(low, high) if low <= high else ()

@@ -138,7 +138,7 @@ def observable_frame(
 ) -> pd.DataFrame:
     """Per stock and day in [start, end], whether each OBSERVABLE or LISTING_WINDOWS gap is known.
 
-    Also each fallback's source flag; with current, each CHECKED feature as the database gives it.
+    Also each fallback's source flag; with current, each CHECKED feature from the database, masked.
     """
     keys = [
         "stock_id",

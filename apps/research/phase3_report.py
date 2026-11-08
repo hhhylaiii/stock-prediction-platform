@@ -99,7 +99,7 @@ def accepted(table: pd.DataFrame) -> pd.Series:
 def fill_counts(
     rows: pd.DataFrame, delisted: pd.Series, fallbacks: Mapping[str, str]
 ) -> pd.DataFrame:
-    """Universe rows whose value equals the fallback source, i.e. rows the fallback filled."""
+    """Universe rows the fallback filled, by later fate."""
     inside, fate = _inside(rows, delisted)
     filled = pd.DataFrame(
         {name: fallback_filled(inside, name) for name in fallbacks},

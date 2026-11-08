@@ -40,7 +40,12 @@ from apps.research.features.build import (
 from apps.research.features.chip import SOURCED_CHIPS
 from apps.research.features.fundamental import sourced_name
 from apps.research.features.registry import FEATURES, feature_names
-from apps.research.features.residual import FALLBACKS, observable_name, rules_signature
+from apps.research.features.residual import (
+    FALLBACKS,
+    fallback_filled,
+    observable_name,
+    rules_signature,
+)
 from apps.research.features.store import (
     export_year,
     partition_rules,
@@ -788,6 +793,19 @@ def test_observable_gaps_mark_formula_and_industry_gaps_but_not_missing_inputs()
         if (stock_id, day) != ("2330", d("2016-03-02"))
     )
 
+    MonthlyRevenue.objects.bulk_create(
+        MonthlyRevenue(
+            stock_id="2330",
+            period=f"{year}-{month:02d}",
+            revenue=1_000,
+            announce_date=date(year + month // 12, month % 12 + 1, 5),
+        )
+        for year, month in [
+            *((2014, m) for m in range(10, 13)),
+            *((2015, m) for m in range(1, 13)),
+            (2016, 1),
+        ]
+    )
     listed("2883", "2015-06-01", "2016-03-31")
     StockMaster.objects.filter(stock_id="2883").update(list_date=None)
     listed("2882", "2015-06-01", "2016-03-31")
@@ -818,10 +836,16 @@ def test_observable_gaps_mark_formula_and_industry_gaps_but_not_missing_inputs()
         frame[keys].sort_values(keys, ignore_index=True),
     )
     assert {sourced_name(name) for name in FALLBACKS} <= set(gaps.columns)
-    flags = gaps[[sourced_name(name) for name in FALLBACKS]]
-    assert (flags.isin([0.0, 1.0]) | flags.isna()).all().all()
     row = frame[frame["date"] == d("2016-03-02")].set_index("stock_id")
     seen = gaps[gaps["date"] == d("2016-03-02")].set_index("stock_id")
+    for name in FALLBACKS:
+        flags = seen[sourced_name(name)]
+        assert flags.loc["2330"] == 1.0, name
+        assert flags.isna().loc["1101"], name
+        merged = frame.merge(gaps, on=keys)
+        recorded = merged["stock_id"].eq("2330") & merged[name].notna()
+        assert recorded.any(), name
+        assert not fallback_filled(merged, name)[recorded].any(), name
 
     def gap(stock_id: str, name: str) -> tuple[bool, bool]:
         value: float = row[name].loc[stock_id]

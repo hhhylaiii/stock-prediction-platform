@@ -219,10 +219,7 @@ def masked_as_observable(
 
 
 def fallback_filled(rows: pd.DataFrame, name: str) -> pd.Series:
-    """Rows with a value while the feature's own source months are off record, as apply_fallbacks.
-
-    A value on record that happens to equal its fallback is not a fill.
-    """
+    """Rows apply_fallbacks filled: a value while the feature's own source months are off record."""
     return rows[name].notna() & rows[sourced_name(name)].ne(1.0)
 
 
