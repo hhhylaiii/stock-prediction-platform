@@ -19,7 +19,7 @@ FILED_LATER_CHECK = "statement_filed_later"
 RESTATED_CHECK = "statement_restated"
 LOGS = {
     FILED_LATE_CHECK: DataQualityLog.Severity.INFO,
-    FILED_LATER_CHECK: DataQualityLog.Severity.WARNING,
+    FILED_LATER_CHECK: DataQualityLog.Severity.INFO,
     RESTATED_CHECK: DataQualityLog.Severity.INFO,
 }
 FILING_COLUMNS = ["stock_id", "period", "fin_type", "uploaded_at", "corrected", "restated"]
@@ -45,16 +45,15 @@ def filing_session(uploaded_at: datetime, calendar: TradingDays, cutoff: time) -
 
 
 def apply_statement_filings(frame: pd.DataFrame, calendar: TradingDays, cutoff: time) -> int:
-    """Uncorrected and restated filings set the date; a corrected one may only bring it forward."""
+    """Each filing's own upload sets the date, a corrected one too: its upload is the correction."""
     filings = [Filing(*row) for row in frame[FILING_COLUMNS].itertuples(index=False)]
     changed: list[tuple[FinancialStatement, date]] = []
     logs: dict[str, dict[str, list[dict[str, Any]]]] = {check: {} for check in LOGS}
     for row, filing, own in _matched(filings):
         session = _session(row, filing, calendar, cutoff)
         deadline = visible_from(statement_deadline(row.period), calendar)
-        target = min(deadline, session) if filing.corrected and not filing.restated else session
-        if target != row.announce_date:
-            changed.append((row, target))
+        if session != row.announce_date:
+            changed.append((row, session))
         if filing.restated or session > deadline:
             check = _check(filing)
             entry = _entry(row, deadline, session, own)

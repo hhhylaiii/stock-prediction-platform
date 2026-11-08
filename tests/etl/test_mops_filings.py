@@ -492,25 +492,30 @@ def test_a_late_uncorrected_report_moves_the_announcement_later(
 
 
 @pytest.mark.django_db
-def test_a_late_corrected_report_keeps_the_deadline_and_warns(adapter: MopsAdapter) -> None:
+def test_a_late_corrected_report_moves_the_announcement_to_its_upload(
+    adapter: MopsAdapter,
+) -> None:
     statement("5483", "2024-Q4", CONSOLIDATED, date(2025, 4, 1))
     statement("5483", "2024-Q3", CONSOLIDATED, date(2024, 12, 2))
+    statement("5483", "2024-Q2", CONSOLIDATED, date(2024, 9, 2))
     written = adapter.upsert(
         STATEMENT_FILING,
         filings(
-            ("5483", "2024-Q4", CONSOLIDATED, "2025-05-07 08:53:42", True),
+            ("5483", "2024-Q4", CONSOLIDATED, "2025-05-07 22:40:00", True),
             ("5483", "2024-Q3", CONSOLIDATED, "2024-11-11 17:38:10", True),
+            ("5483", "2024-Q2", CONSOLIDATED, "2024-08-31 10:00:00", True),
         ),
     )
-    assert written == 1
+    assert written == 2
     assert announced("5483") == {
-        ("2024-Q4", CONSOLIDATED): date(2025, 4, 1),
+        ("2024-Q4", CONSOLIDATED): date(2025, 5, 8),
         ("2024-Q3", CONSOLIDATED): date(2024, 11, 11),
+        ("2024-Q2", CONSOLIDATED): date(2024, 9, 2),
     }
     assert logged(FILED_LATER_CHECK) == {
-        "5483": [("2024-Q4", CONSOLIDATED, "2025-04-01", "2025-05-07")]
+        "5483": [("2024-Q4", CONSOLIDATED, "2025-04-01", "2025-05-08")]
     }
-    assert DataQualityLog.objects.get(check_name=FILED_LATER_CHECK).severity == "warning"
+    assert DataQualityLog.objects.get(check_name=FILED_LATER_CHECK).severity == "info"
     assert not DataQualityLog.objects.filter(check_name=FILED_LATE_CHECK).exists()
 
 
