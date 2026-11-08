@@ -131,4 +131,11 @@ seed 的內容是 e2e 的基本資料再放大：
 
 - [ ] 上線 6 個月後，在 twp 上用 `phase5_report`（不加 `--views`）再量一次，確認預測表變深之後仍在 500 ms 內。
 - [x] web 與 worker 在 2026-11-07 23:18 和 prod 設定一起重建（主 repo 33863dc，映像 `sha256:d6f3a4502c2b`）。這兩個映像都停在 33863dc，缺 #130–#133（含 #131 的晚間 60 日重算與 #133 的櫃買借券容忍值）。
-- [ ] 2026-11-08 早上（協調排時段）把 web 與 worker 重建到當時最新的 develop，帶上 #130 之後的改動與 Phase 2 的新 migration，重建後在這裡記一筆。之後合併的頁面改動要等再下一次重建，跑 S5 的 `--views` 前先重建一次 web。
+- [x] web 與 worker 在 2026-11-08 12:05 換上 develop 51f2c71 的映像（`sha256:56577996c1fa`），帶上 #130–#143。
+  - 映像缺 #144、#145：這兩支在 build 之後、換上之前合併，只改主機上跑的 `revenue_company` 回補，worker 的排程不受影響。
+  - twp 在 build 前已套用全部 migration，含 Phase 2 的 market 0004。
+  - 換上後驗證：healthz、prod 設定與 `DEBUG` False、beat 17 項、concurrency 1、研究排程關閉、沒有未套用的 migration、三個掛載路徑。
+  - 新端點 `/api/data-quality/corrections`、`/api/stocks?q=2330` 回 200；`/api/status` 的 `quality` 有 `warning_rows`。
+  - 頁首的警告數從 80 變成 1：#136 改成每項檢查只算一次，也不再算資料更正紀錄。資料品質本身沒有變。
+  - 舊映像留著，tag 是 `stock-prediction-platform:rollback-33863dc`。
+  - 之後合併的頁面改動要等再下一次重建；跑 S5 的 `--views` 前，先重建一次 web。
