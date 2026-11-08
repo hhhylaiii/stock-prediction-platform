@@ -72,6 +72,7 @@ def test_a_month_after_the_company_stopped_being_public_is_told_apart(
     assert not no_longer_public(answer("1258_112_5"))
     assert not no_longer_public({"code": 500, "result": None, "message": "查詢過量"})
     assert not no_longer_public({**answer("1258_112_6"), "code": 406})
+    assert not no_longer_public({**answer("3598_105_6"), "code": 406})
 
 
 @pytest.mark.parametrize(
