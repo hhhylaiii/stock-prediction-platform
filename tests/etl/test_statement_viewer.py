@@ -77,6 +77,32 @@ def test_banks_and_brokers_name_revenue_and_profit_their_own_way(
     assert bank_row["op_margin"] is None
 
 
+@pytest.mark.parametrize(
+    ("year", "parent", "total", "eps"),
+    [(2013, 7_429_210, 7_646_383, 0.88), (2019, 5_531_951, 5_543_790, 0.45)],
+)
+def test_a_holding_company_names_its_parent_profit_under_a_heading(
+    page: Callable[[str], str], year: int, parent: int, total: int, eps: float
+) -> None:
+    found = summary(page, "2888", year, 1)
+    income = found[INCOME]["2888"]
+    assert (income[PARENT], income["本期淨利（淨損）"], income[EPS]) == (parent, total, eps)
+    empty: dict[str, dict[str, dict[str, float | None]]] = {report: {} for report in BALANCE_FIRST}
+    (row,) = statement_rows(found, empty, 1)
+    assert row["fin_type"] == "consolidated"
+    assert row["net_income"] == parent * 1000
+
+
+def test_the_parent_share_of_comprehensive_income_is_not_profit(
+    page: Callable[[str], str],
+) -> None:
+    shown = page("t164sb01_2888_2013_1_C.html").replace("淨利（淨損）歸屬", "淨利歸屬說明")
+    found = parse_viewer(shown, "2888", "2013-Q1")
+    assert found is not None
+    assert found[INCOME].get(PARENT) is None
+    assert found[INCOME]["本期淨利（淨損）"] == 7_646_383
+
+
 def test_the_viewer_gives_the_figures_the_summaries_give(
     page: Callable[[str], str], fixture_path: Callable[[str], Path]
 ) -> None:
