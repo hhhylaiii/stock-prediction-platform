@@ -133,7 +133,7 @@ def research_months() -> list[str]:
     return [f"{year}-{month:02d}" for year in range(2010, 2025) for month in range(1, 13)]
 
 
-def test_masked_months_are_the_months_residual_coverage_found_on_2026_11_08() -> None:
+def test_masked_months_are_the_months_residual_coverage_found_on_2026_11_09() -> None:
     months = research_months()
     leading = frozenset(months[: months.index("2013-05") + 1])
 
@@ -162,12 +162,23 @@ def test_masked_months_are_the_months_residual_coverage_found_on_2026_11_08() ->
     assert MASKED_MONTHS["fund_rev_3m_yoy"] == frozenset(
         [*months[: months.index("2015-04") + 1], "2016-03", "2017-01"]
     )
+    assert MASKED_MONTHS["fund_roe_ttm"] == frozenset(
+        ["2014-05", *months[months.index("2015-09") : months.index("2016-02") + 1], "2016-05"]
+    )
+    assert MASKED_MONTHS["fund_debt_ratio"] == frozenset({"2013-05"})
+    assert MASKED_MONTHS["fund_cfo_to_ni"] == frozenset(
+        [*months[months.index("2015-09") : months.index("2016-02") + 1], "2016-05"]
+    )
+    for name in ("fund_gm_yoy_chg", "fund_opm_yoy_chg"):
+        assert MASKED_MONTHS[name] == frozenset(
+            [*months[: months.index("2014-05") + 1], "2016-05", "2016-09", "2016-11"]
+        )
     assert len(MASKED_MONTHS["fund_rev_yoy"]) == 62
     assert len(MASKED_MONTHS["fund_eps_yoy"]) == 87
-    assert sum(map(len, MASKED_MONTHS.values())) == 717
+    assert sum(map(len, MASKED_MONTHS.values())) == 643
     text = json.dumps({name: sorted(months) for name, months in sorted(MASKED_MONTHS.items())})
     assert hashlib.sha256(text.encode()).hexdigest() == (
-        "f291a4bfc639b13d506d59f65405791db51289f3e95e70d95d6b92283b0b86b7"
+        "c3dec0bd9ab436291f3104429ca4b9336bf90ad0aa808abcade091bc92b4fb54"
     )
     for name, chosen in MASKED_MONTHS.items():
         assert chosen <= set(months), name
