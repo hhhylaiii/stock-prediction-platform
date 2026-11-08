@@ -47,6 +47,7 @@ from apps.research.training import load_labels, training_rows
 REPORT = Path("docs") / "reports" / "phase3-data-report.md"
 DEFAULT_START, DEFAULT_END = date(2010, 1, 1), date(2020, 12, 31)
 APPENDIX = Path("docs") / "reports" / "phase3"
+VALUE_TOLERANCE = 1e-9
 
 
 def _screening(run_key: str) -> ModelRun:
@@ -88,8 +89,14 @@ def _ruled(start: date, end: date) -> None:
 
 
 def _unmoved(rows: pd.DataFrame, year: int) -> None:
-    """Refuse a partition whose CHECKED gaps today's database no longer gives."""
-    matched = rows[rows["_merge"].eq("both") & rows["in_universe"].astype(bool)]
+    """Refuse a partition whose rows, CHECKED gaps or fallback values the database no longer has."""
+    inside = rows[rows["in_universe"].astype(bool)]
+    if inside["_merge"].eq("left_only").any():
+        raise CommandError(
+            f"the {year} partition holds universe rows the database no longer gives; "
+            "rebuild features before the report"
+        )
+    matched = inside[inside["_merge"].eq("both")]
     moved = [
         name
         for name in CHECKED
@@ -98,6 +105,16 @@ def _unmoved(rows: pd.DataFrame, year: int) -> None:
     if moved:
         raise CommandError(
             f"the {year} partition holds gaps of {moved} that the database no longer gives; "
+            "rebuild features before the report"
+        )
+    drifted = [
+        name
+        for name in FALLBACKS
+        if (matched[name] - matched[current_name(name)]).abs().gt(VALUE_TOLERANCE).any()
+    ]
+    if drifted:
+        raise CommandError(
+            f"the {year} partition holds values of {drifted} that the database no longer gives; "
             "rebuild features before the report"
         )
 
