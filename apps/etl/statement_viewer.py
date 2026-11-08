@@ -111,7 +111,7 @@ def _figures(
 ) -> dict[str, float | None]:
     """The first filled row of each known title, read in the period's own column.
 
-    Holding companies and banks name the parent's share of profit 母公司業主 under a heading.
+    Financial holding companies name the parent's share of profit 母公司業主 under a heading.
     """
     rows = _statement(tables, report, code)
     header = next((row for row in rows if row and row[0] in (TITLE_HEADER, CODE_HEADER)), None)
