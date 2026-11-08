@@ -62,6 +62,11 @@ NAMES = {
         "營業活動之淨現金流入（流出）": "營業活動之淨現金流入（流出）",
     },
 }
+UNDER = {
+    INCOME: {("淨利（淨損）歸屬", "母公司業主"): "淨利（淨損）歸屬於母公司業主"},
+    BALANCE: {},
+    CASH_FLOW: {},
+}
 REQUIRED = {
     INCOME: (EPS, NET_INCOME + PARENT_NET_INCOME),
     BALANCE: (ASSETS, LIABILITIES, EQUITY + PARENT_EQUITY),
@@ -104,7 +109,10 @@ def _tables(page: str) -> dict[int, Table]:
 def _figures(
     tables: dict[int, Table], report: str, code: str, period: str
 ) -> dict[str, float | None]:
-    """The first filled row of each known title, read in the period's own column."""
+    """The first filled row of each known title, read in the period's own column.
+
+    Holding companies and banks name the parent's share of profit 母公司業主 under a heading.
+    """
     rows = _statement(tables, report, code)
     header = next((row for row in rows if row and row[0] in (TITLE_HEADER, CODE_HEADER)), None)
     if header is None:
@@ -112,10 +120,13 @@ def _figures(
     label = 1 if header[0] == CODE_HEADER else 0
     column = label + 1 + _column(header[label + 1 :], report, period, code)
     figures: dict[str, float | None] = {}
+    heading = ""
     for row in rows:
+        title = _title(row[label]) if len(row) > label else ""
+        name = NAMES[report].get(title) or UNDER[report].get((heading, title))
+        heading = title
         if len(row) <= column:
             continue
-        name = NAMES[report].get(_title(row[label]))
         if name is not None and figures.get(name) is None:
             figures[name] = _number(row[column], code)
     for names in REQUIRED[report]:
