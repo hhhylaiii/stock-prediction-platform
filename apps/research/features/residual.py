@@ -39,15 +39,7 @@ def _spans(*spans: str | tuple[str, str]) -> frozenset[str]:
 MASKED_MONTHS: Mapping[str, frozenset[str]] = MappingProxyType(
     {
         "fund_rev_yoy": _spans(("2010-01", "2015-02")),
-        "fund_rev_3m_yoy": _spans(
-            ("2010-01", "2015-04"),
-            "2016-03",
-            "2017-01",
-            "2018-02",
-            "2022-11",
-            "2023-11",
-            "2024-05",
-        ),
+        "fund_rev_3m_yoy": _spans(("2010-01", "2015-04"), "2016-03", "2017-01"),
         "fund_ep": _spans(
             ("2010-01", "2014-03"), ("2015-09", "2016-02"), ("2016-04", "2016-05"), "2017-01"
         ),
