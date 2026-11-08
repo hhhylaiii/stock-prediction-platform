@@ -53,7 +53,7 @@ def test_each_correction_check_is_one_line_with_its_stocks_rows_and_span(
     later = correction(page, "更正財報逾期申報")
     today = timezone.localdate().isoformat()
     expect(later.locator(".muted")).to_have_text(f"25 檔、25 列，{today}")
-    expect(later.locator("i")).to_have_class("warn")
+    expect(later.locator("i")).not_to_have_class("warn")
 
 
 def test_a_correction_written_once_per_run_counts_its_rows_only(
