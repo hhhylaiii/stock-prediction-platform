@@ -396,6 +396,7 @@ def test_a_month_where_only_the_delisted_have_values_stays_affected() -> None:
             "in_universe": True,
             "fund_rev_yoy": [NAN] * 100 + [0.2] * 29 + [NAN] * 71,
             "fund_rev_yoy_q": NAN,
+            sourced_name("fund_rev_yoy"): 1.0,
             observable_name("fund_rev_yoy"): [True] * 100 + [False] * 29 + [True] * 71,
         }
     )
@@ -427,6 +428,7 @@ def test_monthly_coverage_takes_fill_shares_and_rows_for_a_fallback_column() -> 
             "in_universe": [True, True, True, False, True],
             "fund_rev_yoy": [0.1, 0.2, 0.4, 0.5, NAN],
             "fund_rev_yoy_q": [0.1, 0.3, 0.4, 0.5, NAN],
+            sourced_name("fund_rev_yoy"): [0.0, 1.0, NAN, 0.0, 0.0],
         }
     )
     delisted = pd.Series({"2330": False, "2317": False, "1101": True, "9999": True})
@@ -502,3 +504,22 @@ def test_fill_flags_mark_fills_over_the_ratio_or_on_the_delisted_only() -> None:
 
     assert MAX_FILL_RATIO == 3.0
     assert fill_flags(current, delisted).tolist() == [True, False, False, True, False, False]
+
+
+def test_fallback_filled_marks_exactly_the_rows_apply_fallbacks_filled() -> None:
+    features = frame(
+        [
+            ("2330", "2017-03-01", NAN, NAN, NAN, 0.2),
+            ("2330", "2017-03-02", 0.2, 0.2, NAN, 0.2),
+            ("2317", "2017-03-01", NAN, NAN, NAN, 0.3),
+            ("2317", "2017-03-02", 0.1, NAN, NAN, 0.3),
+        ]
+    )
+    flags = sourcing([0.0, 1.0, NAN, 1.0])
+
+    ruled = apply_fallbacks(features, flags).join(flags)
+
+    for name in FALLBACKS:
+        took = ruled[name].notna() & features[name].isna()
+        assert fallback_filled(ruled, name).tolist() == took.tolist(), name
+    assert not fallback_filled(ruled, "fund_rev_3m_yoy").iloc[1]

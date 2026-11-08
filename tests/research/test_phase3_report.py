@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from apps.market.calendar import TradingDays
+from apps.research.features.fundamental import sourced_name
 from apps.research.features.residual import observable_name
 from apps.research.phase3_report import (
     AFTER_COLUMNS,
@@ -35,8 +36,9 @@ def rows() -> pd.DataFrame:
             "date": [d("2016-01-04"), d("2016-01-05"), d("2016-01-06")] * 2 + [d("2016-01-04")],
             "in_universe": [True, True, True, True, True, True, False],
             "fund_ep": [NAN, NAN, 0.1, 0.1, 0.1, 0.1, NAN],
-            "fund_rev_yoy": [0.3, 0.3, NAN, 0.2, 0.3, 0.2, 0.3],
-            "fund_rev_yoy_q": [0.3, 0.3, NAN, 0.1, 0.3, 0.1, 0.3],
+            "fund_rev_yoy": [0.3, 0.3, NAN, 0.2, 0.3, 0.3, 0.3],
+            "fund_rev_yoy_q": [0.3, 0.3, NAN, 0.1, 0.3, 0.3, 0.3],
+            sourced_name("fund_rev_yoy"): [0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0],
             observable_name("fund_ep"): [True, False, None, None, None, None, None],
         }
     )
@@ -103,7 +105,7 @@ def test_missing_table_matches_the_saved_before_table_and_flags_gaps() -> None:
     assert not table.loc["size_log_mcap", "flag"]
 
 
-def test_fill_counts_take_rows_whose_value_is_the_fallback_value() -> None:
+def test_fill_counts_take_rows_whose_value_came_from_the_fallback() -> None:
     counts = fill_counts(rows(), DELISTED, {"fund_rev_yoy": "fund_rev_yoy_q"})
 
     assert counts.loc["fund_rev_yoy"].to_dict() == {

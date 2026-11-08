@@ -218,11 +218,9 @@ def masked_as_observable(
     return frame.assign(**marked)
 
 
-def fallback_filled(
-    rows: pd.DataFrame, name: str, fallbacks: Mapping[str, str] = FALLBACKS
-) -> pd.Series:
-    """Rows whose value equals the fallback source, i.e. rows the fallback filled."""
-    return rows[name].notna() & rows[name].eq(rows[fallbacks[name]])
+def fallback_filled(rows: pd.DataFrame, name: str) -> pd.Series:
+    """Rows apply_fallbacks filled: a value while the feature's own source months are off record."""
+    return rows[name].notna() & rows[sourced_name(name)].ne(1.0)
 
 
 def fill_flags(current: pd.Series, delisted: pd.Series) -> pd.Series:
@@ -254,7 +252,7 @@ def monthly_coverage(
 
     parts = [shares(known), shares(present).add_prefix(PRESENT)]
     if column in fallbacks:
-        parts.append(shares(fallback_filled(inside, column, fallbacks)).add_prefix(FILLED))
+        parts.append(shares(fallback_filled(inside, column)).add_prefix(FILLED))
     sizes = group.groupby([months, group]).size().unstack(fill_value=0)
     parts.append(sizes.reindex(columns=list(GROUPS.values()), fill_value=0).add_prefix(ROWS))
     table = pd.concat(parts, axis=1)
