@@ -165,9 +165,11 @@ def test_evaluate_targets_scores_the_frozen_up_label(
 
 @pytest.fixture
 def taiex(run_panel: Path) -> Path:
-    """TAIEX closes that sway a few percent, so every logistic CV slice holds both classes."""
+    """TAIEX_TR closes that sway a few percent, so every logistic CV slice holds both classes."""
     IndexDaily.objects.bulk_create(
-        IndexDaily(index_id="TAIEX", date=day, close=round(100 * (1 + 0.03 * math.sin(k / 4)), 4))
+        IndexDaily(
+            index_id="TAIEX_TR", date=day, close=round(100 * (1 + 0.03 * math.sin(k / 4)), 2)
+        )
         for k, day in enumerate(weekdays())
     )
     return run_panel
@@ -242,7 +244,7 @@ def test_a_relative_evaluation_refuses_a_run_fit_on_the_absolute_label(taiex: Pa
     lgbm_runs.run_folds("interval", [fold], "interval-rel", taiex, target=RELATIVE)
     run_folds("interval", [fold], "interval-rel", taiex, target=RELATIVE)
 
-    with pytest.raises(ValueError, match="fit on fwd_up_5pct, not fwd_up_5pct_vs_taiex"):
+    with pytest.raises(ValueError, match="fit on fwd_up_5pct, not fwd_up_5pct_vs_taiex_tr"):
         target_eval.evaluate_run("interval-abs", [fold], taiex, relative=True)
-    with pytest.raises(ValueError, match="fit on fwd_up_5pct_vs_taiex, not fwd_up_5pct"):
+    with pytest.raises(ValueError, match="fit on fwd_up_5pct_vs_taiex_tr, not fwd_up_5pct"):
         target_eval.evaluate_run("interval-rel", [fold], taiex)

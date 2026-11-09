@@ -124,9 +124,9 @@ def research() -> list[Fold]:
 
 
 def store_taiex() -> None:
-    """TAIEX closes that swing, so the relative label differs from the absolute one."""
+    """TAIEX_TR closes that swing, so the relative label differs from the absolute one."""
     IndexDaily.objects.bulk_create(
-        IndexDaily(index_id="TAIEX", date=day, close=round(100 * (1 + 0.1 * math.sin(k / 6)), 4))
+        IndexDaily(index_id="TAIEX_TR", date=day, close=round(100 * (1 + 0.1 * math.sin(k / 6)), 4))
         for k, day in enumerate(weekdays())
     )
 

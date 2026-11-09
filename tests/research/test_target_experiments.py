@@ -294,7 +294,7 @@ def test_daily_metrics_score_each_probability_arm_on_its_own_label(small: Path) 
     chosen = target_experiments.target_experiments(CONFIG)["relative-up"]
     folds = compared_folds(chosen, calendar(), weekdays()[-1])
     gap = folds["relative"][0].test_start
-    IndexDaily.objects.filter(index_id="TAIEX", date=gap).delete()
+    IndexDaily.objects.filter(index_id="TAIEX_TR", date=gap).delete()
     target_experiments.train_arms(chosen, "interval-exp", folds, small, (0,))
 
     daily = target_experiments.daily_metrics(chosen, "interval-exp", folds, (0,))
@@ -529,11 +529,13 @@ def test_the_relative_up_report_states_its_rule_and_the_noisy_gap() -> None:
     text = target_experiments.experiment_report(experiment, "interval-exp", daily, fake_folds())
 
     assert "- market：個股特徵加上市場特徵（SPEC 配方）" in text
-    assert "- relative：機率模型改用 20 日報酬減 TAIEX 同期報酬是否大於 5%" in text
+    assert (
+        "- relative：機率模型改用 20 日報酬減 TAIEX_TR（含息報酬指數）同期報酬是否大於 5%" in text
+    )
     assert "| 組 | AUC ↑ |" in text
     assert "（SPEC §7：「日均 AUC 較高就改用」；逐摺差的 NW t 門檻是實驗另加的）" in text
     assert "兩組各對自己的 label 評估" in text
-    assert "TAIEX 是價格指數" in text
+    assert "TAIEX_TR 是含息的報酬指數" in text
     assert (
         "- 第一組沿用 market-interval 的 market 組；market-interval 判定不加市場特徵時，"
         "改帶 --no-market 重跑"
@@ -643,7 +645,7 @@ def test_target_experiment_runs_the_relative_up_arms(command: Path) -> None:
     assert "interval-exp-relative: ran folds" in out.getvalue()
     assert "## 每摺（AUC）" in out.getvalue()
     fitted = ModelRun.objects.filter(run_key="interval-exp-relative", objective="classification")
-    assert {run.params["label"] for run in fitted} == {"fwd_up_5pct_vs_taiex"}
+    assert {run.params["label"] for run in fitted} == {"fwd_up_5pct_vs_taiex_tr"}
 
 
 @pytest.mark.django_db

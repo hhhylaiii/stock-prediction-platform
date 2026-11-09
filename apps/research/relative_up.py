@@ -1,4 +1,7 @@
-"""The up label against the market: a 20-day return beyond TAIEX's move by 5% (SPEC §7)."""
+"""The up label against the market: a 20-day return beyond TAIEX_TR's move by 5% (SPEC §7).
+
+TAIEX_TR reinvests dividends like the adjusted returns the labels use (runbook).
+"""
 
 import hashlib
 import math
@@ -11,9 +14,9 @@ from apps.market.calendar import OutsideCalendarError, TradingDays
 from apps.market.models import IndexDaily, IndexId
 from apps.research.labels import UP_THRESHOLD, UP_TOLERANCE, VOL_DAYS
 
-MARKET = IndexId.TAIEX
+MARKET = IndexId.TAIEX_TR
 RETURN = "fwd_ret_open"
-RELATIVE_LABEL = "fwd_up_5pct_vs_taiex"
+RELATIVE_LABEL = "fwd_up_5pct_vs_taiex_tr"
 
 
 def _later(calendar: TradingDays, day: date) -> date | None:
@@ -24,7 +27,7 @@ def _later(calendar: TradingDays, day: date) -> date | None:
 
 
 def market_returns(calendar: TradingDays, days: Iterable[date]) -> pd.Series:
-    """TAIEX close VOL_DAYS sessions after each day over its close that day; NaN without both."""
+    """TAIEX_TR close VOL_DAYS sessions after each day over its close that day; NaN without both."""
     chosen = sorted(set(days))
     if not chosen:
         return pd.Series(dtype="float64")
@@ -41,7 +44,7 @@ def market_returns(calendar: TradingDays, days: Iterable[date]) -> pd.Series:
 
 
 def relative_up(labels: pd.DataFrame, calendar: TradingDays) -> pd.Series:
-    """Whether each row's 20-day open return beats TAIEX's same 20 days by UP_THRESHOLD."""
+    """Whether each row's 20-day open return beats TAIEX_TR's 20 days by UP_THRESHOLD."""
     market = labels["date"].map(market_returns(calendar, labels["date"]))
     excess = labels[RETURN] - market
     flags = (excess > UP_THRESHOLD + UP_TOLERANCE).astype(object)
@@ -49,7 +52,7 @@ def relative_up(labels: pd.DataFrame, calendar: TradingDays) -> pd.Series:
 
 
 def market_digest(start: date, end: date) -> str:
-    """SHA-256 of the TAIEX closes dated in [start, end]."""
+    """SHA-256 of the TAIEX_TR closes dated in [start, end]."""
     rows = IndexDaily.objects.filter(index_id=MARKET, date__range=(start, end)).order_by("date")
     listed = ";".join(f"{day}={close}" for day, close in rows.values_list("date", "close"))
     return hashlib.sha256(f"{start}..{end} {listed}".encode()).hexdigest()

@@ -535,7 +535,7 @@ def test_an_interval_fold_on_the_relative_label_fits_its_probability_on_it(
     assert seen[0]["fwd_up_5pct"].tolist() == expected.tolist()
     assert (expected != known["fwd_up_5pct"]).any()
     probability = ModelRun.objects.get(run_id=run_id("interval-wf1", "classification", 20, fold))
-    assert probability.params["label"] == "fwd_up_5pct_vs_taiex"
+    assert probability.params["label"] == "fwd_up_5pct_vs_taiex_tr"
     quantile = ModelRun.objects.get(run_id=run_id("interval-wf1", "quantile", 20, fold))
     assert quantile.params["label"] == "fwd_ret_open"
 
@@ -550,7 +550,7 @@ def test_relative_label_folds_rerun_when_the_taiex_closes_change(panel: Path) ->
     notes = fold_notes("interval-rel", MODEL, fold.index)
     assert notes["label_hash"] != fold_notes("interval-abs", MODEL, fold.index)["label_hash"]
     assert notes["label_hash"].startswith(label_hash(fold.train_start, fold.eval_end, (20,)))
-    IndexDaily.objects.filter(index_id="TAIEX", date=fold.test_start).update(close=1)
+    IndexDaily.objects.filter(index_id="TAIEX_TR", date=fold.test_start).update(close=1)
 
     assert run_folds("interval", [fold], "interval-abs", panel) == []
     assert run_folds("interval", [fold], "interval-rel", panel, target=relative) == [fold.index]
@@ -564,8 +564,8 @@ def test_relative_label_folds_follow_the_taiex_closes_twenty_sessions_past_eval_
     relative = target_models.TargetVariant(relative_up=True)
     run_folds("interval", [fold], "interval-rel", panel, target=relative)
     calendar = TradingDays.from_db()
-    beyond = IndexDaily.objects.filter(index_id="TAIEX", date=calendar.shift(fold.eval_end, 21))
-    reach = IndexDaily.objects.filter(index_id="TAIEX", date=calendar.shift(fold.eval_end, 20))
+    beyond = IndexDaily.objects.filter(index_id="TAIEX_TR", date=calendar.shift(fold.eval_end, 21))
+    reach = IndexDaily.objects.filter(index_id="TAIEX_TR", date=calendar.shift(fold.eval_end, 20))
 
     assert beyond.update(close=2) == 1
     assert run_folds("interval", [fold], "interval-rel", panel, target=relative) == []
@@ -581,7 +581,7 @@ def test_a_taiex_change_while_fitting_names_the_taiex_closes(
     monkeypatch.setattr(lgbm_runs, "market_digest", lambda start, end: str(next(calls)))
     relative = target_models.TargetVariant(relative_up=True)
 
-    with pytest.raises(RuntimeError, match="label_daily or TAIEX changed while fitting fold"):
+    with pytest.raises(RuntimeError, match="label_daily or TAIEX_TR changed while fitting fold"):
         run_folds("interval", research()[:1], "interval-rel", panel, target=relative)
 
 

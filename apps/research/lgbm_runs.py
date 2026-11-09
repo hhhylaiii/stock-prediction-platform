@@ -190,7 +190,7 @@ def recipe(
 
 
 def label_digest(scope: str, fold: Fold, target: TargetVariant = TARGET_RECIPE) -> str:
-    """label_hash of a scope's horizons over train_start..eval_end, plus TAIEX for relative_up."""
+    """label_hash of a scope's horizons over train_start..eval_end, and TAIEX_TR if relative_up."""
     digest = label_hash(fold.train_start, fold.eval_end, SCOPE_HORIZONS[scope])
     if not target.relative_up:
         return digest
@@ -563,7 +563,7 @@ def run_fold(
         read = fold_inputs(fold, fold.train_start, fold.test_end, directory, features)
     fitted = FITS[scope](Job(fold, run_key, read, features, seed, bags, variant, target))
     if label_digest(scope, fold, target) != labels_digest:
-        changed = "label_daily or TAIEX" if target.relative_up else "label_daily"
+        changed = "label_daily or TAIEX_TR" if target.relative_up else "label_daily"
         raise RuntimeError(f"{changed} changed while fitting fold {fold.index}; run it again")
     for run, model in fitted.trained:
         if annotate is not None:

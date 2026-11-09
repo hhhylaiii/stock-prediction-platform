@@ -22,7 +22,7 @@ def calendar(days: list[date]) -> TradingDays:
     return TradingDays(days, days[0], days[-1])
 
 
-def store(days: list[date], closes: list[float], index_id: str = "TAIEX") -> None:
+def store(days: list[date], closes: list[float], index_id: str = "TAIEX_TR") -> None:
     IndexDaily.objects.bulk_create(
         IndexDaily(index_id=index_id, date=day, close=close)
         for day, close in zip(days, closes, strict=True)
@@ -41,6 +41,17 @@ def test_market_returns_run_from_the_close_of_t_to_the_close_twenty_sessions_lat
     assert returns[days[9]] == pytest.approx(closes[29] / closes[9] - 1)
     assert math.isnan(returns[days[10]])
     assert list(returns.index) == days[:12]
+
+
+def test_market_returns_follow_the_total_return_index_not_the_price_index() -> None:
+    days = sessions(30)
+    closes = [round(100 * 1.01**k, 4) for k in range(30)]
+    store(days, closes)
+    store(days, [100.0] * 30, "TAIEX")
+
+    returns = market_returns(calendar(days), days[:1])
+
+    assert returns[days[0]] == pytest.approx(closes[20] / closes[0] - 1)
 
 
 def test_market_returns_of_no_days_are_empty() -> None:
@@ -84,9 +95,9 @@ def test_the_market_digest_follows_the_taiex_closes_of_its_range() -> None:
     store(days, [100.0 + k for k in range(30)])
     first = market_digest(days[0], days[20])
 
-    IndexDaily.objects.filter(index_id="TAIEX", date=days[25]).update(close=1)
+    IndexDaily.objects.filter(index_id="TAIEX_TR", date=days[25]).update(close=1)
     store(days, [1.0] * 30, "TPEX")
     assert market_digest(days[0], days[20]) == first
 
-    IndexDaily.objects.filter(index_id="TAIEX", date=days[20]).update(close=1)
+    IndexDaily.objects.filter(index_id="TAIEX_TR", date=days[20]).update(close=1)
     assert market_digest(days[0], days[20]) != first

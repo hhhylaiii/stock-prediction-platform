@@ -247,7 +247,7 @@ def first_day(scope: str, fold: Fold) -> date:
 
 
 def relative_flag(scope: str, target: TargetVariant) -> bool:
-    """The one target setting a baseline reads: the up label against TAIEX, interval only."""
+    """The one target setting a baseline reads: the up label against TAIEX_TR, interval only."""
     if target.relative_up and scope != HoldoutScope.INTERVAL:
         raise ValueError(f"relative_up applies to the interval scope, not {scope}")
     return target.relative_up
@@ -344,7 +344,7 @@ def run_fold(
     inputs = fold_inputs(fold, first_day(scope, fold), fold.test_end, directory, features)
     result = _interval(inputs, run_key, relative) if relative else SCOPES[scope](inputs, run_key)
     if label_digest(scope, fold, relative) != labels:
-        changed = "label_daily or TAIEX" if relative else "label_daily"
+        changed = "label_daily or TAIEX_TR" if relative else "label_daily"
         raise RuntimeError(f"{changed} changed while fitting fold {fold.index}; run it again")
     for item in result.trained:
         if annotate is not None:

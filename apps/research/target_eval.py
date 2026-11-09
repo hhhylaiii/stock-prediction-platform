@@ -50,7 +50,7 @@ LABEL = "fwd_ret_open"
 VOL_LABEL = "fwd_vol_20d"
 UP_LABEL = "fwd_up_5pct"
 RELATIVE_NOTE = (
-    "上漲機率的 label 是相對大盤版：20 日報酬減 TAIEX 同期報酬後是否大於 5%；"
+    "上漲機率的 label 是相對大盤版：20 日報酬減 TAIEX_TR（含息報酬指數）同期報酬後是否大於 5%；"
     "LightGBM 與 logistic baseline 都在這個 label 上訓練與評估"
 )
 VOLATILITY = "tech_vol_20d"
@@ -145,7 +145,7 @@ def target_frame(
 ) -> pd.DataFrame:
     """Both caches of the tuning and research folds up to each eval_end, with labels.
 
-    A relative run scores its up probability against TAIEX, as it was fit.
+    A relative run scores its up probability against TAIEX_TR, as it was fit.
     """
     scope = scope_of(run_key)
     kept = [fold for fold in folds if not fold.holdout]
