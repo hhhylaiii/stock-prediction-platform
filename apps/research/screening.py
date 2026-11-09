@@ -8,7 +8,7 @@ from datetime import date
 import numpy as np
 import pandas as pd
 
-from apps.research.features.registry import feature
+from apps.research.features.registry import FEATURES, feature
 from apps.research.features.transforms import STOCK_LEVEL
 from apps.research.metrics.ic import MIN_STOCKS, daily_rank_ic, summarize_ic
 from apps.research.training import training_rows
@@ -85,9 +85,9 @@ def _twin(name: str, kept: Sequence[str], correlation: pd.DataFrame) -> str | No
 def select(ic: pd.DataFrame, correlation: pd.DataFrame) -> dict[str, str]:
     """Drop reasons: signal features under the IC floor, then features tied to a stronger kept one.
 
-    Features are kept in order of max |IC| over horizons, ties in the order ic lists them.
+    Features are kept in order of max |IC| over horizons, ties in registry order.
     """
-    order = {name: position for position, name in enumerate(ic.index)}
+    order = {spec.name: position for position, spec in enumerate(FEATURES)}
     strength = ic.abs().max(axis=1)
     judged = strength.where(ic.notna().all(axis=1))
     reasons = _low_ic(list(ic.index), judged, " and ".join(str(h) for h in ic.columns))
