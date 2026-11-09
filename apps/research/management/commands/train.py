@@ -71,7 +71,7 @@ class Command(BaseCommand):
             choices=DESIGN_NAMES,
             default=FROZEN,
             help="frozen: the walk-forward layout and variants production.DESIGNS holds; "
-            "spec: the SPEC §7 recipe the research period chose them against.",
+            "spec: the SPEC §7 defaults before the research-period comparison (36-month window).",
         )
         parser.add_argument(
             "--bags",

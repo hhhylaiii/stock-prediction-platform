@@ -43,7 +43,7 @@ class Command(BaseCommand):
             choices=DESIGN_NAMES,
             default=FROZEN,
             help="frozen: the walk-forward layout production.DESIGNS holds; "
-            "spec: the SPEC §7 layout the research period chose it against.",
+            "spec: the SPEC §7 defaults before the research-period comparison (36-month window).",
         )
 
     def _shuffled(self, folds: list[Fold], options: dict[str, Any]) -> ShuffleCheck | None:
