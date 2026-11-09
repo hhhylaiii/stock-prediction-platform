@@ -16,6 +16,12 @@ STOCK_LEVEL = [
     for spec in FEATURES
     if spec.batch == 1 and not spec.market_level and not spec.categorical
 ]
+SECOND_STOCK_LEVEL = [
+    spec.name
+    for spec in FEATURES
+    if spec.batch == 2 and not spec.market_level and not spec.categorical
+]
+MARKET_FEATURES = [spec.name for spec in FEATURES if spec.market_level]
 
 
 def _universe_days(frame: pd.DataFrame, columns: Sequence[str]) -> DataFrameGroupBy:

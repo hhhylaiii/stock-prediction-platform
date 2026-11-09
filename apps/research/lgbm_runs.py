@@ -22,7 +22,7 @@ from apps.research.baseline_runs import (
     fold_inputs,
     require_candidates,
 )
-from apps.research.features.store import read_partitions
+from apps.research.features.store import columns_for, read_partitions
 from apps.research.features.transforms import MarketBins
 from apps.research.gbdt import (
     BASE_PARAMS,
@@ -95,7 +95,7 @@ from apps.research.walkforward import Fold
 MODEL = MODEL_TYPE
 RANK_FIELDS = (RANK_LABEL, "untradable_t1")
 RECIPE_VERSION = "4"
-LATER_DEFAULTS: dict[str, Any] = {"min_rounds": 0, "fixed_rounds": (), "masked": ()}
+LATER_DEFAULTS: dict[str, Any] = {"min_rounds": 0, "fixed_rounds": (), "masked": (), "features": ()}
 MAX_ROUNDS = DEFAULT_MAX_ROUNDS
 SCOPE_HORIZONS: dict[str, tuple[int, ...]] = {
     HoldoutScope.RANK: HORIZONS,
@@ -212,7 +212,8 @@ def scope_features(scope: str, target: TargetVariant = TARGET_RECIPE) -> list[st
     if scope == HoldoutScope.RANK:
         return rank_features(screened)
     features = raw_features(screened)
-    return features if target.market else [name for name in features if name not in MARKET_LEVEL]
+    kept = features if target.market else [name for name in features if name not in MARKET_LEVEL]
+    return [*kept, *(name for name in target.extra if name not in kept)]
 
 
 def input_notes(
@@ -331,9 +332,9 @@ def rank_fold_inputs(fold: Fold, directory: Path, features: list[str]) -> FoldIn
     digest = feature_hash(start, end, directory)
     types = dict.fromkeys(features, "float32")
     parts = [
-        rank_inputs(read_partitions(low, high, directory), features)[[*ROW_KEYS, *features]].astype(
-            types
-        )
+        rank_inputs(read_partitions(low, high, directory, columns_for(features)), features)[
+            [*ROW_KEYS, *features]
+        ].astype(types)
         for low, high in years(start, end)
     ]
     if feature_hash(start, end, directory) != digest:
@@ -608,8 +609,9 @@ def check_design(scope: str, variant: Variant, target: TargetVariant) -> None:
 
 
 def design_features(scope: str, variant: Variant, target: TargetVariant) -> list[str]:
-    """The screened features a scope fits on under a design, less the masked ones."""
-    features = [name for name in scope_features(scope, target) if name not in variant.masked]
+    """The variant's own feature list, or else the scope's screened features, less the masked."""
+    listed = list(variant.features) or scope_features(scope, target)
+    features = [name for name in listed if name not in variant.masked]
     if not features:
         raise ValueError(f"the variant masks every {scope} feature")
     return features

@@ -8,7 +8,7 @@ from datetime import date
 import numpy as np
 import pandas as pd
 
-from apps.research.features.registry import feature
+from apps.research.features.registry import FEATURES, feature
 from apps.research.features.transforms import STOCK_LEVEL
 from apps.research.metrics.ic import MIN_STOCKS, daily_rank_ic, summarize_ic
 from apps.research.training import training_rows
@@ -82,12 +82,22 @@ def _twin(name: str, kept: Sequence[str], correlation: pd.DataFrame) -> str | No
     return max(tied, key=closeness.__getitem__, default=None)
 
 
+def verdict(reason: str, covered: bool) -> str:
+    """Phase 3's wording of one feature's screening result."""
+    if reason:
+        escaped = reason.replace("|", "\\|")
+        return f"剔除：{escaped}"
+    if not covered:
+        return f"保留：IC 有值的天數不到篩選窗的 {MIN_COVERAGE:.0%}，未做低 IC 篩選"
+    return "保留"
+
+
 def select(ic: pd.DataFrame, correlation: pd.DataFrame) -> dict[str, str]:
     """Drop reasons: signal features under the IC floor, then features tied to a stronger kept one.
 
     Features are kept in order of max |IC| over horizons, ties in registry order.
     """
-    order = {name: position for position, name in enumerate(STOCK_LEVEL)}
+    order = {spec.name: position for position, spec in enumerate(FEATURES)}
     strength = ic.abs().max(axis=1)
     judged = strength.where(ic.notna().all(axis=1))
     reasons = _low_ic(list(ic.index), judged, " and ".join(str(h) for h in ic.columns))
@@ -113,28 +123,33 @@ def _require_labels(features: pd.DataFrame, labels: pd.DataFrame, horizon: int) 
         )
 
 
-def screen(features: pd.DataFrame, labels: Mapping[int, pd.DataFrame]) -> Screening:
+def screen(
+    features: pd.DataFrame,
+    labels: Mapping[int, pd.DataFrame],
+    names: Sequence[str] = STOCK_LEVEL,
+) -> Screening:
     """Screen the stock-level columns of raw features against each horizon's labels.
 
     An IC over fewer than MIN_COVERAGE of the window's days is left out of select.
     """
+    names = list(names)
     days = features["date"].nunique()
     columns: dict[str, pd.Series] = {}
     means = {}
     for horizon, frame in labels.items():
         _require_labels(features, frame, horizon)
-        summary = single_factor_ic(training_rows(features, frame, RANK_LABEL), STOCK_LEVEL, horizon)
+        summary = single_factor_ic(training_rows(features, frame, RANK_LABEL), names, horizon)
         columns[f"ic_h{horizon}"] = summary["mean"]
         columns[f"nw_t_h{horizon}"] = summary["nw_t"]
         columns[f"days_h{horizon}"] = summary["n_days"]
         means[horizon] = summary["mean"].where(summary["n_days"] >= MIN_COVERAGE * days)
     universe = features[features["in_universe"].astype(bool)]
-    correlation = mean_daily_correlation(universe, STOCK_LEVEL)
+    correlation = mean_daily_correlation(universe, names)
     screened = pd.DataFrame(means)
     dropped = select(screened, correlation)
     table = pd.DataFrame(columns).assign(
-        conditional=[feature(name).conditional for name in STOCK_LEVEL],
+        conditional=[feature(name).conditional for name in names],
         covered=screened.notna().all(axis=1),
-        reason=[dropped.get(name, "") for name in STOCK_LEVEL],
+        reason=[dropped.get(name, "") for name in names],
     )
     return Screening(table, dropped, correlation, days)

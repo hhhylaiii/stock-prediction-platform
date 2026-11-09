@@ -26,7 +26,7 @@ from apps.research.baselines import (
     vol_interval,
     zero_return,
 )
-from apps.research.features.store import read_partitions
+from apps.research.features.store import columns_for, read_partitions
 from apps.research.holdout import (
     HoldoutError,
     ProductionPass,
@@ -308,7 +308,7 @@ def fold_inputs(
 ) -> FoldInputs:
     """Raw features dated in [start, end], hashed before and after the read."""
     digest = feature_hash(start, end, directory)
-    raw = read_partitions(start, end, directory)
+    raw = read_partitions(start, end, directory, columns_for(features))
     if feature_hash(start, end, directory) != digest:
         raise RuntimeError("feature partitions changed while reading; rerun after build_features")
     return FoldInputs(fold, raw, digest, features)
