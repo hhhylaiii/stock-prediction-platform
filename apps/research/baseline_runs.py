@@ -50,6 +50,7 @@ from apps.research.runs import (
     label_hash,
     lib_versions,
     record_run,
+    refuse_other_layout,
     refuse_production_key,
     screened_features,
 )
@@ -398,11 +399,15 @@ def run_folds(
     if held:
         raise HoldoutError(f"folds {held} are holdout; they run once with the Phase 4 models")
     features = scope_features(scope)
+    refuse_other_layout(run_key, BASELINE, chosen, rerun)
     missing = set(missing_folds(run_key, BASELINE, chosen))
     ran = []
     for fold in chosen:
-        stale = _stale(scope, run_key, fold, directory, features, relative)
-        if rerun or fold.index in missing or stale:
+        if (
+            rerun
+            or fold.index in missing
+            or _stale(scope, run_key, fold, directory, features, relative)
+        ):
             run_fold(scope, fold, run_key, directory, features, target=target)
             ran.append(fold.index)
     return ran

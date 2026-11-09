@@ -7,6 +7,7 @@ import pickle
 import platform
 import shutil
 import tempfile
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -25,7 +26,7 @@ from apps.research.holdout import (
     require_key,
 )
 from apps.research.models import BacktestMetric, HoldoutRun, ModelRun, ModelStatus
-from apps.research.prediction_cache import fold_cached, fold_record
+from apps.research.prediction_cache import fold_cached, fold_record, other_layout
 from apps.research.ranges import years
 from apps.research.walkforward import Fold
 
@@ -211,3 +212,13 @@ def drop_run(run_key: str) -> int:
     _remove(models)
     _remove(cache)
     return len(rows)
+
+
+def refuse_other_layout(run_key: str, model: str, folds: Iterable[Fold], rerun: bool) -> None:
+    """Refuse to refit a run key in place under another walk-forward layout unless asked to."""
+    moved = other_layout(run_key, model, folds)
+    if moved and not rerun:
+        raise RunError(
+            f"{run_key}/{model} cached folds {moved} for another walk-forward layout; "
+            "fit them with the layout they were written with, use a new run key, or rerun"
+        )

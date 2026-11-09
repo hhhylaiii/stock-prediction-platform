@@ -69,6 +69,7 @@ from apps.research.runs import (
     label_hash,
     lib_versions,
     record_run,
+    refuse_other_layout,
     refuse_production_key,
     screened_features,
 )
@@ -635,6 +636,7 @@ def run_folds(
         raise HoldoutError(f"folds {held} are holdout; they run once with the frozen design")
     bag_seeds(seed, bags)
     features = design_features(scope, variant, target)
+    refuse_other_layout(run_key, MODEL, chosen, rerun)
     missing = set(missing_folds(run_key, MODEL, chosen))
     ran = []
     for fold in chosen:
