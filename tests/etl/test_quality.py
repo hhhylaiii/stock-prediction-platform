@@ -52,7 +52,7 @@ def _indices(day: date) -> None:
         [
             *(
                 IndexDaily(index_id=name, date=day, close=Decimal(100))
-                for name in ("TAIEX", "TPEX")
+                for name in ("TAIEX", "TAIEX_TR", "TPEX")
             ),
             *(
                 IndexDaily(index_id=name, date=us_day, close=Decimal(100))
@@ -446,6 +446,10 @@ def test_checks_refuse_a_closed_or_uncovered_day(
         (lambda: IndexDaily.objects.filter(index_id="TAIEX").delete(), {"TAIEX"}),
         (lambda: IndexDaily.objects.filter(index_id="TPEX").update(date=PREV), {"TPEX"}),
         (
+            lambda: IndexDaily.objects.filter(index_id="TAIEX_TR").update(date=PREV),
+            {"TAIEX_TR"},
+        ),
+        (
             lambda: IndexDaily.objects.filter(index_id="SOX").update(date=date(2026, 10, 23)),
             {"SOX"},
         ),
@@ -453,12 +457,16 @@ def test_checks_refuse_a_closed_or_uncovered_day(
             lambda: IndexDaily.objects.filter(index_id="USDTWD").update(date=date(2026, 10, 24)),
             set(),
         ),
-        (lambda: IndexDaily.objects.all().delete(), {"TAIEX", "TPEX", "SOX", "TSM_ADR", "USDTWD"}),
+        (
+            lambda: IndexDaily.objects.all().delete(),
+            {"TAIEX", "TAIEX_TR", "TPEX", "SOX", "TSM_ADR", "USDTWD"},
+        ),
     ],
     ids=[
         "fresh",
         "taiex-missing",
         "tpex-yesterday",
+        "taiex-tr-yesterday",
         "sox-five-days",
         "usdtwd-four-days",
         "none-loaded",
