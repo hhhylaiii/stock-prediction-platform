@@ -58,13 +58,32 @@ def screening_span(calendar: TradingDays, last: date) -> tuple[date, date]:
     return screening_window(generate_folds(calendar, last, config))
 
 
-def check_recorded_screening(directory: Path) -> None:
-    """Refuse when the partitions the recorded screening read have changed since."""
+def check_recorded_screening(directory: Path) -> ModelRun:
+    """The recorded screening, refused when the partitions it read have changed since."""
     run = ModelRun.objects.filter(model_type=SCREENING_MODEL).first()
     if run is None:
         raise ValueError("no feature screening is recorded; run ic_report first")
     if feature_hash(run.train_start, run.train_end, directory) != run.feature_hash:
         raise ValueError("features changed since the recorded screening; run ic_report again")
+    return run
+
+
+def check_same_ics(result: Screening, run: ModelRun) -> None:
+    """Refuse a rescreening whose first-batch ICs differ from the recorded screening's."""
+    recorded = run.params.get("ic", {})
+    for horizon in HORIZONS:
+        now = result.table[f"ic_h{horizon}"].to_dict()
+        for name in (name for name in STOCK_LEVEL if name in now):
+            before = recorded.get(name, {}).get(str(horizon))
+            value = float(now[name])
+            same = (
+                math.isnan(value) if before is None else math.isclose(value, before, abs_tol=1e-9)
+            )
+            if not same:
+                raise ValueError(
+                    f"{name}'s {horizon}-day IC {value:.6f} differs from the recorded screening's "
+                    f"{before}; labels or the screening window changed, run ic_report again"
+                )
 
 
 def group_screening(

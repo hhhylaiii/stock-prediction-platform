@@ -29,10 +29,12 @@ from apps.research.feature_groups import (
     base_arm,
     blocked_lines,
     check_recorded_screening,
+    check_same_ics,
     group_experiment,
     group_names,
     group_screening,
     screening_lines,
+    with_features,
 )
 from apps.research.holdout import HoldoutError, holdout_claimed
 from apps.research.labels import latest_price_date
@@ -74,19 +76,24 @@ class Command(BaseCommand):
             names = group_names(accepted, group)
             seeds = parse_seeds(options["seeds"])
             start = base_arm(DEFAULT_CONFIG, options["window"], options["base"])
+            tags = [*accepted, group]
+            for probe in (with_features(start, accepted, ()), with_features(start, tags, ())):
+                for seed in seeds:
+                    check_run_key(HoldoutScope.RANK, arm_key(run_key, probe, seed))
             last = as_date(options["last_date"], "--last-date") or latest_price_date()
             if last is None:
                 raise ValueError("daily_price is empty")
             calendar = TradingDays.from_db()
-            check_recorded_screening(directory)
+            recorded = check_recorded_screening(directory)
             kept_before = lgbm_runs.scope_features(HoldoutScope.RANK)
             accepted_kept = None
             if accepted:
-                accepted_kept = group_screening(
-                    group_names(accepted), directory, calendar, last
-                ).kept
-                kept_before = accepted_kept
+                before = group_screening(group_names(accepted), directory, calendar, last)
+                check_same_ics(before, recorded)
+                accepted_kept = kept_before = before.kept
             screened = group_screening(names, directory, calendar, last)
+            if not accepted:
+                check_same_ics(screened, recorded)
             lines = screening_lines(screened, group, kept_before)
             added = [name for name in FEATURE_GROUPS[group] if name in screened.kept]
             if not added:
@@ -98,9 +105,6 @@ class Command(BaseCommand):
                 self.stdout.write(text if written is None else f"wrote {written}")
                 return
             experiment = group_experiment(start, accepted, accepted_kept, group, screened.kept)
-            for arm in experiment.arms:
-                for seed in seeds:
-                    check_run_key(HoldoutScope.RANK, arm_key(run_key, arm, seed))
             folds = compared_folds(experiment, calendar, last)
             first = folds[experiment.arms[0].name][0]
             shuffled = checked_shuffle(first, directory, seeds[0])
