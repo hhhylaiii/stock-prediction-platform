@@ -11,7 +11,6 @@ from apps.research.baselines import QUANTILES
 from apps.research.features.registry import FEATURES as REGISTRY
 from apps.research.features.transforms import (
     MARKET_FEATURES,
-    SECOND_STOCK_LEVEL,
     STOCK_LEVEL,
     MarketBins,
     market_bins,
@@ -65,7 +64,7 @@ def raw_inputs(
     raw: pd.DataFrame, fold: Fold, features: Sequence[str]
 ) -> tuple[pd.DataFrame, MarketBins]:
     """Stock features winsorized but not scored, market features cut into training quintiles."""
-    stock = [name for name in features if name in STOCK_LEVEL or name in SECOND_STOCK_LEVEL]
+    stock = [name for name in features if name in STOCK_LEVEL]
     market = [name for name in features if name in MARKET_FEATURES]
     unknown = [name for name in features if name not in stock and name not in market]
     if unknown:

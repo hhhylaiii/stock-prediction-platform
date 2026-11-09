@@ -609,10 +609,7 @@ def check_design(scope: str, variant: Variant, target: TargetVariant) -> None:
 
 
 def design_features(scope: str, variant: Variant, target: TargetVariant) -> list[str]:
-    """The screened features a scope fits on under a design, less the masked ones.
-
-    A rank variant that lists its own features, screened again with a feature group, uses those.
-    """
+    """The variant's own feature list, or else the scope's screened features, less the masked."""
     listed = list(variant.features) or scope_features(scope, target)
     features = [name for name in listed if name not in variant.masked]
     if not features:
