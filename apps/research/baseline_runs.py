@@ -13,6 +13,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from apps.market.calendar import OutsideCalendarError, TradingDays
 from apps.research.baselines import (
     QUANTILES,
     LinearFit,
@@ -42,6 +43,7 @@ from apps.research.prediction_cache import (
     missing_folds,
     save_fold_predictions,
 )
+from apps.research.relative_up import RELATIVE_LABEL, market_digest, relative_up
 from apps.research.runs import (
     RunError,
     feature_hash,
@@ -51,6 +53,7 @@ from apps.research.runs import (
     refuse_production_key,
     screened_features,
 )
+from apps.research.target_models import TARGET_RECIPE, TargetVariant
 from apps.research.training import (
     LINEAR_FEATURES,
     linear_features,
@@ -190,9 +193,11 @@ def _return(inputs: FoldInputs, run_key: str) -> FoldResult:
     return FoldResult(columns, [])
 
 
-def _interval(inputs: FoldInputs, run_key: str) -> FoldResult:
+def _interval(inputs: FoldInputs, run_key: str, relative: bool = False) -> FoldResult:
     fold, raw, test = inputs.fold, inputs.raw[inputs.test], inputs.inputs[inputs.test]
     labels = load_labels(fold.train_start, fold.train_end, VOL_DAYS)
+    if relative:
+        labels = labels.assign(fwd_up_5pct=relative_up(labels, TradingDays.from_db()))
     up = inputs.train(labels, "fwd_up_5pct")
     fit = fit_logistic(up, inputs.features, "fwd_up_5pct", VOL_DAYS)
     quantiles = historical_quantiles(inputs.train(labels, "fwd_ret_open"), "fwd_ret_open")
@@ -211,7 +216,7 @@ def _interval(inputs: FoldInputs, run_key: str) -> FoldResult:
         run_key,
         "logistic",
         VOL_DAYS,
-        "fwd_up_5pct",
+        RELATIVE_LABEL if relative else "fwd_up_5pct",
         objective=ModelObjective.CLASSIFICATION,
         params=_linear_params(fit),
         feature_list=inputs.features,
@@ -241,13 +246,28 @@ def first_day(scope: str, fold: Fold) -> date:
     return fold.test_start if scope == HoldoutScope.RETURN else fold.train_start
 
 
-def label_digest(scope: str, fold: Fold) -> str:
+def relative_flag(scope: str, target: TargetVariant) -> bool:
+    """The one target setting a baseline reads: the up label against TAIEX, interval only."""
+    if target.relative_up and scope != HoldoutScope.INTERVAL:
+        raise ValueError(f"relative_up applies to the interval scope, not {scope}")
+    return target.relative_up
+
+
+def label_digest(scope: str, fold: Fold, relative: bool = False) -> str:
     """label_hash of the rows a scope fits and evaluates on; empty for the rule-only scope."""
     if scope == HoldoutScope.RETURN:
         return ""
     if scope == HoldoutScope.RANK:
         return label_hash(fold.train_start, fold.eval_end, HORIZONS)
-    return label_hash(fold.train_start, fold.train_end, (VOL_DAYS,))
+    digest = label_hash(fold.train_start, fold.train_end, (VOL_DAYS,))
+    if not relative:
+        return digest
+    calendar = TradingDays.from_db()
+    try:
+        reach = calendar.shift(fold.train_end, VOL_DAYS)
+    except OutsideCalendarError:
+        reach = calendar.end
+    return f"{digest}:{market_digest(fold.train_start, reach)}"
 
 
 def scope_features(scope: str) -> list[str]:
@@ -261,23 +281,25 @@ def scope_features(scope: str) -> list[str]:
     return linear_features(kept)
 
 
-def recipe(features: list[str]) -> str:
-    """RECIPE_VERSION with a digest of the features the linear baselines read."""
-    listed = json.dumps(features).encode()
+def recipe(features: list[str], relative: bool = False) -> str:
+    """RECIPE_VERSION with a digest of the features the linear baselines read and the up label."""
+    listed = json.dumps([*features, RELATIVE_LABEL] if relative else features).encode()
     return f"{RECIPE_VERSION}-{hashlib.sha256(listed).hexdigest()[:12]}"
 
 
-def input_notes(scope: str, fold: Fold, directory: Path) -> dict[str, str]:
+def input_notes(scope: str, fold: Fold, directory: Path, relative: bool = False) -> dict[str, str]:
     """Fingerprints of the feature partitions and labels a scope's baseline fold reads today."""
     return {
         "feature_hash": feature_hash(first_day(scope, fold), fold.test_end, directory),
-        "label_hash": label_digest(scope, fold),
+        "label_hash": label_digest(scope, fold, relative),
     }
 
 
-def _current_notes(scope: str, fold: Fold, directory: Path, features: list[str]) -> dict[str, str]:
+def _current_notes(
+    scope: str, fold: Fold, directory: Path, features: list[str], relative: bool = False
+) -> dict[str, str]:
     """Notes a fold cached now would carry: its features, labels and recipe."""
-    return {**input_notes(scope, fold, directory), "recipe": recipe(features)}
+    return {**input_notes(scope, fold, directory, relative), "recipe": recipe(features, relative)}
 
 
 def fold_inputs(
@@ -307,8 +329,10 @@ def run_fold(
     features: list[str],
     production: ProductionPass | None = None,
     annotate: Callable[[ModelRun], Mapping[str, Any]] | None = None,
+    target: TargetVariant = TARGET_RECIPE,
 ) -> Path:
     """Fit one fold's baselines; its old cache goes first and the new one is written last."""
+    relative = relative_flag(scope, target)
     if production is not None:
         check_run_key(scope, run_key)
         authorize_production(run_key, production, fold)
@@ -316,17 +340,22 @@ def run_fold(
         raise HoldoutError(f"fold {fold.index} is holdout; it runs once with the Phase 4 models")
     require_candidates(run_key, fold)
     fold_path(run_key, BASELINE, fold.index).unlink(missing_ok=True)
-    labels = label_digest(scope, fold)
+    labels = label_digest(scope, fold, relative)
     inputs = fold_inputs(fold, first_day(scope, fold), fold.test_end, directory, features)
-    result = SCOPES[scope](inputs, run_key)
-    if label_digest(scope, fold) != labels:
-        raise RuntimeError(f"label_daily changed while fitting fold {fold.index}; run it again")
+    result = _interval(inputs, run_key, relative) if relative else SCOPES[scope](inputs, run_key)
+    if label_digest(scope, fold, relative) != labels:
+        changed = "label_daily or TAIEX" if relative else "label_daily"
+        raise RuntimeError(f"{changed} changed while fitting fold {fold.index}; run it again")
     for item in result.trained:
         if annotate is not None:
             item.run.params = {**item.run.params, **annotate(item.run)}
         record_run(item.run, item.model, fold=fold, production=production)
     rows = inputs.raw.loc[inputs.test, ROW_KEYS].reset_index(drop=True)
-    notes = {"feature_hash": inputs.feature_hash, "label_hash": labels, "recipe": recipe(features)}
+    notes = {
+        "feature_hash": inputs.feature_hash,
+        "label_hash": labels,
+        "recipe": recipe(features, relative),
+    }
     predictions = rows.assign(**result.columns)
     return save_fold_predictions(
         run_key, BASELINE, fold, predictions, notes=notes, production=production
@@ -344,17 +373,25 @@ def check_run_key(scope: str, run_key: str) -> None:
         raise ValueError(f"run_key must be at most {MAX_RUN_KEY} characters to fit its run_ids")
 
 
-def _stale(scope: str, run_key: str, fold: Fold, directory: Path, features: list[str]) -> bool:
+def _stale(
+    scope: str, run_key: str, fold: Fold, directory: Path, features: list[str], relative: bool
+) -> bool:
     """Whether a cached fold's features, labels or recipe have changed since it was fitted."""
-    current = _current_notes(scope, fold, directory, features)
+    current = _current_notes(scope, fold, directory, features, relative)
     return fold_notes(run_key, BASELINE, fold.index) != current
 
 
 def run_folds(
-    scope: str, folds: Iterable[Fold], run_key: str, directory: Path, rerun: bool = False
+    scope: str,
+    folds: Iterable[Fold],
+    run_key: str,
+    directory: Path,
+    rerun: bool = False,
+    target: TargetVariant = TARGET_RECIPE,
 ) -> list[int]:
     """Run folds without a current cache, or all with rerun; holdout folds are refused."""
     check_run_key(scope, run_key)
+    relative = relative_flag(scope, target)
     refuse_production_key(run_key)
     chosen = list(folds)
     held = [fold.index for fold in chosen if is_holdout(fold)]
@@ -364,8 +401,9 @@ def run_folds(
     missing = set(missing_folds(run_key, BASELINE, chosen))
     ran = []
     for fold in chosen:
-        if rerun or fold.index in missing or _stale(scope, run_key, fold, directory, features):
-            run_fold(scope, fold, run_key, directory, features)
+        stale = _stale(scope, run_key, fold, directory, features, relative)
+        if rerun or fold.index in missing or stale:
+            run_fold(scope, fold, run_key, directory, features, target=target)
             ran.append(fold.index)
     return ran
 

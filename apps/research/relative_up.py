@@ -13,6 +13,7 @@ from apps.research.labels import UP_THRESHOLD, UP_TOLERANCE, VOL_DAYS
 
 MARKET = IndexId.TAIEX
 RETURN = "fwd_ret_open"
+RELATIVE_LABEL = "fwd_up_5pct_vs_taiex"
 
 
 def _later(calendar: TradingDays, day: date) -> date | None:

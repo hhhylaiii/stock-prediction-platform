@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from apps.market.calendar import TradingDays
 from apps.research import baseline_runs, lgbm_runs
 from apps.research.baseline_runs import BASELINE, RETURN_HORIZON, check_run_key
 from apps.research.baselines import QUANTILES
@@ -30,14 +31,15 @@ from apps.research.metrics.forecast import (
 )
 from apps.research.metrics.ic import research_ic
 from apps.research.metrics.stats import newey_west_t, paired_nw_t
-from apps.research.models import HoldoutScope
+from apps.research.models import HoldoutScope, ModelObjective, ModelRun
 from apps.research.prediction_cache import (
     MissingFoldsError,
     fold_notes,
     load_predictions,
     missing_folds,
 )
-from apps.research.target_models import ECE_LIMIT
+from apps.research.relative_up import RELATIVE_LABEL, relative_up
+from apps.research.target_models import ECE_LIMIT, TargetVariant
 from apps.research.training import KEYS, load_labels
 from apps.research.walkforward import Fold
 
@@ -47,6 +49,10 @@ SCOPES = (RETURN, INTERVAL)
 LABEL = "fwd_ret_open"
 VOL_LABEL = "fwd_vol_20d"
 UP_LABEL = "fwd_up_5pct"
+RELATIVE_NOTE = (
+    "上漲機率的 label 是相對大盤版：20 日報酬減 TAIEX 同期報酬後是否大於 5%；"
+    "LightGBM 與 logistic baseline 都在這個 label 上訓練與評估"
+)
 VOLATILITY = "tech_vol_20d"
 LABEL_FIELDS: dict[str, tuple[str, ...]] = {
     RETURN: (LABEL, "untradable_t1"),
@@ -116,13 +122,16 @@ def scope_of(run_key: str) -> str:
     raise ValueError(f"a target run_key must start with return- or interval-, got {run_key!r}")
 
 
-def stale_folds(scope: str, run_key: str, folds: Sequence[Fold], directory: Path) -> list[int]:
+def stale_folds(
+    scope: str, run_key: str, folds: Sequence[Fold], directory: Path, relative: bool = False
+) -> list[int]:
     """Folds whose LightGBM or baseline cache was fit on features or labels other than today's."""
+    target = TargetVariant(relative_up=relative)
     stale = []
     for fold in folds:
         for model, current in (
-            (MODEL, lgbm_runs.input_notes(scope, fold, directory)),
-            (BASELINE, baseline_runs.input_notes(scope, fold, directory)),
+            (MODEL, lgbm_runs.input_notes(scope, fold, directory, target)),
+            (BASELINE, baseline_runs.input_notes(scope, fold, directory, relative)),
         ):
             notes = fold_notes(run_key, model, fold.index)
             if {key: notes.get(key) for key in current} != current:
@@ -131,8 +140,13 @@ def stale_folds(scope: str, run_key: str, folds: Sequence[Fold], directory: Path
     return stale
 
 
-def target_frame(run_key: str, folds: Sequence[Fold], directory: Path) -> pd.DataFrame:
-    """Both caches of the tuning and research folds up to each eval_end, with labels."""
+def target_frame(
+    run_key: str, folds: Sequence[Fold], directory: Path, relative: bool = False
+) -> pd.DataFrame:
+    """Both caches of the tuning and research folds up to each eval_end, with labels.
+
+    A relative run scores its up probability against TAIEX, as it was fit.
+    """
     scope = scope_of(run_key)
     kept = [fold for fold in folds if not fold.holdout]
     keys = [*KEYS, "in_universe", "fold"]
@@ -142,6 +156,8 @@ def target_frame(run_key: str, folds: Sequence[Fold], directory: Path) -> pd.Dat
     frame = frame[frame["date"] <= frame["fold"].map({fold.index: fold.eval_end for fold in kept})]
     start, end = min(fold.test_start for fold in kept), max(fold.eval_end for fold in kept)
     labels = load_labels(start, end, HORIZON[scope], LABEL_FIELDS[scope])
+    if relative:
+        labels = labels.assign(**{UP_LABEL: relative_up(labels, TradingDays.from_db())})
     frame = frame.merge(labels, on=KEYS, how="left", validate="one_to_one")
     if scope == INTERVAL:
         vols = read_columns(start, end, directory, [VOLATILITY])
@@ -275,9 +291,26 @@ def evaluate_interval(frame: pd.DataFrame, folds: Sequence[Fold]) -> IntervalEva
 Evaluation = ReturnEvaluation | IntervalEvaluation
 
 
-def evaluate_run(run_key: str, folds: Sequence[Fold], directory: Path) -> Evaluation:
+def check_up_label(run_key: str, relative: bool) -> None:
+    """Refuse a run whose probability models were fit on the other up label."""
+    expected = RELATIVE_LABEL if relative else UP_LABEL
+    runs = ModelRun.objects.filter(run_key=run_key, objective=ModelObjective.CLASSIFICATION)
+    labels = sorted({run.params.get("label") for run in runs} - {expected})
+    if labels:
+        raise ValueError(
+            f"{run_key}'s probability models were fit on {', '.join(map(str, labels))}, "
+            f"not {expected}; evaluate it with the design it was trained on"
+        )
+
+
+def evaluate_run(
+    run_key: str, folds: Sequence[Fold], directory: Path, relative: bool = False
+) -> Evaluation:
     """A target run's tuning and research folds; missing caches first, then stale ones refused."""
     scope = scope_of(run_key)
+    baseline_runs.relative_flag(scope, TargetVariant(relative_up=relative))
+    if scope == INTERVAL:
+        check_up_label(run_key, relative)
     kept = [fold for fold in folds if not fold.holdout]
     if not any(fold.research for fold in kept):
         raise ValueError("no research folds to evaluate")
@@ -285,13 +318,13 @@ def evaluate_run(run_key: str, folds: Sequence[Fold], directory: Path) -> Evalua
         missing = missing_folds(run_key, model, kept)
         if missing:
             raise MissingFoldsError(run_key, model, missing)
-    stale = stale_folds(scope, run_key, kept, directory)
+    stale = stale_folds(scope, run_key, kept, directory, relative)
     if stale:
         raise ValueError(
             f"folds {stale} of {run_key} cache models fit on features or labels that are stale; "
             "rerun train for the baselines and LightGBM"
         )
-    frame = target_frame(run_key, kept, directory)
+    frame = target_frame(run_key, kept, directory, relative)
     if scope == RETURN:
         return evaluate_return(frame, kept)
     return evaluate_interval(frame, kept)
@@ -449,10 +482,11 @@ INTRO = (
 )
 
 
-def report(run_key: str, evaluated: Evaluation) -> str:
+def report(run_key: str, evaluated: Evaluation, relative: bool = False) -> str:
     """Markdown of a target run's research-period metrics, baselines and SPEC §7 gates."""
     if isinstance(evaluated, ReturnEvaluation):
         body = _return_lines(evaluated)
     else:
         body = _interval_lines(evaluated)
-    return "\n".join([f"# 目標評估：{run_key}", "", INTRO, "", *body]) + "\n"
+    label = [RELATIVE_NOTE, ""] if relative else []
+    return "\n".join([f"# 目標評估：{run_key}", "", INTRO, "", *label, *body]) + "\n"

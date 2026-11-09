@@ -62,7 +62,7 @@ from apps.research.rank_model import (
     rank_features,
     rank_inputs,
 )
-from apps.research.relative_up import market_digest, relative_up
+from apps.research.relative_up import RELATIVE_LABEL, market_digest, relative_up
 from apps.research.runs import (
     RunError,
     feature_hash,
@@ -106,7 +106,6 @@ INTERVAL_TAGS = {
     ModelObjective.VOLATILITY: "vol",
     ModelObjective.CLASSIFICATION: "prob",
 }
-RELATIVE_LABEL = f"{UP_LABEL}_vs_taiex"
 NO_IC: Mapping[str, float | None] = {"ic_mean": None, "icir": None, "ic_nw_t": None}
 
 
