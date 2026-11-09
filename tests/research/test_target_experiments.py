@@ -44,7 +44,13 @@ QUANTILES = {0.1: "lightgbm_q10_h20", 0.5: "lightgbm_q50_h20", 0.9: "lightgbm_q9
 def test_the_market_experiments_compare_stock_features_alone_with_market_features_added() -> None:
     chosen = target_experiments.target_experiments(WalkForwardConfig())
 
-    assert set(chosen) == {"market-return", "market-interval", "relative-up"}
+    assert set(chosen) == {
+        "market-return",
+        "market-interval",
+        "relative-up",
+        "quarter-end-return",
+        "quarter-end-interval",
+    }
     for name, scope in (("market-return", "return"), ("market-interval", "interval")):
         experiment = chosen[name]
         assert experiment.scope == scope

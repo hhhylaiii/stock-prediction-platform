@@ -195,9 +195,9 @@ def test_return_folds_read_only_their_test_period(
     reader = baseline_runs.read_partitions
     ranges = []
 
-    def recorded(start: date, end: date, directory: Path) -> pd.DataFrame:
+    def recorded(start: date, end: date, directory: Path, columns: list[str]) -> pd.DataFrame:
         ranges.append((start, end))
-        return reader(start, end, directory)
+        return reader(start, end, directory, columns)
 
     monkeypatch.setattr(baseline_runs, "read_partitions", recorded)
 
@@ -479,8 +479,8 @@ def test_a_partition_rewritten_during_the_read_stops_the_fold(
     fold = research()[0]
     reader = baseline_runs.read_partitions
 
-    def rewritten(start: date, end: date, directory: Path) -> pd.DataFrame:
-        frame = reader(start, end, directory)
+    def rewritten(start: date, end: date, directory: Path, columns: list[str]) -> pd.DataFrame:
+        frame = reader(start, end, directory, columns)
         FeatureDaily.objects.filter(stock_id="1101").update(tech_ret_1d=9.0)
         export_year(2016, directory)
         return frame
