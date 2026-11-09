@@ -11,7 +11,6 @@ from typing import Any
 from apps.market.calendar import TradingDays
 from apps.research import baseline_runs
 from apps.research.baseline_runs import check_run_key
-from apps.research.experiments import LONG_MONTHS, MIN_ROUNDS
 from apps.research.holdout import (
     PRODUCTION_FOLD,
     ProductionPass,
@@ -108,10 +107,11 @@ class Built:
     references: dict[str, Any]
 
 
-FROZEN_CONFIG = replace(WalkForwardConfig(), train_months=LONG_MONTHS)
+FROZEN_MONTHS, FROZEN_MIN_ROUNDS = 60, 200
+FROZEN_CONFIG = replace(WalkForwardConfig(), train_months=FROZEN_MONTHS)
 SPEC_DESIGNS: dict[str, Design] = {scope: Design() for scope in HoldoutScope.values}
 DESIGNS: dict[str, Design] = {
-    HoldoutScope.RANK: Design(FROZEN_CONFIG, replace(SPEC_RECIPE, min_rounds=MIN_ROUNDS)),
+    HoldoutScope.RANK: Design(FROZEN_CONFIG, replace(SPEC_RECIPE, min_rounds=FROZEN_MIN_ROUNDS)),
     HoldoutScope.RETURN: Design(FROZEN_CONFIG, target=TargetVariant(market=False)),
     HoldoutScope.INTERVAL: Design(
         FROZEN_CONFIG, target=TargetVariant(market=False, relative_up=True)
