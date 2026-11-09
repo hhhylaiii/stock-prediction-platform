@@ -399,7 +399,7 @@ def run_folds(
     if held:
         raise HoldoutError(f"folds {held} are holdout; they run once with the Phase 4 models")
     features = scope_features(scope)
-    refuse_other_layout(run_key, BASELINE, chosen, rerun)
+    refuse_other_layout(run_key, chosen, rerun)
     missing = set(missing_folds(run_key, BASELINE, chosen))
     ran = []
     for fold in chosen:

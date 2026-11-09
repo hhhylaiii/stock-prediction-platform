@@ -214,11 +214,11 @@ def drop_run(run_key: str) -> int:
     return len(rows)
 
 
-def refuse_other_layout(run_key: str, model: str, folds: Iterable[Fold], rerun: bool) -> None:
+def refuse_other_layout(run_key: str, folds: Iterable[Fold], rerun: bool) -> None:
     """Refuse to refit a run key in place under another walk-forward layout unless asked to."""
-    moved = other_layout(run_key, model, folds)
+    moved = other_layout(run_key, folds)
     if moved and not rerun:
         raise RunError(
-            f"{run_key}/{model} cached folds {moved} for another walk-forward layout; "
+            f"{run_key} cached folds {moved} for another walk-forward layout; "
             "fit them with the layout they were written with, use a new run key, or rerun"
         )

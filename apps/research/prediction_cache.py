@@ -247,13 +247,15 @@ def missing_folds(run_key: str, model: str, folds: Iterable[Fold]) -> list[int]:
     ]
 
 
-def other_layout(run_key: str, model: str, folds: Iterable[Fold]) -> list[int]:
-    """Folds cached under the same index for another layout: a different train or test start."""
+def other_layout(run_key: str, folds: Iterable[Fold]) -> list[int]:
+    """Folds any model of the run cached for another layout: a different train or test start."""
+    root = Path(settings.RESEARCH_CACHE_DIR) / require_key(run_key)
     moved = []
     for fold in folds:
-        stored = _stored_record(fold_path(run_key, model, fold.index))
         expected = fold_record(fold)
-        if stored is not None and any(stored.get(name) != expected[name] for name in LAYOUT):
+        stored = [_stored_record(path) for path in root.glob(f"*/{_name(fold.index)}")]
+        records = [record for record in stored if record is not None]
+        if any(record.get(name) != expected[name] for record in records for name in LAYOUT):
             moved.append(fold.index)
     return moved
 
