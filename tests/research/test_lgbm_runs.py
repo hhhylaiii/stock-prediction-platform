@@ -35,7 +35,7 @@ from apps.research.runs import (
     lib_versions,
     load_model,
 )
-from tests.research.run_panels import CONFIG, KEPT, STOCKS, folds, research, weekdays
+from tests.research.run_panels import KEPT, STOCKS, folds, research, use_designs, weekdays
 
 pytestmark = pytest.mark.django_db
 
@@ -250,7 +250,7 @@ def test_rank_folds_need_the_screening_and_a_rank_run_key(panel: Path) -> None:
 
 @pytest.fixture
 def command(panel: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    monkeypatch.setattr(train, "DEFAULT_CONFIG", CONFIG)
+    use_designs(monkeypatch)
     StockMaster.objects.create(stock_id="1101", name="1101", market="TWSE", industry="水泥工業")
     DailyPrice.objects.create(
         stock_id="1101", date=weekdays()[-1], close=10, volume=1000, turnover=10_000

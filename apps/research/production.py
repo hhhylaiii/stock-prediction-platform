@@ -3,7 +3,7 @@
 import json
 import math
 from collections.abc import Callable
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
@@ -11,6 +11,7 @@ from typing import Any
 from apps.market.calendar import TradingDays
 from apps.research import baseline_runs
 from apps.research.baseline_runs import check_run_key
+from apps.research.experiments import LONG_MONTHS, MIN_ROUNDS
 from apps.research.holdout import (
     PRODUCTION_FOLD,
     ProductionPass,
@@ -107,7 +108,26 @@ class Built:
     references: dict[str, Any]
 
 
-DESIGNS: dict[str, Design] = {scope: Design() for scope in HoldoutScope.values}
+FROZEN_CONFIG = replace(WalkForwardConfig(), train_months=LONG_MONTHS)
+SPEC_DESIGNS: dict[str, Design] = {scope: Design() for scope in HoldoutScope.values}
+DESIGNS: dict[str, Design] = {
+    HoldoutScope.RANK: Design(FROZEN_CONFIG, replace(SPEC_RECIPE, min_rounds=MIN_ROUNDS)),
+    HoldoutScope.RETURN: Design(FROZEN_CONFIG, target=TargetVariant(market=False)),
+    HoldoutScope.INTERVAL: Design(
+        FROZEN_CONFIG, target=TargetVariant(market=False, relative_up=True)
+    ),
+}
+FROZEN, SPEC = "frozen", "spec"
+DESIGN_NAMES = (FROZEN, SPEC)
+
+
+def design_for(scope: str, name: str = FROZEN) -> Design:
+    """The scope's frozen design, or the SPEC recipe it was chosen against."""
+    if name not in DESIGN_NAMES:
+        raise ValueError(f"design must be one of {list(DESIGN_NAMES)}, not {name!r}")
+    return (DESIGNS if name == FROZEN else SPEC_DESIGNS)[scope]
+
+
 BAGS = 5
 SHADOW = "shadow"
 GATES = "gates"
@@ -292,6 +312,7 @@ def build_run(
             baseline_runs.scope_features(scope),
             production=granted,
             annotate=_annotation(notes["shadow"], {}),
+            target=design.target,
         )
         shadow = _run_ids(shadow_key(run_key))
     model = _fit(

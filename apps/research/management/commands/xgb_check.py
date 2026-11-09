@@ -12,10 +12,9 @@ from apps.research.baseline_runs import check_run_key
 from apps.research.ensemble import research_folds, write_report
 from apps.research.management.commands.train import fold_indices
 from apps.research.models import HoldoutScope
-from apps.research.walkforward import WalkForwardConfig, WalkForwardError
+from apps.research.production import DESIGN_NAMES, FROZEN, design_for
+from apps.research.walkforward import WalkForwardError
 from apps.research.xgboost_check import xgboost_daily_ics, xgboost_report
-
-DEFAULT_CONFIG = WalkForwardConfig()
 
 
 class Command(BaseCommand):
@@ -27,13 +26,20 @@ class Command(BaseCommand):
         parser.add_argument("--last-date")
         parser.add_argument("--seed", type=int, default=0)
         parser.add_argument("--output", help="Markdown file to write; prints when left out.")
+        parser.add_argument(
+            "--design",
+            choices=DESIGN_NAMES,
+            default=FROZEN,
+            help="frozen: the walk-forward layout production.DESIGNS holds; "
+            "spec: the SPEC §7 layout the research period chose it against.",
+        )
 
     def handle(self, *args: Any, **options: Any) -> None:
         run_key = options["run_key"]
         try:
             check_run_key(HoldoutScope.RANK, run_key)
             last = as_date(options["last_date"], "--last-date")
-            folds = research_folds(DEFAULT_CONFIG, last)
+            folds = research_folds(design_for(HoldoutScope.RANK, options["design"]).config, last)
             if options["folds"] is not None:
                 wanted = fold_indices(options["folds"])
                 outside = sorted(wanted - {fold.index for fold in folds})

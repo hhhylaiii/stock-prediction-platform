@@ -35,13 +35,13 @@ from apps.research.runs import SCREENING_MODEL, label_hash, load_model
 from apps.research.target_models import huber_delta, raw_inputs, sorted_quantiles
 from apps.research.training import load_labels, training_rows
 from tests.research.run_panels import (
-    CONFIG,
     KEPT,
     STOCKS,
     UNSCREENED,
     folds,
     research,
     store_taiex,
+    use_designs,
     weekdays,
 )
 
@@ -409,7 +409,7 @@ def test_target_folds_need_the_screening(panel: Path) -> None:
 
 @pytest.fixture
 def command(panel: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    monkeypatch.setattr(train, "DEFAULT_CONFIG", CONFIG)
+    use_designs(monkeypatch)
     StockMaster.objects.create(stock_id="1101", name="1101", market="TWSE", industry="水泥工業")
     DailyPrice.objects.create(
         stock_id="1101", date=weekdays()[-1], close=10, volume=1000, turnover=10_000

@@ -12,7 +12,6 @@ from django.core.management.base import CommandError
 from apps.market.models import DailyPrice, StockMaster
 from apps.research import xgboost_check
 from apps.research.features.store import export_year, read_partitions
-from apps.research.management.commands import xgb_check
 from apps.research.models import FeatureDaily, LabelDaily, ModelRun
 from apps.research.prediction_cache import MissingFoldsError, fold_path
 from apps.research.rank_model import rank_inputs
@@ -26,7 +25,7 @@ from apps.research.xgboost_check import (
     xgboost_daily_ics,
     xgboost_report,
 )
-from tests.research.run_panels import CONFIG, KEPT, research, weekdays
+from tests.research.run_panels import KEPT, research, use_designs, weekdays
 
 pytestmark = pytest.mark.django_db
 
@@ -177,7 +176,7 @@ def test_xgboost_daily_ics_refuse_labels_rebuilt_mid_run(
 
 @pytest.fixture
 def command(rank_caches: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    monkeypatch.setattr(xgb_check, "DEFAULT_CONFIG", CONFIG)
+    use_designs(monkeypatch)
     monkeypatch.setattr(xgboost_check, "MAX_ROUNDS", 120)
     StockMaster.objects.create(stock_id="1101", name="1101", market="TWSE", industry="水泥工業")
     DailyPrice.objects.create(
