@@ -82,6 +82,16 @@ def _twin(name: str, kept: Sequence[str], correlation: pd.DataFrame) -> str | No
     return max(tied, key=closeness.__getitem__, default=None)
 
 
+def verdict(reason: str, covered: bool) -> str:
+    """Phase 3's wording of one feature's screening result."""
+    if reason:
+        escaped = reason.replace("|", "\\|")
+        return f"剔除：{escaped}"
+    if not covered:
+        return f"保留：IC 有值的天數不到篩選窗的 {MIN_COVERAGE:.0%}，未做低 IC 篩選"
+    return "保留"
+
+
 def select(ic: pd.DataFrame, correlation: pd.DataFrame) -> dict[str, str]:
     """Drop reasons: signal features under the IC floor, then features tied to a stronger kept one.
 

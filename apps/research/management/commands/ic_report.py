@@ -25,6 +25,7 @@ from apps.research.screening import (
     Screening,
     screen,
     screening_window,
+    verdict,
 )
 from apps.research.training import load_labels
 from apps.research.walkforward import WalkForwardConfig, generate_folds
@@ -45,16 +46,8 @@ def _cell(value: float, digits: int) -> str:
     return "—" if math.isnan(value) else f"{value:.{digits}f}"
 
 
-def _text(value: str) -> str:
-    return value.replace("|", "\\|")
-
-
 def _verdict(row: pd.Series) -> str:
-    if row["reason"]:
-        return f"剔除：{_text(row['reason'])}"
-    if not row["covered"]:
-        return f"保留：IC 有值的天數不到篩選窗的 {MIN_COVERAGE:.0%}，未做低 IC 篩選"
-    return "保留"
+    return verdict(row["reason"], bool(row["covered"]))
 
 
 def _unscreened(spec: FeatureSpec) -> str:
