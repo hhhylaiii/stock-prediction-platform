@@ -28,6 +28,7 @@ from apps.research.walkforward import Fold
 KEYS = ["date", "stock_id"]
 FOLD_METADATA = b"fold"
 NOTES_METADATA = b"notes"
+LAYOUT = ("train_start", "test_start")
 
 
 class MissingFoldsError(LookupError):
@@ -244,6 +245,19 @@ def missing_folds(run_key: str, model: str, folds: Iterable[Fold]) -> list[int]:
         for fold in folds
         if _stored_record(fold_path(run_key, model, fold.index)) != fold_record(fold)
     ]
+
+
+def other_layout(run_key: str, folds: Iterable[Fold]) -> list[int]:
+    """Folds any model of the run cached for another layout: a different train or test start."""
+    root = Path(settings.RESEARCH_CACHE_DIR) / require_key(run_key)
+    moved = []
+    for fold in folds:
+        expected = fold_record(fold)
+        stored = [_stored_record(path) for path in root.glob(f"*/{_name(fold.index)}")]
+        records = [record for record in stored if record is not None]
+        if any(record.get(name) != expected[name] for record in records for name in LAYOUT):
+            moved.append(fold.index)
+    return moved
 
 
 def load_predictions(run_key: str, model: str, folds: Iterable[Fold]) -> pd.DataFrame:

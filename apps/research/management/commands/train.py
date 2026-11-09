@@ -21,10 +21,11 @@ from apps.research.baseline_runs import (
 from apps.research.gbdt import bag_seeds
 from apps.research.holdout import HoldoutError, is_holdout
 from apps.research.labels import latest_price_date
+from apps.research.models import HoldoutScope
+from apps.research.production import DESIGN_NAMES, FROZEN, Design, design_for
 from apps.research.runs import RunError
-from apps.research.walkforward import Fold, WalkForwardConfig, WalkForwardError, generate_folds
+from apps.research.walkforward import Fold, WalkForwardError, generate_folds
 
-DEFAULT_CONFIG = WalkForwardConfig()
 MODELS = (BASELINE, lgbm_runs.MODEL)
 
 
@@ -66,6 +67,13 @@ class Command(BaseCommand):
             "--seed", type=int, default=0, help="Seed of the shuffle check and of LightGBM."
         )
         parser.add_argument(
+            "--design",
+            choices=DESIGN_NAMES,
+            default=FROZEN,
+            help="frozen: the walk-forward layout and variants production.DESIGNS holds; "
+            "spec: the SPEC §7 defaults before the research-period comparison (36-month window).",
+        )
+        parser.add_argument(
             "--bags",
             type=int,
             default=1,
@@ -73,12 +81,16 @@ class Command(BaseCommand):
             "under their own run_key, since a run_key keeps one bag size.",
         )
 
+    def _design(self, options: dict[str, Any]) -> Design:
+        """The scope's chosen design; the shuffle check alone reads the rank layout."""
+        return design_for(options["scope"] or HoldoutScope.RANK, options["design"])
+
     def _folds(self, options: dict[str, Any]) -> list[Fold]:
         last = as_date(options["last_date"], "--last-date") or latest_price_date()
         if last is None:
             raise CommandError("daily_price is empty")
         try:
-            folds = generate_folds(TradingDays.from_db(), last, DEFAULT_CONFIG)
+            folds = generate_folds(TradingDays.from_db(), last, self._design(options).config)
         except (CalendarError, WalkForwardError) as error:
             raise CommandError(f"--last-date {last}: {error}") from error
         if options["folds"] is None:
@@ -126,7 +138,7 @@ class Command(BaseCommand):
             check_run_key(scope, run_key)
             bag_seeds(options["seed"], options["bags"])
             if options["model"] == lgbm_runs.MODEL:
-                lgbm_runs.scope_features(scope)
+                lgbm_runs.scope_features(scope, self._design(options).target)
             else:
                 scope_features(scope)
         except (ValueError, RunError) as error:
@@ -143,8 +155,17 @@ class Command(BaseCommand):
         self, scope: str, folds: list[Fold], run_key: str, options: dict[str, Any]
     ) -> list[int]:
         directory, rerun = settings.FEATURE_PARQUET_DIR, options["rerun"]
+        design = self._design(options)
         if options["model"] == lgbm_runs.MODEL:
             return lgbm_runs.run_folds(
-                scope, folds, run_key, directory, options["seed"], rerun, options["bags"]
+                scope,
+                folds,
+                run_key,
+                directory,
+                options["seed"],
+                rerun,
+                options["bags"],
+                design.variant,
+                design.target,
             )
-        return run_folds(scope, folds, run_key, directory, rerun)
+        return run_folds(scope, folds, run_key, directory, rerun, target=design.target)

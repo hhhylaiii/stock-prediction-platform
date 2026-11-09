@@ -22,7 +22,6 @@ from apps.research.ensemble import (
     research_folds,
 )
 from apps.research.features.store import export_year
-from apps.research.management.commands import ensemble_check
 from apps.research.metrics.ic import daily_rank_ic
 from apps.research.models import FeatureDaily, LabelDaily
 from apps.research.prediction_cache import (
@@ -33,7 +32,7 @@ from apps.research.prediction_cache import (
     save_fold_predictions,
 )
 from apps.research.training import training_rows
-from tests.research.run_panels import CONFIG, research, weekdays
+from tests.research.run_panels import CONFIG, research, use_designs, weekdays
 
 pytestmark = pytest.mark.django_db
 
@@ -192,7 +191,7 @@ def test_the_ensemble_module_runs_without_xgboost() -> None:
 
 @pytest.fixture
 def command(rank_caches: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    monkeypatch.setattr(ensemble_check, "DEFAULT_CONFIG", CONFIG)
+    use_designs(monkeypatch)
     StockMaster.objects.create(stock_id="1101", name="1101", market="TWSE", industry="水泥工業")
     DailyPrice.objects.create(
         stock_id="1101", date=weekdays()[-1], close=10, volume=1000, turnover=10_000

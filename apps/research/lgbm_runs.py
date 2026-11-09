@@ -62,13 +62,14 @@ from apps.research.rank_model import (
     rank_features,
     rank_inputs,
 )
-from apps.research.relative_up import market_digest, relative_up
+from apps.research.relative_up import RELATIVE_LABEL, market_digest, relative_up
 from apps.research.runs import (
     RunError,
     feature_hash,
     label_hash,
     lib_versions,
     record_run,
+    refuse_other_layout,
     refuse_production_key,
     screened_features,
 )
@@ -106,7 +107,6 @@ INTERVAL_TAGS = {
     ModelObjective.VOLATILITY: "vol",
     ModelObjective.CLASSIFICATION: "prob",
 }
-RELATIVE_LABEL = f"{UP_LABEL}_vs_taiex"
 NO_IC: Mapping[str, float | None] = {"ic_mean": None, "icir": None, "ic_nw_t": None}
 
 
@@ -191,7 +191,7 @@ def recipe(
 
 
 def label_digest(scope: str, fold: Fold, target: TargetVariant = TARGET_RECIPE) -> str:
-    """label_hash of a scope's horizons over train_start..eval_end, plus TAIEX for relative_up."""
+    """label_hash of a scope's horizons over train_start..eval_end, and TAIEX_TR if relative_up."""
     digest = label_hash(fold.train_start, fold.eval_end, SCOPE_HORIZONS[scope])
     if not target.relative_up:
         return digest
@@ -564,7 +564,7 @@ def run_fold(
         read = fold_inputs(fold, fold.train_start, fold.test_end, directory, features)
     fitted = FITS[scope](Job(fold, run_key, read, features, seed, bags, variant, target))
     if label_digest(scope, fold, target) != labels_digest:
-        changed = "label_daily or TAIEX" if target.relative_up else "label_daily"
+        changed = "label_daily or TAIEX_TR" if target.relative_up else "label_daily"
         raise RuntimeError(f"{changed} changed while fitting fold {fold.index}; run it again")
     for run, model in fitted.trained:
         if annotate is not None:
@@ -636,6 +636,7 @@ def run_folds(
         raise HoldoutError(f"folds {held} are holdout; they run once with the frozen design")
     bag_seeds(seed, bags)
     features = design_features(scope, variant, target)
+    refuse_other_layout(run_key, chosen, rerun)
     missing = set(missing_folds(run_key, MODEL, chosen))
     ran = []
     for fold in chosen:

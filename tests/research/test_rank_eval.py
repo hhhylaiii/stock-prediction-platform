@@ -35,7 +35,14 @@ from apps.research.models import BacktestMetric, FeatureDaily, LabelDaily, Model
 from apps.research.panel import load_price_panel
 from apps.research.prediction_cache import MissingFoldsError, fold_path, load_predictions
 from apps.research.walkforward import Fold
-from tests.research.run_panels import CONFIG, STOCKS, build_panel, folds, research, weekdays
+from tests.research.run_panels import (
+    STOCKS,
+    build_panel,
+    folds,
+    research,
+    use_designs,
+    weekdays,
+)
 
 pytestmark = pytest.mark.django_db
 
@@ -365,7 +372,7 @@ def test_shuffle_result_checks_the_first_research_fold_against_the_limit(
 
 @pytest.fixture
 def command(caches: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    monkeypatch.setattr(evaluate_rank, "DEFAULT_CONFIG", CONFIG)
+    use_designs(monkeypatch)
     return caches
 
 

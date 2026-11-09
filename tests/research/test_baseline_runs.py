@@ -48,6 +48,7 @@ from tests.research.run_panels import (
     fitted_runs,
     folds,
     research,
+    use_designs,
     weekdays,
 )
 
@@ -312,7 +313,7 @@ def test_shuffle_check_reports_an_oos_ic_near_zero(panel: Path) -> None:
 
 @pytest.fixture
 def command(panel: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    monkeypatch.setattr(train, "DEFAULT_CONFIG", CONFIG)
+    use_designs(monkeypatch)
     StockMaster.objects.create(stock_id="1101", name="1101", market="TWSE", industry="水泥工業")
     DailyPrice.objects.create(
         stock_id="1101", date=date(2016, 12, 27), close=10, volume=1000, turnover=10_000

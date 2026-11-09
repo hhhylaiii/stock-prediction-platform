@@ -7,12 +7,15 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from apps.market.calendar import TradingDays
 from apps.market.models import IndexDaily, TradingCalendar
+from apps.research import production
 from apps.research.features.store import export_year
 from apps.research.holdout import claim_holdout
-from apps.research.models import FeatureDaily, LabelDaily, ModelRun
+from apps.research.models import FeatureDaily, HoldoutScope, LabelDaily, ModelRun
+from apps.research.production import Design
 from apps.research.runs import SCREENING_MODEL
 from apps.research.training import linear_features
 from apps.research.walkforward import Fold, WalkForwardConfig, generate_folds
@@ -121,9 +124,9 @@ def research() -> list[Fold]:
 
 
 def store_taiex() -> None:
-    """TAIEX closes that swing, so the relative label differs from the absolute one."""
+    """TAIEX_TR closes that swing, so the relative label differs from the absolute one."""
     IndexDaily.objects.bulk_create(
-        IndexDaily(index_id="TAIEX", date=day, close=round(100 * (1 + 0.1 * math.sin(k / 6)), 4))
+        IndexDaily(index_id="TAIEX_TR", date=day, close=round(100 * (1 + 0.1 * math.sin(k / 6)), 4))
         for k, day in enumerate(weekdays())
     )
 
@@ -136,3 +139,12 @@ def panel_calendar() -> TradingDays:
 def claim_all() -> None:
     for scope in ("rank", "return", "interval"):
         claim_holdout(scope, f"{scope}-final", weekdays()[-1])
+
+
+def use_designs(
+    monkeypatch: pytest.MonkeyPatch, config: WalkForwardConfig = CONFIG, **frozen: Any
+) -> None:
+    """Point every scope's frozen and SPEC designs at config; frozen ones may be given instead."""
+    spec = {scope: Design(config) for scope in HoldoutScope.values}
+    monkeypatch.setattr(production, "SPEC_DESIGNS", spec)
+    monkeypatch.setattr(production, "DESIGNS", {**spec, **frozen})

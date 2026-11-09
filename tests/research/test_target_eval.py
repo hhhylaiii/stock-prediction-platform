@@ -43,7 +43,7 @@ from apps.research.prediction_cache import (
     save_fold_predictions,
 )
 from apps.research.walkforward import Fold
-from tests.research.run_panels import CONFIG, build_panel, folds, research, weekdays
+from tests.research.run_panels import build_panel, folds, research, use_designs, weekdays
 
 pytestmark = pytest.mark.django_db
 
@@ -564,7 +564,7 @@ def test_the_interval_report_fails_coverage_crossing_and_ece_on_research_folds()
 
 @pytest.fixture
 def command(runs: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    monkeypatch.setattr(evaluate_targets, "DEFAULT_CONFIG", CONFIG)
+    use_designs(monkeypatch)
     return runs
 
 
@@ -626,9 +626,9 @@ def test_evaluate_targets_never_reads_holdout_folds(command: Path, monkeypatch: 
     seen: list[list[Fold]] = []
     original = target_eval.evaluate_run
 
-    def recorded(run_key: str, chosen: list[Fold], *args: Any) -> Any:
+    def recorded(run_key: str, chosen: list[Fold], *args: Any, **kwargs: Any) -> Any:
         seen.append(chosen)
-        return original(run_key, chosen, *args)
+        return original(run_key, chosen, *args, **kwargs)
 
     monkeypatch.setattr(evaluate_targets, "evaluate_run", recorded)
 

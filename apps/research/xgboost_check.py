@@ -45,7 +45,9 @@ def relative_gap(lightgbm: float, other: float) -> float:
     return abs(other - lightgbm) / abs(lightgbm)
 
 
-def fit_xgboost(rows: pd.DataFrame, fold: Fold, features: Sequence[str], seed: int) -> xgb.Booster:
+def fit_xgboost(
+    rows: pd.DataFrame, fold: Fold, features: Sequence[str], seed: int, min_rounds: int = 0
+) -> xgb.Booster:
     """XGBoost stopped on validation daily rank IC, then refit on every row for that many rounds."""
     fit, valid = split_validation(rows, fold)
     feval = DailyRankIC(valid["date"], valid[RANK_LABEL])
@@ -62,7 +64,7 @@ def fit_xgboost(rows: pd.DataFrame, fold: Fold, features: Sequence[str], seed: i
         verbose_eval=False,
     )
     full = xgb.DMatrix(rows[names], label=rows[RANK_LABEL])
-    return xgb.train(params, full, num_boost_round=probe.best_iteration + 1)
+    return xgb.train(params, full, num_boost_round=max(probe.best_iteration + 1, min_rounds))
 
 
 def _features(run_key: str, folds: Sequence[Fold]) -> dict[int, list[str]]:
@@ -116,7 +118,7 @@ def _window(inputs: pd.DataFrame, labels: pd.DataFrame, fold: Fold, test: bool) 
 
 
 def _fold_ics(
-    run_key: str, fold: Fold, features: list[str], directory: Path, seed: int
+    run_key: str, fold: Fold, features: list[str], directory: Path, seed: int, min_rounds: int
 ) -> list[pd.DataFrame]:
     read = lgbm_runs.rank_fold_inputs(fold, directory, features)
     _refuse(run_key, [fold.index] if _stale(run_key, fold, read.feature_hash) else [])
@@ -126,7 +128,8 @@ def _fold_ics(
     for horizon in HORIZONS:
         column = f"{lgbm_runs.MODEL}_h{horizon}"
         labels = load_labels(fold.train_start, fold.eval_end, horizon)
-        booster = fit_xgboost(_window(inputs, labels, fold, test=False), fold, features, seed)
+        rows = _window(inputs, labels, fold, test=False)
+        booster = fit_xgboost(rows, fold, features, seed, min_rounds)
         evaluated = _window(inputs, labels, fold, test=True).merge(
             cached[[*KEYS, column]], on=KEYS, validate="one_to_one"
         )
@@ -141,15 +144,15 @@ def _fold_ics(
 
 
 def xgboost_daily_ics(
-    run_key: str, folds: Sequence[Fold], directory: Path, seed: int
+    run_key: str, folds: Sequence[Fold], directory: Path, seed: int, min_rounds: int = 0
 ) -> pd.DataFrame:
-    """Daily OOS rank IC of LightGBM's cached scores and an XGBoost refit, on the same rows."""
+    """Daily OOS rank IC of LightGBM's cached scores and an XGBoost refit with the same floor."""
     features = _features(run_key, folds)
     _check_caches(run_key, folds, directory)
     parts = [
         part
         for fold in folds
-        for part in _fold_ics(run_key, fold, features[fold.index], directory, seed)
+        for part in _fold_ics(run_key, fold, features[fold.index], directory, seed, min_rounds)
     ]
     return pd.concat(parts, ignore_index=True)[DAILY_COLUMNS]
 

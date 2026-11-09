@@ -15,10 +15,9 @@ from apps.research.holdout import is_holdout
 from apps.research.labels import latest_price_date
 from apps.research.models import HoldoutScope
 from apps.research.prediction_cache import FoldMismatchError, MissingFoldsError
+from apps.research.production import DESIGN_NAMES, FROZEN, design_for
 from apps.research.rank_eval import evaluate_run, report, shuffle_result, write_metrics
-from apps.research.walkforward import Fold, WalkForwardConfig, WalkForwardError, generate_folds
-
-DEFAULT_CONFIG = WalkForwardConfig()
+from apps.research.walkforward import Fold, WalkForwardError, generate_folds
 
 
 class Command(BaseCommand):
@@ -39,6 +38,13 @@ class Command(BaseCommand):
             "its IC; left out, the report marks the shuffle check unjudged.",
         )
         parser.add_argument("--seed", type=int, default=0, help="Seed of the shuffle check.")
+        parser.add_argument(
+            "--design",
+            choices=DESIGN_NAMES,
+            default=FROZEN,
+            help="frozen: the walk-forward layout production.DESIGNS holds; "
+            "spec: the SPEC §7 defaults before the research-period comparison (36-month window).",
+        )
 
     def _shuffled(self, folds: list[Fold], options: dict[str, Any]) -> ShuffleCheck | None:
         if not options["shuffle_check"]:
@@ -56,10 +62,9 @@ class Command(BaseCommand):
             if last is None:
                 raise ValueError("daily_price is empty")
             calendar = TradingDays.from_db()
+            config = design_for(HoldoutScope.RANK, options["design"]).config
             folds = [
-                fold
-                for fold in generate_folds(calendar, last, DEFAULT_CONFIG)
-                if not is_holdout(fold)
+                fold for fold in generate_folds(calendar, last, config) if not is_holdout(fold)
             ]
             evaluations = evaluate_run(run_key, folds, settings.FEATURE_PARQUET_DIR, calendar)
             shuffled = self._shuffled(folds, options)

@@ -80,15 +80,16 @@ TITLES = {
 SETTINGS = {
     "nomarket": "只用篩選後的個股特徵，不加市場特徵",
     "market": "個股特徵加上市場特徵（SPEC 配方）",
-    "relative": "機率模型改用 20 日報酬減 TAIEX 同期報酬是否大於 5%；分位數與波動率模型不變",
+    "relative": "機率模型改用 20 日報酬減 TAIEX_TR（含息報酬指數）同期報酬是否大於 5%；"
+    "分位數與波動率模型不變",
     "relative-nomarket": "同 relative，但兩組都不加市場特徵",
 }
 MARKET_REASON = "OOS 指標沒有提高就不用"
 RELATIVE_REASON = "日均 AUC 較高就改用"
 RELATIVE_CAVEAT = (
-    "日均 AUC 兩組各對自己的 label 評估：第一組看 20 日報酬是否大於 5%，第二組看減掉 TAIEX "
-    "同期報酬（收盤 t 到收盤 t+20）後是否大於 5%。TAIEX 是價格指數、個股是含息的還原報酬，"
-    "除息旺季的 TAIEX 報酬偏低，第二組的正例會偏多"
+    "日均 AUC 兩組各對自己的 label 評估：第一組看 20 日報酬是否大於 5%，第二組看減掉 TAIEX_TR "
+    "同期報酬（收盤 t 到收盤 t+20）後是否大於 5%。TAIEX_TR 是含息的報酬指數，和個股的還原報酬"
+    "同一口徑；個股從 t+1 開盤起算、大盤從 t 收盤起算，差一段隔夜跳空"
 )
 DAILY_COLUMNS = ["arm", "seed", "fold", "metric", "date", "value"]
 
@@ -239,7 +240,7 @@ def _arm_frames(
 
 
 def _arm_labels(arm: Arm, labels: pd.DataFrame, calendar: TradingDays | None) -> pd.DataFrame:
-    """The labels an arm is scored on: the up label against TAIEX for a relative_up arm."""
+    """The labels an arm is scored on: the up label against TAIEX_TR for a relative_up arm."""
     if not arm.target.relative_up or calendar is None:
         return labels
     return labels.assign(**{UP_LABEL: relative_up(labels, calendar)})

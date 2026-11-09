@@ -18,9 +18,8 @@ from apps.research.ensemble import (
 from apps.research.labels import HORIZONS
 from apps.research.models import HoldoutScope
 from apps.research.prediction_cache import FoldMismatchError, MissingFoldsError
-from apps.research.walkforward import WalkForwardConfig, WalkForwardError
-
-DEFAULT_CONFIG = WalkForwardConfig()
+from apps.research.production import DESIGN_NAMES, FROZEN, design_for
+from apps.research.walkforward import WalkForwardError
 
 
 class Command(BaseCommand):
@@ -30,13 +29,20 @@ class Command(BaseCommand):
         parser.add_argument("--run-key", required=True)
         parser.add_argument("--last-date")
         parser.add_argument("--output", help="Markdown file to write; prints when left out.")
+        parser.add_argument(
+            "--design",
+            choices=DESIGN_NAMES,
+            default=FROZEN,
+            help="frozen: the walk-forward layout production.DESIGNS holds; "
+            "spec: the SPEC §7 defaults before the research-period comparison (36-month window).",
+        )
 
     def handle(self, *args: Any, **options: Any) -> None:
         run_key = options["run_key"]
         try:
             check_run_key(HoldoutScope.RANK, run_key)
             last = as_date(options["last_date"], "--last-date")
-            folds = research_folds(DEFAULT_CONFIG, last)
+            folds = research_folds(design_for(HoldoutScope.RANK, options["design"]).config, last)
             daily = pd.concat(
                 [ensemble_daily_ics(run_key, folds, horizon) for horizon in HORIZONS],
                 ignore_index=True,

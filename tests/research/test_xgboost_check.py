@@ -15,7 +15,8 @@ from apps.research.features.store import export_year, read_partitions
 from apps.research.management.commands import xgb_check
 from apps.research.models import FeatureDaily, LabelDaily, ModelRun
 from apps.research.prediction_cache import MissingFoldsError, fold_path
-from apps.research.rank_model import rank_inputs
+from apps.research.production import Design
+from apps.research.rank_model import Variant, rank_inputs
 from apps.research.training import load_labels, training_rows
 from apps.research.xgboost_check import (
     DAILY_COLUMNS,
@@ -26,7 +27,7 @@ from apps.research.xgboost_check import (
     xgboost_daily_ics,
     xgboost_report,
 )
-from tests.research.run_panels import CONFIG, KEPT, research, weekdays
+from tests.research.run_panels import CONFIG, KEPT, research, use_designs, weekdays
 
 pytestmark = pytest.mark.django_db
 
@@ -104,6 +105,8 @@ def test_fit_xgboost_stops_on_validation_rank_ic_then_refits_every_row(
     rounds = probe["out"].best_iteration + 1
     assert final["num_boost_round"] == rounds
     assert booster.num_boosted_rounds() == rounds < 400
+    floored = fit_xgboost(rows, fold, KEPT, seed=3, min_rounds=rounds + 50)
+    assert floored.num_boosted_rounds() == rounds + 50
     assert {key: final["params"][key] for key in XGB_PARAMS} == XGB_PARAMS
     assert (probe["params"]["seed"], final["params"]["seed"]) == (3, 3)
     assert XGB_PARAMS == {
@@ -165,9 +168,11 @@ def test_xgboost_daily_ics_refuse_labels_rebuilt_mid_run(
     folds = chosen()
     fit = xgboost_check.fit_xgboost
 
-    def rebuilt(rows: pd.DataFrame, fold: Any, features: list[str], seed: int) -> xgb.Booster:
+    def rebuilt(
+        rows: pd.DataFrame, fold: Any, features: list[str], seed: int, min_rounds: int
+    ) -> xgb.Booster:
         LabelDaily.objects.filter(date=fold.train_start, horizon=20).update(fwd_rank_pct=0.5)
-        return fit(rows, fold, features, seed)
+        return fit(rows, fold, features, seed, min_rounds)
 
     monkeypatch.setattr(xgboost_check, "fit_xgboost", rebuilt)
 
@@ -177,7 +182,7 @@ def test_xgboost_daily_ics_refuse_labels_rebuilt_mid_run(
 
 @pytest.fixture
 def command(rank_caches: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    monkeypatch.setattr(xgb_check, "DEFAULT_CONFIG", CONFIG)
+    use_designs(monkeypatch)
     monkeypatch.setattr(xgboost_check, "MAX_ROUNDS", 120)
     StockMaster.objects.create(stock_id="1101", name="1101", market="TWSE", industry="水泥工業")
     DailyPrice.objects.create(
@@ -202,3 +207,21 @@ def test_xgb_check_refuses_folds_outside_the_research_period(command: Path) -> N
         call_command("xgb_check", run_key="rank-wf1", folds="0-2,7", stdout=StringIO())
     with pytest.raises(CommandError, match="start with rank-"):
         call_command("xgb_check", run_key="return-wf1", stdout=StringIO())
+
+
+def test_xgb_check_refits_xgboost_with_the_design_round_floor(
+    command: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    use_designs(monkeypatch, rank=Design(CONFIG, Variant(min_rounds=7)))
+    seen: list[tuple[Any, ...]] = []
+
+    def record(*args: Any) -> pd.DataFrame:
+        seen.append(args)
+        raise LookupError("stop after the floor")
+
+    monkeypatch.setattr(xgb_check, "xgboost_daily_ics", record)
+
+    with pytest.raises(CommandError, match="stop after the floor"):
+        call_command("xgb_check", run_key="rank-wf1", stdout=StringIO())
+
+    assert seen[0][-1] == 7
