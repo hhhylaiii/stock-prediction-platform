@@ -12,20 +12,23 @@ from django.core.management.base import CommandError
 
 from apps.market.calendar import TradingDays
 from apps.market.models import DailyPrice
-from apps.research import experiments, lgbm_runs
+from apps.research import experiments, feature_groups, lgbm_runs
 from apps.research.feature_groups import (
     BLOCKED,
     FEATURE_GROUPS,
     base_arm,
     check_recorded_screening,
+    check_same_ics,
     group_experiment,
     group_names,
+    group_screening,
     screening_lines,
     screening_span,
 )
 from apps.research.features.registry import FEATURES
 from apps.research.features.store import columns_for, export_year, read_partitions
 from apps.research.features.transforms import SECOND_STOCK_LEVEL, STOCK_LEVEL
+from apps.research.holdout import claim_holdout
 from apps.research.inference import day_rows, model_inputs
 from apps.research.management.commands import feature_group, target_experiment
 from apps.research.models import FeatureDaily, ModelRun
@@ -36,7 +39,16 @@ from apps.research.target_experiments import QUARTER_END, target_experiments
 from apps.research.target_models import TargetVariant
 from apps.research.training import load_labels
 from apps.research.walkforward import WalkForwardConfig, generate_folds
-from tests.research.run_panels import CONFIG, END, KEPT, START, research, store_taiex, weekdays
+from tests.research.run_panels import (
+    CONFIG,
+    END,
+    KEPT,
+    START,
+    panel_calendar,
+    research,
+    store_taiex,
+    weekdays,
+)
 
 GAP = "tech_gap_1d"
 
@@ -243,6 +255,10 @@ def command(gapped: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     )
     screening = ModelRun.objects.get(model_type=SCREENING_MODEL)
     screening.feature_hash = feature_hash(screening.train_start, screening.train_end, gapped)
+    screening.params = {
+        **screening.params,
+        "ic": {name: {"5": 0.01, "20": 0.02} for name in STOCK_LEVEL},
+    }
     screening.save()
     return gapped
 
@@ -373,5 +389,74 @@ def test_the_quarter_end_experiments_write_their_reports(
     text = output.read_text()
     assert f"# 實驗：{name}（{scope}-qe）" in text
     assert "再加 `mkt_days_to_quarter_end`" in text
-    assert "SPEC §6：「第二批特徵：總體 OOS 指標沒有提高就不留」" in text
+    assert "SPEC §6：「總體 OOS rank IC 沒有提高就不留」" in text
+    assert "沒有 rank IC 可比" in text
     assert "**判定" in text
+
+
+@pytest.fixture
+def screened_panel(gapped: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    span = (weekdays()[0], weekdays()[-1])
+    monkeypatch.setattr(feature_groups, "screening_span", lambda calendar, last: span)
+    return gapped
+
+
+@pytest.mark.django_db
+def test_a_group_screening_reads_the_group_columns(screened_panel: Path) -> None:
+    result = group_screening([*KEPT, GAP], screened_panel, panel_calendar(), END)
+
+    assert result.table["ic_h5"].notna().to_dict()[GAP]
+
+
+@pytest.mark.django_db
+def test_a_group_screening_refuses_missing_days_and_partitions_rewritten_mid_read(
+    screened_panel: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    days = sorted([*weekdays(), date(2016, 3, 5)])
+    with pytest.raises(ValueError, match="features are missing on 1 of"):
+        group_screening(KEPT, screened_panel, TradingDays(days, days[0], days[-1]), END)
+
+    reader = feature_groups.read_partitions
+
+    def rewritten(start: date, end: date, directory: Path, columns: list[str]) -> pd.DataFrame:
+        frame = reader(start, end, directory, columns)
+        FeatureDaily.objects.filter(stock_id="1101").update(tech_ret_1d=9.0)
+        export_year(2016, directory)
+        return frame
+
+    monkeypatch.setattr(feature_groups, "read_partitions", rewritten)
+    with pytest.raises(RuntimeError, match="changed while reading"):
+        group_screening(KEPT, screened_panel, panel_calendar(), END)
+
+
+def test_a_rescreening_must_reproduce_the_recorded_first_batch_ics() -> None:
+    table = pd.DataFrame({"ic_h5": [0.01, np.nan], "ic_h20": [0.02, 0.03]}, index=KEPT[:2])
+    result = Screening(table, {}, table, 10)
+    recorded = {KEPT[0]: {"5": 0.01, "20": 0.02}, KEPT[1]: {"5": None, "20": 0.03}}
+
+    check_same_ics(result, ModelRun(params={"ic": recorded}))
+    with pytest.raises(ValueError, match=r"tech_ret_60d's 20-day IC 0\.030000 differs"):
+        check_same_ics(
+            result, ModelRun(params={"ic": {**recorded, KEPT[1]: {"5": None, "20": 0.04}}})
+        )
+
+
+@pytest.mark.django_db
+def test_feature_group_checks_its_run_keys_before_screening(
+    command: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def unexpected(*args: object) -> Screening:
+        raise AssertionError("screened before the run keys were checked")
+
+    monkeypatch.setattr(feature_group, "group_screening", unexpected)
+
+    with pytest.raises(CommandError, match="at most 40 characters"):
+        call_command("feature_group", group="tech", run_key=f"rank-{'x' * 30}", stdout=StringIO())
+
+
+@pytest.mark.django_db
+def test_feature_group_refuses_once_the_rank_holdout_is_claimed(command: Path) -> None:
+    claim_holdout("rank", "rank-final", weekdays()[-1])
+
+    with pytest.raises(CommandError, match="rank design is frozen"):
+        call_command("feature_group", group="tech", run_key="rank-fg", stdout=StringIO())
