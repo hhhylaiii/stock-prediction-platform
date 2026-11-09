@@ -276,7 +276,7 @@ Oct 29, 2026 · @Owen Lai
 | 模型 | 角色 | 輸入 | 起始參數 | 輸出 |
 | --- | --- | --- | --- | --- |
 | Ridge、logistic | baseline，可解釋 | 當日橫截面 z-score 特徵，缺值已填並帶 `_missing` 旗標 | Ridge 的 alpha、logistic 的 C 都由訓練窗內的時間序列 CV 在 0.1 到 100 之間選 | 預測分數、係數表（每個特徵的權重與符號） |
-| LightGBM | 主模型 | 排名目標用 z-score 值；絕對報酬、區間、波動率、機率目標用原值並加入市場層級特徵，保留 NaN（見第 6 節處理步驟）。市場層級特徵每日全市場同值，樹會靠它認出日期、等於 in-sample 看到大盤走勢，所以先在訓練窗內依分位切成 5 級再進模型；Phase 4 比較有、無市場特徵兩版，OOS 指標沒有提高就不用 | objective 依目標（見下表）；num\_leaves 31、learning\_rate 0.02、feature\_fraction 0.7、bagging\_fraction 0.8、min\_data\_in\_leaf 200、lambda\_l2 1；early stopping 100 輪，驗證集與停止指標見 walk-forward 一節 | 預測分數、feature importance（gain）與各摺前 10 名的變動 |
+| LightGBM | 主模型 | 排名目標用 z-score 值；絕對報酬、區間、波動率、機率目標用原值並加入市場層級特徵，保留 NaN（見第 6 節處理步驟）。市場層級特徵每日全市場同值，樹會靠它認出日期、等於 in-sample 看到大盤走勢，所以先在訓練窗內依分位切成 5 級再進模型；Phase 4 比較有、無市場特徵兩版，OOS 指標沒有提高就不用。研究期結果：絕對報酬與區間（含波動率、機率）加了都沒有變好（MAE 0.0378 對 0.0377、pinball 0.0811 對 0.0806），兩者都不加 | objective 依目標（見下表）；num\_leaves 31、learning\_rate 0.02、feature\_fraction 0.7、bagging\_fraction 0.8、min\_data\_in\_leaf 200、lambda\_l2 1；early stopping 100 輪，驗證集與停止指標見 walk-forward 一節 | 預測分數、feature importance（gain）與各摺前 10 名的變動 |
 | LightGBM seed bagging | 正式輸出 | 同 LightGBM | 同一組參數、同一輪數訓 5 個 seed（`seed`、`bagging_seed`、`feature_fraction_seed` 不同），排名與回歸平均原始分數，機率模型平均各 seed 的機率，校準套在平均後的輸出；研究階段的 walk-forward 用單 seed，只有最終驗證跑與正式上線用 5 seed | `prediction` 表的 score、ret\_pred、q10/q50/q90、vol\_pred、prob\_up\_5pct |
 | XGBoost（可選） | 對照模型，只用來抓實作錯誤 | 同 LightGBM | tree\_method hist；max\_depth 6、eta 0.02、subsample 0.8、colsample\_bytree 0.7、min\_child\_weight 200（對應 LightGBM 的 min\_data\_in\_leaf 200） | 與 LightGBM 的 rank IC 差異超過 20% 時要追查實作；不進 ensemble，不是上線條件 |
 | Ensemble（可選） | 排名目標的最終分數 | Ridge 與 LightGBM bagging 的分數 | 兩者各自轉當日 rank 後平均；walk-forward 總體 rank IC 不高於 LightGBM 單獨就不用 | `prediction` 表的 score |
@@ -287,12 +287,12 @@ Oct 29, 2026 · @Owen Lai
 
 | 目標 | label | LightGBM objective | 輸出欄位 | 展示層換算 |
 | --- | --- | --- | --- | --- |
-| 排名 | `fwd_rank_pct`，5 日與 20 日各訓一個 | regression（L2）為主；lambdarank 為備選，需先把 `fwd_rank_pct` 分成 10 級整數相關度、以日期為 group | score, rank, pct | 不換算 |
+| 排名 | `fwd_rank_pct`，5 日與 20 日各訓一個 | regression（L2）。lambdarank（`fwd_rank_pct` 分成 10 級整數相關度、以日期為 group）是備選，Phase 4 比較後不用：研究期 rank IC −0.056 對 0.133，NDCG 只獎勵前 30 名命中漲幅前 10%，模型把高波動股排到前面 | score, rank, pct | 不換算 |
 | 絕對報酬 5 日 | `fwd_ret_5d`\_open | regression（Huber，對極端報酬較穩）；LightGBM 的 alpha 即 Huber delta，預設 0.9 對 5 日報酬約等於 20 個標準差、實際上就是 L2；設為訓練窗內 fwd\_ret\_5d\_open MAD 的 1.5 倍，約 0.05 | ret\_pred（horizon 5） | 預測價 = 當日收盤價 × (1 + ret\_pred)，每檔用自己的收盤價 |
 | 絕對報酬 20 日 | 不另訓模型 | 取報酬區間模型的 q50 | ret\_pred（horizon 20）= q50 | 同上；預測價必然落在價格區間內 |
 | 報酬區間 | `fwd_ret_20d`\_open | quantile，alpha = 0.1、0.5、0.9 各訓一個模型；預測後逐列排序，保證 q10 ≤ q50 ≤ q90 | q10, q50, q90 | 價格區間 = 收盤價 × (1 + q10) 到 收盤價 × (1 + q90)；這是展示用的主區間 |
 | 波動率 | log(`fwd_vol_20d`) | regression（L2）對 log 值，預測取 exp 還原；最重要的輸入是 `tech_vol_20d`、`risk_idio_vol_60d`（`tech_vol_60d` 和 `risk_idio_vol_60d` 的日均 Spearman 是 0.963，Phase 3 篩選時剔除） | vol\_pred（年化） | 80% 區間 = 收盤價 × exp(±1.28 × vol\_pred × √(20/252))，做 sanity check；fallback 改以預測報酬為中心（見輸出一致性）；不預設展示 |
-| 上漲機率 | `fwd_up_5pct` | binary | prob\_up\_5pct | 直接顯示機率；ECE 高於 0.05 時以 early-stopping 驗證集做 isotonic 校準再上線 |
+| 上漲機率 | 相對大盤版：`fwd_ret_20d`\_open 減 TAIEX 同期報酬（收盤 t 到收盤 t+20）是否大於 5%（Phase 4 比較後由 `fwd_up_5pct` 改用，見評估指標的機率一條；頁面與 API 的說法、輸出一致性的 q50 檢查怎麼跟著改，在設計凍結時決定） | binary | prob\_up\_5pct | 直接顯示機率；ECE 高於 0.05 時以 early-stopping 驗證集做 isotonic 校準再上線 |
 
 分類目標的 baseline 用 logistic regression；分位數目標的 baseline 用波動率區間（q50 = 0，q10 與 q90 = ±1.28 × tech\_vol\_20d × √(20/252)），訓練窗內的無條件歷史分位數只當 sanity 下限，打不過它代表實作有錯；波動率目標的 baseline 是直接拿 `tech_vol_20d` 當預測。絕對報酬與 q50 的輸出會明顯集中在 0 附近，這是個股報酬可預測性低的正常現象，不要為了拉開分布去調整。
 
@@ -308,11 +308,11 @@ Oct 29, 2026 · @Owen Lai
 
 **Walk-forward 驗證**
 
-1. 訓練窗預設 36 個月，之後留 20 個交易日 embargo（訓練資料的 label 視窗不得跨進測試期），再測試 3 個月；每 3 個月往前滾一摺，從 2014 年起到最新一期約 51 摺，所有測試期串起來算總體指標，並另報每摺指標。
+1. 訓練窗 60 個月（Phase 4 依第 3 條比較後選定；比較前的預設是 36 個月），之後留 20 個交易日 embargo（訓練資料的 label 視窗不得跨進測試期），再測試 3 個月；每 3 個月往前滾一摺，從 2014 年起到最新一期約 51 摺，所有測試期串起來算總體指標，並另報每摺指標。
 2. 研究期與最終 holdout：測試期落在 2014 到 2024 年的摺（約 44 摺）是研究期，窗長、取樣、ensemble、lambdarank、label 變體、市場特徵有無等所有設計選擇只在研究期上比較與決定；2025 年起的摺（約 7 摺）是 holdout，設計定案前不得執行，定案後只跑一次，其結果是對外報告的數字。holdout 結果不佳只能記錄，不得回頭改設計再跑，否則 holdout 失效。每摺的指標只算測試期起點到 `eval_end`：時期交界（調參摺接研究期、研究期接 holdout）前的摺，`eval_end` 是下一個時期第一個測試日往前 21 個交易日，讓 label 視窗不跨進下一個時期；其他摺的 `eval_end` 就是測試期終點。
-3. 訓練窗長度是參數，不是定案：Phase 4 在研究期同一組摺上比較 36 個月、60 個月、expanding 加時間衰減權重（半衰期 24 個月），以總體 OOS rank IC 選定後寫回本節。60 個月窗的第一摺只能從 2015 年起，三種窗長一律只比 2015 年起的摺。
-4. 訓練列取樣：20 日 label 每檔每天一列，相鄰 20 列的 label 高度重疊，有效樣本遠低於列數。Phase 4 粗跑比較「全部列」與「每 5 個交易日取一列」兩版，後者訓練快 5 倍、減少對重疊列的過擬合，OOS rank IC 不輸就採用；預測與評估仍每日對全市場做。
-5. Early stopping 的驗證集固定是訓練窗最後 6 個月，與前段訓練資料之間同樣留 20 個交易日 embargo；排名目標用每日 rank IC 當停止指標（自訂 feval，每 10 輪算一次），其他目標用各自的 loss。取得最佳輪數後，以整個訓練窗重訓固定輪數再產出測試期預測。測試期永遠不得用於 early stopping 或任何選擇。
+3. 訓練窗長度是參數，不是定案：Phase 4 在研究期同一組摺上比較 36 個月、60 個月、expanding 加時間衰減權重（半衰期 24 個月），以總體 OOS rank IC 選定後寫回本節。60 個月窗的第一摺只能從 2015 年起，三種窗長一律只比 2015 年起的摺。研究期結果（每 6 個月一摺的粗摺 4–21，seed 0、3、6）：36 個月 0.1231、60 個月 0.1325、expanding 0.1284，選定 60 個月。
+4. 訓練列取樣：20 日 label 每檔每天一列，相鄰 20 列的 label 高度重疊，有效樣本遠低於列數。Phase 4 粗跑比較「全部列」與「每 5 個交易日取一列」兩版，後者訓練快 5 倍、減少對重疊列的過擬合，OOS rank IC 不輸就採用；預測與評估仍每日對全市場做。研究期結果：每 5 日一列 0.1315、全部列 0.1325，輸了，維持全部列。
+5. Early stopping 的驗證集固定是訓練窗最後 6 個月，與前段訓練資料之間同樣留 20 個交易日 embargo；排名目標用每日 rank IC 當停止指標（自訂 feval，每 10 輪算一次），其他目標用各自的 loss。取得最佳輪數後，以整個訓練窗重訓固定輪數再產出測試期預測；排名目標的重訓輪數取最佳輪數與 200 的較大者（Phase 4 比較「最佳輪數」「至少 200 輪」「調參摺的固定輪數」三版：0.1325、0.1335、0.1325，20 日模型常在 100 輪內就停）。測試期永遠不得用於 early stopping 或任何選擇。
 6. 超參數只在研究期中測試期落在 2014 到 2015 年的摺（調參摺；季摺是前 8 摺，每 6 個月一摺的粗跑是前 4 摺）聯合調一次，之後凍結；調參摺的指標已不是純 OOS，不計入總體指標，另行標註。正式上線後每年重調一次，只用重調時點之前的資料。單摺的 IC 噪音太大，不逐摺調。
 7. 永遠不用隨機 K-fold；任何以隨機切分得到的指標一律視為無效。
 8. 算力：完整 walk-forward 約 51 摺（研究期 44、holdout 7），每摺 8 個 GBDT 模型（排名 2、絕對報酬 1、分位數 3、波動率 1、機率 1），單 seed、全部列粗估一到兩天，每 5 日取樣約五分之一。調參與窗長比較先用每 6 個月一摺粗跑，定案後再跑完整版；每摺的預測結果快取成 Parquet，指標重算不重訓。
@@ -327,7 +327,7 @@ Oct 29, 2026 · @Owen Lai
 - 絕對報酬（5 日）：MAE 與 RMSE 對上「永遠預測 0」與「預測過去 60 日平均報酬」兩個 baseline。關卡不是單純較低：逐摺算模型與 baseline 的 MAE 差，差值序列的 Newey-West t 值大於 2 才算過，因為差距會在小數第四位、單純比大小是噪音。另報方向準確率（預測符號與實際符號一致的比例，label 為 0 的列不計）及其對 50% 的 NW t 值。20 日的 ret\_pred 就是 q50，隨區間目標評估。
 - 區間：主指標是 pinball loss（三個 alpha 加總）必須低於波動率區間 baseline（q50 = 0，q10 與 q90 = ±1.28 × `tech_vol_20d` × √(20/252)），同樣用逐摺配對差的 NW t 值大於 2 判定；無條件歷史分位數只當 sanity 下限。總體覆蓋率在 75% 到 85% 之間，且每一摺都在 70% 到 90% 之間，過窄或過寬都算失敗；另報依 `tech_vol_20d` 五分位分組的覆蓋率與區間平均寬度。
 - 波動率：MAE 與 QLIKE，對上「用 tech\_vol\_20d 當預測」的 baseline。
-- 機率：每日 AUC 的平均（不用全期混合 AUC，會被市場漲跌主導）、Brier score 對上 logistic baseline。校準看全區 reliability 圖（10 格）並報 ECE；ECE 高於 0.05 時以 early-stopping 驗證集擬合 isotonic 校準，套到測試期重驗，不得用測試期擬合。Phase 4 另比較相對大盤的標籤（`fwd_ret_20d_open` 減 TAIEX 同期報酬是否大於 5%），日均 AUC 較高就改用。
+- 機率：每日 AUC 的平均（不用全期混合 AUC，會被市場漲跌主導）、Brier score 對上 logistic baseline。校準看全區 reliability 圖（10 格）並報 ECE；ECE 高於 0.05 時以 early-stopping 驗證集擬合 isotonic 校準，套到測試期重驗，不得用測試期擬合。Phase 4 另比較相對大盤的標籤（`fwd_ret_20d_open` 減 TAIEX 同期報酬是否大於 5%），日均 AUC 較高就改用。研究期結果：相對版 0.5977、原版 0.5837（逐摺差 NW t +2.44），改用相對版；兩版各對自己的 label 評估，TAIEX 是價格指數、個股是含息的還原報酬，除息旺季相對版的正例偏多。
 - 洩漏警訊：兩個條件任一成立，就先當成洩漏追查，不當成好消息。(1) 研究期（不含調參摺）任一摺 LightGBM 的 OOS 日 IC 均值比同摺 Ridge 高 0.05 以上（在兩者都有分數的同一批列上算），5 日、20 日都適用；沒有同摺 Ridge 可比的摺標「未判定」，不算沒響。(2) 第 8 節的標籤打亂測試（20 日 Ridge），OOS rank IC 的絕對值達 0.02；報表這次沒跑打亂測試，或算不出 IC 時，也標「未判定」。IC 均值本身不設上限。
 
 **模型管理與上線後監控**
