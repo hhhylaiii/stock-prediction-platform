@@ -89,15 +89,15 @@ def _both(*datasets: str, sessions_back: tuple[int, ...] = (0,)) -> list[Fetch]:
 
 BATCHES: dict[str, list[Fetch]] = {
     "prices": [*_both("daily_price", "index_daily", DIVIDEND_EVENT), Fetch("twse", "return_index")],
-    "afternoon": [
-        *_both("institutional", "daily_valuation", "attention", "disposition", "full_delivery"),
-        Fetch("twse", "foreign_holding"),
-        Fetch("twse", "shares_outstanding"),
-    ],
+    "afternoon": _both(
+        "institutional", "daily_valuation", "attention", "disposition", "full_delivery"
+    ),
     "qfii": [Fetch("tpex", "foreign_holding"), Fetch("tpex", "shares_outstanding")],
     "night": [
         *_both("margin", "sbl"),
         *_both("day_trade", sessions_back=tuple(range(REDONE["day_trade"] + 1))),
+        Fetch("twse", "foreign_holding"),
+        Fetch("twse", "shares_outstanding"),
     ],
     "notices": _both("attention", "disposition"),
 }
