@@ -1,7 +1,4 @@
-"""The up label against the market: a 20-day return beyond TAIEX_TR's move by 5% (SPEC §7).
-
-TAIEX_TR reinvests dividends like the adjusted returns the labels use (runbook).
-"""
+"""The up label against the market: a 20-day return beyond TAIEX_TR's move by 5% (SPEC §7)."""
 
 import hashlib
 import math

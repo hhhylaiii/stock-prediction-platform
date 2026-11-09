@@ -51,7 +51,8 @@ VOL_LABEL = "fwd_vol_20d"
 UP_LABEL = "fwd_up_5pct"
 RELATIVE_NOTE = (
     "上漲機率的 label 是相對大盤版：20 日報酬減 TAIEX_TR（含息報酬指數）同期報酬後是否大於 5%；"
-    "LightGBM 與 logistic baseline 都在這個 label 上訓練與評估"
+    "LightGBM 與 logistic baseline 都在這個 label 上訓練與評估；"
+    "輸出一致性一節仍拿這個機率對照絕對報酬的 q50 是否大於 5%，矛盾比例會偏高"
 )
 VOLATILITY = "tech_vol_20d"
 LABEL_FIELDS: dict[str, tuple[str, ...]] = {
@@ -143,10 +144,7 @@ def stale_folds(
 def target_frame(
     run_key: str, folds: Sequence[Fold], directory: Path, relative: bool = False
 ) -> pd.DataFrame:
-    """Both caches of the tuning and research folds up to each eval_end, with labels.
-
-    A relative run scores its up probability against TAIEX_TR, as it was fit.
-    """
+    """Both caches of the tuning and research folds up to each eval_end, with labels as fit."""
     scope = scope_of(run_key)
     kept = [fold for fold in folds if not fold.holdout]
     keys = [*KEYS, "in_universe", "fold"]
@@ -291,11 +289,14 @@ def evaluate_interval(frame: pd.DataFrame, folds: Sequence[Fold]) -> IntervalEva
 Evaluation = ReturnEvaluation | IntervalEvaluation
 
 
-def check_up_label(run_key: str, relative: bool) -> None:
-    """Refuse a run whose probability models were fit on the other up label."""
+def check_up_label(run_key: str, relative: bool, folds: Sequence[Fold]) -> None:
+    """Refuse folds whose probability models were fit on the other up label."""
     expected = RELATIVE_LABEL if relative else UP_LABEL
+    suffixes = tuple(f".f{fold.index:03d}" for fold in folds)
     runs = ModelRun.objects.filter(run_key=run_key, objective=ModelObjective.CLASSIFICATION)
-    labels = sorted({run.params.get("label") for run in runs} - {expected})
+    labels = sorted(
+        {run.params.get("label") for run in runs if run.run_id.endswith(suffixes)} - {expected}
+    )
     if labels:
         raise ValueError(
             f"{run_key}'s probability models were fit on {', '.join(map(str, labels))}, "
@@ -310,7 +311,7 @@ def evaluate_run(
     scope = scope_of(run_key)
     baseline_runs.relative_flag(scope, TargetVariant(relative_up=relative))
     if scope == INTERVAL:
-        check_up_label(run_key, relative)
+        check_up_label(run_key, relative, folds)
     kept = [fold for fold in folds if not fold.holdout]
     if not any(fold.research for fold in kept):
         raise ValueError("no research folds to evaluate")
