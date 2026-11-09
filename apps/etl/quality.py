@@ -37,6 +37,7 @@ NO_TRADE_LIMIT = 0.05
 BASELINE_DAYS = timedelta(days=31)
 STALE_AFTER_DAYS = {
     IndexId.TAIEX.value: 0,
+    IndexId.TAIEX_TR.value: 0,
     IndexId.TPEX.value: 0,
     IndexId.SOX.value: 4,
     IndexId.TSM_ADR.value: 4,
