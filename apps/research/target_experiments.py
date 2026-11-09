@@ -1,8 +1,8 @@
 """Return and interval experiments on coarse research folds: market features, up label (SPEC §7)."""
 
 import math
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pandas as pd
@@ -46,6 +46,8 @@ from apps.research.walkforward import Fold, WalkForwardConfig
 RETURN, INTERVAL = HoldoutScope.RETURN, HoldoutScope.INTERVAL
 MODEL = lgbm_runs.MODEL
 NO_MARKET = TargetVariant(market=False)
+QUARTER_END = ("mkt_days_to_quarter_end",)
+RELATIVE_NO_MARKET = TargetVariant(market=False, relative_up=True)
 QUANTILE_COLUMNS = quantile_columns(MODEL)
 VOL_COLUMN = f"{MODEL}_vol_h{VOL_DAYS}"
 PROB_COLUMN = f"{MODEL}_prob_h{VOL_DAYS}"
@@ -85,6 +87,11 @@ SETTINGS = {
     "relative-nomarket": "同 relative，但兩組都不加市場特徵",
 }
 MARKET_REASON = "OOS 指標沒有提高就不用"
+QUARTER_REASON = "第二批特徵：總體 OOS 指標沒有提高就不留（SPEC §6）"
+QUARTER_CAVEAT = (
+    "`mkt_days_to_quarter_end` 是市場層級特徵，排名模型不用；兩組都不加其他市場特徵，"
+    "只差這一欄，進模型前和其他市場特徵一樣在訓練窗內切成 5 級"
+)
 RELATIVE_REASON = "日均 AUC 較高就改用"
 RELATIVE_CAVEAT = (
     "日均 AUC 兩組各對自己的 label 評估：第一組看 20 日報酬是否大於 5%，第二組看減掉 TAIEX_TR "
@@ -149,6 +156,7 @@ def target_experiments(
         TargetVariant(market=market, relative_up=True),
     )
     follow = "不加市場特徵時，改帶 --no-market" if market else "採用市場特徵時，拿掉 --no-market"
+    chosen.update(_quarter_end(arm, window))
     chosen["relative-up"] = TargetExperiment(
         "relative-up",
         "better",
@@ -163,6 +171,29 @@ def target_experiments(
         ),
         window,
     )
+    return chosen
+
+
+def _quarter_end(
+    arm: Callable[[str, TargetVariant], Arm], window: str
+) -> dict[str, TargetExperiment]:
+    """mkt_days_to_quarter_end on the no-market designs of both target scopes."""
+    bases = {RETURN: ("nomarket", NO_MARKET), INTERVAL: ("relative-nomarket", RELATIVE_NO_MARKET)}
+    chosen = {}
+    for scope, (name, target) in bases.items():
+        first = arm(name, target)
+        second = arm(f"{name}-qend", replace(target, extra=QUARTER_END))
+        chosen[f"quarter-end-{scope}"] = TargetExperiment(
+            f"quarter-end-{scope}",
+            "better",
+            (first, second),
+            scope,
+            SCOPE_PRIMARY[scope],
+            SCOPE_METRICS[scope],
+            QUARTER_REASON,
+            (QUARTER_CAVEAT,),
+            window,
+        )
     return chosen
 
 
