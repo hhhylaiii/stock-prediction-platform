@@ -14,10 +14,11 @@ from apps.research import target_eval
 from apps.research.baseline_runs import BASELINE, RETURN_HORIZON
 from apps.research.lgbm_runs import MODEL
 from apps.research.metrics.ic import daily_rank_ic, research_ic
-from apps.research.models import HoldoutScope, ModelObjective, ModelRun, ModelStatus, Prediction
+from apps.research.models import ModelObjective, ModelRun, ModelStatus, Prediction
 from apps.research.predict import Slot, serving_run
 from apps.research.prediction_cache import fold_path, load_fold_predictions
-from apps.research.production import GATES, SHADOW, design_for, shadow_key
+from apps.research.production import GATES, SHADOW, shadow_key
+from apps.research.relative_up import RELATIVE_LABEL
 from apps.research.runs import PRODUCTION, RunError
 from apps.research.training import load_labels
 from apps.research.walkforward import Fold
@@ -180,9 +181,9 @@ def _shadow_ic(shadow: ModelRun) -> Gate:
 def _shadow_target(shadow: ModelRun, directory: Path) -> Gate:
     fold = _fold(shadow)
     objective = ModelObjective(shadow.objective)
-    relative = objective != ModelObjective.REGRESSION and (
-        design_for(HoldoutScope.INTERVAL).target.relative_up
-    )
+    relative = shadow.params.get("label") == RELATIVE_LABEL
+    if objective == ModelObjective.CLASSIFICATION:
+        target_eval.check_up_label(shadow.run_key, relative, [fold])
     frame = target_eval.target_frame(shadow.run_key, [fold], directory, relative)
     if objective == ModelObjective.REGRESSION:
         mae = target_eval.evaluate_return(frame, [fold]).mae["zero"]
