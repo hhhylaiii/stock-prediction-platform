@@ -17,7 +17,13 @@ from apps.market.calendar import TradingDays
 from apps.market.models import DailyPrice, IndexDaily, StockMaster
 from apps.research import baseline_runs, lgbm_runs, target_eval
 from apps.research.baseline_runs import BASELINE, run_folds
-from apps.research.management.commands import evaluate_rank, evaluate_targets, train
+from apps.research.management.commands import (
+    ensemble_check,
+    evaluate_rank,
+    evaluate_targets,
+    train,
+    xgb_check,
+)
 from apps.research.models import ModelRun
 from apps.research.prediction_cache import fold_notes
 from apps.research.production import DESIGNS, Design, design_for
@@ -342,3 +348,53 @@ def test_a_taiex_change_while_fitting_a_baseline_names_the_taiex_closes(
 
     with pytest.raises(RuntimeError, match="label_daily or TAIEX_TR changed while fitting fold"):
         run_folds("interval", research()[:1], "interval-rel", taiex, target=RELATIVE)
+
+
+@pytest.mark.parametrize(("design", "config", "floor"), [("frozen", OTHER, 7), ("spec", CONFIG, 0)])
+def test_rank_checks_read_the_folds_of_the_named_design(
+    command: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    design: str,
+    config: WalkForwardConfig,
+    floor: int,
+) -> None:
+    use_designs(monkeypatch, rank=Design(OTHER, Variant(min_rounds=7)))
+    seen: dict[str, tuple[list[Any], tuple[Any, ...]]] = {}
+
+    def stop(name: str) -> Any:
+        def record(run_key: str, folds: list[Any], *args: Any, **kwargs: Any) -> Any:
+            seen[name] = (list(folds), args)
+            raise ValueError("stop after the folds")
+
+        return record
+
+    monkeypatch.setattr(evaluate_rank, "evaluate_run", stop("evaluate_rank"))
+    monkeypatch.setattr(ensemble_check, "ensemble_daily_ics", stop("ensemble_check"))
+    monkeypatch.setattr(xgb_check, "xgboost_daily_ics", stop("xgb_check"))
+
+    for name in ("evaluate_rank", "ensemble_check", "xgb_check"):
+        with pytest.raises(CommandError, match="stop after the folds"):
+            call_command(name, run_key="rank-wf1", design=design, stdout=StringIO())
+
+    def layout(folds: list[Any]) -> set[tuple[int, Any]]:
+        return {(fold.index, fold.train_start) for fold in folds}
+
+    chosen = layout(_research(config))
+    other = layout(_research(OTHER if config == CONFIG else CONFIG))
+    assert set(seen) == {"evaluate_rank", "ensemble_check", "xgb_check"}
+    for folds, _ in seen.values():
+        assert folds
+        assert layout(folds) <= chosen - other
+    assert seen["xgb_check"][1][-1] == floor
+
+
+def test_a_fit_refuses_a_layout_another_model_of_the_key_cached(
+    run_panel: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(lgbm_runs, "MAX_ROUNDS", 60)
+    fold = research()[0]
+    lgbm_runs.run_folds("rank", [fold], "rank-wf2", run_panel)
+    moved = replace(fold, train_start=fold.train_start + timedelta(days=7))
+
+    with pytest.raises(RunError, match="another walk-forward layout"):
+        run_folds("rank", [moved], "rank-wf2", run_panel)

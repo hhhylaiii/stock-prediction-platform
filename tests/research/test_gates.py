@@ -637,7 +637,7 @@ def test_every_gate_names_the_unit_of_its_sample() -> None:
 
 
 @pytest.mark.django_db
-def test_a_relative_design_fits_and_judges_the_shadow_on_the_relative_label(
+def test_the_shadow_is_judged_on_the_up_label_it_was_fit_on(
     researched: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     IndexDaily.objects.bulk_create(
@@ -654,9 +654,23 @@ def test_a_relative_design_fits_and_judges_the_shadow_on_the_relative_label(
     shadow = ModelRun.objects.filter(run_key="interval-prod-shadow", objective="classification")
     assert {run.params["label"] for run in shadow} == {RELATIVE_LABEL}
     assert {run.model_type for run in shadow} == {MODEL, "logistic"}
+    monkeypatch.setitem(production.DESIGNS, "interval", Design(CONFIG))
     probability = by_slot(check_gates("interval-prod", researched))[Slot("classification", 20)]
     fold = gates._fold(shadow.get(model_type=MODEL))
     frame = gates.target_eval.target_frame("interval-prod-shadow", [fold], researched, True)
     brier = gates.target_eval.evaluate_interval(frame, [fold]).brier
     assert probability["shadow_oos"].value == pytest.approx(brier.model)
     assert f"logistic {brier.baseline:.4f}" in probability["shadow_oos"].threshold
+
+
+@pytest.mark.django_db
+def test_a_shadow_whose_baseline_was_fit_on_the_other_up_label_is_refused(
+    researched: Path,
+) -> None:
+    built("interval", "interval-wf1", researched)
+    ModelRun.objects.filter(run_key="interval-prod-shadow", model_type="logistic").update(
+        params={"label": RELATIVE_LABEL}
+    )
+
+    with pytest.raises(ValueError, match="fit on fwd_up_5pct_vs_taiex_tr, not fwd_up_5pct"):
+        check_gates("interval-prod", researched)
