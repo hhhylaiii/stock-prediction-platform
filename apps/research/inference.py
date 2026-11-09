@@ -14,7 +14,7 @@ from apps.research.features.transforms import STOCK_LEVEL, MarketBins, winsorize
 from apps.research.gbdt import Bagged
 from apps.research.models import REST_FEATURE, ModelObjective, ModelRun
 from apps.research.rank_model import MODEL_TYPE, rank_inputs
-from apps.research.target_models import MARKET_LEVEL, sorted_quantiles
+from apps.research.target_models import MARKET_FEATURES, SECOND_STOCK_LEVEL, sorted_quantiles
 
 ROW_COLUMNS = ["stock_id", "date", "in_universe"]
 TOP_CONTRIBUTIONS = 5
@@ -63,8 +63,8 @@ def model_inputs(run: ModelRun, model: Any, rows: pd.DataFrame) -> pd.DataFrame:
     features = list(run.feature_list)
     if run.objective == ModelObjective.RANK:
         return rank_inputs(rows, features)[features].astype("float32")
-    stock = [name for name in features if name in STOCK_LEVEL]
-    foreign = [name for name in features if name not in stock and name not in MARKET_LEVEL]
+    stock = [name for name in features if name in STOCK_LEVEL or name in SECOND_STOCK_LEVEL]
+    foreign = [name for name in features if name not in stock and name not in MARKET_FEATURES]
     if foreign:
         raise ValueError(f"{run.run_id} reads features no raw-value model takes: {foreign}")
     return MarketBins(model["market_bins"]).apply(winsorize(rows, stock))[features]

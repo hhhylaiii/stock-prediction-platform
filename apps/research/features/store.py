@@ -21,6 +21,7 @@ from apps.research.features.build import (
     FRAME_COLUMNS,
     FRAME_TYPES,
 )
+from apps.research.features.registry import feature_names
 from apps.research.features.residual import RULES_KEY, rules_signature
 from apps.research.models import FeatureDaily
 from apps.research.ranges import months, years
@@ -107,6 +108,15 @@ def _read_partition(directory: Path, low: date, high: date, wanted: list[str]) -
         dated = [("date", ">=", low), ("date", "<=", high)]
         frame: pd.DataFrame = pq.read_table(handle, columns=wanted, filters=dated).to_pandas()
     return frame
+
+
+SECOND_BATCH = feature_names(batch=2)
+
+
+def columns_for(features: Sequence[str]) -> list[str]:
+    """The first-batch columns plus the second-batch features a fit asks for."""
+    wanted = [name for name in features if name in SECOND_BATCH]
+    return [*FIRST_BATCH_COLUMNS, *dict.fromkeys(wanted)]
 
 
 def read_partitions(

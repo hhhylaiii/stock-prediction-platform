@@ -9,7 +9,14 @@ from sklearn.isotonic import IsotonicRegression
 
 from apps.research.baselines import QUANTILES
 from apps.research.features.registry import FEATURES as REGISTRY
-from apps.research.features.transforms import STOCK_LEVEL, MarketBins, market_bins, winsorize
+from apps.research.features.transforms import (
+    MARKET_FEATURES,
+    SECOND_STOCK_LEVEL,
+    STOCK_LEVEL,
+    MarketBins,
+    market_bins,
+    winsorize,
+)
 from apps.research.gbdt import MAX_ROUNDS, Boosted, bag_seeds, boost, refit, split_validation
 from apps.research.metrics.forecast import expected_calibration_error, reliability_table
 from apps.research.runs import Screened
@@ -34,6 +41,12 @@ class TargetVariant:
 
     market: bool = True
     relative_up: bool = False
+    extra: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        foreign = [name for name in self.extra if name not in MARKET_FEATURES]
+        if foreign or len(set(self.extra)) < len(self.extra):
+            raise ValueError(f"extra takes distinct market-level features only: {self.extra}")
 
 
 TARGET_RECIPE = TargetVariant()
@@ -52,8 +65,8 @@ def raw_inputs(
     raw: pd.DataFrame, fold: Fold, features: Sequence[str]
 ) -> tuple[pd.DataFrame, MarketBins]:
     """Stock features winsorized but not scored, market features cut into training quintiles."""
-    stock = [name for name in features if name in STOCK_LEVEL]
-    market = [name for name in features if name in MARKET_LEVEL]
+    stock = [name for name in features if name in STOCK_LEVEL or name in SECOND_STOCK_LEVEL]
+    market = [name for name in features if name in MARKET_FEATURES]
     unknown = [name for name in features if name not in stock and name not in market]
     if unknown:
         raise ValueError(f"the raw-value models take stock or market features, not {unknown}")

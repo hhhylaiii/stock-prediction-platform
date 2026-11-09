@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from apps.research.features.transforms import STOCK_LEVEL, standardize
+from apps.research.features.transforms import SECOND_STOCK_LEVEL, STOCK_LEVEL, standardize
 from apps.research.gbdt import MAX_ROUNDS, Boosted, DailyRankIC, Feval, Layout, boost
 from apps.research.labels import HORIZONS
 from apps.research.runs import Screened
@@ -27,6 +27,16 @@ LAMBDARANK = {
 }
 
 
+RANKABLE = frozenset([*STOCK_LEVEL, *SECOND_STOCK_LEVEL])
+
+
+def _stock_level(features: Sequence[str]) -> list[str]:
+    unknown = [name for name in features if name not in RANKABLE]
+    if unknown:
+        raise ValueError(f"the rank model takes stock-level features only, not {unknown}")
+    return list(features)
+
+
 @dataclass(frozen=True)
 class Variant:
     """A rank design choice under comparison in research; the defaults are the SPEC recipe."""
@@ -37,6 +47,7 @@ class Variant:
     min_rounds: int = 0
     fixed_rounds: tuple[tuple[int, int], ...] = ()
     masked: tuple[str, ...] = ()
+    features: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.every < 1:
@@ -60,6 +71,9 @@ class Variant:
         foreign = [name for name in self.masked if name not in STOCK_LEVEL]
         if foreign:
             raise ValueError(f"masked takes stock-level features only, not {foreign}")
+        _stock_level(self.features)
+        if len(set(self.features)) < len(self.features):
+            raise ValueError(f"features lists a feature twice: {self.features}")
 
     def fixed_for(self, horizon: int) -> int:
         """The horizon's fixed refit rounds; 0 leaves them to early stopping."""
@@ -67,13 +81,6 @@ class Variant:
 
 
 SPEC_RECIPE = Variant()
-
-
-def _stock_level(features: Sequence[str]) -> list[str]:
-    unknown = [name for name in features if name not in STOCK_LEVEL]
-    if unknown:
-        raise ValueError(f"the rank model takes stock-level features only, not {unknown}")
-    return list(features)
 
 
 def rank_features(screened: Screened) -> list[str]:
