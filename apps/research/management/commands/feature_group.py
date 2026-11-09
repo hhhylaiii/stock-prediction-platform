@@ -25,9 +25,10 @@ from apps.research.experiments import (
 )
 from apps.research.feature_groups import (
     BASES,
-    BLOCKED,
     FEATURE_GROUPS,
     base_arm,
+    blocked_lines,
+    check_recorded_screening,
     group_experiment,
     group_names,
     group_screening,
@@ -70,12 +71,14 @@ class Command(BaseCommand):
         group, accepted, run_key = options["group"], _tags(options["accepted"]), options["run_key"]
         directory = settings.FEATURE_PARQUET_DIR
         try:
+            names = group_names(accepted, group)
             seeds = parse_seeds(options["seeds"])
             start = base_arm(DEFAULT_CONFIG, options["window"], options["base"])
             last = as_date(options["last_date"], "--last-date") or latest_price_date()
             if last is None:
                 raise ValueError("daily_price is empty")
             calendar = TradingDays.from_db()
+            check_recorded_screening(directory)
             kept_before = lgbm_runs.scope_features(HoldoutScope.RANK)
             accepted_kept = None
             if accepted:
@@ -83,12 +86,14 @@ class Command(BaseCommand):
                     group_names(accepted), directory, calendar, last
                 ).kept
                 kept_before = accepted_kept
-            screened = group_screening(group_names(accepted, group), directory, calendar, last)
+            screened = group_screening(names, directory, calendar, last)
             lines = screening_lines(screened, group, kept_before)
             added = [name for name in FEATURE_GROUPS[group] if name in screened.kept]
             if not added:
                 verdict = "**判定：這組在篩選全部剔除，不跑 walk-forward，維持原設計**"
-                text = "\n".join([f"# 特徵組：{group}（{run_key}）", "", *lines, verdict, ""])
+                text = "\n".join(
+                    [f"# 特徵組：{group}（{run_key}）", "", *lines, verdict, "", *blocked_lines()]
+                )
                 written = write_report(text, options["output"])
                 self.stdout.write(text if written is None else f"wrote {written}")
                 return
@@ -117,8 +122,7 @@ class Command(BaseCommand):
             raise CommandError(str(error)) from error
         for name, indices in ran.items():
             self.stdout.write(f"{name}: ran folds {indices}")
-        blocked = [f"- `{name}`：{reason}" for name, reason in BLOCKED.items()]
         text = experiment_report(experiment, run_key, daily, options["note"], stopped)
-        text = "\n".join([text.rstrip("\n"), "", *lines, "## 沒評估的特徵", "", *blocked, ""])
+        text = "\n".join([text.rstrip("\n"), "", *lines, *blocked_lines()])
         written = write_report(text, options["output"])
         self.stdout.write(text if written is None else f"wrote {written}")

@@ -337,6 +337,8 @@ def arm_setting(arm: Arm) -> str:
         line += "，輪數由調參摺定"
     if variant.masked:
         line += f"，遮掉 {len(variant.masked)} 個特徵"
+    if variant.features:
+        line += f"，特徵 {len(variant.features)} 個（重新篩選後的清單）"
     return line
 
 
