@@ -85,9 +85,11 @@ SETTINGS = {
     "relative": "機率模型改用 20 日報酬減 TAIEX_TR（含息報酬指數）同期報酬是否大於 5%；"
     "分位數與波動率模型不變",
     "relative-nomarket": "同 relative，但兩組都不加市場特徵",
+    "nomarket-qend": "同 nomarket，再加 `mkt_days_to_quarter_end`",
+    "relative-nomarket-qend": "同 relative-nomarket，再加 `mkt_days_to_quarter_end`",
 }
 MARKET_REASON = "OOS 指標沒有提高就不用"
-QUARTER_REASON = "第二批特徵：總體 OOS 指標沒有提高就不留（SPEC §6）"
+QUARTER_REASON = "第二批特徵：總體 OOS 指標沒有提高就不留"
 QUARTER_CAVEAT = (
     "`mkt_days_to_quarter_end` 是市場層級特徵，排名模型不用；兩組都不加其他市場特徵，"
     "只差這一欄，進模型前和其他市場特徵一樣在訓練窗內切成 5 級"
@@ -111,6 +113,7 @@ class TargetExperiment(Experiment):
     reason: str
     caveats: tuple[str, ...] = ()
     window: str = "base"
+    section: str = "§7"
 
 
 def _layout(base: WalkForwardConfig, window: str) -> WalkForwardConfig:
@@ -193,6 +196,7 @@ def _quarter_end(
             QUARTER_REASON,
             (QUARTER_CAVEAT,),
             window,
+            "§6",
         )
     return chosen
 
@@ -480,7 +484,8 @@ def experiment_report(
         "seed 不是 0 時再加 `-s<seed>`",
         f"- 判定規則：{alternative} 的 {primary} 要{'低' if lower else '高'}於 {default}，"
         f"而且逐摺差的 NW t 要{'低於 −' if lower else '高於 '}{GATE_T:g} 才採用"
-        f"（SPEC §7：「{experiment.reason}」；逐摺差的 NW t 門檻是實驗另加的）；其他欄只列參考。"
+        f"（SPEC {experiment.section}：「{experiment.reason}」；逐摺差的 NW t 門檻是實驗另加的）；"
+        "其他欄只列參考。"
         "各 seed 先逐日平均，再看研究期與逐摺差",
         *(f"- {caveat}" for caveat in experiment.caveats),
         "",
