@@ -39,14 +39,21 @@ class Command(BaseCommand):
         try:
             check_run_key(HoldoutScope.RANK, run_key)
             last = as_date(options["last_date"], "--last-date")
-            folds = research_folds(design_for(HoldoutScope.RANK, options["design"]).config, last)
+            design = design_for(HoldoutScope.RANK, options["design"])
+            folds = research_folds(design.config, last)
             if options["folds"] is not None:
                 wanted = fold_indices(options["folds"])
                 outside = sorted(wanted - {fold.index for fold in folds})
                 if outside:
                     raise ValueError(f"folds {outside} are not research folds")
                 folds = [fold for fold in folds if fold.index in wanted]
-            daily = xgboost_daily_ics(run_key, folds, settings.FEATURE_PARQUET_DIR, options["seed"])
+            daily = xgboost_daily_ics(
+                run_key,
+                folds,
+                settings.FEATURE_PARQUET_DIR,
+                options["seed"],
+                design.variant.min_rounds,
+            )
         except (
             ValueError,
             LookupError,
