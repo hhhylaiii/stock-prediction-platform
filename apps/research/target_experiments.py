@@ -89,10 +89,11 @@ SETTINGS = {
     "relative-nomarket-qend": "同 relative-nomarket，再加 `mkt_days_to_quarter_end`",
 }
 MARKET_REASON = "OOS 指標沒有提高就不用"
-QUARTER_REASON = "第二批特徵：總體 OOS 指標沒有提高就不留"
+QUARTER_REASON = "總體 OOS rank IC 沒有提高就不留"
 QUARTER_CAVEAT = (
-    "`mkt_days_to_quarter_end` 是市場層級特徵，排名模型不用；兩組都不加其他市場特徵，"
-    "只差這一欄，進模型前和其他市場特徵一樣在訓練窗內切成 5 級"
+    "`mkt_days_to_quarter_end` 是市場層級特徵，排名模型不用，沒有 rank IC 可比；"
+    "照 §7 市場特徵的比較，改看這個目標的主指標，並加逐摺差 NW t 門檻。"
+    "兩組都不加其他市場特徵，只差這一欄，進模型前和其他市場特徵一樣在訓練窗內切成 5 級"
 )
 RELATIVE_REASON = "日均 AUC 較高就改用"
 RELATIVE_CAVEAT = (
