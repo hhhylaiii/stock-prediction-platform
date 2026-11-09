@@ -2,7 +2,9 @@
 
 import math
 from dataclasses import replace
+from datetime import date, timedelta
 from io import StringIO
+from itertools import count
 from pathlib import Path
 from typing import Any
 
@@ -15,13 +17,14 @@ from apps.market.calendar import TradingDays
 from apps.market.models import DailyPrice, IndexDaily, StockMaster
 from apps.research import baseline_runs, lgbm_runs, target_eval
 from apps.research.baseline_runs import BASELINE, run_folds
-from apps.research.experiments import LONG_MONTHS, MIN_ROUNDS
 from apps.research.management.commands import evaluate_rank, evaluate_targets, train
 from apps.research.models import ModelRun
 from apps.research.prediction_cache import fold_notes
 from apps.research.production import DESIGNS, Design, design_for
 from apps.research.rank_model import SPEC_RECIPE, Variant
 from apps.research.relative_up import RELATIVE_LABEL, relative_up
+from apps.research.runs import RunError
+from apps.research.target_eval import RELATIVE_NOTE
 from apps.research.target_models import TARGET_RECIPE, TargetVariant
 from apps.research.training import load_labels
 from apps.research.walkforward import WalkForwardConfig, generate_folds
@@ -33,9 +36,20 @@ RELATIVE = TargetVariant(market=False, relative_up=True)
 
 def test_the_frozen_design_is_what_the_research_period_chose() -> None:
     assert {design.config for design in DESIGNS.values()} == {
-        replace(WalkForwardConfig(), train_months=LONG_MONTHS)
+        WalkForwardConfig(
+            window="rolling",
+            train_months=60,
+            embargo=20,
+            test_months=3,
+            step_months=3,
+            valid_months=6,
+            data_start=date(2010, 1, 1),
+            first_test=date(2014, 1, 1),
+            tuning_end=date(2015, 12, 31),
+            holdout_start=date(2025, 1, 1),
+        )
     }
-    assert DESIGNS["rank"].variant == replace(SPEC_RECIPE, min_rounds=MIN_ROUNDS)
+    assert DESIGNS["rank"].variant == Variant(min_rounds=200)
     assert DESIGNS["rank"].target == TARGET_RECIPE
     assert DESIGNS["return"].target == TargetVariant(market=False)
     assert DESIGNS["interval"].target == RELATIVE
@@ -248,3 +262,83 @@ def test_a_relative_evaluation_refuses_a_run_fit_on_the_absolute_label(taiex: Pa
         target_eval.evaluate_run("interval-abs", [fold], taiex, relative=True)
     with pytest.raises(ValueError, match="fit on fwd_up_5pct_vs_taiex_tr, not fwd_up_5pct"):
         target_eval.evaluate_run("interval-rel", [fold], taiex)
+
+
+def test_train_refuses_a_run_key_cached_for_another_layout(
+    command: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    use_designs(monkeypatch, rank=Design(OTHER))
+    call_command("train", scope="rank", run_key="rank-wf1", design="spec", stdout=StringIO())
+
+    with pytest.raises(CommandError, match="another walk-forward layout"):
+        call_command("train", scope="rank", run_key="rank-wf1", stdout=StringIO())
+
+
+def test_fits_refuse_another_layout_in_place_but_follow_a_longer_test_period(
+    run_panel: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(lgbm_runs, "MAX_ROUNDS", 60)
+    fold = research()[0]
+    lgbm_runs.run_folds("rank", [fold], "rank-wf1", run_panel)
+    run_folds("rank", [fold], "rank-wf1", run_panel)
+    moved = replace(fold, train_start=fold.train_start + timedelta(days=7))
+
+    for runner in (lgbm_runs.run_folds, run_folds):
+        with pytest.raises(RunError, match=rf"cached folds \[{fold.index}\] for another"):
+            runner("rank", [moved], "rank-wf1", run_panel)
+    longer = replace(fold, eval_end=fold.eval_end + timedelta(days=7))
+    assert run_folds("rank", [longer], "rank-wf1", run_panel) == [fold.index]
+    assert lgbm_runs.run_folds("rank", [moved], "rank-wf1", run_panel, rerun=True) == [fold.index]
+
+
+def test_the_up_label_check_reads_only_the_folds_it_evaluates(taiex: Path) -> None:
+    first, second = research()[:2]
+    lgbm_runs.run_folds("interval", [first], "interval-mix", taiex)
+    lgbm_runs.run_folds("interval", [second], "interval-mix", taiex, target=RELATIVE)
+
+    target_eval.check_up_label("interval-mix", True, [second])
+    with pytest.raises(ValueError, match="fit on fwd_up_5pct, not fwd_up_5pct_vs_taiex_tr"):
+        target_eval.check_up_label("interval-mix", True, [first, second])
+
+
+def test_a_relative_report_names_the_up_label_it_scored(
+    command: Path, taiex: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(lgbm_runs, "MAX_ROUNDS", 60)
+    folds = [fold for fold in research() if fold.research][:1]
+    lgbm_runs.run_folds("interval", folds, "interval-rel", taiex, target=RELATIVE)
+    run_folds("interval", folds, "interval-rel", taiex, target=RELATIVE)
+    evaluation = target_eval.evaluate_run("interval-rel", folds, taiex, relative=True)
+    use_designs(monkeypatch, interval=Design(CONFIG, target=RELATIVE))
+    monkeypatch.setattr(evaluate_targets, "evaluate_run", lambda *args, **kwargs: evaluation)
+    out = StringIO()
+
+    call_command("evaluate_targets", run_key="interval-rel", stdout=out)
+
+    assert RELATIVE_NOTE in out.getvalue()
+    assert RELATIVE_NOTE not in target_eval.report("interval-rel", evaluation)
+
+
+def test_relative_baselines_follow_the_taiex_closes_twenty_sessions_past_train_end(
+    taiex: Path,
+) -> None:
+    fold = research()[0]
+    run_folds("interval", [fold], "interval-rel", taiex, target=RELATIVE)
+    calendar = TradingDays.from_db()
+    beyond = IndexDaily.objects.filter(index_id="TAIEX_TR", date=calendar.shift(fold.train_end, 21))
+    reach = IndexDaily.objects.filter(index_id="TAIEX_TR", date=calendar.shift(fold.train_end, 20))
+
+    assert beyond.update(close=2) == 1
+    assert run_folds("interval", [fold], "interval-rel", taiex, target=RELATIVE) == []
+    assert reach.update(close=2) == 1
+    assert run_folds("interval", [fold], "interval-rel", taiex, target=RELATIVE) == [fold.index]
+
+
+def test_a_taiex_change_while_fitting_a_baseline_names_the_taiex_closes(
+    taiex: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = count()
+    monkeypatch.setattr(baseline_runs, "market_digest", lambda start, end: str(next(calls)))
+
+    with pytest.raises(RuntimeError, match="label_daily or TAIEX_TR changed while fitting fold"):
+        run_folds("interval", research()[:1], "interval-rel", taiex, target=RELATIVE)

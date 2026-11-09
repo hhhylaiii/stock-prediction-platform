@@ -1,3 +1,4 @@
+import math
 import shutil
 from dataclasses import replace
 from datetime import date, timedelta
@@ -10,7 +11,8 @@ from django.core.management import call_command
 from django.core.management.base import CommandError
 
 from apps.etl.models import DataQualityLog
-from apps.research import gates
+from apps.market.models import IndexDaily
+from apps.research import gates, production
 from apps.research.baseline_runs import BASELINE
 from apps.research.gates import NO_SERVING, Gate, SlotGates, check_gates
 from apps.research.lgbm_runs import MODEL
@@ -25,9 +27,11 @@ from apps.research.models import (
 )
 from apps.research.predict import Slot
 from apps.research.prediction_cache import fold_path, load_fold_predictions
-from apps.research.production import build_run
+from apps.research.production import Design, build_run
+from apps.research.relative_up import RELATIVE_LABEL
 from apps.research.runs import RunError, model_path
-from tests.research.run_panels import claim_all, weekdays
+from apps.research.target_models import TargetVariant
+from tests.research.run_panels import CONFIG, claim_all, weekdays
 
 LAST = weekdays()[-1]
 
@@ -630,3 +634,29 @@ def test_gates_refuse_an_n_that_changed_while_they_were_checked(
 def test_every_gate_names_the_unit_of_its_sample() -> None:
     assert set(gates.SAMPLE_UNITS) == {"agreement", "gain_overlap", "shadow_oos", "data_quality"}
     assert set(gates.SAMPLE_UNITS.values()) <= {"stocks", "features", "days"}
+
+
+@pytest.mark.django_db
+def test_a_relative_design_fits_and_judges_the_shadow_on_the_relative_label(
+    researched: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    IndexDaily.objects.bulk_create(
+        IndexDaily(
+            index_id="TAIEX_TR", date=day, close=round(100 * (1 + 0.03 * math.sin(k / 4)), 2)
+        )
+        for k, day in enumerate(weekdays())
+    )
+    relative = Design(CONFIG, target=TargetVariant(relative_up=True))
+    monkeypatch.setitem(production.DESIGNS, "interval", relative)
+    for run in built("interval", "interval-wf1", researched):
+        logged(run)
+
+    shadow = ModelRun.objects.filter(run_key="interval-prod-shadow", objective="classification")
+    assert {run.params["label"] for run in shadow} == {RELATIVE_LABEL}
+    assert {run.model_type for run in shadow} == {MODEL, "logistic"}
+    probability = by_slot(check_gates("interval-prod", researched))[Slot("classification", 20)]
+    fold = gates._fold(shadow.get(model_type=MODEL))
+    frame = gates.target_eval.target_frame("interval-prod-shadow", [fold], researched, True)
+    brier = gates.target_eval.evaluate_interval(frame, [fold]).brier
+    assert probability["shadow_oos"].value == pytest.approx(brier.model)
+    assert f"logistic {brier.baseline:.4f}" in probability["shadow_oos"].threshold
