@@ -116,3 +116,6 @@ lambdarank-notrunc: best 1 valid 0.4177 test IC 0.3906
 | market-return | 71.1 分 | 7.28 GB |
 | market-interval | 219.2 分 | 7.99 GB |
 | relative-up | 118.6 分 | 7.33 GB |
+| 停止輪數重跑（seed 0） | 46.0 分 | 5.97 GB |
+| 停止輪數重跑（seed 0、3） | 51.4 分 | 6.33 GB |
+| 取樣重跑（seed 0） | 16.0 分 | 6.30 GB |
