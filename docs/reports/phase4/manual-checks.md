@@ -126,3 +126,5 @@ lambdarank-notrunc: best 1 valid 0.4177 test IC 0.3906
 | chip 組（seed 0、3、6） | 56.4 分 | 6.00 GB |
 | ind 組（seed 0） | 28.5 分 | 5.99 GB |
 | ind 組（seed 0、3、6） | 55.1 分 | 6.47 GB |
+| exdt 組（seed 0） | 29.1 分 | 6.78 GB |
+| exdt 組（seed 0、3、6） | 55.8 分 | 6.26 GB |
