@@ -1,10 +1,12 @@
 # stock-prediction-platform
 
-台股上市、上櫃普通股的每日預測平台：收盤後產出未來 5、20 個交易日的報酬排名、預測報酬與價格區間、上漲機率。規格見 [docs/SPEC.md](docs/SPEC.md)。個人研究用途，資料授權限制見規格第 3 節。
+A daily prediction platform for common stocks listed on the Taiwan Stock Exchange (TWSE) and the Taipei Exchange (TPEx). After each close it produces, for the next 5 and 20 trading days, a return ranking, predicted returns with price intervals, and the probability of a rise. The specification is [docs/SPEC.md](docs/SPEC.md). For personal research use; see section 3 of the spec for the data licensing restrictions.
 
-## 快速上手
+The spec, the runbook and the web pages are written in Traditional Chinese.
 
-已經有資料庫（`docker compose up -d db redis`，資料在 volume 裡）時，看畫面只要：
+## Quick start
+
+If the database already exists (`docker compose up -d db redis`, with the data kept in a volume), this is all it takes to see the pages:
 
 ```bash
 uv sync
@@ -12,64 +14,64 @@ uv run python manage.py migrate
 uv run python manage.py runserver
 ```
 
-打開 <http://127.0.0.1:8000/>。`.env` 會自動讀取，`DATABASE_URL` 預設連本機的 `twp`，特徵、模型、預測快取預設放在 `artifacts/`。第一次用先 `cp .env.example .env`，回補資料要填 `FINMIND_API_TOKEN`。
+Open <http://127.0.0.1:8000/>. `.env` is loaded automatically, `DATABASE_URL` defaults to the local `twp` database, and features, models and the prediction cache go to `artifacts/` by default. On first use run `cp .env.example .env`; backfilling data requires `FINMIND_API_TOKEN`.
 
-畫面是一頁三個視圖，用網址的 `#` 切換：
+The UI is a single page with three views, switched by the `#` fragment of the URL:
 
-| 視圖 | 網址 | 內容 | 需要的資料 |
+| View | URL | Content | Data needed |
 | --- | --- | --- | --- |
-| 今日預測 | `/#today` | 全市場 5 日、20 日排名與預測報酬，20 日 80% 價格區間、漲幅超過 5% 的機率；可搜尋、只看追蹤 | 上線中的模型 |
-| 個股 | `/#stock-2330` | K 線或收盤線、這次預測怎麼來的（特徵貢獻）、過去的預測與實際結果 | 行情；預測區塊要上線中的模型 |
-| 模型與資料 | `/#models` | 上線中的模型、每月 rank IC 與 baseline、今日資料更新、資料品質與模型輸出檢查、資料更正紀錄 | ETL 紀錄；模型區塊要上線中的模型 |
+| Today's predictions (今日預測) | `/#today` | Market-wide 5-day and 20-day rankings and predicted returns, the 20-day 80% price interval and the probability of gaining more than 5%; supports search and a watchlist-only filter | A live model |
+| Stock (個股) | `/#stock-2330` | Candlestick or closing-price chart, how this prediction came about (feature contributions), past predictions against actual outcomes | Prices; the prediction blocks need a live model |
+| Models and data (模型與資料) | `/#models` | The live models, monthly rank IC against the baseline, today's data updates, data-quality and model-output checks, the data correction log | ETL records; the model blocks need a live model |
 
-還沒有上線中的模型時，預測相關區塊會顯示「預測資料尚未產出」，K 線、ETL 紀錄與品質檢查照常顯示。頂端的狀態列讀 `/api/status`：當天品質檢查有 error 時，當天不產出預測；`quality.warnings` 是有 warning 的檢查項數，`quality.warning_rows` 是 warning 的列數。
+When no model is live yet, the prediction blocks show 「預測資料尚未產出」 ("predictions have not been produced yet"), while the candlestick chart, ETL records and quality checks are shown as usual. The status bar at the top reads `/api/status`: when the day's quality checks report an error, no predictions are produced for that day; `quality.warnings` is the number of checks with warnings and `quality.warning_rows` is the number of rows with warnings.
 
-## 資料與模型的流程
+## Data and model pipeline
 
 ```
-來源（TWSE、TPEx、FinMind、MOPS、TDCC、Yahoo、data.gov.tw）
-  → raw 表（原始回應）→ standard 表（日價量、籌碼、財報…，upsert、可重跑）
-  → 品質檢查（data_quality_log）
-  → label_daily、feature_daily（另存 Parquet）
-  → walk-forward 訓練與評估（model_run、backtest_metric）
-  → 上線模型每日預測（prediction、prediction_contrib）與事後監控（model_monitor）
-  → 唯讀 API（/api/...）與頁面
+Sources (TWSE, TPEx, FinMind, MOPS, TDCC, Yahoo, data.gov.tw)
+  → raw tables (original responses) → standard tables (daily prices and volume, institutional and margin positions, financial statements…; upserted, safe to rerun)
+  → quality checks (data_quality_log)
+  → label_daily, feature_daily (also stored as Parquet)
+  → walk-forward training and evaluation (model_run, backtest_metric)
+  → daily predictions from the live model (prediction, prediction_contrib) and after-the-fact monitoring (model_monitor)
+  → read-only API (/api/...) and pages
 ```
 
-每日排程由 `worker` 容器裡的 Celery beat 執行，時間表、閘門、重試與補抓見 [docs/runbook.md](docs/runbook.md)。
+The daily schedule is run by Celery beat inside the `worker` container; see [docs/runbook.md](docs/runbook.md) for the timetable, gates, retries and catch-up.
 
-## 常用指令
+## Common commands
 
-都用 `uv run python manage.py <指令> -h` 看完整參數。
+Run `uv run python manage.py <command> -h` for the full options of any command.
 
-| 用途 | 指令 |
+| Purpose | Command |
 | --- | --- |
-| 抓一天或一段日期 | `fetch --source twse --dataset daily_price --date 2026-11-06` |
-| 逐檔回補（可續跑） | `backfill --source finmind --dataset <dataset> --from 2010-01-01 --resume` |
-| 補抓漏掉的交易日 | `catchup --since 2026-11-01 --dry-run` |
-| 跑一天的品質檢查 | `check_quality --date 2026-11-06` |
-| 重建 label、特徵 | `build_labels --start 2010-01-01`、`build_features --start 2010-01-01`（不給範圍就重做最近 60 天） |
-| 訓練與評估 | `train --model lightgbm --scope rank --run-key <key>`、`evaluate_rank --run-key <key>`、`ic_report --run-key <key>` |
-| 事後監控 | `monitor --date 2026-11-06` |
-| Phase 5 驗收報告 | `phase5_report --out <dir>` |
+| Fetch one day or a date range | `fetch --source twse --dataset daily_price --date 2026-11-06` |
+| Backfill stock by stock (resumable) | `backfill --source finmind --dataset <dataset> --from 2010-01-01 --resume` |
+| Catch up on missed trading days | `catchup --since 2026-11-01 --dry-run` |
+| Run one day's quality checks | `check_quality --date 2026-11-06` |
+| Rebuild labels and features | `build_labels --start 2010-01-01`, `build_features --start 2010-01-01` (without a range, the last 60 days are rebuilt) |
+| Train and evaluate | `train --model lightgbm --scope rank --run-key <key>`, `evaluate_rank --run-key <key>`, `ic_report --run-key <key>` |
+| After-the-fact monitoring | `monitor --date 2026-11-06` |
+| Phase 5 acceptance report | `phase5_report --out <dir>` |
 
-API 都是唯讀的 GET，回應格式是 `{"success", "data", "error", "meta"}`：`/api/status`、`/api/predictions`、`/api/stocks?q=<代號或名稱>`（最多 20 筆）、`/api/stocks/<代號>`（加 `/prices`、`/predictions`、`/features`、`/history`）、`/api/models`、`/api/models/ic-monthly`、`/api/etl/runs`、`/api/data-quality`（加 `/corrections`）。
+Every API endpoint is a read-only GET and responds with `{"success", "data", "error", "meta"}`: `/api/status`, `/api/predictions`, `/api/stocks?q=<code or name>` (at most 20 results), `/api/stocks/<code>` (plus `/prices`, `/predictions`, `/features`, `/history`), `/api/models`, `/api/models/ic-monthly`, `/api/etl/runs`, `/api/data-quality` (plus `/corrections`).
 
-## 目錄
+## Layout
 
-- `apps/etl/`：來源 adapter、raw 層、`etl_run`、品質檢查、排程任務。
-- `apps/market/`：standard 表、交易日曆、還原價。
-- `apps/research/`：label、特徵、walk-forward、模型、報表、監控。
-- `apps/api/`：唯讀 API。`apps/web/`：頁面（`templates/web/index.html`、`static/web/`）。
-- `docs/`：規格、runbook、各 Phase 的驗收報告（`docs/reports/`）。
+- `apps/etl/`: source adapters, the raw layer, `etl_run`, quality checks, scheduled tasks.
+- `apps/market/`: standard tables, the trading calendar, adjusted prices.
+- `apps/research/`: labels, features, walk-forward, models, reports, monitoring.
+- `apps/api/`: the read-only API. `apps/web/`: the pages (`templates/web/index.html`, `static/web/`).
+- `docs/`: the spec, the runbook and the acceptance report of each phase (`docs/reports/`).
 
-## 需求
+## Requirements
 
-- macOS 或 Linux、[uv](https://docs.astral.sh/uv/)（會依 `.python-version` 自動安裝 Python 3.12）
-- Docker Desktop（Compose v2.24 以上）
-- macOS 跑 LightGBM 需要 OpenMP：`brew install libomp`
+- macOS or Linux, and [uv](https://docs.astral.sh/uv/) (it installs Python 3.12 automatically from `.python-version`)
+- Docker Desktop (Compose v2.24 or later)
+- LightGBM on macOS needs OpenMP: `brew install libomp`
 
-## 本機開發
+## Local development
 
 ```bash
 cp .env.example .env
@@ -82,11 +84,11 @@ uv run pytest -m "not e2e"
 uv run pytest -m e2e
 ```
 
-`-m e2e` 是 Playwright 的瀏覽器冒煙測試，要先跑過一次 `playwright install chromium`。
+`-m e2e` runs the Playwright browser smoke tests; `playwright install chromium` must have been run once beforehand.
 
-要平行跑就加 `-n auto`，同時設 `OMP_NUM_THREADS=1`：`OMP_NUM_THREADS=1 uv run pytest -m "not e2e" -n auto`。不設的話，每個 worker 裡的 LightGBM、XGBoost 都會吃滿全部核心、互相搶 CPU，反而比不平行還慢。
+To run the tests in parallel, add `-n auto` and set `OMP_NUM_THREADS=1`: `OMP_NUM_THREADS=1 uv run pytest -m "not e2e" -n auto`. Without it, LightGBM and XGBoost in every worker each take all the cores and fight over the CPU, which ends up slower than not running in parallel at all.
 
-## 全部容器
+## All containers
 
 ```bash
 docker compose up -d --build
@@ -94,7 +96,7 @@ docker compose ps
 curl http://localhost:8000/healthz
 ```
 
-四個容器：`web`（gunicorn）、`worker`（Celery worker 內含 beat）、`db`（PostgreSQL 16）、`redis`（broker）。每日排程、重試、手動補抓與防休眠見 [docs/runbook.md](docs/runbook.md)。所有容器與主機都要用 `TZ=Asia/Taipei`，否則排程會偏 8 小時。
+Four containers: `web` (gunicorn), `worker` (a Celery worker with beat embedded), `db` (PostgreSQL 16) and `redis` (the broker). See [docs/runbook.md](docs/runbook.md) for the daily schedule, retries, manual catch-up and sleep prevention. Every container and the host must use `TZ=Asia/Taipei`; otherwise the schedule is off by 8 hours.
 
-- web、db、redis 的對外 port 只綁 `127.0.0.1`，區網連不到。
-- Compose 預設用 `config.settings.dev`（DEBUG 開）。改成 `config.settings.prod` 時要在 `.env` 設 `DJANGO_SECRET_KEY` 與 `DJANGO_ALLOWED_HOSTS`，`DATABASE_URL` 也必填（Compose 會自動注入）。`DJANGO_ALLOWED_HOSTS` 要保留 `localhost`，web 的 healthcheck 靠它；只用 http 存取時設 `DJANGO_SECURE_COOKIES=false`，否則瀏覽器可能丟掉 session 與 CSRF cookie。
+- The published ports of web, db and redis bind to `127.0.0.1` only, so they cannot be reached from the LAN.
+- Compose uses `config.settings.dev` by default (DEBUG on). When switching to `config.settings.prod`, set `DJANGO_SECRET_KEY` and `DJANGO_ALLOWED_HOSTS` in `.env`; `DATABASE_URL` is required as well (Compose injects it automatically). Keep `localhost` in `DJANGO_ALLOWED_HOSTS` because the web healthcheck relies on it; when the site is served over plain http only, set `DJANGO_SECURE_COOKIES=false`, or the browser may drop the session and CSRF cookies.
