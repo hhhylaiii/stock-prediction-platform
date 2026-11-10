@@ -119,3 +119,6 @@ lambdarank-notrunc: best 1 valid 0.4177 test IC 0.3906
 | 停止輪數重跑（seed 0） | 46.0 分 | 5.97 GB |
 | 停止輪數重跑（seed 0、3） | 51.4 分 | 6.33 GB |
 | 取樣重跑（seed 0） | 16.0 分 | 6.30 GB |
+| tech 組（seed 0） | 28.2 分 | 6.35 GB |
+| tech 組（seed 0、3、6；14:55 停在第 84 個 fit） | 63.0 分 | 未記錄 |
+| tech 組（seed 0、3、6；接續剩下的 24 個 fit） | 23.1 分 | 6.46 GB |
