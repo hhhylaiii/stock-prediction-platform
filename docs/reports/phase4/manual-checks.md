@@ -129,3 +129,6 @@ lambdarank-notrunc: best 1 valid 0.4177 test IC 0.3906
 | exdt 組（seed 0） | 29.1 分 | 6.78 GB |
 | exdt 組（seed 0、3、6） | 55.8 分 | 6.26 GB |
 | relative-up 改減 TAIEX_TR（seed 0） | 81.0 分 | 7.22 GB |
+| 4.8b interval LightGBM | 74.0 分 | 7.12 GB |
+| 4.8b interval baseline | 37.5 分 | 8.14 GB |
+| 4.8b interval 評估 | 2.0 分 | 6.98 GB |
