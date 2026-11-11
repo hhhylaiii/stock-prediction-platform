@@ -53,6 +53,7 @@ from apps.research.features.store import (
     read_partitions,
     write_features,
 )
+from apps.research.inference import day_rows
 from apps.research.models import FeatureDaily
 from apps.research.universe import load_universe_panel
 from tests.research.conftest import weekday_calendar
@@ -187,9 +188,31 @@ def test_a_rebuild_empties_dormant_values_written_earlier(tmp_path: Path, settin
     assert len(rows) == len(written)
     assert rows[list(DORMANT)].isna().all().all()
     assert rows["chip_fi_net_1d"].notna().all()
-    exported = read_partitions(*days, tmp_path, ["stock_id", "date", *DORMANT, "chip_fi_net_1d"])
+    exported = read_columns(*days, tmp_path, [*DORMANT, "chip_fi_net_1d"])
     assert exported[list(DORMANT)].isna().all().all()
     assert exported["chip_fi_net_1d"].notna().all()
+
+
+def test_fits_and_predictions_read_dormant_features_empty_from_a_stale_partition(
+    tmp_path: Path,
+) -> None:
+    calendar_rows()
+    listed("2330", "2015-06-01", "2016-04-29")
+    inputs("2330")
+    days = (d("2016-03-01"), d("2016-03-04"))
+    store.write_features(build_feature_frame(CALENDAR, *days, masked={}, dormant=()), *days)
+    export_year(2016, tmp_path)
+    names = [*DORMANT, "chip_fi_net_1d"]
+    assert read_columns(*days, tmp_path, names).notna().all().all()
+
+    read = read_partitions(*days, tmp_path, ["stock_id", "date", "in_universe", *names])
+    scored = day_rows(days[1], tmp_path, names)
+
+    for frame in (read, scored):
+        assert frame[list(DORMANT)].isna().all().all()
+        assert frame[list(DORMANT)].dtypes.eq("float64").all()
+        assert frame["chip_fi_net_1d"].notna().all()
+    assert list(read.columns) == ["stock_id", "date", "in_universe", *names]
 
 
 def test_the_frame_has_one_row_per_listed_stock_and_trading_day_in_range() -> None:
