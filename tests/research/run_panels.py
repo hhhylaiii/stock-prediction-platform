@@ -15,7 +15,7 @@ from apps.market.calendar import TradingDays
 from apps.market.models import IndexDaily, TradingCalendar
 from apps.research import lgbm_runs, production
 from apps.research.features.store import export_year
-from apps.research.holdout import claim_holdout, is_holdout
+from apps.research.holdout import PASSED, claim_holdout, is_holdout, report_marker
 from apps.research.models import FeatureDaily, HoldoutScope, LabelDaily, ModelRun
 from apps.research.prediction_cache import fold_path
 from apps.research.production import Design
@@ -158,14 +158,24 @@ def write_holdout_markers(
                 written.touch()
 
 
-def claim_all(finished: bool = True) -> None:
-    """Claim every scope's holdout, finished by default: a run of its design, every fold written."""
+def write_holdout_report(scope: str, key: str, status: str = PASSED, path: str = "r.md") -> None:
+    """Mark the holdout under key reported with a verdict."""
+    marker = report_marker(key)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    stored = {"scope": scope, "status": status, "path": path, "sha256": "0" * 64, "text": ""}
+    marker.write_text(json.dumps(stored), encoding="utf-8")
+
+
+def claim_all(finished: bool = True, reported: str | None = PASSED) -> None:
+    """Claim every scope's holdout; by default finished on its design and reported as passed."""
     for scope, objective in HOLDOUT_OBJECTIVES.items():
         key = f"{scope}-final"
         claim_holdout(scope, key, weekdays()[-1])
         if not finished:
             continue
         write_holdout_markers(scope, key)
+        if reported is not None:
+            write_holdout_report(scope, key, reported)
         design = production.DESIGNS[scope]
         note = json.loads(json.dumps(production.design_note(design)))
         features = lgbm_runs.design_features(scope, design.variant, design.target)

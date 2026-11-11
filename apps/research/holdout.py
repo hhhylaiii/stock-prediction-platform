@@ -1,14 +1,23 @@
 """Holdout guard: a scope runs its holdout folds once unless forced with a reason (SPEC §7)."""
 
+import json
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date
+from pathlib import Path
 
+from django.conf import settings
 from django.db import IntegrityError, transaction
 from django.db.models import Max
 
-from apps.research.models import HoldoutRun, HoldoutScope, ModelRun
+from apps.research.models import (
+    HoldoutRelease,
+    HoldoutRun,
+    HoldoutScope,
+    HoldoutVerdict,
+    ModelRun,
+)
 from apps.research.walkforward import Fold, WalkForwardConfig
 
 KEY_PATTERN = re.compile(r"[a-z0-9][a-z0-9_.-]{0,63}", re.ASCII)
@@ -149,3 +158,74 @@ def authorize_folds(folds: Iterable[Fold], run_key: str, ticket: HoldoutTicket |
     beyond = [fold.index for fold in holdout if fold.test_end > ticket.last_date]
     if beyond:
         raise HoldoutError(f"folds {beyond} run past the claimed last_date {ticket.last_date}")
+
+
+PASSED, FAILED, DEGRADED = (verdict.value for verdict in HoldoutVerdict)
+
+
+@dataclass(frozen=True)
+class Reported:
+    scope: str
+    status: str
+    path: str
+    sha256: str
+    text: str
+
+
+def report_marker(run_key: str) -> Path:
+    """File that keeps a holdout's one report and verdict under its cache directory."""
+    return Path(settings.RESEARCH_CACHE_DIR) / require_key(run_key) / "holdout.report"
+
+
+def reported(run_key: str) -> Reported | None:
+    """The one report and verdict a holdout was marked with, or None before it."""
+    marker = report_marker(run_key)
+    if not marker.exists():
+        return None
+    return Reported(**json.loads(marker.read_text(encoding="utf-8")))
+
+
+def release_holdout(scope: str, status: str, reason: str) -> HoldoutRelease:
+    """Record the user's decision to build on the scope's latest holdout despite its verdict."""
+    note = reason.strip()
+    if not note:
+        raise HoldoutError("a holdout release needs the user's reason")
+    key = production_pass(scope).frozen_by
+    marked = reported(key)
+    if marked is None:
+        raise HoldoutError(f"holdout {key} has no report yet; there is no verdict to release")
+    if marked.status == PASSED:
+        raise HoldoutError(f"holdout {key} was judged {PASSED}; it needs no release")
+    if marked.status != status:
+        raise HoldoutError(
+            f"holdout {key} was judged {marked.status}, not {status}; release the verdict it has"
+        )
+    try:
+        with transaction.atomic():
+            return HoldoutRelease.objects.create(
+                holdout=HoldoutRun.objects.get(run_key=key), status=status, reason=note
+            )
+    except IntegrityError as error:
+        raise HoldoutError(f"holdout {key} is already released") from error
+
+
+def released_verdict(granted: ProductionPass) -> dict[str, str] | None:
+    """Leave to build on the scope's holdout: None when it passed, else its recorded release."""
+    key = granted.frozen_by
+    marked = reported(key)
+    if marked is None or marked.scope != granted.scope:
+        raise HoldoutError(f"holdout {key} has no report; a build waits for its verdict")
+    if marked.status == PASSED:
+        return None
+    release = HoldoutRelease.objects.filter(holdout__run_key=key, status=marked.status).first()
+    if release is None:
+        raise HoldoutError(
+            f"holdout {key} was judged {marked.status} (report {marked.path}); the build is "
+            "refused until release_holdout records the user's decision"
+        )
+    return {
+        "status": release.status,
+        "reason": release.reason,
+        "released_at": release.released_at.isoformat(),
+        "report": marked.path,
+    }
