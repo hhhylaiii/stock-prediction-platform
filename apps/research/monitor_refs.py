@@ -5,6 +5,7 @@ from collections.abc import Iterable, Mapping
 
 import pandas as pd
 
+from apps.market.calendar import TradingDays
 from apps.research.baseline_runs import BASELINE
 from apps.research.labels import VOL_DAYS
 from apps.research.metrics.forecast import daily_brier
@@ -12,6 +13,8 @@ from apps.research.metrics.ic import daily_rank_ic, research_ic
 from apps.research.models import OUTPUT_HORIZONS, ModelRun
 from apps.research.monitor import BRIER_BASELINE, IC_THRESHOLD, WINDOW
 from apps.research.prediction_cache import load_predictions
+from apps.research.relative_up import relative_up
+from apps.research.target_eval import check_up_label
 from apps.research.training import load_labels
 from apps.research.walkforward import Fold
 
@@ -48,10 +51,13 @@ def research_ic_thresholds(run_key: str, model: str, folds: Iterable[Fold]) -> d
     return thresholds
 
 
-def research_brier(run_key: str, folds: Iterable[Fold]) -> float:
-    """Mean daily Brier of the logistic baseline over the research folds."""
+def research_brier(run_key: str, folds: Iterable[Fold], relative: bool = False) -> float:
+    """Mean daily Brier of the logistic baseline over the research folds, on the up label it fit."""
     chosen = [fold for fold in folds if fold.research]
+    check_up_label(run_key, relative, chosen)
     rows = _labelled(load_predictions(run_key, BASELINE, chosen), chosen, VOL_DAYS)
+    if relative:
+        rows = rows.assign(fwd_up_5pct=relative_up(rows, TradingDays.from_db()))
     outcomes = rows.assign(fwd_up_5pct=rows["fwd_up_5pct"].map({True: 1.0, False: 0.0}))
     daily = research_ic(daily_brier(outcomes, "fwd_up_5pct", LOGISTIC), chosen)
     return float(daily.mean()) if len(daily) else math.nan

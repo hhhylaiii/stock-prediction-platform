@@ -648,6 +648,7 @@ def test_the_shadow_is_judged_on_the_up_label_it_was_fit_on(
     )
     relative = Design(CONFIG, target=TargetVariant(relative_up=True))
     monkeypatch.setitem(production.DESIGNS, "interval", relative)
+    monkeypatch.setattr(production, "research_brier", lambda run_key, folds, relative: 0.25)
     for run in built("interval", "interval-wf1", researched):
         logged(run)
 

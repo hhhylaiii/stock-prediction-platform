@@ -27,6 +27,7 @@ from apps.etl.models import DataQualityLog
 from apps.market.calendar import CalendarError, OutsideCalendarError, TradingDays
 from apps.research.baselines import INTERVAL_HORIZON
 from apps.research.evaluation import ALERT_SHARE, odds_against_q50, wide_bands
+from apps.research.labels import VOL_DAYS
 from apps.research.lock import locked
 from apps.research.metrics.forecast import (
     daily_absolute_error,
@@ -46,6 +47,7 @@ from apps.research.models import (
     ModelStatus,
     Prediction,
 )
+from apps.research.relative_up import RELATIVE_LABEL, relative_up
 from apps.research.runs import SCREENING_MODEL
 from apps.research.walkforward import oos_start
 
@@ -54,6 +56,7 @@ ODDS_CHECK = "output_odds_vs_q50"
 UNSCORED_CHECK = "monitor_unscored"
 ALERT_CHECK = "model_alert"
 OUTPUT_CHECKS = (WIDTH_CHECK, ODDS_CHECK)
+REFERENCE_CHECKS = (ODDS_CHECK,)
 CHECKS = (*OUTPUT_CHECKS, UNSCORED_CHECK, ALERT_CHECK)
 IC_THRESHOLD = "rolling_ic_threshold"
 BRIER_BASELINE = "brier_baseline"
@@ -158,8 +161,24 @@ def matured_dates(calendar: TradingDays, day: date) -> dict[int, date]:
     return found
 
 
-def _matured_rows(day: date, horizon: int) -> pd.DataFrame:
-    """Predictions of a date and horizon joined to their labels."""
+def _relative_runs(run_ids: pd.Series) -> set[str]:
+    """The runs whose up label was the one against TAIEX_TR."""
+    fitted = ModelRun.objects.filter(pk__in=set(run_ids), params__label=RELATIVE_LABEL)
+    return set(fitted.values_list("run_id", flat=True))
+
+
+def _relative_flags(
+    known: pd.DataFrame, day: date, horizon: int, calendar: TradingDays
+) -> pd.Series:
+    """The up label against TAIEX_TR as 1.0 or 0.0; NaN off the 20-day horizon or with no close."""
+    if horizon != VOL_DAYS:
+        return pd.Series(float("nan"), index=known.index)
+    flags = relative_up(known.assign(date=day), calendar)
+    return flags.map({True: 1.0, False: 0.0}).astype(float)
+
+
+def _matured_rows(day: date, horizon: int, calendar: TradingDays) -> pd.DataFrame:
+    """Predictions of a date and horizon joined to their labels, each run's up label as fit."""
     predictions = Prediction.objects.filter(date=day, horizon=horizon)
     fields = ["run_id", "run__objective", "stock_id", "in_universe", *OUTPUTS]
     frame = pd.DataFrame(list(predictions.values_list(*fields)), columns=fields)
@@ -167,17 +186,24 @@ def _matured_rows(day: date, horizon: int) -> pd.DataFrame:
     labels = LabelDaily.objects.filter(date=day, horizon=horizon).values_list(*fields)
     known = pd.DataFrame(list(labels), columns=fields)
     known["fwd_up_5pct"] = known["fwd_up_5pct"].map({True: 1.0, False: 0.0})
+    relative = _relative_runs(frame["run_id"])
+    if relative:
+        known[RELATIVE_LABEL] = _relative_flags(known, day, horizon, calendar)
     joined = frame.merge(known, on="stock_id", how="left")
+    if relative:
+        chosen = joined["run_id"].isin(relative)
+        joined["fwd_up_5pct"] = joined["fwd_up_5pct"].mask(chosen, joined[RELATIVE_LABEL])
+        joined = joined.drop(columns=[RELATIVE_LABEL])
     numbers = joined[[*OUTPUTS, *LABELS]].astype(float)
     return joined.drop(columns=[*OUTPUTS, *LABELS]).join(numbers).assign(date=day)
 
 
-def score_matured(day: date, horizon: int) -> tuple[int, list[str]]:
+def score_matured(day: date, horizon: int, calendar: TradingDays) -> tuple[int, list[str]]:
     """Rewrite model_monitor of runs predicting the date; return the count and runs left unscored.
 
     Rows count as in research: universe, tradable at the next open, label known.
     """
-    rows = _matured_rows(day, horizon)
+    rows = _matured_rows(day, horizon, calendar)
     found, unscored = [], []
     for (run_id, objective), part in rows.groupby(["run_id", "run__objective"]):
         counted = part["in_universe"].astype(bool) & part["untradable_t1"].eq(False)
@@ -242,12 +268,16 @@ def _consistency_row(
         "n_stocks": len(flagged),
         "stocks": marked,
     }
-    severity = DataQualityLog.Severity.WARNING if marked else DataQualityLog.Severity.INFO
+    warned = marked and check not in REFERENCE_CHECKS
+    severity = DataQualityLog.Severity.WARNING if warned else DataQualityLog.Severity.INFO
     return DataQualityLog(date=day, check_name=check, severity=severity, detail=detail)
 
 
 def consistency_checks(day: date) -> list[DataQualityLog]:
-    """Width-ratio and odds-versus-q50 rows of the day's outputs, each skipped without inputs."""
+    """Width-ratio and odds-versus-q50 rows of the day's outputs, each skipped without inputs.
+
+    The odds row is a reference: the up label is against the market, q50 is not.
+    """
     frame = _outputs_on(day)
     checks = {
         WIDTH_CHECK: wide_bands(frame, "q10", "q90", "vol_pred"),
@@ -514,7 +544,7 @@ def _degrade(day: date, entries: list[dict[str, Any]]) -> list[str]:
 def _alerting(row: DataQualityLog) -> bool:
     if row.check_name in (UNSCORED_CHECK, ALERT_CHECK):
         return True
-    return bool(row.detail["share"] > ALERT_SHARE)
+    return row.check_name not in REFERENCE_CHECKS and bool(row.detail["share"] > ALERT_SHARE)
 
 
 def recheck_outputs(day: date) -> list[DataQualityLog]:
@@ -543,7 +573,7 @@ def run_monitor(day: date, calendar: TradingDays) -> MonitorResult:
     with transaction.atomic():
         scored, missed = 0, []
         for horizon, when in matured.items():
-            count, unscored = score_matured(when, horizon)
+            count, unscored = score_matured(when, horizon, calendar)
             scored += count
             missed += [
                 {"run_id": run_id, "date": when.isoformat(), "horizon": horizon}
