@@ -70,6 +70,7 @@ from apps.research.runs import (
     label_hash,
     lib_versions,
     record_run,
+    refuse_holdout_key,
     refuse_other_layout,
     refuse_production_key,
     screened_features,
@@ -648,6 +649,7 @@ def run_folds(
     """Run a scope's folds without a current cache, or all with rerun; holdout is refused."""
     check_run_key(scope, run_key)
     refuse_production_key(run_key)
+    refuse_holdout_key(run_key)
     check_design(scope, variant, target)
     chosen = list(folds)
     held = [fold.index for fold in chosen if is_holdout(fold)]

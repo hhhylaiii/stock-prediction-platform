@@ -13,6 +13,7 @@ from apps.research import (
     baseline_runs,
     holdout,
     holdout_eval,
+    holdout_runs,
     lgbm_runs,
     prediction_cache,
     production,
@@ -33,6 +34,7 @@ from apps.research.holdout_eval import (
     flag,
     windows,
 )
+from apps.research.management.commands import holdout as holdout_command
 from apps.research.models import BacktestMetric
 from apps.research.production import Design
 from apps.research.target_eval import evaluate_return, target_frame
@@ -135,6 +137,9 @@ def frozen(run_panel: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(holdout, "SPEC_HOLDOUT_START", CONFIG.holdout_start)
     monkeypatch.setattr(prediction_cache, "SPEC_HOLDOUT_START", CONFIG.holdout_start)
     monkeypatch.setattr(holdout_eval, "WINDOW", 2)
+    monkeypatch.setattr(production, "BAGS", 1)
+    monkeypatch.setattr(holdout_runs, "latest_price_date", lambda: weekdays()[-1])
+    monkeypatch.setattr(holdout_command, "latest_price_date", lambda: weekdays()[-1])
     use_designs(monkeypatch)
     monkeypatch.setattr(
         production,
@@ -163,8 +168,6 @@ def run(scope: str, output: Path, **options: object) -> str:
         "holdout",
         scope=scope,
         run_key=f"{scope}-final",
-        bags=1,
-        last_date=DAY,
         output=str(output),
         stdout=out,
         **options,
@@ -267,7 +270,7 @@ def test_the_holdout_needs_a_report_path_that_does_not_exist(frozen: Path, tmp_p
     taken.write_text("kept")
 
     with pytest.raises(CommandError, match="give --output"):
-        call_command("holdout", scope="return", run_key="return-final", last_date=DAY)
+        call_command("holdout", scope="return", run_key="return-final")
     with pytest.raises(CommandError, match="reported once"):
         run("return", taken)
 
@@ -282,8 +285,6 @@ def test_the_return_bound_is_the_worst_research_window_of_fold_mae_gaps(frozen: 
         "holdout",
         scope="return",
         run_key="return-final",
-        bags=1,
-        last_date=DAY,
         output=str(frozen.parent / "r.md"),
     )
     research = [fold for fold in folds() if fold.research]

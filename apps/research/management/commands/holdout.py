@@ -51,13 +51,6 @@ class Command(BaseCommand):
         parser.add_argument("--scope", required=True, choices=HoldoutScope.values)
         parser.add_argument("--run-key", required=True)
         parser.add_argument(
-            "--last-date", help="Last price day of a new claim; today's by default."
-        )
-        parser.add_argument(
-            "--bags", type=int, default=BAGS, help="LightGBM seeds bagged per model."
-        )
-        parser.add_argument("--seed", type=int, default=0)
-        parser.add_argument(
             "--force", action="store_true", help="A new claim after an earlier one."
         )
         parser.add_argument("--reason", default="", help="Why a forced claim reruns the holdout.")
@@ -67,8 +60,15 @@ class Command(BaseCommand):
             help="Fit one research fold on the holdout's path under a <scope>-rehearsal key.",
         )
         parser.add_argument(
-            "--fold", type=int, help="Research fold of the rehearsal; the last one by default."
+            "--fold", type=int, help="Rehearsal only: its research fold, the last one by default."
         )
+        parser.add_argument(
+            "--last-date", help="Rehearsal only: last price day; the holdout claims the latest."
+        )
+        parser.add_argument(
+            "--bags", type=int, help=f"Rehearsal only, 1 by default; the holdout bags {BAGS}."
+        )
+        parser.add_argument("--seed", type=int, help="Rehearsal only, 0 by default.")
         parser.add_argument(
             "--output",
             help="Markdown report to write once; the holdout needs it, a rehearsal prints without.",
@@ -77,9 +77,13 @@ class Command(BaseCommand):
     def _check(self, options: dict[str, Any]) -> None:
         if options["rehearse"] and (options["force"] or options["reason"]):
             raise CommandError("--force and --reason claim a holdout; a rehearsal claims none")
-        if not options["rehearse"] and options["fold"] is not None:
-            raise CommandError("--fold picks the rehearsal's research fold; add --rehearse")
-        if options["bags"] < 1:
+        fixed = [
+            name for name in ("fold", "last_date", "bags", "seed") if options[name] is not None
+        ]
+        if not options["rehearse"] and fixed:
+            names = ", ".join(f"--{name.replace('_', '-')}" for name in fixed)
+            raise CommandError(f"{names} apply to a rehearsal; the holdout runs as frozen")
+        if options["bags"] is not None and options["bags"] < 1:
             raise CommandError("--bags must be at least 1")
         output = options["output"]
         if not options["rehearse"] and not output:
@@ -115,9 +119,8 @@ class Command(BaseCommand):
                 raise ValueError("daily_price is empty")
             if options["rehearse"]:
                 fold = research_fold(scope, options["fold"], last, TradingDays.from_db())
-                rehearse(
-                    scope, run_key, fold, directory, seed=options["seed"], bags=options["bags"]
-                )
+                seed, bags = options["seed"] or 0, options["bags"] or 1
+                rehearse(scope, run_key, fold, directory, seed=seed, bags=bags)
                 self.stdout.write(f"{run_key}: rehearsed research fold {fold.index}")
                 header = Header(scope, run_key, "", None, last, rehearsal=True)
                 self._report(scope, run_key, [fold], header, options)
@@ -127,8 +130,6 @@ class Command(BaseCommand):
                 run_key,
                 last,
                 directory,
-                seed=options["seed"],
-                bags=options["bags"],
                 force=options["force"],
                 reason=options["reason"],
             )
@@ -142,3 +143,5 @@ class Command(BaseCommand):
             self._report(scope, run_key, held, header, options)
         except ERRORS as error:
             raise CommandError(str(error)) from error
+        except RuntimeError as error:
+            raise CommandError(f"{error}; run the same command again to resume") from error

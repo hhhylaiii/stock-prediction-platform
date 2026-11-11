@@ -53,6 +53,7 @@ from tests.research.run_panels import (
     panel_calendar,
     research,
     weekdays,
+    write_holdout_markers,
 )
 
 AS_OF = date(2026, 10, 30)
@@ -421,20 +422,24 @@ def test_build_run_fits_the_return_scope_without_references(researched: Path) ->
     assert "brier_baseline" not in model.params
 
 
+def model_fields(run_key: str) -> dict[str, Any]:
+    return {
+        "run_id": f"{run_key}.lightgbm.h20.f000",
+        "run_key": run_key,
+        "model_type": "lightgbm",
+        "objective": "rank",
+        "version": "4",
+        "train_start": date(2016, 1, 4),
+        "train_end": date(2016, 6, 1),
+        "params": {},
+        "feature_list": [],
+        "lib_versions": {},
+        "feature_hash": "0" * 64,
+    }
+
+
 def research_row(run_key: str, **params: Any) -> ModelRun:
-    return ModelRun.objects.create(
-        run_id=f"{run_key}.lightgbm.h20.f000",
-        run_key=run_key,
-        model_type="lightgbm",
-        objective="rank",
-        version="4",
-        train_start=date(2016, 1, 4),
-        train_end=date(2016, 6, 1),
-        params=params,
-        feature_list=[],
-        lib_versions={},
-        feature_hash="0" * 64,
-    )
+    return ModelRun.objects.create(**{**model_fields(run_key), "params": params})
 
 
 @pytest.mark.django_db
@@ -547,14 +552,32 @@ def test_build_run_refuses_missing_references_before_fitting(
 @pytest.mark.django_db
 def test_build_run_waits_for_a_holdout_that_ran_the_frozen_design(researched: Path) -> None:
     claim_holdout("rank", "rank-final", weekdays()[-1])
+    design = production.DESIGNS["rank"]
+    note = json.loads(json.dumps(production.design_note(design)))
+    features = lgbm_runs.design_features("rank", design.variant, design.target)
 
-    with pytest.raises(RunError, match="holdout rank-final recorded no run"):
-        build_run("rank", "rank-prod", "rank-wf1", weekdays()[-1], researched)
-    research_row("rank-final", design={"config": {}, "variant": {}, "target": {}})
-    with pytest.raises(RunError, match="not the one holdout rank-final ran"):
-        build_run("rank", "rank-prod", "rank-wf1", weekdays()[-1], researched)
+    def refused(message: str) -> None:
+        with pytest.raises(RunError, match=message):
+            build_run("rank", "rank-prod", "rank-wf1", weekdays()[-1], researched)
 
-    assert not ModelRun.objects.filter(run_key__startswith="rank-prod").exists()
+    refused("holdout rank-final recorded no run")
+    bare = research_row("rank-final")
+    refused("1 runs under holdout rank-final recorded no design")
+    bare.delete()
+    other = research_row("rank-final", design={"config": {}, "variant": {}, "target": {}})
+    refused("not the one holdout rank-final ran")
+    other.delete()
+    ModelRun.objects.create(
+        **{**model_fields("rank-final"), "params": {production.DESIGN: note}, "feature_list": KEPT}
+    )
+    refused("holdout rank-final fit other features")
+    ModelRun.objects.filter(run_key="rank-final").update(feature_list=features)
+    refused(r"holdout rank-final has not written folds \[\d+\]")
+    write_holdout_markers("rank", "rank-final")
+
+    build_run("rank", "rank-prod", "rank-wf1", weekdays()[-1], researched)
+
+    assert ModelRun.objects.filter(run_key="rank-prod").exists()
 
 
 @pytest.mark.django_db
