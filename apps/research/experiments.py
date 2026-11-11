@@ -35,13 +35,15 @@ TUNING_SEEDS = tuple(bag_seeds(0, MIN_SEEDS))
 SUGGESTED_SEEDS = ",".join(map(str, TUNING_SEEDS))
 GROUP = "group"
 GROUP_GAIN = 0.001
+GROUP_HIGHER = 2
 GAIN_DIGITS = 9
+GROUP_SEEDS = "、".join(map(str, TUNING_SEEDS))
 RULES = {
     "best": "總體 rank IC（5 日與 20 日平均）最高的一組；同分留 {first}",
     "not_worse": "總體 rank IC 不低於 {first} 就採用",
     "better": "總體 rank IC 嚴格高於 {first} 才採用",
-    GROUP: f"{MIN_SEEDS} 個 seed 的平均至少比 {{first}} 高 {GROUP_GAIN:g}，"
-    f"而且 {MIN_SEEDS} 個 seed 裡至少 2 個較高才採用（§6 第 7 步）",
+    GROUP: f"seed {GROUP_SEEDS} 的平均至少比 {{first}} 高 {GROUP_GAIN:g}，"
+    f"而且 {MIN_SEEDS} 個 seed 裡至少 {GROUP_HIGHER} 個較高才採用（§6 第 7 步）",
 }
 DAILY_COLUMNS = ["arm", "seed", "fold", "horizon", "date", "ic"]
 ROUND_COLUMNS = ["arm", "seed", "horizon", "fold", "best", "rounds"]
@@ -251,14 +253,14 @@ def verdict(experiment: Experiment, table: pd.DataFrame) -> str:
 
 
 def group_verdict(experiment: Experiment, daily: pd.DataFrame) -> str | None:
-    """§6 step 7: the group if its mean gains GROUP_GAIN, two thirds of seeds up; None below 3."""
+    """§6 step 7 on seeds 0, 3, 6: the group if it gains GROUP_GAIN with 2 seeds up; else None."""
     first, second = (arm.name for arm in experiment.arms)
     means = per_seed(daily)["mean"].unstack("arm")
-    if len(means) < MIN_SEEDS:
+    if tuple(sorted(means.index)) != TUNING_SEEDS:
         return None
     gain = _strict_mean(means[second]) - _strict_mean(means[first])
     higher = int((means[second] - means[first] > 0).sum())
-    kept = round(gain, GAIN_DIGITS) >= GROUP_GAIN and 3 * higher >= 2 * len(means)
+    kept = round(gain, GAIN_DIGITS) >= GROUP_GAIN and higher >= GROUP_HIGHER
     return second if kept else first
 
 
@@ -402,22 +404,28 @@ def _verdict_lines(table: pd.DataFrame, chosen: str, seeds: int) -> list[str]:
 
 
 def _group_lines(experiment: Experiment, table: pd.DataFrame, daily: pd.DataFrame) -> list[str]:
-    """The §6 step 7 verdict with the unrounded gain, or none below MIN_SEEDS seeds."""
+    """The §6 step 7 verdict with the gain to GAIN_DIGITS places, or none off seeds 0, 3, 6."""
     first, second = (arm.name for arm in experiment.arms)
     gain = table["mean"][second] - table["mean"][first]
     means = per_seed(daily)["mean"].unstack("arm")
+    seeds = sorted(means.index)
     chosen = group_verdict(experiment, daily)
     if chosen is None:
+        reason = (
+            f"只跑了 {len(seeds)} 個 seed"
+            if len(seeds) < MIN_SEEDS
+            else f"seed 是 {'、'.join(map(str, seeds))}，不是 {GROUP_SEEDS}"
+        )
         return [
-            f"**判定（暫定）：只跑了 {len(means)} 個 seed，不給採用判定**",
-            f"- {second} 比 {first} 高 {gain:+.6f}；"
-            f"要用 {MIN_SEEDS} 個 seed（`--seeds {SUGGESTED_SEEDS}`）重跑再判定",
+            f"**判定（暫定）：{reason}，不給採用判定**",
+            f"- {second} 比 {first} 高 {gain:+.{GAIN_DIGITS}f}；"
+            f"要用 `--seeds {SUGGESTED_SEEDS}` 重跑再判定",
         ]
     higher = int((means[second] - means[first] > 0).sum())
     return [
         f"**判定：採用 {chosen}**",
-        f"- {second} 比 {first} 高 {gain:+.6f}（門檻 +{GROUP_GAIN:g}），"
-        f"{len(means)} 個 seed 裡 {higher} 個較高",
+        f"- {second} 比 {first} 高 {gain:+.{GAIN_DIGITS}f}（門檻 +{GROUP_GAIN:g}），"
+        f"{len(seeds)} 個 seed 裡 {higher} 個較高",
     ]
 
 
