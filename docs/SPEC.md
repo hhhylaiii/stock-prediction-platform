@@ -293,7 +293,7 @@ Oct 29, 2026 · @Owen Lai
 | 絕對報酬 20 日 | 不另訓模型 | 取報酬區間模型的 q50 | ret\_pred（horizon 20）= q50 | 同上；預測價必然落在價格區間內 |
 | 報酬區間 | `fwd_ret_20d`\_open | quantile，alpha = 0.1、0.5、0.9 各訓一個模型；預測後逐列排序，保證 q10 ≤ q50 ≤ q90 | q10, q50, q90 | 價格區間 = 收盤價 × (1 + q10) 到 收盤價 × (1 + q90)；這是展示用的主區間 |
 | 波動率 | log(`fwd_vol_20d`) | regression（L2）對 log 值，預測取 exp 還原；最重要的輸入是 `tech_vol_20d`、`risk_idio_vol_60d`（`tech_vol_60d` 和 `risk_idio_vol_60d` 的日均 Spearman 是 0.963，Phase 3 篩選時剔除） | vol\_pred（年化） | 80% 區間 = 收盤價 × exp(±1.28 × vol\_pred × √(20/252))，做 sanity check；fallback 改以預測報酬為中心（見輸出一致性）；不預設展示 |
-| 上漲機率 | 相對大盤版：`fwd_ret_20d`\_open 減 `TAIEX_TR`（加權股價報酬指數，含息，和還原報酬同一口徑）收盤 t 到收盤 t+20 的報酬後是否大於 5%；個股從 t+1 開盤起算、大盤從 t 收盤起算，差一段隔夜跳空，屬已知近似（Phase 4 比較後由 `fwd_up_5pct` 改用，見評估指標的機率一條）。logistic baseline 也用這個 label。以下跟著改的地方在設計凍結時決定：頁面與 API 的說法、輸出一致性的 q50 檢查、`label_daily` 要不要存這一欄、上線後事後評估與告警（`model_monitor` 的 Brier、AUC）和每月門檻 (3) 讀哪個 label | binary | prob\_up\_5pct | 直接顯示機率；ECE 高於 0.05 時以 early-stopping 驗證集做 isotonic 校準再上線 |
+| 上漲機率 | 相對大盤版：`fwd_ret_20d`\_open 減 `TAIEX_TR`（加權股價報酬指數，含息，和還原報酬同一口徑）收盤 t 到收盤 t+20 的報酬後是否大於 5%；個股從 t+1 開盤起算、大盤從 t 收盤起算，差一段隔夜跳空，屬已知近似（Phase 4 比較後由 `fwd_up_5pct` 改用，見評估指標的機率一條）。logistic baseline 也用這個 label。上線後事後評估與告警（`model_monitor` 的 Brier、AUC，以及 logistic baseline 的 Brier）和每月門檻 (3) 都讀這個 label，評分時由 `label_daily` 的 `fwd_ret_open` 與 `TAIEX_TR` 收盤當場算，`label_daily` 不另存這一欄；輸出一致性的 q50 檢查改為參考（使用者 2026-11-11 同意）。頁面與 API 的說法仍待決定 | binary | prob\_up\_5pct | 直接顯示機率；ECE 高於 0.05 時以 early-stopping 驗證集做 isotonic 校準再上線 |
 
 分類目標的 baseline 用 logistic regression；分位數目標的 baseline 用波動率區間（q50 = 0，q10 與 q90 = ±1.28 × tech\_vol\_20d × √(20/252)），訓練窗內的無條件歷史分位數只當 sanity 下限，打不過它代表實作有錯；波動率目標的 baseline 是直接拿 `tech_vol_20d` 當預測。絕對報酬與 q50 的輸出會明顯集中在 0 附近，這是個股報酬可預測性低的正常現象，不要為了拉開分布去調整。
 
@@ -303,7 +303,7 @@ Oct 29, 2026 · @Owen Lai
 - 波動率區間與分位數區間的寬度比落在 0.5 到 2 之外的股票，每日寫入 `data_quality_log`，severity 為 warning；比例超過 10% 要追查。
 - 分位數模型的覆蓋率告警成立（見模型管理與上線後監控）的期間，價格區間改用以預測報酬為中心的波動率區間：收盤價 × (1 + ret\_pred ± 1.28 × vol\_pred × √(h/252))，預測價仍落在區間內；缺 vol\_pred 時用 `tech_vol_20d`；API 回應附 `interval_source` 欄位標明來源。
 - 5 日沒有分位數模型：API 用同一式（h = 5，以 √(5/252) 縮放）給波動率區間並標 `interval_source = volatility`；缺 vol\_pred 時改用 tech\_vol\_20d 並標 `tech_vol_20d`，缺 ret\_pred 時以 0 為中心；頁面依「波動率區間不預設展示」，5 日不畫區間。
-- 上漲機率與 q50 矛盾的列（prob\_up\_5pct 大於 0.5 但 q50 小於 5%，或 prob\_up\_5pct 小於 0.5 但 q50 大於 5%）每日計數，比例超過 10% 要追查。
+- 上漲機率與 q50 矛盾的列（prob\_up\_5pct 大於 0.5 但 q50 小於 5%，或 prob\_up\_5pct 小於 0.5 但 q50 大於 5%）每日計數，只做參考：上漲機率是相對大盤版，q50 是絕對報酬，兩者本來就不完全一致，所以 severity 一律 info、不告警（使用者 2026-11-11 同意）。
 - `ret_pred` 與 q10/q50/q90 以 t+1 還原開盤價為基準，展示層仍以最新收盤價換算，差額是隔夜跳空，屬已知近似，不另修正。
 - 訓練 universe 外的股票照常輸出，API 附 `in_universe` 欄位，事後評估不計入。
 
@@ -336,8 +336,8 @@ Oct 29, 2026 · @Owen Lai
 - 每次訓練寫一列 `model_run`，含參數、特徵清單、訓練區間、指標、seed、套件版本、特徵 Parquet 的 hash；模型檔以 `run_id` 命名存檔。`status` 取值 candidate、active、degraded、retired。
 - 每月重訓：新模型 N 以當下為訓練窗終點；同時訓一個設定相同的影子模型 N′，訓練窗截止在 6 個月加 20 個交易日之前，用來在最近 6 個月上做 OOS 檢查。上線門檻全部是對 N 的健全性檢查，不拿 N′ 跟舊模型比 IC（兩個同配方模型比 6 個月 IC 是噪音，且 N′ 看不到 N 新加入的最近 6 個月資料）：(1) N 與現役模型在最新交易日的預測 Spearman 相關 ≥ 0.7；(2) N 與現役模型 gain 前 10 名特徵重疊 ≥ 6 個；(3) N′ 最近 6 個月 OOS 達絕對門檻：排名 rank IC > 0、區間覆蓋率在 70% 到 90%、機率 Brier 不高於 logistic baseline、波動率 QLIKE 不高於 `tech_vol_20d` baseline、5 日 MAE 不高於零預測；(4) N 訓練窗起點到 as_of（N 最後幾列訓練資料的 label 讀到 as_of 的價格）之間，`data_quality_log` 無 severity = error 的紀錄。任一不過，舊模型續用、告警並記錄原因，是否強制換模由人工決定：強制換模只能跳過這四項的不過（模型組沒建完整、holdout 尚未 claim 都不能跳過），必須寫原因，原因與沒過的門檻記進 N 的 `model_run.params` 並告警。換模把 N 改 active、該類目標原本服務中的版本改 retired，並記下上線日。
 - 線上預測只用 `model_run` 中 `status = active` 的版本，每類目標各一個。
-- 事後評估：每日對 horizon 已到期的預測，從 `prediction` 與 `label_daily` 算實際 rank IC、覆蓋率、區間寬度、Brier、AUC、MAE（報酬或波動率，依 run 的目標）、方向準確率（同樣不計 label 為 0 的列），只算 universe 內且 `untradable_t1 = 0` 的列，寫入 `model_monitor` 表；服務層的「歷史預測準確度」讀這張表。
-- 告警：60 個交易日滾動 rank IC 低於門檻、覆蓋率出 70% 到 90%、Brier 高於 logistic baseline，任一成立就告警並把該模型 `status` 改 degraded，API 回應附警示。被判的是當天服務中的版本，當天沒有預測列就不判；60 個交易日的窗口串接該目標歷來服務過的版本，每列只算各自版本的樣本外日子。換模後有 5 個交易日的寬限期，從 max(樣本外界線, 上線日) 起算，期間超標只告警、不降級；上線日之前補寫的日子也不判降級。是否停用由人工決定；degraded 改回 active 只能人工恢復（`restore_run`），必須寫原因，降級期間記成一段警示期；恢復後該目標同一 horizon 的窗口從恢復日重新起算（之後換上的版本沿用），累積滿 60 列才重新自動降級，重設期間串接的 60 列仍超標時只告警、不降級；之後補跑恢復日之前的監控，也不會把恢復的版本降回去。滾動 IC 的門檻不用固定 0：20 日 horizon 下 60 個交易日只有約 3 個獨立樣本，健康模型（IC 0.03）也會有約三成時間滾動均值小於 0；門檻取研究期 walk-forward 全部 60 日滾動 IC 的 5% 分位，寫進 `model_run.params`，每次重訓更新。
+- 事後評估：每日對 horizon 已到期的預測，從 `prediction` 與 `label_daily` 算實際 rank IC、覆蓋率、區間寬度、Brier、AUC、MAE（報酬或波動率，依 run 的目標）、方向準確率（同樣不計 label 為 0 的列），只算 universe 內且 `untradable_t1 = 0` 的列，寫入 `model_monitor` 表；Brier 與 AUC 對該 run 訓練時的上漲 label（`model_run.params` 的 label），相對大盤版當場算，缺 `TAIEX_TR` 收盤時該 run 記成到期預測缺 label；服務層的「歷史預測準確度」讀這張表。
+- 告警：60 個交易日滾動 rank IC 低於門檻、覆蓋率出 70% 到 90%、Brier 高於 logistic baseline（研究期 logistic 在同一個上漲 label 上的日均 Brier），任一成立就告警並把該模型 `status` 改 degraded，API 回應附警示。被判的是當天服務中的版本，當天沒有預測列就不判；60 個交易日的窗口串接該目標歷來服務過的版本，每列只算各自版本的樣本外日子。換模後有 5 個交易日的寬限期，從 max(樣本外界線, 上線日) 起算，期間超標只告警、不降級；上線日之前補寫的日子也不判降級。是否停用由人工決定；degraded 改回 active 只能人工恢復（`restore_run`），必須寫原因，降級期間記成一段警示期；恢復後該目標同一 horizon 的窗口從恢復日重新起算（之後換上的版本沿用），累積滿 60 列才重新自動降級，重設期間串接的 60 列仍超標時只告警、不降級；之後補跑恢復日之前的監控，也不會把恢復的版本降回去。滾動 IC 的門檻不用固定 0：20 日 horizon 下 60 個交易日只有約 3 個獨立樣本，健康模型（IC 0.03）也會有約三成時間滾動均值小於 0；門檻取研究期 walk-forward 全部 60 日滾動 IC 的 5% 分位，寫進 `model_run.params`，每次重訓更新。
 - 第 8 節的標籤打亂測試在每次完整 walk-forward 前執行一次。
 
 ## 8. 必須遵守的規範與已知陷阱
