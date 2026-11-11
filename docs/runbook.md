@@ -13,6 +13,10 @@ uv run python manage.py refresh_stock_master
 
 - 第一次 15:10 的 `prepare_day` 會補抓前 14 天缺的日子；靠 `etl_run` 判斷缺日的 dataset（股數、注意、處置、全額交割）在排程前沒有每日紀錄，會整段補抓，股數還會重建之後的日子，每個補到的日子都跑一次品質檢查並告警。先看 `--dry-run` 的清單，太長就先在 ETL 時段外手動跑 `catchup`。
 - `refresh_stock_master` 先手動跑一次，確認第一次新增與下市的代號合理，再交給 16:00 的排程。
+- 排名模型的已知缺口與硬性前提（2026-11-11 凍結時記下，SPEC 第 6 節特徵表）：`fund_days_to_ex_date` 的線上來源是 plan 2.7b（證交所 TWT48U 與櫃買的除權除息預告表）。
+  - 2.7b 上線前，2026-10-31 起這一欄線上全是 NaN，模型把所有股票當成沒有已公告的除息日。淡季影響很小（universe 列裡有值的比例：2025-11 是 0.4%），旺季大（2026-06 是 18.1%、2026-07 是 14.4%）。
+  - 2.7b 必須在 2027-04-30 前上線，並核對新來源的公告提前天數和 FinMind 的歷史分布相近（中位數 15–17 天、5% 分位 13 天）。4 月底是最後期限，不是計畫日期。
+  - 排名 holdout 的數字代表「有這個來源時」的表現；2.7b 上線前的除息旺季不適用。
 
 啟動 worker 之後，確認排程真的載入了：
 
@@ -240,7 +244,7 @@ uv run python manage.py reapply_dividend_dates --stock 2884 --stock 2885
   uv run python manage.py fetch --source tpex --dataset dividend_event --start 2026-10-26 --end <今天>
   ```
 
-- 還沒做（plan 2.7b）：用預告表定 `announce_date`。在那之前，2026-10-30 之後新公告的除息日 `announce_date` 是空的，`fund_days_to_ex_date` 看不到。
+- 還沒做（plan 2.7b）：用預告表定 `announce_date`。在那之前，2026-10-30 之後新公告的除息日 `announce_date` 是空的，`fund_days_to_ex_date` 看不到。排名的凍結設計讀這一欄，所以 2.7b 是硬性前提，期限 2027-04-30（見「上線前」）。
 
 ## 財報每日掃描
 
