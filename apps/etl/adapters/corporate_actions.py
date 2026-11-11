@@ -8,6 +8,7 @@ from decimal import Decimal
 from typing import Any, NamedTuple
 
 import pandas as pd
+from django.conf import settings
 from django.db import transaction
 
 from apps.etl.adapters.finmind_datasets import DIVIDEND_PLACES, EVENT_COLUMNS
@@ -90,8 +91,16 @@ def events_from(frame: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(events, columns=EVENT_COLUMNS, dtype=object)
 
 
+def exchanges_lead_from() -> date:
+    """The first ex-date the exchanges' own tables settle; FinMind's backfill ends before it."""
+    return date.fromisoformat(str(settings.DIVIDEND_EXCHANGE_PRIMARY_FROM))
+
+
 def write_events(frame: pd.DataFrame, source: str, day: date) -> int:
-    """New events and blank factors are written; differing stored figures are only logged."""
+    """New events and blank factors are written; stored figures that differ are logged.
+
+    From the day the exchanges lead, the results table also replaces what differs.
+    """
     records = [_record(raw) for raw in frame.to_dict("records")]
     listed = set(
         StockMaster.objects.filter(
@@ -100,30 +109,34 @@ def write_events(frame: pd.DataFrame, source: str, day: date) -> int:
     )
     records = [record for record in records if record["stock_id"] in listed]
     stored = _stored(records)
+    leads_from = exchanges_lead_from()
     new: list[DividendEvent] = []
-    filled: list[DividendEvent] = []
+    changed: list[DividendEvent] = []
     differing: list[dict[str, Any]] = []
     for record in records:
         row = stored.get((record["stock_id"], record["ex_date"]))
         if row is None:
             new.append(DividendEvent(**record))
             continue
-        if row.adj_factor is None and record["adj_factor"] is not None:
-            row.adj_factor = record["adj_factor"]
-            filled.append(row)
         fields = _differences(row, record)
+        settles = bool(fields) and row.ex_date >= leads_from
+        blank = row.adj_factor is None and record["adj_factor"] is not None
+        if settles:
+            row.cash_dividend, row.stock_dividend = (record[name] for name in AMOUNTS)
+        if record["adj_factor"] is not None and (settles or blank):
+            row.adj_factor = record["adj_factor"]
+        if settles or blank:
+            changed.append(row)
         if fields:
-            differing.append(
-                {"stock_id": row.stock_id, "ex_date": row.ex_date.isoformat(), "fields": fields}
-            )
-    adjusted = {row.stock_id for row in [*new, *filled] if row.adj_factor is not None}
+            differing.append(_difference(row, fields, settles))
+    adjusted = {row.stock_id for row in [*new, *changed] if row.adj_factor is not None}
     with transaction.atomic():
         DividendEvent.objects.bulk_create(new)
-        DividendEvent.objects.bulk_update(filled, ["adj_factor"])
+        DividendEvent.objects.bulk_update(changed, [*AMOUNTS, "adj_factor"])
         _log(source, day, differing)
         for stock_id in sorted(adjusted):
             refresh_adj_factor(stock_id)
-    return len(new) + len(filled)
+    return len(new) + len(changed)
 
 
 def _amount(values: Iterable[Decimal]) -> Decimal:
@@ -166,11 +179,26 @@ def _differences(row: DividendEvent, record: Mapping[str, Any]) -> dict[str, lis
     return fields
 
 
+def _difference(row: DividendEvent, fields: dict[str, list[Any]], settled: bool) -> dict[str, Any]:
+    entry = {"stock_id": row.stock_id, "ex_date": row.ex_date.isoformat(), "fields": fields}
+    return {**entry, "overwritten": True} if settled else entry
+
+
 def _log(source: str, day: date, differing: list[dict[str, Any]]) -> None:
-    """One row per run day and source: a rerun replaces it, agreement removes it."""
-    DataQualityLog.objects.filter(
-        date=day, check_name=MISMATCH_CHECK, detail__source=source
-    ).delete()
+    """One row per run day and source: a rerun replaces it, agreement removes it.
+
+    What the day already overwrote stays on record, as a rerun finds nothing left to differ.
+    """
+    logs = DataQualityLog.objects.filter(date=day, check_name=MISMATCH_CHECK, detail__source=source)
+    again = {(entry["stock_id"], entry["ex_date"]) for entry in differing}
+    kept = [
+        entry
+        for log in logs
+        for entry in log.detail.get("events", [])
+        if entry.get("overwritten") and (entry["stock_id"], entry["ex_date"]) not in again
+    ]
+    differing = sorted([*kept, *differing], key=lambda entry: (entry["stock_id"], entry["ex_date"]))
+    logs.delete()
     if differing:
         DataQualityLog.objects.create(
             date=day,

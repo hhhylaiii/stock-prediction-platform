@@ -1,6 +1,6 @@
 """Settings shared by every environment; values come from environment variables."""
 
-from datetime import time
+from datetime import date, time
 from pathlib import Path
 
 import environ
@@ -98,6 +98,11 @@ ETL_NOT_READY_COUNTDOWN = env.int("ETL_NOT_READY_COUNTDOWN", default=1800)
 ETL_NOT_READY_RETRIES = env.int("ETL_NOT_READY_RETRIES", default=6)
 ETL_CATCHUP_LOOKBACK_DAYS = env.int("ETL_CATCHUP_LOOKBACK_DAYS", default=14)
 FILING_VISIBLE_BEFORE = env.str("FILING_VISIBLE_BEFORE", default="22:40")
+DIVIDEND_EXCHANGE_PRIMARY_FROM = env.str("DIVIDEND_EXCHANGE_PRIMARY_FROM", default="2026-10-31")
+try:
+    date.fromisoformat(DIVIDEND_EXCHANGE_PRIMARY_FROM)
+except ValueError:
+    raise ImproperlyConfigured("DIVIDEND_EXCHANGE_PRIMARY_FROM must be a YYYY-MM-DD date") from None
 
 
 ETL_AT = {
