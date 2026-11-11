@@ -5,6 +5,7 @@ from collections.abc import Mapping, Sequence, Set
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 import pandas as pd
@@ -32,7 +33,55 @@ MASKED_MONTH = "masked_month"
 SHORT_REFERENCE = "short_reference"
 EMPTY_REFERENCE = "empty_reference"
 ZERO_LOW = "zero_low"
+PRICE, INDEX, FLOWS, MARGIN, SBL = "daily_price", "index_daily", "institutional", "margin", "sbl"
+HOLDING, VALUATION, EX_DATES = "foreign_holding", "daily_valuation", "dividend_event"
+SHARES, REVENUE, STATEMENTS = "shares_outstanding", "monthly_revenue", "financial_statement"
+MASTER, DAY_TRADE, WEEKLY, ATTENTION = "stock_master", "day_trade", "weekly_holding", "attention"
+CARRIED = frozenset({SHARES, REVENUE, STATEMENTS, MASTER})
+GAPPED = frozenset({DAY_TRADE, WEEKLY, ATTENTION})
 Severity = DataQualityLog.Severity
+
+
+def _reading(names: str, *datasets: str) -> dict[str, tuple[str, ...]]:
+    return dict.fromkeys(names.split(), datasets)
+
+
+SOURCES: Mapping[str, tuple[str, ...]] = MappingProxyType(
+    {
+        **_reading("tech_ret_1d tech_ret_5d tech_ret_20d tech_ret_60d tech_mom_250_20", PRICE),
+        **_reading("tech_ma_gap_5d tech_ma_gap_20d tech_ma_gap_60d", PRICE),
+        **_reading("tech_vol_20d tech_vol_60d tech_volume_ratio_5_20", PRICE),
+        **_reading("tech_rsi_14 tech_kd_k tech_kd_d tech_macd_hist_pct", PRICE),
+        **_reading("tech_high_52w_gap tech_low_52w_gap", PRICE),
+        **_reading("tech_limit_up_t tech_limit_up_cnt_20d tech_limit_down_cnt_20d", PRICE),
+        **_reading("tech_parkinson_vol_20d tech_gap_1d tech_close_loc_5d", PRICE),
+        **_reading("tech_max_ret_20d tech_skew_60d", PRICE),
+        **_reading("liq_dollar_vol_med_20d liq_amihud_20d", PRICE),
+        **_reading("tech_turnover_rate_5d size_log_mcap", PRICE, SHARES),
+        **_reading("tech_attention_t", ATTENTION),
+        **_reading("chip_fi_net_1d chip_fi_net_5d chip_fi_net_20d", FLOWS, SHARES),
+        **_reading("chip_it_net_5d chip_it_net_20d", FLOWS, SHARES),
+        **_reading("chip_dealer_self_net_5d chip_dealer_hedge_net_5d", FLOWS, SHARES),
+        **_reading("chip_fi_buy_streak", FLOWS),
+        **_reading("chip_margin_chg_5d", MARGIN, SHARES),
+        **_reading("chip_margin_usage chip_short_ratio", MARGIN),
+        **_reading("chip_sbl_short_chg_5d", SBL, SHARES),
+        **_reading("chip_fi_holding_pct chip_fi_holding_chg_20d", HOLDING),
+        **_reading("chip_big_holder_pct_chg_1w chip_holder_count_chg_1w", WEEKLY),
+        **_reading("chip_day_trade_ratio_5d", DAY_TRADE, PRICE),
+        **_reading("fund_rev_yoy fund_rev_3m_yoy", REVENUE, STATEMENTS),
+        **_reading("fund_rev_yoy_q fund_eps_yoy fund_roe_ttm", STATEMENTS),
+        **_reading("fund_gross_margin fund_op_margin fund_debt_ratio", STATEMENTS),
+        **_reading("fund_gm_yoy_chg fund_opm_yoy_chg fund_cfo_to_ni", STATEMENTS),
+        **_reading("fund_days_since_fs", STATEMENTS),
+        **_reading("fund_ep", STATEMENTS, PRICE),
+        **_reading("fund_bp fund_dividend_yield", VALUATION),
+        **_reading("fund_days_to_ex_date", EX_DATES),
+        **_reading("risk_beta_250d risk_idio_vol_60d", PRICE, INDEX),
+        **_reading("ind_sector_ret_20d ind_rel_ret_20d ind_mom_neutral", PRICE, MASTER),
+        **_reading("ind_ep_neutral", STATEMENTS, PRICE, MASTER),
+    }
+)
 
 
 class CoverageError(ValueError):
@@ -46,6 +95,15 @@ class Verdict:
     appeared: list[str]
 
 
+def stops_predictions(name: str) -> bool:
+    """Whether the feature's collapse is an error, which shuts the day's predictions.
+
+    It only warns when a source is outside the research gate and not carried forward, so one
+    missed day leaves the feature empty: GAPPED. Classify a new feature in SOURCES by that rule.
+    """
+    return not GAPPED.intersection(SOURCES[name])
+
+
 def watched() -> tuple[list[str], int]:
     """Every feature a frozen design reads, and the years its longest training window spans."""
     names: dict[str, None] = {}
@@ -57,6 +115,9 @@ def watched() -> tuple[list[str], int]:
             raise CoverageError(f"the {scope} design's features cannot be read: {error}") from error
         names.update(dict.fromkeys(listed))
         months = max(months, design.config.train_months)
+    unlisted = [name for name in names if name not in SOURCES]
+    if unlisted:
+        raise CoverageError(f"{', '.join(unlisted)} have no sources listed in SOURCES")
     return list(names), months // 12
 
 
@@ -119,12 +180,13 @@ def _finding(name: str, count: int, share: float, values: pd.Series) -> dict[str
     if not _under(share, bound):
         return None
     shown = {"share": share, "median": float(values.median()), "low": low, "bound": bound}
+    halved = low >= USUALLY_FILLED and _under(share, HALF * low)
     return {
         "feature": name,
         "count": count,
         **{key: round(value, SHOWN_DIGITS) for key, value in shown.items()},
         "days": len(values),
-        "collapsed": low >= USUALLY_FILLED and _under(share, HALF * low),
+        "collapsed": halved and stops_predictions(name),
     }
 
 

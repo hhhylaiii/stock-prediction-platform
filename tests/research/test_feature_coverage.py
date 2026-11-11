@@ -18,19 +18,26 @@ from django.core.management.base import CommandError
 from apps.api.ops import MODEL_CHECK_PREFIXES
 from apps.etl.models import DataQualityLog
 from apps.etl.quality import CHECKS, should_run_prediction
+from apps.etl.tasks import GATE_DATASETS
 from apps.market.calendar import TradingDays
 from apps.market.models import TradingCalendar
 from apps.research import feature_coverage, production
 from apps.research.feature_coverage import (
+    CARRIED,
     CHECK,
+    GAPPED,
+    SOURCES,
     CoverageError,
     coverage_row,
     coverage_summary,
     run_coverage,
+    stops_predictions,
     universe_counts,
     watched,
 )
 from apps.research.features.store import partition_path
+from apps.research.features.transforms import STOCK_LEVEL
+from apps.research.target_models import MARKET_LEVEL
 
 pytestmark = pytest.mark.django_db
 Severity = DataQualityLog.Severity
@@ -129,17 +136,70 @@ def test_the_check_is_listed_with_the_model_checks() -> None:
 def test_the_watched_features_are_what_the_frozen_designs_read(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    lists = {"rank": ["a", "b", "c"], "return": ["a", "d"], "interval": ["d", "a"]}
+    lists = {
+        "rank": [DENSE, USUAL, SPARSE],
+        "return": [DENSE, "size_log_mcap"],
+        "interval": ["size_log_mcap", DENSE],
+    }
     monkeypatch.setattr(
         feature_coverage, "design_features", lambda scope, variant, target: lists[scope]
     )
 
-    assert watched() == (["a", "b", "c", "d"], 5)
+    assert watched() == ([DENSE, USUAL, SPARSE, "size_log_mcap"], 5)
 
     longer = replace(production.DESIGNS["return"].config, train_months=84)
     designs = {**production.DESIGNS, "return": replace(production.DESIGNS["return"], config=longer)}
     monkeypatch.setattr(feature_coverage, "DESIGNS", designs)
-    assert watched() == (["a", "b", "c", "d"], 7)
+    assert watched() == ([DENSE, USUAL, SPARSE, "size_log_mcap"], 7)
+
+
+def test_a_design_feature_without_listed_sources_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        feature_coverage, "design_features", lambda scope, variant, target: [DENSE, "tech_new_1d"]
+    )
+
+    with pytest.raises(CoverageError, match="tech_new_1d have no sources listed in SOURCES"):
+        watched()
+
+
+def test_every_feature_a_frozen_design_can_read_has_its_sources_listed() -> None:
+    readable = set(STOCK_LEVEL)
+    for scope, design in production.DESIGNS.items():
+        readable |= set(design.variant.features) | set(design.target.extra)
+        if scope != "rank" and design.target.market:
+            readable |= set(MARKET_LEVEL)
+
+    assert readable <= set(SOURCES)
+    assert len(production.DESIGNS["rank"].variant.features) == 60
+
+
+def test_each_source_holds_the_gate_is_carried_forward_or_leaves_a_gap() -> None:
+    read = {dataset for datasets in SOURCES.values() for dataset in datasets}
+
+    assert read <= GATE_DATASETS | CARRIED | GAPPED
+    assert not (CARRIED | GAPPED) & GATE_DATASETS
+    assert not CARRIED & GAPPED
+    assert all(SOURCES.values())
+
+
+def test_only_features_a_missed_day_empties_are_spared_the_error() -> None:
+    spared = {name for name in SOURCES if not stops_predictions(name)}
+
+    assert spared == {
+        "chip_day_trade_ratio_5d",
+        "chip_big_holder_pct_chg_1w",
+        "chip_holder_count_chg_1w",
+        "tech_attention_t",
+    }
+    assert sorted(GAPPED) == ["attention", "day_trade", "weekly_holding"]
+    assert sorted(CARRIED) == [
+        "financial_statement",
+        "monthly_revenue",
+        "shares_outstanding",
+        "stock_master",
+    ]
 
 
 def test_designs_whose_features_cannot_be_read_are_refused() -> None:
@@ -238,6 +298,28 @@ def test_a_usually_filled_feature_under_half_its_low_is_an_error(
         f"3 of 3 features judged, flagged {feature}, {SPARSE}; "
         f"{feature} collapsed, so the day is not predicted"
     )
+
+
+def test_a_collapse_only_warns_for_a_feature_one_missed_day_would_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gapped, carried = "chip_day_trade_ratio_5d", "size_log_mcap"
+    monkeypatch.setattr(feature_coverage, "watched", lambda: ([gapped, carried], 5))
+    for year in REFERENCE_YEARS:
+        write(tmp_path, year, rows(november(year), {gapped: 1.0, carried: 1.0}))
+
+    write(tmp_path, 2026, rows([THURSDAY], {gapped: 0.0, carried: 1.0}))
+    spared = coverage_row(THURSDAY, tmp_path)
+    write(tmp_path, 2026, rows([DAY], {gapped: 0.0, carried: 0.0}))
+    stopped = coverage_row(DAY, tmp_path)
+
+    assert spared.severity == Severity.WARNING
+    assert flagged(spared)[gapped]["collapsed"] is False
+    assert stopped.severity == Severity.ERROR
+    assert {name: entry["collapsed"] for name, entry in flagged(stopped).items()} == {
+        gapped: False,
+        carried: True,
+    }
 
 
 def test_an_empty_sparse_feature_is_a_warning_never_an_error(tmp_path: Path) -> None:
