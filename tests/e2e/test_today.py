@@ -150,6 +150,35 @@ def test_five_days_without_the_return_model_says_so(
     expect(page.locator("#model-note")).to_be_hidden()
 
 
+def test_a_request_that_fails_after_a_good_one_clears_both_notes(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    Prediction.objects.filter(run_id="prob-h20").delete()
+    page.goto(live_server.url)
+    expect(page.locator("#band-note")).to_be_visible()
+    expect(page.locator("#model-note")).to_be_visible()
+    page.route("**/api/predictions?**", lambda route: route.abort())
+
+    page.get_by_role("button", name="5 日").click()
+
+    expect(page.locator("#rows .error")).to_have_text("無法連線到伺服器。")
+    expect(page.locator("#band-note")).to_be_hidden()
+    expect(page.locator("#model-note")).to_be_hidden()
+
+
+def test_a_search_without_a_match_drops_the_missing_model_note(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    Prediction.objects.filter(run_id="prob-h20").delete()
+    page.goto(live_server.url)
+    expect(page.locator("#model-note")).to_be_visible()
+
+    page.locator("#q").fill("zzz")
+
+    expect(page.locator("#rows .empty")).to_contain_text("今日預測裡沒有符合「zzz」的股票")
+    expect(page.locator("#model-note")).to_be_hidden()
+
+
 def test_a_day_missing_only_the_odds_model_keeps_the_band_note(
     page: Page, live_server: LiveServer, predicted: Seed
 ) -> None:

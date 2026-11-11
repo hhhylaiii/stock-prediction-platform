@@ -1,4 +1,5 @@
 from datetime import date, timedelta
+from pathlib import Path
 from statistics import fmean, stdev
 from typing import Any
 
@@ -9,6 +10,13 @@ from pytest_django import DjangoAssertNumQueries
 from apps.api.model_runs import HOLDOUT_RELEASE, MONTH_DAYS, MONTH_IC
 from apps.research import production
 from apps.research.eval_report import RANK_METRICS
+from apps.research.holdout import (
+    FAILED,
+    claim_holdout,
+    production_pass,
+    release_holdout,
+    released_verdict,
+)
 from apps.research.models import BacktestMetric, HoldoutRun, ModelMonitor, ModelRun, Prediction
 from tests.api.conftest import (
     EARLY_CALENDAR_START,
@@ -22,6 +30,7 @@ from tests.api.conftest import (
     taipei,
     trained_until,
 )
+from tests.research.run_panels import write_holdout_report
 
 pytestmark = pytest.mark.usefixtures("calendar_in_db")
 
@@ -467,6 +476,27 @@ def test_a_model_built_on_a_released_holdout_carries_the_release_without_its_rep
     body = response.content.decode()
     assert REPORT_PATH not in body
     assert RELEASE["sha256"] not in body
+
+
+def test_the_release_a_build_records_reaches_the_endpoint_with_its_reason(
+    client: Client, runs: Runs, settings: Any, tmp_path: Path
+) -> None:
+    settings.RESEARCH_CACHE_DIR = str(tmp_path)
+    claim_holdout("rank", "rank-final", OCT_30)
+    write_holdout_report("rank", "rank-final", FAILED, REPORT_PATH)
+    release_holdout("rank", FAILED, "the user accepts the gap")
+    recorded = released_verdict(production_pass("rank"))
+    assert recorded is not None
+    ModelRun.objects.filter(pk="rank-h20").update(params=released(recorded))
+
+    response = client.get("/api/models")
+
+    shown = by_slot(envelope_of(response))[("rank", 20)]["holdout_release"]
+    assert shown == {name: recorded[name] for name in RELEASE_SHOWN}
+    assert (shown["status"], shown["reason"]) == (FAILED, "the user accepts the gap")
+    assert shown["failed"]
+    assert shown["flagged"]
+    assert REPORT_PATH not in response.content.decode()
 
 
 @pytest.mark.parametrize(

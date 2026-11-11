@@ -949,8 +949,9 @@ def test_a_retrain_says_why_each_scope_was_refused_or_failed(
     page: Page, live_server: LiveServer, seeded: Seed
 ) -> None:
     verdict = (
-        "HoldoutError: holdout rank-holdout-20261111 was judged 未達標; the build is refused "
-        "until release_holdout records the user's decision"
+        "HoldoutError: holdout rank-holdout-20261111 was judged 未達標 (report "
+        "rank-holdout-20261111.md); the build is refused until release_holdout records the "
+        "user's decision"
     )
     retrained(seeded, 1, {"return": "return-2026-11"}, NOT_FROZEN, {"rank": verdict})
 
