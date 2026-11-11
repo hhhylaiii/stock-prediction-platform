@@ -12,11 +12,12 @@ from django.test import override_settings
 from apps.etl.models import DataQualityLog
 from apps.etl.tasks import US_CLOSE_CHECK
 from apps.research import production, tasks
+from apps.research.holdout import FAILED, claim_holdout, production_pass, released_verdict
 from apps.research.models import HoldoutScope, LabelDaily, ModelRun
 from apps.research.production import DESIGNS, build_run
 from apps.research.promotion import PROMOTION_CHECK, Promoted
 from apps.research.runs import RunError
-from tests.research.run_panels import claim_all
+from tests.research.run_panels import claim_all, write_holdout_report
 from tests.research.test_tasks import (
     TAIPEI,
     WEDNESDAY,
@@ -233,6 +234,29 @@ def test_a_failed_build_leaves_the_other_scopes_built(
     }
     assert detail["runs"] == {"rank": RUN, "return": RUN}
     assert sent == [(FIRST, tasks.RETRAIN_CHECK, Severity.WARNING)]
+
+
+def test_a_build_the_holdout_verdict_refuses_is_recorded_without_a_host_path(
+    frozen: None, settings: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings.RESEARCH_CACHE_DIR = tmp_path
+    labelled(FIRST)
+    claim_holdout("rank", "rank-final", FIRST)
+    write_holdout_report("rank", "rank-final", FAILED, "/Users/someone/reports/rank-final.md")
+
+    def build(scope: str, run_key: str, research: str, as_of: date, directory: Path) -> None:
+        released_verdict(production_pass(scope))
+
+    monkeypatch.setattr(tasks, "build_run", build)
+
+    retrain(FIRST)
+
+    failed = marker(FIRST, tasks.RETRAIN_CHECK).detail["failed"]
+    assert failed["rank"].startswith(
+        f"HoldoutError: holdout rank-final was judged {FAILED} (report rank-final.md)"
+    )
+    assert set(failed) == {"rank", "return"}
+    assert "/" not in "".join(failed.values())
 
 
 def test_the_retrain_waits_for_labels_through_its_day(
