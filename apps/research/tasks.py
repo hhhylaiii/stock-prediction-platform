@@ -22,7 +22,12 @@ from apps.etl.tasks import US_CLOSE_CHECK, ready_for_research
 from apps.market.adjust import ADJ_CHECK
 from apps.market.calendar import OutsideCalendarError, TradingDays
 from apps.research.feature_coverage import CHECK as COVERAGE_CHECK
-from apps.research.feature_coverage import CoverageError, coverage_summary, run_coverage
+from apps.research.feature_coverage import (
+    FLAGGED,
+    CoverageError,
+    coverage_summary,
+    run_coverage,
+)
 from apps.research.labels import HORIZONS
 from apps.research.lock import ResearchBusyError, research_lock
 from apps.research.models import HoldoutScope, LabelDaily, ModelRun
@@ -81,19 +86,21 @@ def _labels(day: date) -> str:
 def _coverage(day: date) -> str:
     """The day's feature coverage row; a check that cannot run warns and the chain goes on.
 
-    An earlier error row of the day stands, so a failed recheck never reopens its predictions.
+    The day's earlier error row stands and its flagged list is kept, so a failed recheck
+    neither reopens the day's predictions nor returns a flagged day to later references.
     """
     try:
         row = run_coverage(day, TradingDays.from_db(), settings.FEATURE_PARQUET_DIR)
     except Exception as error:
         logger.error("research coverage %s failed: %s", day, error)
         shown = str(error) if isinstance(error, CoverageError) else type(error).__name__
-        stands = DataQualityLog.objects.filter(
-            date=day, check_name=COVERAGE_CHECK, severity=Severity.ERROR
-        ).exists()
-        if stands:
+        rows = DataQualityLog.objects.filter(date=day, check_name=COVERAGE_CHECK)
+        earlier = rows.order_by("-pk").first()
+        if earlier is not None and earlier.severity == Severity.ERROR:
             return f"coverage check failed ({shown}); the day's earlier error stands"
-        _record(day, COVERAGE_CHECK, Severity.WARNING, {"error": shown})
+        flagged = [] if earlier is None else earlier.detail.get(FLAGGED, [])
+        kept = {FLAGGED: flagged} if flagged else {}
+        _record(day, COVERAGE_CHECK, Severity.WARNING, {"error": shown, **kept})
         return f"coverage check failed, see {COVERAGE_CHECK}"
     return coverage_summary(row)
 

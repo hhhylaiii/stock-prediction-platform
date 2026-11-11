@@ -708,6 +708,25 @@ def test_a_coverage_check_that_cannot_run_warns_and_the_chain_goes_on(
     assert sent == [(WEDNESDAY, tasks.COVERAGE_CHECK, Severity.WARNING)]
 
 
+def test_a_recheck_that_cannot_run_keeps_the_features_the_day_had_flagged(
+    sent: list[tuple[date, str, str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    earlier = coverage(WEDNESDAY, Severity.WARNING, collapsed=False)
+
+    def fails(day: date, calendar: TradingDays, directory: Path) -> DataQualityLog:
+        raise RuntimeError("cannot read /srv/features/year=2023")
+
+    monkeypatch.setattr(tasks, "run_coverage", fails)
+
+    result = tasks.STEPS["coverage"](WEDNESDAY)
+
+    assert result == "coverage check failed, see monitor_feature_coverage"
+    failed = marker(WEDNESDAY, tasks.COVERAGE_CHECK)
+    assert failed.severity == Severity.WARNING
+    assert failed.detail == {"error": "RuntimeError", "flagged": earlier.detail["flagged"]}
+    assert sent == [(WEDNESDAY, tasks.COVERAGE_CHECK, Severity.WARNING)]
+
+
 def test_a_recheck_that_cannot_run_leaves_the_day_s_error_standing(
     sent: list[tuple[date, str, str]], monkeypatch: pytest.MonkeyPatch
 ) -> None:
