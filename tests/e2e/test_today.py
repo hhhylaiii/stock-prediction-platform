@@ -16,10 +16,12 @@ from tests.e2e.conftest import (
     EXTRA_STOCKS,
     PROB_HEAD,
     PROB_TIP,
+    RELEASE_REASON,
     TPEX_EXTRAS,
     XSS_NAME,
     Seed,
     at,
+    released_on,
 )
 
 pytestmark = pytest.mark.e2e
@@ -52,7 +54,33 @@ def test_today_lists_the_ranking_with_prices_and_bands(
     expect(page.locator("#today-meta")).to_contain_text("涵蓋 25 檔")
     expect(page.locator("#today-meta")).to_contain_text("LightGBM 2026-10")
     expect(page.locator("#status")).not_to_contain_text("預測尚未產出")
+    expect(page.locator("#today-meta")).not_to_contain_text("放行")
     assert page.evaluate("window.__xss") is None
+
+
+def test_today_names_the_models_that_went_live_on_a_released_holdout(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    ModelRun.objects.filter(pk="rank-h20").update(params=released_on("未達標"))
+    ModelRun.objects.filter(pk__in=["quantile-h20", "vol-h20", "prob-h20"]).update(
+        params=released_on("明顯退化")
+    )
+
+    page.goto(live_server.url)
+
+    meta = page.locator("#today-meta")
+    expect(meta).to_contain_text(
+        "排名 20 日模型的 holdout 判定未達標，經使用者放行上線；"
+        "報酬區間 20 日、波動率 20 日、跑贏大盤機率 20 日模型的 holdout 判定明顯退化，"
+        "經使用者放行上線。原因見模型頁。"
+    )
+    expect(meta).not_to_contain_text(RELEASE_REASON)
+
+    page.get_by_role("button", name="5 日").click()
+
+    expect(page.locator("#rows .trow").nth(0)).to_contain_text("9999")
+    expect(meta).to_contain_text("涵蓋 25 檔")
+    expect(meta).not_to_contain_text("放行")
 
 
 def test_today_says_what_the_probability_and_the_band_mean(
