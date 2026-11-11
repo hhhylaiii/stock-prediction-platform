@@ -15,7 +15,6 @@ from django.db import transaction
 from django.utils import timezone
 
 from apps.etl.adapters.base import BaseAdapter
-from apps.etl.adapters.corporate_actions import exchanges_lead_from
 from apps.etl.adapters.finmind_datasets import (
     chip_rows,
     dividend_events,
@@ -31,6 +30,7 @@ from apps.etl.dividend_dates import (
     Session,
     announcement_session,
     compare_announce_dates,
+    exchanges_lead_from,
     fill_announce_dates,
     moves,
 )

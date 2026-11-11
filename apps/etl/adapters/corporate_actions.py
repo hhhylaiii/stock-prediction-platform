@@ -12,6 +12,7 @@ from django.conf import settings
 from django.db import transaction
 
 from apps.etl.adapters.finmind_datasets import DIVIDEND_PLACES, EVENT_COLUMNS
+from apps.etl.dividend_dates import exchanges_lead_from
 from apps.etl.errors import SchemaChangedError
 from apps.etl.models import DataQualityLog
 from apps.market.adjust import refresh_adj_factor
@@ -91,15 +92,11 @@ def events_from(frame: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(events, columns=EVENT_COLUMNS, dtype=object)
 
 
-def exchanges_lead_from() -> date:
-    """The first ex-date the exchanges' own tables settle; FinMind's backfill ends before it."""
-    return date.fromisoformat(str(settings.DIVIDEND_EXCHANGE_PRIMARY_FROM))
-
-
 def write_events(frame: pd.DataFrame, source: str, day: date) -> int:
     """New events and blank factors are written; stored figures that differ are logged.
 
-    From the day the exchanges lead, the results table also replaces what differs.
+    From the day the exchanges lead, the results table also replaces what differs, unless
+    DIVIDEND_RESULTS_SETTLE is off.
     """
     records = [_record(raw) for raw in frame.to_dict("records")]
     listed = set(
@@ -109,6 +106,7 @@ def write_events(frame: pd.DataFrame, source: str, day: date) -> int:
     )
     records = [record for record in records if record["stock_id"] in listed]
     stored = _stored(records)
+    settling = bool(settings.DIVIDEND_RESULTS_SETTLE)
     leads_from = exchanges_lead_from()
     new: list[DividendEvent] = []
     changed: list[DividendEvent] = []
@@ -119,7 +117,7 @@ def write_events(frame: pd.DataFrame, source: str, day: date) -> int:
             new.append(DividendEvent(**record))
             continue
         fields = _differences(row, record)
-        settles = bool(fields) and row.ex_date >= leads_from
+        settles = settling and bool(fields) and row.ex_date >= leads_from
         blank = row.adj_factor is None and record["adj_factor"] is not None
         if settles:
             row.cash_dividend, row.stock_dividend = (record[name] for name in AMOUNTS)

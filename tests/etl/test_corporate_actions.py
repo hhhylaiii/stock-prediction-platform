@@ -292,3 +292,26 @@ def test_the_first_day_the_exchanges_lead_is_a_setting(
     write_events(frame, "twse", date(2026, 11, 2))
 
     assert DividendEvent.objects.get(stock_id="2330").cash_dividend == Decimal(cash)
+
+
+@pytest.mark.django_db
+def test_with_settling_switched_off_the_results_table_only_logs_as_before(settings: Any) -> None:
+    settings.DIVIDEND_RESULTS_SETTLE = False
+    _stored_from_a_notice()
+    frame = _events(
+        Action("6655", LED, Decimal("2.65"), Decimal("0"), 0.97, "ex_rights"),
+        Action("2330", LED, Decimal("70.5"), Decimal("0"), 0.98, "ex_rights"),
+    )
+
+    assert write_events(frame, "twse", date(2026, 11, 2)) == 1
+
+    kept = {row.stock_id: row for row in DividendEvent.objects.all()}
+    assert kept["6655"].cash_dividend == Decimal("2.6")
+    assert kept["6655"].adj_factor == pytest.approx(0.97)
+    assert kept["2330"].cash_dividend == Decimal("70")
+    assert kept["2330"].adj_factor == pytest.approx(0.99)
+    events = DataQualityLog.objects.get(check_name=MISMATCH_CHECK).detail["events"]
+    assert [(event["stock_id"], "overwritten" in event) for event in events] == [
+        ("2330", False),
+        ("6655", False),
+    ]

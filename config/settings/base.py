@@ -103,6 +103,7 @@ try:
     date.fromisoformat(DIVIDEND_EXCHANGE_PRIMARY_FROM)
 except ValueError:
     raise ImproperlyConfigured("DIVIDEND_EXCHANGE_PRIMARY_FROM must be a YYYY-MM-DD date") from None
+DIVIDEND_RESULTS_SETTLE = env.bool("DIVIDEND_RESULTS_SETTLE", default=True)
 
 
 ETL_AT = {

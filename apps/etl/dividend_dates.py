@@ -51,9 +51,19 @@ def compare_announce_dates(stock_id: str, announced: Mapping[date, date | None])
     ]
 
 
+def exchanges_lead_from() -> date:
+    """The first ex-date the exchanges' own tables settle; FinMind's backfill ends before it."""
+    return date.fromisoformat(str(settings.DIVIDEND_EXCHANGE_PRIMARY_FROM))
+
+
 def moves(found: Redated, earlier: bool) -> bool:
-    """A blank date is filled; with earlier, a later one moves back. None ever moves forward."""
-    return found.stored is None or (earlier and found.announced < found.stored)
+    """A blank date is filled; with earlier, a first sight moves back. None ever moves forward.
+
+    Only events the exchanges lead hold a first sight; dates of the FinMind years never move.
+    """
+    if found.stored is None:
+        return True
+    return earlier and found.ex_date >= exchanges_lead_from() and found.announced < found.stored
 
 
 def fill_announce_dates(
