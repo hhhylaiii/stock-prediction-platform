@@ -118,6 +118,18 @@ def _unlabelled(scope: str, folds: list[Fold]) -> list[str]:
     ]
 
 
+def _unbuilt(scope: str, last: date, calendar: TradingDays) -> list[str]:
+    """Horizons whose last label settled by last is not in label_daily yet."""
+    days = {horizon: calendar.shift(last, -horizon) for horizon in lgbm_runs.SCOPE_HORIZONS[scope]}
+    return [
+        f"{horizon} days on {day}"
+        for horizon, day in days.items()
+        if not LabelDaily.objects.filter(
+            date=day, horizon=horizon, fwd_ret_open__isnull=False
+        ).exists()
+    ]
+
+
 def _check_claim(scope: str, run_key: str, last: date, calendar: TradingDays) -> None:
     """Refuse a claim the holdout could not finish: no data, no folds, no labels, a used key."""
     price = latest_price_date()
@@ -129,6 +141,12 @@ def _check_claim(scope: str, run_key: str, last: date, calendar: TradingDays) ->
     missing = _unlabelled(scope, folds)
     if missing:
         raise HoldoutError(f"no settled label yet for {', '.join(missing)}; claim once it is built")
+    unbuilt = _unbuilt(scope, last, calendar)
+    if unbuilt:
+        raise HoldoutError(
+            f"label_daily is not built through {last}: no settled label at "
+            f"{', '.join(unbuilt)}; run build_labels first"
+        )
     cached = Path(settings.RESEARCH_CACHE_DIR) / run_key
     if ModelRun.objects.filter(run_key=run_key).exists() or cached.exists():
         raise HoldoutError(f"{run_key} already holds runs or caches; the holdout needs a new key")

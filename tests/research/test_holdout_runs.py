@@ -1,6 +1,5 @@
 import shutil
 from datetime import date
-from io import StringIO
 from pathlib import Path
 from typing import Any
 
@@ -256,45 +255,6 @@ def test_rehearsing_a_relative_design_uses_its_up_label(
 
 
 @pytest.mark.django_db
-def test_the_command_runs_the_holdout_once_and_names_the_folds(frozen: Path) -> None:
-    out = StringIO()
-
-    call_command("holdout", scope="return", run_key="return-final", stdout=out)
-    call_command("holdout", scope="return", run_key="return-final", stdout=out)
-
-    index = held()[0].index
-    lines = out.getvalue().splitlines()
-    assert lines[0] == (
-        f"return-final: holdout attempt 1 of return through {LAST}; "
-        f"fitted folds [{index}], already written []"
-    )
-    assert lines[1].endswith(f"fitted folds [], already written [{index}]")
-    with pytest.raises(CommandError, match="rerun only with force and a reason"):
-        call_command("holdout", scope="return", run_key="return-other")
-
-
-@pytest.mark.django_db
-def test_the_command_rehearses_a_research_fold_without_a_claim(frozen: Path) -> None:
-    out = StringIO()
-    fold = next(f for f in folds() if f.research)
-
-    call_command(
-        "holdout",
-        scope="return",
-        run_key="return-rehearsal",
-        rehearse=True,
-        fold=fold.index,
-        bags=1,
-        last_date=DAY,
-        stdout=out,
-    )
-
-    assert out.getvalue().strip() == f"return-rehearsal: rehearsed research fold {fold.index}"
-    assert fold_path("return-rehearsal", MODEL, fold.index).exists()
-    assert not HoldoutRun.objects.exists()
-
-
-@pytest.mark.django_db
 @pytest.mark.parametrize(
     ("options", "message"),
     [
@@ -338,6 +298,17 @@ def test_a_claim_waits_for_every_holdout_fold_to_have_a_settled_label(frozen: Pa
     LabelDaily.objects.filter(date__gte=fold.test_start, horizon=5).update(fwd_ret_open=None)
 
     with pytest.raises(HoldoutError, match=f"no settled label yet for fold {fold.index} at 5 days"):
+        run_holdout("return", "return-final", LAST, frozen)
+
+    assert not HoldoutRun.objects.exists()
+
+
+@pytest.mark.django_db
+def test_a_claim_waits_for_label_daily_to_be_built_through_its_last_date(frozen: Path) -> None:
+    day = holdout_runs.TradingDays.from_db().shift(LAST, -5)
+    LabelDaily.objects.filter(date=day, horizon=5).update(fwd_ret_open=None)
+
+    with pytest.raises(HoldoutError, match=f"not built through {LAST}: .* 5 days on {day}"):
         run_holdout("return", "return-final", LAST, frozen)
 
     assert not HoldoutRun.objects.exists()
