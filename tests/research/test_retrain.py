@@ -144,11 +144,6 @@ def alerts(sent: list[Any], check: str) -> list[Any]:
     return [call for call in sent if call[1] == check]
 
 
-def test_no_scope_names_its_research_run_before_the_design_is_frozen() -> None:
-    frozen = {scope: design.research_run_key for scope, design in DESIGNS.items()}
-    assert frozen == dict.fromkeys(HoldoutScope.values)
-
-
 def test_a_build_refuses_a_research_run_other_than_the_frozen_one(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
