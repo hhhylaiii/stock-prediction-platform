@@ -109,8 +109,9 @@ def test_the_header_ranks_the_stock_and_the_table_lists_both_horizons(
     expect(pair).to_contain_text("30.0%")
     expect(pair).to_contain_text("過去 60 日實際為 25.0%")
     expect(pair).to_contain_text("LightGBM 2026-10")
-    expect(page.locator("#forecasts .sub")).to_contain_text(
-        f"以 {explained.last_session.isoformat()} 收盤 1,138 換算"
+    expect(page.locator("#forecasts .sub")).to_have_text(
+        "排名、報酬與區間機率各由自己的模型產出；排名模型多用了幾個籌碼與除息日特徵，其餘特徵相同。"
+        f"價格以 {explained.last_session.isoformat()} 收盤 1,138 換算。"
     )
     head = page.locator("#forecasts .thead .prob-head")
     expect(head).to_have_text(PROB_HEAD)
