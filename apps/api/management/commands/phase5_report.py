@@ -124,7 +124,7 @@ def table_checks(client: Client, day: str | None) -> list[Check]:
         long.check("20 日排名", ranked, f"；{long.head}"),
         long.check("20 日預測價格", priced),
         long.check("20 日價格區間", banded, f"；來源 {source_text}"),
-        long.check("20 日上漲機率", likely),
+        long.check("20 日跑贏大盤機率", likely),
         short.check(
             "5 日排名、預測價格與區間",
             lambda row: ranked(row) and priced(row) and banded(row),

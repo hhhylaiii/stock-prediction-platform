@@ -61,7 +61,7 @@ h2{margin:0;font-size:15px;font-weight:500}
 .trow{height:52px;border-bottom:1px solid var(--line-soft);color:var(--ink);text-decoration:none}
 .trow.short{height:44px}
 a.trow:hover{background:var(--hover);color:var(--ink)}
-.rank-cols{grid-template-columns:48px minmax(150px,1fr) 56px 92px 112px 92px 170px 140px 124px 72px}
+.rank-cols{grid-template-columns:48px minmax(150px,1fr) 56px 92px 112px 92px 170px 140px 140px 72px}
 .stockcell{display:flex;align-items:baseline;gap:10px;min-width:0}
 .stockcell .name{font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .range{position:relative;height:20px}
