@@ -176,7 +176,7 @@ class Command(BaseCommand):
         held = holdout_folds(scope, ticket.last_date, TradingDays.from_db())
         header = Header(scope, run_key, key, ticket.attempt, ticket.last_date, rehearsal=False)
         text, verdict = self._report(header, held, bounds)
-        mark_reported(run_key, marked_report(scope, verdict.status, output, text))
+        mark_reported(run_key, marked_report(verdict, output, text))
         self._write(output, text)
 
     def handle(self, *args: Any, **options: Any) -> None:

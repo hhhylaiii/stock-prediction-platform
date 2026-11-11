@@ -13,14 +13,21 @@ from datetime import date
 from pathlib import Path
 
 import pandas as pd
-from django.conf import settings
 
 from apps.market.calendar import TradingDays
 from apps.research import baseline_runs, lgbm_runs, rank_eval, target_eval
 from apps.research.eval_report import write_rank_metrics
 from apps.research.evaluation import RankReport, rank_report, tradable_rows
 from apps.research.gates import COVERAGE as COVERAGE_GATE
-from apps.research.holdout import HoldoutError, require_key
+from apps.research.holdout import (
+    DEGRADED,
+    FAILED,
+    PASSED,
+    HoldoutError,
+    Reported,
+    report_marker,
+    reported,
+)
 from apps.research.labels import HORIZONS
 from apps.research.metrics.forecast import mean_by_fold
 from apps.research.models import HoldoutScope, ModelRun
@@ -46,7 +53,6 @@ SPEC_LINES: dict[str, tuple[int, str]] = {
     "acceptance": (392, "| Phase 4 主模型"),
 }
 GATE_SHARE = rank_eval.GATE_SHARE
-PASSED, FAILED, DEGRADED = "達標", "未達標", "明顯退化"
 HIGHER, LOWER, INSIDE = "higher", "lower", "inside"
 IC_FLAG = "排名 {horizon} 日 IC"
 MAE_FLAG = "MAE 差（模型減零預測）"
@@ -403,31 +409,13 @@ def interval_verdict(
     )
 
 
-def _report_marker(run_key: str) -> Path:
-    return Path(settings.RESEARCH_CACHE_DIR) / require_key(run_key) / "holdout.report"
-
-
-@dataclass(frozen=True)
-class Reported:
-    scope: str
-    status: str
-    path: str
-    sha256: str
-    text: str
-
-
-def marked_report(scope: str, status: str, output: str, text: str) -> Reported:
-    """A holdout's one report as its marker keeps it: verdict, absolute path, digest and text."""
+def marked_report(verdict: ScopeVerdict, output: str, text: str) -> Reported:
+    """A holdout's one report as its marker keeps it: verdict, what fell short, path and text."""
     path = str(Path(output).resolve())
-    return Reported(scope, status, path, hashlib.sha256(text.encode("utf-8")).hexdigest(), text)
-
-
-def reported(run_key: str) -> Reported | None:
-    """The one report and verdict a holdout was marked with, or None before it."""
-    marker = _report_marker(run_key)
-    if not marker.exists():
-        return None
-    return Reported(**json.loads(marker.read_text(encoding="utf-8")))
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    failed = [gate.name for gate in verdict.gates if not gate.passed]
+    flagged = [raised.name for raised in verdict.flags if raised.flagged]
+    return Reported(verdict.scope, verdict.status, path, digest, text, failed, flagged)
 
 
 def unwritten_report(run_key: str, output: str) -> Reported | None:
@@ -460,7 +448,7 @@ def write_once(output: str, text: str) -> None:
 
 def mark_reported(run_key: str, marked: Reported) -> None:
     """Record a holdout's one report and verdict before the report file is written."""
-    _link_whole(_report_marker(run_key), json.dumps(asdict(marked), ensure_ascii=False))
+    _link_whole(report_marker(run_key), json.dumps(asdict(marked), ensure_ascii=False))
 
 
 def bags_of(run_key: str) -> list[int]:
@@ -550,12 +538,16 @@ def _shortest(days: pd.DataFrame) -> str:
     )
 
 
+RELEASE_NOTE = "上線與否由使用者決定，同意後才用 `release_holdout` 記下原因放行。"
 HANDLING = {
     PASSED: "門檻 (3) 全部達標、沒有明顯退化旗標：可以進上線流程。",
-    FAILED: f"有門檻未達標：這個目標不上線，報協調；照 {cite('record')} 只記錄、不改設計重跑。",
+    FAILED: (
+        "有門檻未達標：這個目標預設不上線，報協調；`build_run` 會拒建，"
+        f"{RELEASE_NOTE}照 {cite('record')} 只記錄、不改設計重跑。"
+    ),
     DEGRADED: (
-        "門檻 (3) 全部達標，但有明顯退化旗標：停下，上線與否由使用者決定；"
-        f"照 {cite('record')} 只記錄、不改設計重跑。"
+        "門檻 (3) 全部達標，但有明顯退化旗標：停下，預設不上線；`build_run` 會拒建，"
+        f"{RELEASE_NOTE}照 {cite('record')} 只記錄、不改設計重跑。"
     ),
 }
 REHEARSAL_NOTE = "演練跑在研究摺上，只驗證程式路徑與資料形狀，數字不作任何判定。"

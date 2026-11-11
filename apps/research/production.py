@@ -8,6 +8,8 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
+from apps.etl.alerts import dispatch
+from apps.etl.models import DataQualityLog
 from apps.market.calendar import TradingDays
 from apps.research import baseline_runs
 from apps.research.baseline_runs import check_run_key
@@ -18,6 +20,7 @@ from apps.research.holdout import (
     is_holdout,
     latest_ticket,
     production_pass,
+    released_verdict,
 )
 from apps.research.lgbm_runs import (
     MODEL,
@@ -134,6 +137,9 @@ def design_for(scope: str, name: str = FROZEN) -> Design:
 
 BAGS = 5
 HOLDOUT_MODELS = (baseline_runs.BASELINE, MODEL)
+HOLDOUT_RELEASE = "holdout_release"
+RELEASE_CHECK = "model_holdout_release"
+ALERTED = ("status", "failed", "flagged", "released_at")
 SHADOW = "shadow"
 GATES = "gates"
 BASELINED = (HoldoutScope.RETURN, HoldoutScope.INTERVAL)
@@ -315,6 +321,20 @@ def _run_ids(key: str) -> list[str]:
     )
 
 
+def _alert_release(
+    scope: str, run_key: str, as_of: date, holdout: str, release: dict[str, Any]
+) -> None:
+    """Warn that a production run was built on a released verdict; the reason stays in params."""
+    shown = {name: release[name] for name in ALERTED}
+    row = DataQualityLog.objects.create(
+        date=as_of,
+        check_name=RELEASE_CHECK,
+        severity=DataQualityLog.Severity.WARNING,
+        detail={"scope": scope, "run_key": run_key, "holdout": holdout, **shown},
+    )
+    dispatch([row])
+
+
 def build_run(
     scope: str, run_key: str, research_run_key: str, as_of: date, directory: Path, seed: int = 0
 ) -> Built:
@@ -332,6 +352,8 @@ def build_run(
     research = [fold for fold in generate_folds(calendar, as_of, design.config) if fold.research]
     features = design_features(scope, design.variant, design.target)
     check_holdout_design(scope, granted, design, features, calendar)
+    release = released_verdict(granted)
+    released = {} if release is None else {HOLDOUT_RELEASE: release}
     _check_research(scope, research_run_key, design, features)
     references = _references(scope, research_run_key, research, design.target.relative_up)
     shared = {
@@ -341,7 +363,7 @@ def build_run(
     }
     roles = {
         "shadow": {**shared, "role": SHADOW, "shadow_of": run_key},
-        "model": {**shared, "role": "model", "shadow_run_key": shadow_key(run_key)},
+        "model": {**shared, **released, "role": "model", "shadow_run_key": shadow_key(run_key)},
     }
     notes = {
         role: {"research_run_key": research_run_key, PRODUCTION: note}
@@ -383,4 +405,6 @@ def build_run(
         granted,
         _annotation(notes["model"], references),
     )
+    if release is not None:
+        _alert_release(scope, run_key, as_of, granted.frozen_by, release)
     return Built(model, shadow, references)
