@@ -318,7 +318,7 @@ def test_a_failed_rebuild_lets_the_morning_predict(
 
     tasks.morning.apply().get()
 
-    assert steps(ran) == ["features", "predict", "monitor"]
+    assert steps(ran) == ["features", "coverage", "predict", "monitor"]
     assert marker(DAY, tasks.MORNING_CHECK).severity == Severity.INFO
 
 
@@ -342,7 +342,7 @@ def test_an_open_note_adds_a_last_rebuild_to_the_morning(
 
     tasks.morning.apply().get()
 
-    assert steps(ran) == ["features", "predict", "monitor", "rebuild"]
+    assert steps(ran) == ["features", "coverage", "predict", "monitor", "rebuild"]
 
 
 def test_a_morning_that_makes_up_a_missed_evening_recomputes_its_sixty_sessions(
@@ -355,7 +355,7 @@ def test_a_morning_that_makes_up_a_missed_evening_recomputes_its_sixty_sessions(
 
     tasks.morning.apply().get()
 
-    made_up = ["labels", "features", "predict", "monitor", "recent_features"]
+    made_up = ["labels", "features", "coverage", "predict", "monitor", "recent_features"]
     assert steps(ran) == [*made_up, "rebuild_covered"]
 
 

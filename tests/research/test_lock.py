@@ -4,6 +4,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import date, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 from django.core.management import call_command
@@ -14,6 +15,7 @@ from django.test.utils import CaptureQueriesContext
 from apps.market.calendar import TradingDays
 from apps.market.models import TradingCalendar
 from apps.research import lock
+from apps.research.feature_coverage import run_coverage
 from apps.research.lock import LOCK_ID, ResearchBusyError, locked, research_lock
 from apps.research.monitor import run_monitor
 from apps.research.predict import predict
@@ -186,7 +188,7 @@ def test_the_holder_label_is_restored_once_the_lock_is_released() -> None:
 
 
 @pytest.mark.django_db
-def test_predict_monitor_promote_and_restore_refuse_while_another_job_holds_the_lock(
+def test_the_locked_jobs_refuse_while_another_job_holds_the_lock(
     calendar_rows: None, tmp_path: Path
 ) -> None:
     calendar = TradingDays.from_db()
@@ -196,6 +198,7 @@ def test_predict_monitor_promote_and_restore_refuse_while_another_job_holds_the_
             lambda: run_monitor(DAY, calendar),
             lambda: promote("prod.rank", DAY, tmp_path),
             lambda: restore("r1", DAY, "back"),
+            lambda: run_coverage(DAY, calendar, tmp_path),
         ):
             with pytest.raises(ResearchBusyError, match="features 2026-10-28"):
                 call()
@@ -209,10 +212,11 @@ def test_predict_monitor_promote_and_restore_refuse_while_another_job_holds_the_
         ("monitor", {"date": "2026-10-28"}),
         ("promote", {"run_key": "prod.rank", "date": "2026-10-28"}),
         ("restore_run", {"run_id": "r1", "date": "2026-10-28", "reason": "back"}),
+        ("feature_coverage", {"date": DAY}),
     ],
 )
 def test_the_commands_report_who_holds_the_lock(
-    calendar_rows: None, command: str, options: dict[str, str]
+    calendar_rows: None, command: str, options: dict[str, Any]
 ) -> None:
     with held_elsewhere("monitor 2026-10-27"), pytest.raises(CommandError) as caught:
         call_command(command, **options)

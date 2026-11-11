@@ -400,7 +400,7 @@ def test_a_morning_among_the_first_sessions_of_its_month_queues_its_retrain(
 
     tasks.morning.apply().get()
 
-    assert steps(ran) == ["features", "predict", "monitor"]
+    assert steps(ran) == ["features", "coverage", "predict", "monitor"]
     assert queued == [session.isoformat()]
     assert not DataQualityLog.objects.filter(check_name=tasks.RETRAIN_CHECK).exists()
 
@@ -484,7 +484,7 @@ def test_last_month_s_retrain_neither_stops_this_month_s_nor_adds_a_promote_step
 
     tasks.morning.apply().get()
 
-    assert steps(ran) == ["features", "predict", "monitor"]
+    assert steps(ran) == ["features", "coverage", "predict", "monitor"]
     assert queued == [FIRST.isoformat()]
 
 
@@ -522,7 +522,7 @@ def test_the_morning_after_a_retrain_promotes_its_untried_builds_under_the_lock(
     tasks.morning.apply().get()
 
     assert ran[-1] == ("promote", day, True)
-    assert steps(ran) == ["features", "predict", "monitor", "promote"]
+    assert steps(ran) == ["features", "coverage", "predict", "monitor", "promote"]
 
 
 def test_no_promote_step_once_every_build_was_tried(
@@ -537,7 +537,7 @@ def test_no_promote_step_once_every_build_was_tried(
 
     tasks.morning.apply().get()
 
-    assert steps(ran) == ["features", "predict", "monitor"]
+    assert steps(ran) == ["features", "coverage", "predict", "monitor"]
 
 
 def test_the_promote_step_swaps_each_untried_build_from_today_or_its_later_first_day(

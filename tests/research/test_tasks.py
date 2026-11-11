@@ -14,10 +14,12 @@ from django.db import connection
 from django.test import override_settings
 
 from apps.etl.models import DataQualityLog
+from apps.etl.quality import CHECKS as QUALITY_CHECKS
 from apps.etl.tasks import US_CLOSE_CHECK
 from apps.market.calendar import TradingDays
 from apps.market.models import TradingCalendar
 from apps.research import tasks
+from apps.research.feature_coverage import CoverageError
 from apps.research.lock import LOCK_ID, ResearchBusyError
 from apps.research.monitor import MonitorResult
 from apps.research.predict import Predicted, Slot
@@ -361,12 +363,13 @@ def test_the_morning_chain_rebuilds_features_then_predicts_then_monitors(
 
     assert ran == [
         ("features", WEDNESDAY, True),
+        ("coverage", WEDNESDAY, True),
         ("predict", WEDNESDAY, True),
         ("monitor", WEDNESDAY, True),
     ]
     done = marker(WEDNESDAY, tasks.MORNING_CHECK)
     assert done.severity == Severity.INFO
-    assert done.detail["steps"] == [ok("features"), ok("predict"), ok("monitor")]
+    assert done.detail["steps"] == [ok("features"), ok("coverage"), ok("predict"), ok("monitor")]
     assert sent == []
 
 
@@ -379,7 +382,7 @@ def test_the_morning_makes_up_the_evening_around_its_own_steps(
 
     tasks.morning.apply().get()
 
-    assert steps(ran) == ["labels", "features", "predict", "monitor", "recent_features"]
+    assert steps(ran) == ["labels", "features", "coverage", "predict", "monitor", "recent_features"]
 
 
 def test_the_morning_after_friday_runs_on_saturday_and_not_again_until_tuesday(
@@ -392,7 +395,7 @@ def test_the_morning_after_friday_runs_on_saturday_and_not_again_until_tuesday(
         tasks.morning.apply().get()
 
     assert {day for _, day, _ in ran} == {FRIDAY}
-    assert steps(ran) == ["features", "predict", "monitor"]
+    assert steps(ran) == ["features", "coverage", "predict", "monitor"]
 
 
 def test_a_failed_morning_is_redone_the_next_morning_of_the_same_session(
@@ -405,7 +408,7 @@ def test_a_failed_morning_is_redone_the_next_morning_of_the_same_session(
 
     tasks.morning.apply().get()
 
-    assert steps(ran) == ["features", "predict", "monitor"]
+    assert steps(ran) == ["features", "coverage", "predict", "monitor"]
     assert marker(FRIDAY, tasks.MORNING_CHECK).severity == Severity.INFO
 
 
@@ -420,7 +423,7 @@ def test_the_morning_waits_for_the_us_close_and_then_runs_without_it_with_a_warn
 
     tasks.morning.apply().get()
 
-    assert steps(ran) == ["features", "predict", "monitor"]
+    assert steps(ran) == ["features", "coverage", "predict", "monitor"]
     done = marker(WEDNESDAY, tasks.MORNING_CHECK)
     assert done.severity == Severity.WARNING
     assert done.detail["us_close"] == tasks.US_CLOSE_MISSING
@@ -488,13 +491,13 @@ def test_a_failed_step_stops_the_chain_and_records_what_was_done(
 
     tasks.morning.apply()
 
-    assert steps(ran) == ["features"]
+    assert steps(ran) == ["features", "coverage"]
     done = marker(WEDNESDAY, tasks.MORNING_CHECK)
     assert done.severity == Severity.WARNING
     assert done.detail == {
         "failed": "predict",
         "error": "RuntimeError: no serving run for rank 20",
-        "steps": [ok("features")],
+        "steps": [ok("features"), ok("coverage")],
     }
     assert sent == [(WEDNESDAY, tasks.MORNING_CHECK, Severity.WARNING)]
     assert not holds_lock()
@@ -529,7 +532,7 @@ def test_a_step_that_finds_the_lock_busy_retries_until_it_is_free(
 
     tasks.morning.apply().get()
 
-    assert steps(ran) == ["features", "predict", "monitor"]
+    assert steps(ran) == ["features", "coverage", "predict", "monitor"]
     assert marker(WEDNESDAY, tasks.MORNING_CHECK).severity == Severity.INFO
 
 
@@ -546,9 +549,9 @@ def test_a_later_step_that_waits_for_the_lock_keeps_the_steps_done_before_it(
 
     tasks.morning.apply().get()
 
-    assert steps(ran) == ["features", "predict", "monitor"]
+    assert steps(ran) == ["features", "coverage", "predict", "monitor"]
     done = marker(WEDNESDAY, tasks.MORNING_CHECK)
-    assert done.detail["steps"] == [ok("features"), ok("predict"), ok("monitor")]
+    assert done.detail["steps"] == [ok("features"), ok("coverage"), ok("predict"), ok("monitor")]
 
 
 def test_a_step_that_never_gets_the_lock_fails_the_chain(
@@ -628,19 +631,127 @@ def test_the_real_steps_run_the_research_commands_and_functions(
         called.append(("monitor", (day, calendar.is_trading_day(day))))
         return MonitorResult(scored=4, logs=(), degraded=("r2",))
 
+    def covered(day: date, calendar: TradingDays, directory: Path) -> DataQualityLog:
+        called.append(("coverage", (day, calendar.is_trading_day(day), directory)))
+        return coverage(day, Severity.WARNING, collapsed=False)
+
     monkeypatch.setattr(tasks, "call_command", command)
     monkeypatch.setattr(tasks, "predict", predicted)
     monkeypatch.setattr(tasks, "run_monitor", monitored)
+    monkeypatch.setattr(tasks, "run_coverage", covered)
 
     assert tasks.STEPS["features"](WEDNESDAY) == "build_features: 7 rows"
     assert tasks.STEPS["recent_features"](WEDNESDAY) == "build_features: 7 rows"
     assert tasks.STEPS["labels"](WEDNESDAY) == "build_labels: 7 rows"
+    assert tasks.STEPS["coverage"](WEDNESDAY) == "1 of 1 features judged, flagged tech_ret_5d"
     assert tasks.STEPS["predict"](WEDNESDAY) == "r1: 3 rows; no serving run for quantile 20 日"
     assert tasks.STEPS["monitor"](WEDNESDAY) == "4 model_monitor rows, degraded r2"
     assert called == [
         ("build_features", {"date": WEDNESDAY}),
         ("build_features", {"end": WEDNESDAY, "recent": 60}),
         ("build_labels", {"end": WEDNESDAY, "recent": 81}),
+        ("coverage", (WEDNESDAY, True, settings.FEATURE_PARQUET_DIR)),
         ("predict", (WEDNESDAY, settings.FEATURE_PARQUET_DIR)),
         ("monitor", (WEDNESDAY, True)),
     ]
+
+
+def coverage(day: date, severity: str, collapsed: bool) -> DataQualityLog:
+    """A stored coverage row flagging one feature, as run_coverage leaves it."""
+    entry = {"feature": "tech_ret_5d", "collapsed": collapsed}
+    detail = {"features": 1, "judged": 1, "flagged": [entry]}
+    return DataQualityLog.objects.create(
+        date=day, check_name=tasks.COVERAGE_CHECK, severity=severity, detail=detail
+    )
+
+
+@pytest.mark.parametrize(
+    ("error", "shown"),
+    [
+        (RuntimeError("cannot read /srv/features/year=2023"), "RuntimeError"),
+        (
+            CoverageError("the feature partition of 2023 is missing"),
+            "the feature partition of 2023 is missing",
+        ),
+    ],
+)
+def test_a_coverage_check_that_cannot_run_warns_and_the_chain_goes_on(
+    now: Callable[[date, time], None],
+    gate: list[bool],
+    ran: list[tuple[str, date, bool]],
+    sent: list[tuple[date, str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
+    shown: str,
+) -> None:
+    record(WEDNESDAY, tasks.EVENING_CHECK)
+    record(WEDNESDAY, US_CLOSE_CHECK)
+    now(WEDNESDAY + timedelta(days=1), time(6, 0))
+
+    def fails(day: date, calendar: TradingDays, directory: Path) -> DataQualityLog:
+        raise error
+
+    monkeypatch.setattr(tasks, "run_coverage", fails)
+    monkeypatch.setitem(tasks.STEPS, "coverage", tasks._coverage)
+
+    tasks.morning.apply().get()
+
+    assert steps(ran) == ["features", "predict", "monitor"]
+    failed = marker(WEDNESDAY, tasks.COVERAGE_CHECK)
+    assert (failed.severity, failed.detail) == (Severity.WARNING, {"error": shown})
+    done = marker(WEDNESDAY, tasks.MORNING_CHECK)
+    assert done.severity == Severity.INFO
+    assert done.detail["steps"][1] == {
+        "step": "coverage",
+        "result": "coverage check failed, see monitor_feature_coverage",
+    }
+    assert sent == [(WEDNESDAY, tasks.COVERAGE_CHECK, Severity.WARNING)]
+
+
+def test_a_recheck_that_cannot_run_leaves_the_day_s_error_standing(
+    sent: list[tuple[date, str, str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    coverage(WEDNESDAY, Severity.ERROR, collapsed=True)
+
+    def fails(day: date, calendar: TradingDays, directory: Path) -> DataQualityLog:
+        raise RuntimeError("cannot read /srv/features/year=2023")
+
+    monkeypatch.setattr(tasks, "run_coverage", fails)
+
+    result = tasks.STEPS["coverage"](WEDNESDAY)
+
+    assert result == "coverage check failed (RuntimeError); the day's earlier error stands"
+    assert marker(WEDNESDAY, tasks.COVERAGE_CHECK).severity == Severity.ERROR
+    assert sent == []
+
+
+@pytest.mark.parametrize(
+    ("severity", "collapsed", "stopped_by"),
+    [(Severity.ERROR, True, "PredictionGateError"), (Severity.WARNING, False, "RunError")],
+)
+def test_only_a_collapsed_feature_shuts_the_gate_the_predict_step_reads(
+    now: Callable[[date, time], None],
+    ran: list[tuple[str, date, bool]],
+    monkeypatch: pytest.MonkeyPatch,
+    severity: str,
+    collapsed: bool,
+    stopped_by: str,
+) -> None:
+    for check in (tasks.EVENING_CHECK, US_CLOSE_CHECK, *QUALITY_CHECKS):
+        record(WEDNESDAY, check)
+    now(WEDNESDAY + timedelta(days=1), time(6, 0))
+    monkeypatch.setattr("apps.etl.tasks.etl_complete", lambda day: True)
+    monkeypatch.setattr(
+        tasks, "run_coverage", lambda day, calendar, directory: coverage(day, severity, collapsed)
+    )
+    monkeypatch.setitem(tasks.STEPS, "coverage", tasks._coverage)
+    monkeypatch.setitem(tasks.STEPS, "predict", tasks._predict)
+
+    tasks.morning.apply()
+
+    assert steps(ran) == ["features"]
+    done = marker(WEDNESDAY, tasks.MORNING_CHECK)
+    assert done.detail["failed"] == "predict"
+    assert done.detail["error"].startswith(f"{stopped_by}: ")
+    assert done.detail["steps"][1]["step"] == "coverage"
+    assert marker(WEDNESDAY, tasks.COVERAGE_CHECK).severity == severity
