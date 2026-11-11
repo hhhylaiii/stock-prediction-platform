@@ -56,6 +56,7 @@ from tests.research.run_panels import (
     research,
     weekdays,
     write_holdout_markers,
+    write_holdout_report,
 )
 
 AS_OF = date(2026, 10, 30)
@@ -578,6 +579,9 @@ def test_build_run_waits_for_a_holdout_that_ran_the_frozen_design(researched: Pa
     write_holdout_markers("rank", "rank-final", models=(BASELINE,))
     refused(r"holdout rank-final has not written folds \[\d+\]")
     write_holdout_markers("rank", "rank-final")
+    with pytest.raises(HoldoutError, match="holdout rank-final has no report"):
+        build_run("rank", "rank-prod", "rank-wf1", weekdays()[-1], researched)
+    write_holdout_report("rank", "rank-final")
 
     build_run("rank", "rank-prod", "rank-wf1", weekdays()[-1], researched)
 
@@ -594,6 +598,7 @@ def test_build_run_accepts_the_holdout_the_runner_really_wrote(
     monkeypatch.setattr(holdout_runs, "latest_price_date", lambda: last)
 
     outcome = holdout_runs.run_holdout("rank", "rank-final", last, researched)
+    write_holdout_report("rank", "rank-final")
 
     built = build_run("rank", "rank-prod", "rank-wf1", last, researched)
     assert outcome.ran
