@@ -158,8 +158,7 @@ def test_monthly_revenue_mom_is_stored_but_no_batch_reads_it() -> None:
 
 
 def test_dormant_features_keep_their_place_in_the_registry_and_the_frozen_design() -> None:
-    assert sorted(DORMANT) == ["chip_big_holder_pct_chg_1w", "chip_holder_count_chg_1w"]
-    assert all(DORMANT.values())
+    assert DORMANT == ("chip_big_holder_pct_chg_1w", "chip_holder_count_chg_1w")
     assert set(DORMANT) <= set(STOCK_LEVEL)
     assert set(DORMANT) <= set(FEATURE_COLUMNS)
     assert set(DORMANT) <= set(FIRST_BATCH_COLUMNS)
