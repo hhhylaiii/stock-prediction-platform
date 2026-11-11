@@ -1,5 +1,8 @@
+import subprocess
+import sys
 from collections.abc import Callable
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, parse_qsl, urlsplit
 from zoneinfo import ZoneInfo
@@ -7,16 +10,16 @@ from zoneinfo import ZoneInfo
 import pytest
 import responses
 import time_machine
-from django.core.management import call_command
+from django.core.management import CommandError, call_command
 from django.utils import timezone
 
 from apps.etl.adapters.tpex import TpexAdapter
 from apps.etl.adapters.twse import TwseAdapter
-from apps.etl.errors import SourceNotReadyError
-from apps.etl.models import DividendNotice, RawTpex, RawTwse
+from apps.etl.errors import SchemaChangedError, SourceNotReadyError
+from apps.etl.models import DataQualityLog, DividendNotice, EtlRun, RawTpex, RawTwse
 from apps.etl.ratelimit import RateLimiter
 from apps.etl.replay import replay_range
-from apps.market.calendar import TradingDays
+from apps.market.calendar import NotATradingDayError, TradingDays
 from apps.market.models import DividendEvent, StockMaster
 
 pytestmark = pytest.mark.django_db
@@ -167,8 +170,39 @@ def test_a_span_of_days_is_refused_since_the_list_has_no_history(
 ) -> None:
     for adapter in (twse, tpex):
         with pytest.raises(ValueError, match="one day"):
+            adapter.run("dividend_notice", NOV_11, NOV_13)
+        with pytest.raises(ValueError, match="one day"):
             adapter.fetch("dividend_notice", NOV_11, NOV_13)
     assert len(responses.calls) == 0
+    assert not EtlRun.objects.exists()
+
+
+@responses.activate
+@time_machine.travel(_at(date(2026, 11, 14), "10:00:00"), tick=False)
+def test_a_day_the_market_is_closed_is_refused(twse: TwseAdapter, tpex: TpexAdapter) -> None:
+    saturday = date(2026, 11, 14)
+
+    for adapter in (twse, tpex):
+        with pytest.raises(NotATradingDayError):
+            adapter.fetch("dividend_notice", saturday, saturday)
+    assert len(responses.calls) == 0
+
+
+@responses.activate
+@time_machine.travel(_at(NOV_11, "21:30:00"), tick=False)
+def test_an_answer_that_is_not_the_list_is_refused_and_still_kept(
+    twse: TwseAdapter, tpex: TpexAdapter, load_fixture: Callable[[str], Any]
+) -> None:
+    responses.get(TWT48U, json={"stat": "查詢日期小於可查詢最小日期"})
+    odd = load_fixture(TPEX_LIST)
+    odd["stat"] = "error"
+    responses.post(PRE_POST, json=odd)
+
+    with pytest.raises(SchemaChangedError, match="TWT48U"):
+        twse.fetch("dividend_notice", NOV_11, NOV_11)
+    with pytest.raises(SchemaChangedError, match="prePost"):
+        tpex.fetch("dividend_notice", NOV_11, NOV_11)
+    assert RawTwse.objects.count() == RawTpex.objects.count() == 1
 
 
 @time_machine.travel(_at(NOV_13, "21:30:00"), tick=False)
@@ -209,3 +243,53 @@ def test_stored_lists_apply_again_in_the_order_and_session_they_were_fetched(
         ("2344", date(2026, 11, 18)): date(2026, 11, 9),
         ("6655", date(2026, 11, 24)): NOV_11,
     }
+
+
+@responses.activate
+@time_machine.travel(_at(NOV_11, "21:30:00"), tick=False)
+def test_a_preview_prints_what_the_lists_would_write_and_keeps_nothing(
+    load_fixture: Callable[[str], Any],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _listed("2344", "6655", "0051", "6488")
+    DividendEvent.objects.create(stock_id="6655", ex_date=date(2026, 11, 24), adj_factor=0.97)
+    responses.get(TWT48U, json=load_fixture(TWSE_LIST))
+    responses.post(PRE_POST, json=load_fixture(TPEX_LIST))
+    monkeypatch.setattr(TradingDays, "from_db", classmethod(lambda cls: CALENDAR))
+    alerted: list[object] = []
+    monkeypatch.setattr("apps.etl.dividend_notices.dispatch", alerted.append)
+
+    call_command("preview_dividend_notices")
+
+    out = capsys.readouterr().out
+    assert alerted == []
+    assert "twse session 2026-11-11: 49 listed, sound, 2 to create, 1 to date" in out
+    assert "  create 2344 2026-11-18 cash 2.00000000 stock 0.00000000 announced 2026-11-11" in out
+    assert "  create 0051 2026-11-20 cash 0.00000000 stock 0.00000000 announced 2026-11-11" in out
+    assert "  date 6655 2026-11-24 announced 2026-11-11" in out
+    assert "  create 6488 2026-12-29 cash 6.00000000 stock 0.00000000 announced 2026-11-11" in out
+    assert out.rstrip().endswith("nothing was written")
+    assert _announced() == {("6655", date(2026, 11, 24)): None}
+    kept = (DividendNotice, RawTwse, RawTpex, DataQualityLog, EtlRun)
+    assert [model.objects.count() for model in kept] == [0, 0, 0, 0, 0]
+
+
+@responses.activate
+@time_machine.travel(_at(NOV_11, "21:30:00"), tick=False)
+def test_a_preview_of_one_source_that_has_not_published_says_so(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    responses.get(TWT48U, json=NO_DATA)
+    monkeypatch.setattr(TradingDays, "from_db", classmethod(lambda cls: CALENDAR))
+
+    with pytest.raises(CommandError, match="SourceNotReadyError"):
+        call_command("preview_dividend_notices", "--source", "twse")
+
+
+@pytest.mark.parametrize("command", ["preview_dividend_notices", "reapply_dividend_notices"])
+def test_the_notice_commands_load_in_a_fresh_process(command: str) -> None:
+    root = Path(__file__).resolve().parents[2]
+    asked = [sys.executable, "manage.py", command, "--help"]
+    result = subprocess.run(asked, cwd=root, capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr[-400:]

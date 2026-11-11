@@ -69,6 +69,17 @@ def test_rows_of_one_stock_and_day_add_up(load_fixture: Callable[[str], Any]) ->
     assert _by_key(notices)["2344", date(2026, 11, 18)].cash_dividend == Decimal("2.5")
 
 
+@pytest.mark.parametrize("text", ["", "  ", "--", "---"])
+def test_a_blank_or_dashed_amount_reads_as_nothing_due(
+    load_fixture: Callable[[str], Any], text: str
+) -> None:
+    body = copy.deepcopy(load_fixture(TWSE))
+    row = next(row for row in body["data"] if row[1] == "2344")
+    row[7] = text
+
+    assert _by_key(twse_notices(body))["2344", date(2026, 11, 18)].cash_dividend == 0
+
+
 @pytest.mark.parametrize("text", ["另行公告", "N/A", "-1.5"])
 def test_an_amount_that_is_neither_a_figure_nor_pending_is_refused(
     load_fixture: Callable[[str], Any], text: str

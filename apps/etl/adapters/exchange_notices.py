@@ -91,11 +91,19 @@ def _notices(
 
 
 def _due(text: Any, where: str) -> Decimal:
-    """A non-negative amount; one the issuer has yet to announce counts as none for now."""
+    """A non-negative amount; blank, dashed or yet to be announced counts as none for now.
+
+    Any other wording is a table we no longer know how to read, so the whole list is refused.
+    """
     cleaned = TAGS.sub("", str(text)).strip()
     if any(mark in cleaned for mark in PENDING):
         return ZERO
-    value = parse_price(cleaned)
-    if value is None or value < 0:
-        raise SchemaChangedError(f"{where} has an unreadable amount {text!r}")
+    try:
+        value = parse_price(cleaned)
+    except SchemaChangedError:
+        raise SchemaChangedError(f"{where} has an unreadable amount {text!r}") from None
+    if value is None:
+        return ZERO
+    if value < 0:
+        raise SchemaChangedError(f"{where} has a negative amount {text!r}")
     return value

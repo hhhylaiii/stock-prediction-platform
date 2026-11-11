@@ -1,7 +1,7 @@
 """TWSE listed-market adapter using whole-market daily endpoints (SPEC §3, §8.6)."""
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from datetime import date
 from decimal import Decimal
 from typing import Any, ClassVar
@@ -11,6 +11,7 @@ import requests
 from django.conf import settings
 from django.utils import timezone
 
+from apps.etl import dividend_notices
 from apps.etl.adapters.base import BaseAdapter
 from apps.etl.adapters.corporate_actions import (
     DIVIDEND_EVENT,
@@ -77,7 +78,6 @@ from apps.etl.adapters.twse_tables import (
     taiex_rows,
 )
 from apps.etl.client import SourceClient
-from apps.etl.dividend_notices import write_notices
 from apps.etl.errors import SchemaChangedError, SourceNotReadyError
 from apps.etl.exchange_rows import TWSE_LAYOUT, OfficialDay, official_days
 from apps.etl.models import RawTwse
@@ -231,6 +231,12 @@ class TwseAdapter(BaseAdapter):
         super().__init__(calendar, limiter)
         self.client = TwseClient.build(limiter, session)
 
+    def units(self, dataset: str, start: date, end: date) -> Iterator[tuple[date, date]]:
+        """The notice list has no history, so even a run may ask for one day only."""
+        if dataset == DIVIDEND_NOTICE:
+            one_day(start, end)
+        return super().units(dataset, start, end)
+
     def fetch(
         self, dataset: str, start: date, end: date, stock_id: str | None = None
     ) -> pd.DataFrame:
@@ -277,7 +283,7 @@ class TwseAdapter(BaseAdapter):
         if dataset == DIVIDEND_EVENT:
             return write_events(frame, self.source, frame.attrs["day"])
         if dataset == DIVIDEND_NOTICE:
-            return write_notices(self.source, frame, self.calendar)
+            return dividend_notices.write_notices(self.source, frame, self.calendar)
         if dataset in EVENT_DATASETS:
             return upsert_events(frame)
         if dataset == DAILY_PRICE:
