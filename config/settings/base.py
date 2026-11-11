@@ -104,6 +104,7 @@ try:
 except ValueError:
     raise ImproperlyConfigured("DIVIDEND_EXCHANGE_PRIMARY_FROM must be a YYYY-MM-DD date") from None
 DIVIDEND_RESULTS_SETTLE = env.bool("DIVIDEND_RESULTS_SETTLE", default=True)
+DIVIDEND_NOTICE_MAX_GONE = env.int("DIVIDEND_NOTICE_MAX_GONE", default=3)
 
 
 ETL_AT = {

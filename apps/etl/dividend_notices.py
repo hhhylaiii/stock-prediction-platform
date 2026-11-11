@@ -6,6 +6,7 @@ from decimal import Decimal
 from typing import Any, NamedTuple
 
 import pandas as pd
+from django.conf import settings
 from django.db import transaction
 from django.db.models import Min
 from django.utils import timezone
@@ -26,8 +27,7 @@ from apps.market.calendar import TradingDays
 from apps.market.models import DividendEvent, StockMaster
 
 NOTICE_CHECK = DIVIDEND_NOTICE
-MAX_GONE = 3
-UNSETTLED_DAYS = timedelta(days=7)
+UNSETTLED_DAYS = timedelta(days=30)
 AMOUNTS = ("cash_dividend", "stock_dividend")
 Key = tuple[str, date]
 SOURCES: dict[str, tuple[type[RawRecord], Callable[[Mapping[str, Any]], list[Notice]]]] = {
@@ -77,7 +77,7 @@ def _read(source: str, frame: pd.DataFrame, calendar: TradingDays, quiet: bool) 
 
 
 def replay_notices(source: str, calendar: TradingDays) -> Replayed:
-    """Every stored list again, oldest fetch first; one that no longer parses is skipped."""
+    """Every stored list again, oldest fetch first and without alerts; one refused is skipped."""
     raw_model, parse = SOURCES[source]
     today = timezone.localdate()
     lists = rows = skipped = 0
@@ -90,7 +90,7 @@ def replay_notices(source: str, calendar: TradingDays) -> Replayed:
             skipped += 1
             continue
         session = session_seen(calendar, record.fetched_at)
-        rows += apply_notices(source, notices, session, today).rows
+        rows += apply_notices(source, notices, session, today, quiet=True).rows
         lists += 1
     return Replayed(lists, rows, skipped)
 
@@ -112,9 +112,9 @@ def apply_notices(
     with transaction.atomic():
         before = _fetch_before(source, session)
         gone = _gone(source, session, coming)
-        sound = bool(coming) and len(gone) <= MAX_GONE
+        sound = bool(coming) and len(gone) <= int(settings.DIVIDEND_NOTICE_MAX_GONE)
         seen = _see(source, coming, session)
-        created, dated, revised = _write(coming, seen, today)
+        created, dated, revised = _write(coming, seen, session, today)
         again = sound and before is not None and bool(before.detail.get("sound"))
         removed = _withdraw(source, gone, before.date, session) if again and before else []
         detail = {
@@ -150,6 +150,7 @@ def _gone(source: str, session: date, coming: dict[Key, Notice]) -> list[Dividen
     """Events an earlier list held that are still to come, not yet withdrawn, and not on this one.
 
     They keep counting until withdrawn, so a list cut short night after night never reads sound.
+    More than DIVIDEND_NOTICE_MAX_GONE of them make the list unsound; at 0 nothing is ever removed.
     """
     live = DividendNotice.objects.filter(
         source=source, withdrawn__isnull=True, first_seen__lt=session, ex_date__gt=session
@@ -186,11 +187,12 @@ def _see(source: str, coming: dict[Key, Notice], session: date) -> dict[Key, Div
 
 
 def _write(
-    coming: dict[Key, Notice], seen: dict[Key, DividendNotice], today: date
+    coming: dict[Key, Notice], seen: dict[Key, DividendNotice], session: date, today: date
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     """New events with their first session; blank dates filled; own unsettled amounts follow.
 
-    A withdrawn event is left alone, and no event is made for an ex-date that has already come.
+    A withdrawn event is left alone, no event is made for an ex-date that has already come,
+    and only the latest list seen sets an amount, so an older one replayed changes nothing.
     """
     listed = set(
         StockMaster.objects.filter(stock_id__in={key[0] for key in coming}).values_list(
@@ -221,7 +223,8 @@ def _write(
         if event.announce_date is None:
             event.announce_date = first[key]
             dated.append(event)
-        if sighting.created_event and event.adj_factor is None and _differs(event, notice):
+        ours = sighting.created_event and sighting.last_seen == session
+        if ours and event.adj_factor is None and _differs(event, notice):
             held = [getattr(event, name) for name in AMOUNTS]
             event.cash_dividend, event.stock_dividend = _amounts(notice)
             revised.append((event, held))
@@ -287,7 +290,7 @@ def _removed_earlier(source: str, session: date) -> list[dict[str, Any]]:
 
 
 def _unsettled(source: str, day: date) -> list[str]:
-    """Events this table made whose ex-date came in the past week without a result."""
+    """Events this table made whose ex-date came in the past 30 days without a result."""
     made = DividendNotice.objects.filter(
         source=source, created_event=True, ex_date__lte=day, ex_date__gte=day - UNSETTLED_DAYS
     ).values_list("stock_id", "ex_date")

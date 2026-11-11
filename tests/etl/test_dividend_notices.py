@@ -1,11 +1,12 @@
 from datetime import date
 from decimal import Decimal
+from typing import Any
 
 import pytest
 
 from apps.etl.adapters.corporate_actions import Action, action_frame, events_from, write_events
 from apps.etl.adapters.exchange_notices import Notice
-from apps.etl.dividend_notices import MAX_GONE, NOTICE_CHECK, apply_notices
+from apps.etl.dividend_notices import NOTICE_CHECK, apply_notices
 from apps.etl.models import DataQualityLog, DividendNotice
 from apps.market.adjust import ADJ_CHECK, refresh_adj_factor
 from apps.market.models import DailyPrice, DividendEvent, StockMaster
@@ -141,6 +142,49 @@ def test_an_older_list_read_later_only_widens_what_was_seen() -> None:
 
     sighting = DividendNotice.objects.get(stock_id="6655")
     assert (sighting.first_seen, sighting.last_seen) == (MON, WED)
+
+
+def test_a_second_read_in_the_same_session_is_not_a_second_list() -> None:
+    _listed("6655", "2344")
+    apply_notices("twse", [_cash("6655"), _cash("2344")], MON)
+    apply_notices("twse", [_cash("2344")], TUE)
+
+    assert _written("twse", [_cash("2344")], TUE) == 0
+    assert _event("6655").announce_date == MON
+
+    assert _written("twse", [_cash("2344")], WED) == 1
+
+
+def test_with_the_allowance_set_to_none_a_missing_event_only_warns(settings: Any) -> None:
+    settings.DIVIDEND_NOTICE_MAX_GONE = 0
+    _listed("6655", "2344")
+    apply_notices("twse", [_cash("6655"), _cash("2344")], MON)
+
+    for session in (TUE, WED, THU):
+        apply_notices("twse", [_cash("2344")], session)
+
+    assert _event("6655").announce_date == MON
+    assert (_log(THU).severity, _log(THU).detail["sound"]) == ("warning", False)
+
+
+def test_an_older_list_read_again_does_not_put_an_old_amount_back() -> None:
+    _listed("0051")
+    apply_notices("twse", [_cash("0051", "0")], MON)
+    apply_notices("twse", [_cash("0051", "1.2")], TUE)
+
+    assert apply_notices("twse", [_cash("0051", "0")], MON, WED).rows == 0
+
+    assert _event("0051").cash_dividend == Decimal("1.2")
+
+
+def test_only_events_this_table_made_are_called_unsettled() -> None:
+    _listed("6655", "2344")
+    DividendEvent.objects.create(stock_id="6655", ex_date=TUE, cash_dividend=Decimal("2.5"))
+    apply_notices("twse", [_cash("6655", ex_date=TUE), _cash("2344")], MON)
+
+    apply_notices("twse", [_cash("2344")], WED)
+
+    assert _log(WED).detail["unsettled"] == []
 
 
 def test_an_event_missing_once_stays() -> None:
@@ -281,7 +325,7 @@ def test_an_old_list_read_again_makes_no_event_whose_ex_date_has_come() -> None:
     assert list(DividendEvent.objects.values_list("stock_id", flat=True)) == ["2344"]
 
 
-@pytest.mark.parametrize(("lost", "sound", "left"), [(MAX_GONE, True, 7 - MAX_GONE), (4, False, 7)])
+@pytest.mark.parametrize(("lost", "sound", "left"), [(3, True, 4), (4, False, 7)])
 def test_no_more_than_three_events_may_leave_a_list_at_once(
     lost: int, sound: bool, left: int
 ) -> None:
@@ -390,13 +434,16 @@ def test_an_ex_date_arriving_before_two_lists_agree_is_reported_unsettled() -> N
 
 @pytest.mark.parametrize(
     ("session", "unsettled"),
-    [(date(2026, 11, 17), ["6655@2026-11-10"]), (date(2026, 11, 18), [])],
+    [(date(2026, 12, 10), ["6655@2026-11-10"]), (date(2026, 12, 11), [])],
 )
-def test_an_unsettled_event_is_reported_for_a_week(session: date, unsettled: list[str]) -> None:
+def test_an_unsettled_event_is_reported_for_thirty_days(
+    session: date, unsettled: list[str]
+) -> None:
+    later = _cash("2344", ex_date=date(2026, 12, 30))
     _listed("6655", "2344")
-    apply_notices("twse", [_cash("6655", ex_date=TUE), _cash("2344")], MON)
+    apply_notices("twse", [_cash("6655", ex_date=TUE), later], MON)
 
-    apply_notices("twse", [_cash("2344")], session)
+    apply_notices("twse", [later], session)
 
     assert _log(session).detail["unsettled"] == unsettled
 
