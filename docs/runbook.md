@@ -533,6 +533,15 @@ uv run python manage.py rebuild_market_history
   - 2026-10-22、10-27～10-30 這 5 個交易日，兩個市場都沒有外資持股頁。
   - `stock_master` 裡的普通股在 2010 年後每個有價的股票日都有對應的段（不在 stock_master 的 3 檔見第一條）。13 檔共 2,297 列 `daily_price`（收盤價非空的 2,014 天）早於該檔的第一段：其中 6 檔是 2026-10 下旬新上市、第一段從 11-02 起算，原因是上面那 5 天沒有頁；最多的是 6794，2020-12-25～2024-05-17 有 822 天不在外資持股頁上。
 
+## Holdout（只跑一次）
+
+2025 年起的摺是 holdout（SPEC 第 7 節 walk-forward 第 2 條），每個 scope 用凍結設計（`production.DESIGNS[scope]` 的 `research_run_key` 有值）跑一次。跑之前先問使用者。
+
+- 演練：`holdout --scope S --run-key S-rehearsal --rehearse [--fold N] --bags 1`。走同一條訓練與寫入路徑，但跑在研究摺上（預設最後一個研究摺），不 claim、不碰 holdout 摺；run_key 一律以 `<scope>-rehearsal` 開頭，正式 holdout 不收這種 key。演練寫的是一般研究快取，用完 `drop_run --run-key S-rehearsal` 清掉。
+- 正式：`holdout --scope S --run-key S-holdout-YYYYMMDD [--bags 5]`。先 `claim_holdout` 寫 `holdout_run`（last_date 是當天最新的價格日），再逐摺擬合 baseline 與 LightGBM，每摺兩個模型一起寫入一次；每個 model_run 的 `params["design"]` 記下跑的設計。
+- 中斷（重開機、記憶體不足）：用同一個 run_key 再跑一次，會沿用最新那次 claim 與它的 last_date，只補還沒寫入的摺；換 run_key 會被拒（要 `--force --reason`，那是重跑 holdout，SPEC 不允許只因結果不好而重跑）。
+- claim 之後才能 `build_run`：正式 run 只建在 holdout 跑過的設計上，`production.DESIGNS[scope]` 和 holdout run 記下的設計不同、或那次 claim 還沒有任何 run，`build_run` 都拒建。
+
 ## 模型監控與換模
 
 - `monitor --date D` 判的是 D 當天服務中的 run（D 在該 horizon 有 `prediction` 列的 run，依 API 的順序）。slot 當天沒有 `prediction` 列就不判，停機或 predict 失敗的那幾天監控會暫停；補跑時先補 `predict --date D`，再補 `monitor --date D`。
