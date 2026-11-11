@@ -14,7 +14,7 @@ from apps.etl.models import DataQualityLog
 from apps.etl.quality import CHECKS as ETL_CHECKS
 from apps.etl.quality import should_run_prediction
 from apps.market.calendar import TradingDays
-from apps.market.models import TradingCalendar
+from apps.market.models import IndexDaily, TradingCalendar
 from apps.research import monitor
 from apps.research.evaluation import band_width
 from apps.research.metrics.forecast import (
@@ -36,6 +36,7 @@ from apps.research.monitor import (
     WIDTH_CHECK,
     run_monitor,
 )
+from apps.research.relative_up import RELATIVE_LABEL
 from apps.research.runs import SCREENING_MODEL
 
 pytestmark = pytest.mark.django_db
@@ -259,6 +260,55 @@ def test_each_objective_is_scored_on_universe_rows_with_a_label() -> None:
         assert row.n_stocks == 38
     assert (regression.ic, regression.coverage, regression.brier) == (None, None, None)
     assert (rank.mae, classification.mae, volatility.coverage) == (None, None, None)
+
+
+def market(**closes: float) -> None:
+    """TAIEX_TR closes on the 20-day matured date and on DAY, by name."""
+    days = {"start": matured(20), "end": DAY}
+    IndexDaily.objects.bulk_create(
+        IndexDaily(index_id="TAIEX_TR", date=days[name], close=close)
+        for name, close in closes.items()
+    )
+
+
+def probability_runs() -> tuple[ModelRun, ModelRun, pd.DataFrame]:
+    relative = make_run("prod.up.relative", "classification", params={"label": RELATIVE_LABEL})
+    plain = make_run("prod.up.plain", "classification", params={"label": "fwd_up_5pct"})
+    twenty = seed_matured({"classification": relative}, 20, 7)
+    predict(plain, matured(20), 20, twenty[["stock_id", "in_universe", "prob_up_5pct"]])
+    return relative, plain, twenty
+
+
+def test_a_probability_run_is_scored_on_the_up_label_it_was_fit_on() -> None:
+    relative, plain, twenty = probability_runs()
+    market(start=100.0, end=103.0)
+
+    run_monitor(DAY, calendar())
+
+    kept = twenty[twenty["in_universe"] & twenty["fwd_ret_open"].notna() & ~twenty["untradable_t1"]]
+    beats = kept.assign(up=(kept["fwd_ret_open"] - 0.03 > 0.05).astype(float))
+    alone = kept.assign(up=kept["fwd_up_5pct"].astype(float))
+    assert 0 < beats["up"].sum() < alone["up"].sum()
+    scored = stored(relative, 20)
+    assert scored.n_stocks == 38
+    assert scored.brier == pytest.approx(first(daily_brier(beats, "up", "prob_up_5pct")))
+    assert scored.auc == pytest.approx(first(daily_auc(beats, "up", "prob_up_5pct")))
+    unchanged = stored(plain, 20)
+    assert unchanged.brier == pytest.approx(first(daily_brier(alone, "up", "prob_up_5pct")))
+    assert unchanged.auc == pytest.approx(first(daily_auc(alone, "up", "prob_up_5pct")))
+    assert scored.brier != pytest.approx(unchanged.brier)
+
+
+def test_a_relative_run_without_the_market_close_is_left_unscored() -> None:
+    relative, plain, _ = probability_runs()
+    market(start=100.0)
+
+    run_monitor(DAY, calendar())
+
+    assert not ModelMonitor.objects.filter(run=relative).exists()
+    assert stored(plain, 20).n_stocks == 38
+    missed = DataQualityLog.objects.get(date=DAY, check_name=UNSCORED_CHECK).detail["runs"]
+    assert missed == [{"run_id": relative.run_id, "date": matured(20).isoformat(), "horizon": 20}]
 
 
 def test_predictions_without_labels_are_flagged_and_keep_earlier_scores(

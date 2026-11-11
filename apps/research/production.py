@@ -156,7 +156,9 @@ def design_note(design: Design) -> dict[str, Any]:
     }
 
 
-def _references(scope: str, research_run_key: str, folds: list[Fold]) -> dict[str, Any]:
+def _references(
+    scope: str, research_run_key: str, folds: list[Fold], relative: bool
+) -> dict[str, Any]:
     """The monitor references N carries, from the research run's folds; none may be missing."""
     if scope == HoldoutScope.RANK:
         thresholds = research_ic_thresholds(research_run_key, MODEL, folds)
@@ -168,7 +170,7 @@ def _references(scope: str, research_run_key: str, folds: list[Fold]) -> dict[st
             )
         return {IC_THRESHOLD: {str(h): float(thresholds[h]) for h in OUTPUT_HORIZONS}}
     if scope == HoldoutScope.INTERVAL:
-        brier = research_brier(research_run_key, folds)
+        brier = research_brier(research_run_key, folds, relative)
         if not math.isfinite(brier):
             raise RunError(f"{research_run_key} gives no logistic baseline Brier")
         return {BRIER_BASELINE: brier}
@@ -276,7 +278,7 @@ def build_run(
     research = [fold for fold in generate_folds(calendar, as_of, design.config) if fold.research]
     features = design_features(scope, design.variant, design.target)
     _check_research(scope, research_run_key, design, features)
-    references = _references(scope, research_run_key, research)
+    references = _references(scope, research_run_key, research, design.target.relative_up)
     shared = {
         "as_of": as_of.isoformat(),
         "frozen_by": granted.frozen_by,

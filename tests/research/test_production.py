@@ -38,6 +38,7 @@ from apps.research.production import (
 )
 from apps.research.rank_model import SPEC_RECIPE, Variant
 from apps.research.runs import RunError
+from apps.research.target_models import TargetVariant
 from apps.research.walkforward import (
     WalkForwardConfig,
     WalkForwardError,
@@ -533,7 +534,7 @@ def test_build_run_refuses_missing_references_before_fitting(
 ) -> None:
     claim_all()
     monkeypatch.setattr(monitor_refs, "rolling_ic_threshold", lambda ic: math.nan)
-    monkeypatch.setattr(production, "research_brier", lambda run_key, folds: math.nan)
+    monkeypatch.setattr(production, "research_brier", lambda run_key, folds, relative: math.nan)
 
     with pytest.raises(RunError, match=r"no rolling IC threshold at \[5, 20\] days"):
         build_run("rank", "rank-prod", "rank-wf1", weekdays()[-1], researched)
@@ -542,6 +543,28 @@ def test_build_run_refuses_missing_references_before_fitting(
 
     assert not ModelRun.objects.filter(run_key__endswith="-prod").exists()
     assert not ModelRun.objects.filter(run_key__endswith="-prod-shadow").exists()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("relative", [False, True])
+def test_build_run_takes_the_baseline_brier_on_the_design_s_up_label(
+    researched: Path, monkeypatch: pytest.MonkeyPatch, relative: bool
+) -> None:
+    claim_all()
+    asked: list[tuple[str, bool]] = []
+
+    def brier(run_key: str, folds: list[Any], relative: bool) -> float:
+        asked.append((run_key, relative))
+        return math.nan
+
+    monkeypatch.setattr(production, "research_brier", brier)
+    target = TargetVariant(market=False, relative_up=relative)
+    monkeypatch.setitem(production.DESIGNS, "interval", Design(CONFIG, target=target))
+
+    with pytest.raises(RunError, match="no logistic baseline Brier"):
+        build_run("interval", "interval-prod", "interval-wf1", weekdays()[-1], researched)
+
+    assert asked == [("interval-wf1", relative)]
 
 
 @pytest.mark.django_db
