@@ -36,7 +36,7 @@ from apps.research.models import (
 )
 from apps.research.monitor import BRIER_BASELINE, IC_THRESHOLD, WINDOW
 from apps.research.monitor_refs import research_brier, research_ic_thresholds
-from apps.research.prediction_cache import fold_cached
+from apps.research.prediction_cache import fold_written
 from apps.research.rank_model import SPEC_RECIPE, Variant
 from apps.research.runs import PRODUCTION, RunError
 from apps.research.target_models import TARGET_RECIPE, TargetVariant
@@ -133,6 +133,7 @@ def design_for(scope: str, name: str = FROZEN) -> Design:
 
 
 BAGS = 5
+HOLDOUT_MODELS = (baseline_runs.BASELINE, MODEL)
 SHADOW = "shadow"
 GATES = "gates"
 BASELINED = (HoldoutScope.RETURN, HoldoutScope.INTERVAL)
@@ -200,7 +201,27 @@ def _unwritten(granted: ProductionPass, design: Design, calendar: TradingDays) -
         return []
     folds = generate_folds(calendar, ticket.last_date, design.config)
     key = granted.frozen_by
-    return [fold.index for fold in folds if is_holdout(fold) and not fold_cached(key, fold.index)]
+    return [
+        fold.index
+        for fold in folds
+        if is_holdout(fold) and not fold_written(key, fold.index, HOLDOUT_MODELS)
+    ]
+
+
+def holdout_mismatch(scope: str, key: str, design: Design, features: list[str]) -> str | None:
+    """Why the runs a holdout key recorded are not of this design and features, or None."""
+    runs = list(
+        ModelRun.objects.filter(run_key=key).values_list("model_type", "params", "feature_list")
+    )
+    bare = sum(1 for _, params, _ in runs if DESIGN not in params)
+    if bare:
+        return f"{bare} runs under holdout {key} recorded no design; it is not a holdout run"
+    expected = _canonical(json.loads(json.dumps(design_note(design))))
+    if {_canonical(params[DESIGN]) for _, params, _ in runs} - {expected}:
+        return f"the {scope} design is not the one holdout {key} ran"
+    if any(model == MODEL and listed != features for model, _, listed in runs):
+        return f"holdout {key} fit other features than the {scope} design reads now"
+    return None
 
 
 def check_holdout_design(
@@ -208,24 +229,11 @@ def check_holdout_design(
 ) -> None:
     """Refuse a build unless the scope's freezing holdout finished on this design and features."""
     key = granted.frozen_by
-    runs = list(
-        ModelRun.objects.filter(run_key=key).values_list("model_type", "params", "feature_list")
-    )
-    if not runs:
+    if not ModelRun.objects.filter(run_key=key).exists():
         raise RunError(f"holdout {key} recorded no run; run the {scope} holdout before building")
-    bare = sum(1 for _, params, _ in runs if DESIGN not in params)
-    if bare:
-        raise RunError(
-            f"{bare} runs under holdout {key} recorded no design; it is not a holdout run"
-        )
-    expected = _canonical(json.loads(json.dumps(design_note(design))))
-    if {_canonical(params[DESIGN]) for _, params, _ in runs} != {expected}:
-        raise RunError(
-            f"the {scope} design is not the one holdout {key} ran; "
-            "production builds only that design"
-        )
-    if any(model == MODEL and listed != features for model, _, listed in runs):
-        raise RunError(f"holdout {key} fit other features than the {scope} design reads now")
+    mismatch = holdout_mismatch(scope, key, design, features)
+    if mismatch:
+        raise RunError(f"{mismatch}; production builds only the design its holdout ran")
     unwritten = _unwritten(granted, design, calendar)
     if unwritten:
         raise RunError(f"holdout {key} has not written folds {unwritten}; finish it first")

@@ -17,6 +17,7 @@ from apps.research import lgbm_runs, production
 from apps.research.features.store import export_year
 from apps.research.holdout import claim_holdout, is_holdout
 from apps.research.models import FeatureDaily, HoldoutScope, LabelDaily, ModelRun
+from apps.research.prediction_cache import fold_path
 from apps.research.production import Design
 from apps.research.runs import SCREENING_MODEL
 from apps.research.training import linear_features
@@ -141,14 +142,20 @@ def panel_calendar() -> TradingDays:
 HOLDOUT_OBJECTIVES = {"rank": "rank", "return": "regression", "interval": "quantile"}
 
 
-def write_holdout_markers(scope: str, key: str) -> None:
-    """Mark every holdout fold of the scope's frozen design written under key."""
+def write_holdout_markers(
+    scope: str, key: str, models: tuple[str, ...] = production.HOLDOUT_MODELS
+) -> None:
+    """Mark every holdout fold of the scope's frozen design written under key, files included."""
     calendar = TradingDays.from_db()
     for fold in generate_folds(calendar, weekdays()[-1], production.DESIGNS[scope].config):
         if is_holdout(fold):
             marker = Path(settings.RESEARCH_CACHE_DIR) / key / f"fold-{fold.index:03d}.holdout"
             marker.parent.mkdir(parents=True, exist_ok=True)
             marker.touch()
+            for model in models:
+                written = fold_path(key, model, fold.index)
+                written.parent.mkdir(parents=True, exist_ok=True)
+                written.touch()
 
 
 def claim_all(finished: bool = True) -> None:

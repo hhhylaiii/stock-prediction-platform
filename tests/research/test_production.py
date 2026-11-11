@@ -14,6 +14,7 @@ from apps.market.calendar import TradingDays
 from apps.research import (
     baseline_runs,
     holdout,
+    holdout_runs,
     lgbm_runs,
     monitor_refs,
     production,
@@ -573,10 +574,29 @@ def test_build_run_waits_for_a_holdout_that_ran_the_frozen_design(researched: Pa
     refused("holdout rank-final fit other features")
     ModelRun.objects.filter(run_key="rank-final").update(feature_list=features)
     refused(r"holdout rank-final has not written folds \[\d+\]")
+    write_holdout_markers("rank", "rank-final", models=(BASELINE,))
+    refused(r"holdout rank-final has not written folds \[\d+\]")
     write_holdout_markers("rank", "rank-final")
 
     build_run("rank", "rank-prod", "rank-wf1", weekdays()[-1], researched)
 
+    assert ModelRun.objects.filter(run_key="rank-prod").exists()
+
+
+@pytest.mark.django_db
+def test_build_run_accepts_the_holdout_the_runner_really_wrote(
+    researched: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    last = weekdays()[-1]
+    frozen = replace(production.DESIGNS["rank"], research_run_key="rank-wf1")
+    monkeypatch.setitem(production.DESIGNS, "rank", frozen)
+    monkeypatch.setattr(holdout_runs, "latest_price_date", lambda: last)
+
+    outcome = holdout_runs.run_holdout("rank", "rank-final", last, researched)
+
+    built = build_run("rank", "rank-prod", "rank-wf1", last, researched)
+    assert outcome.ran
+    assert built.model
     assert ModelRun.objects.filter(run_key="rank-prod").exists()
 
 

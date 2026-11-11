@@ -23,6 +23,7 @@ from apps.research.models import LabelDaily, ModelRun
 from apps.research.prediction_cache import (
     fold_cached,
     fold_path,
+    fold_written,
     save_fold_predictions,
     save_holdout_fold,
 )
@@ -31,7 +32,7 @@ from apps.research.runs import FittedFold, record_run, refuse_production_key
 from apps.research.walkforward import Fold, generate_folds
 
 REHEARSAL = "rehearsal"
-MODELS = (baseline_runs.BASELINE, lgbm_runs.MODEL)
+MODELS = production.HOLDOUT_MODELS
 
 
 @dataclass(frozen=True)
@@ -133,14 +134,17 @@ def _check_claim(scope: str, run_key: str, last: date, calendar: TradingDays) ->
         raise HoldoutError(f"{run_key} already holds runs or caches; the holdout needs a new key")
 
 
-def _check_resume(run_key: str, seed: int, bags: int) -> None:
-    """Refuse resuming a claim with another seed or bag count than its written folds used."""
+def _check_resume(scope: str, run_key: str, features: list[str], seed: int, bags: int) -> None:
+    """Refuse resuming a claim on another seed, bag count, design or features than it began on."""
     runs = ModelRun.objects.filter(run_key=run_key, model_type=lgbm_runs.MODEL)
     used = {(run.seed, run.params.get("bags")) for run in runs}
     if used and used != {(seed, bags)}:
         raise HoldoutError(
             f"{run_key} was fit with (seed, bags) {sorted(used)}; resume it with the same"
         )
+    mismatch = production.holdout_mismatch(scope, run_key, frozen_design(scope), features)
+    if mismatch:
+        raise HoldoutError(f"{mismatch}; resume it on the design it began with")
 
 
 def run_holdout(
@@ -156,23 +160,32 @@ def run_holdout(
 ) -> HoldoutOutcome:
     """Claim the scope's holdout once it can finish, then fit and write every unwritten fold.
 
-    A second call with the latest claim's run_key resumes it on that claim's last date.
+    A call with the latest claim's run_key resumes it on that claim's last date, forced or not.
     """
     _check_key(scope, run_key, rehearsal=False)
     design = frozen_design(scope)
     lgbm_runs.check_design(scope, design.variant, design.target)
+    features = lgbm_runs.design_features(scope, design.variant, design.target)
+    baseline_runs.scope_features(scope)
     bagged = production.BAGS if bags is None else bags
     bag_seeds(seed, bagged)
     calendar = TradingDays.from_db()
     latest = latest_ticket(scope)
-    if latest is not None and latest.run_key == run_key and not force:
-        _check_resume(run_key, seed, bagged)
+    if latest is not None and latest.run_key == run_key:
+        _check_resume(scope, run_key, features, seed, bagged)
         ticket = latest
     else:
         _check_claim(scope, run_key, last, calendar)
         ticket = claim_holdout(scope, run_key, last, force=force, reason=reason)
     folds = holdout_folds(scope, ticket.last_date, calendar)
-    kept = [fold.index for fold in folds if fold_cached(run_key, fold.index)]
+    kept = [fold.index for fold in folds if fold_written(run_key, fold.index, MODELS)]
+    taken = [fold.index for fold in folds if fold_cached(run_key, fold.index)]
+    torn = [index for index in taken if index not in kept]
+    if torn:
+        raise HoldoutError(
+            f"holdout folds {torn} of {run_key} were taken but not fully written: a write was "
+            "cut short; see the runbook's holdout section before resuming"
+        )
     ran = []
     for fold in folds:
         if fold.index in kept:
