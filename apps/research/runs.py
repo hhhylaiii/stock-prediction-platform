@@ -13,6 +13,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
 from django.conf import settings
 from django.db import connection, transaction
 
@@ -39,6 +40,15 @@ SCREENING_MODEL = "screening"
 
 class RunError(RuntimeError):
     """A run cannot be written or dropped without losing a record that must stay."""
+
+
+@dataclass(frozen=True)
+class FittedFold:
+    """One model's fold fitted but not written: its runs with their models, predictions, notes."""
+
+    trained: list[tuple[ModelRun, Any]]
+    predictions: pd.DataFrame
+    notes: dict[str, str]
 
 
 @dataclass(frozen=True)
