@@ -414,6 +414,7 @@ done
 `index_daily` 的 `TAIEX_TR` 是證交所的發行量加權股價報酬指數（MFI94U）：成分股的現金股利再投入，除息不會讓它下跌。`TAIEX` 是價格指數，除息時照樣扣掉股息，7、8 月除息旺季 20 日內約差 1 個百分點。研究層的 label 用還原價，要比大盤時用 `TAIEX_TR` 才同一個口徑。
 
 - 每日 15:30 的 prices 批抓一次，一個月一個請求；不擋研究閘門。品質檢查的指數新鮮度（`index_freshness`）含它，門檻和 `TAIEX` 一樣是當天要有收盤，沒有就記 warning，`detail.stale` 列出 `TAIEX_TR`。當天沒抓到時，22:50 的 `etl_runs` 檢查記 warning 並告警；隔天 15:10 的 catchup 補上後，會對那天重跑品質檢查，把那天的告警再送一次。
+- 相對大盤版的機率模型在監控時要用預測日與到期日的 `TAIEX_TR` 收盤；到期日 D 沒抓到時，隔天 06:00 的監控把這個 run 記進 `monitor_unscored`（頁面「到期預測缺 label」），catchup 不會自動補評分。等 15:10 的 catchup 補上 D 的收盤後，手動跑 `monitor --date D`。
 - 回補從 2010 年起，一個月一個請求，約 203 個、12 分鐘。先跑 `migrate`（`market.0003`），回補要在 worker 換成新程式後的第一次 15:10 之前做完；否則 `prepare_day` 的 catchup 會一天一個請求補回看期內的日子，並對那些日子重跑品質檢查、把舊告警再送一次：
 
   ```bash
@@ -539,9 +540,9 @@ uv run python manage.py rebuild_market_history
 
 - 時段：最後幾個 holdout 摺讀的 label、`TAIEX_TR` 與特徵每晚都會重寫，擬合期間碰上就會報「changed while fitting」或「feature partitions changed」。避開 15:30 的價格批次、23:00 到 02:30 的研究 chain、06:00 到 08:00 的早上 chain，或先關 `RESEARCH_SCHEDULE_ENABLED`（見「研究排程」）。報了這兩種錯就用同一個指令再跑一次，會從沒寫入的摺續跑。
 - 演練：`holdout --scope S --run-key S-rehearsal --rehearse [--fold N] [--bags B] [--seed K]`。在一個研究摺（預設最後一個）上用同一支擬合與 model_run 記錄函式，但快取寫成一般研究快取（`save_fold_predictions`），不 claim，也不走 holdout 的寫入保護（ticket、只寫一次的 marker）。bags 預設 1；要量正式跑的時間與記憶體時用 `--bags 5`。run_key 一律以 `<scope>-rehearsal` 開頭，正式 holdout 不收這種 key。演練也照正式的模板評估並印出報告（結論標「演練不作判定」），給 `--output` 就寫成檔，不寫 `backtest_metric`；正式跑之前看一次它的數字是否合理（天數、覆蓋率、界線來自哪幾摺）。用完 `drop_run S-rehearsal` 清掉。
-- 正式：`holdout --scope S --run-key S-holdout-YYYYMMDD --output docs/reports/phase4/S-holdout-YYYYMMDD.md`。不收 `--last-date`、`--bags`、`--seed`：last_date 是最新的價格日，bags 是 `production.BAGS`（5），seed 0。claim 之前先擋掉跑不完的情況：日期晚於最新價格日、沒有 holdout 摺、某個 holdout 摺在某個 horizon 還沒有已到期的 label（季初約 21 個交易日內的最後一摺）、run_key 底下已有 model_run 或快取、設計不合法、凍結設計的研究 run（`DESIGNS[S].research_run_key`）少了哪些摺的快取（評估要讀它們算旗標的界線）。之後逐摺擬合 baseline 與 LightGBM，每摺兩個模型一起寫入一次；每個 model_run 的 `params["design"]` 記下跑的設計。擬合完立刻評估：判定、明顯退化旗標、參考關卡照 SPEC 第 7 節 walk-forward 第 2 條寫死；排名的指標先寫進 `backtest_metric`（run_key 是這次 holdout 的），再寫報告。報告只寫一次：`--output` 已存在、或這個 run_key 已經報告過（不論當時寫到哪個路徑），都拒跑。
-- 中斷（重開機、記憶體不足）：用同一個 run_key 再跑一次，會沿用最新那次 claim 與它的 last_date，只補還沒寫入的摺，再評估、寫報告；seed 或 bags 和已寫入的摺不同會被拒。換 run_key 會被拒（要 `--force --reason`，那是重跑 holdout，SPEC 不允許只因結果不好而重跑）。claim 之後，研究的 `train` 也不能寫進這個 run_key。
-- claim 之後才能 `build_run`，而且要 holdout 跑完：那次 claim 的每個 holdout 摺都已寫入、每個 run 都記下和 `production.DESIGNS[scope]` 相同的設計、LightGBM 的特徵清單和現在的設計相同，`build_run` 才建；任何一條不符就拒建並寫出哪一條。
+- 正式：`holdout --scope S --run-key S-holdout-YYYYMMDD --output docs/reports/phase4/S-holdout-YYYYMMDD.md`。不收 `--last-date`、`--bags`、`--seed`：last_date 是最新的價格日，bags 是 `production.BAGS`（5），seed 0。claim 之前先擋掉跑不完的情況：日期晚於最新價格日、沒有 holdout 摺、某個 holdout 摺在某個 horizon 還沒有已到期的 label（季初約 21 個交易日內的最後一摺）、run_key 底下已有 model_run 或快取、設計不合法、沒有特徵篩選紀錄、凍結設計的研究 run（`DESIGNS[S].research_run_key`）少了哪些摺的快取（評估要讀它們算旗標的界線）。之後逐摺擬合 baseline 與 LightGBM，每摺兩個模型一起寫入一次；每個 model_run 的 `params["design"]` 記下跑的設計。擬合完立刻評估：判定、明顯退化旗標、參考關卡照 SPEC 第 7 節 walk-forward 第 2 條寫死；排名的指標先寫進 `backtest_metric`（run_key 是這次 holdout 的），再寫報告。報告只寫一次：`--output` 已存在、或這個 run_key 已經報告過（不論當時寫到哪個路徑），都拒跑。
+- 中斷（重開機、記憶體不足）：用同一個指令再跑一次（強制重跑的那次連同 `--force --reason` 照打），會沿用最新那次 claim 與它的 last_date，只補還沒寫入的摺，再評估、寫報告；seed、bags、設計或 LightGBM 的特徵清單和這次 claim 已記下的 run 不同會被拒，改回開跑時的設計再續跑。續跑報「were taken but not fully written」表示某摺在佔位之後、兩個模型的檔案寫完之前被殺掉（視窗不到 1 毫秒）：這一摺沒有完整的預測、也沒有被讀過。先確認沒有別的 `holdout` 行程在跑，再刪掉 `RESEARCH_CACHE_DIR/<run_key>/` 底下那一摺的 `fold-NNN.holdout` 與 `baseline/`、`lightgbm/` 裡同號的 parquet（有幾個刪幾個），然後用同一個指令續跑；別的摺不要動。換 run_key 會被拒（要 `--force --reason`，那是重跑 holdout，SPEC 不允許只因結果不好而重跑）。claim 之後，研究的 `train` 也不能寫進這個 run_key。
+- claim 之後才能 `build_run`，而且要 holdout 跑完：那次 claim 的每個 holdout 摺都已寫入（marker 與兩個模型的檔案都在）、每個 run 都記下和 `production.DESIGNS[scope]` 相同的設計、LightGBM 的特徵清單和現在的設計相同，`build_run` 才建；任何一條不符就拒建並寫出哪一條。
 
 ## 模型監控與換模
 
@@ -549,7 +550,7 @@ uv run python manage.py rebuild_market_history
 - `model_alert` 每筆帶 `mode`：`judged` 會把 active 的 run 降級（`reason` 是 `missing_reference` 時只告警）；`grace`（上線日之前補寫的日子，以及換模後 5 個交易日）與 `reset`（`restore_run` 之後、該 slot（目標 × horizon）的窗口還沒累積滿 60 列，之後換上的 run 沿用；h20 約要 80 個交易日、h5 約 65 個）只告警。被判 run 自己的恢復日晚於告警日時（恢復後補跑之前的日子），`reset_rows` 是 0。`mostly_predecessors` 為 true 表示窗口多為前任 run 的列，人工恢復前先看這個。
 - `monitor`、`predict`、`promote`、`restore_run` 共用研究鎖，一次只跑一個（見「研究排程」）；手動指令拿不到鎖會報錯並寫出持有者，等它跑完再重跑。
 - 換模日落在交易日曆最後 4 個交易日內時，寬限結束日算不出來（log 會有 warning）；12 月換模前先照「交易日曆延伸」延伸日曆。
-- 換模：`promote --run-key K`，門檻沒過時舊模型續用並寫 `model_promotion` 告警；要強制換模用 `--force --reason "<原因>"`。門檻判斷後正常結束的 promote（換上或被擋）都寫一列 `model_promotion`；在那之前或之後任何一步報錯（例如非交易日、claim 不符、寫預測失敗），整筆回復、不寫。`detail.scope` 是 rank／return／interval（一次 promote 只處理一個 scope），`detail.promoted` 表示換了沒有：門檻全過是 info（不告警），沒過與強制換模是 warning。同一個 scope 依 id（寫入順序）最新的那一列，就是最後一次換模嘗試的結果；`promoted` 是 false 時服務中的仍是前一個 build，restore 與降級不寫這一列。`data_quality` 門檻的 reason 只寫摘要（幾天有 error、最近一天是哪些檢查），完整清單在 N 的 `params["gates"]` 那一項的 `errors`（新到舊，最多 200 筆）與 `errors_total`。晚幾天才換模時，`--date` 預設會取 slot 已有列的最後一天。換上之後，promote 會重算那天的 `output_width_ratio` 與 `output_odds_vs_q50`（換模重寫了那天的預測），超標照樣告警；重算失敗只寫 error log，換模不回復，等下一次 `monitor --date D` 再算。
+- 換模：`promote --run-key K`，門檻沒過時舊模型續用並寫 `model_promotion` 告警；要強制換模用 `--force --reason "<原因>"`。門檻判斷後正常結束的 promote（換上或被擋）都寫一列 `model_promotion`；在那之前或之後任何一步報錯（例如非交易日、claim 不符、寫預測失敗），整筆回復、不寫。`detail.scope` 是 rank／return／interval（一次 promote 只處理一個 scope），`detail.promoted` 表示換了沒有：門檻全過是 info（不告警），沒過與強制換模是 warning。同一個 scope 依 id（寫入順序）最新的那一列，就是最後一次換模嘗試的結果；`promoted` 是 false 時服務中的仍是前一個 build，restore 與降級不寫這一列。`data_quality` 門檻的 reason 只寫摘要（幾天有 error、最近一天是哪些檢查），完整清單在 N 的 `params["gates"]` 那一項的 `errors`（新到舊，最多 200 筆）與 `errors_total`。晚幾天才換模時，`--date` 預設會取 slot 已有列的最後一天。換上之後，promote 會重算那天的 `output_width_ratio` 與 `output_odds_vs_q50`（換模重寫了那天的預測），寬度比超標照樣告警，機率矛盾只記 info、不告警；重算失敗只寫 error log，換模不回復，等下一次 `monitor --date D` 再算。
 - 恢復：`restore_run --run-id R --date D --reason "<原因>"`，只接受 degraded 的 run，D 不早於它最後一個預測日、不晚於今天。
 
 ## 告警

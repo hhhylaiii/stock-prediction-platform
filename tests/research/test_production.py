@@ -14,6 +14,7 @@ from apps.market.calendar import TradingDays
 from apps.research import (
     baseline_runs,
     holdout,
+    holdout_runs,
     lgbm_runs,
     monitor_refs,
     production,
@@ -38,6 +39,7 @@ from apps.research.production import (
 )
 from apps.research.rank_model import SPEC_RECIPE, Variant
 from apps.research.runs import RunError
+from apps.research.target_models import TargetVariant
 from apps.research.walkforward import (
     WalkForwardConfig,
     WalkForwardError,
@@ -538,7 +540,7 @@ def test_build_run_refuses_missing_references_before_fitting(
 ) -> None:
     claim_all()
     monkeypatch.setattr(monitor_refs, "rolling_ic_threshold", lambda ic: math.nan)
-    monkeypatch.setattr(production, "research_brier", lambda run_key, folds: math.nan)
+    monkeypatch.setattr(production, "research_brier", lambda run_key, folds, relative: math.nan)
 
     with pytest.raises(RunError, match=r"no rolling IC threshold at \[5, 20\] days"):
         build_run("rank", "rank-prod", "rank-wf1", weekdays()[-1], researched)
@@ -573,11 +575,52 @@ def test_build_run_waits_for_a_holdout_that_ran_the_frozen_design(researched: Pa
     refused("holdout rank-final fit other features")
     ModelRun.objects.filter(run_key="rank-final").update(feature_list=features)
     refused(r"holdout rank-final has not written folds \[\d+\]")
+    write_holdout_markers("rank", "rank-final", models=(BASELINE,))
+    refused(r"holdout rank-final has not written folds \[\d+\]")
     write_holdout_markers("rank", "rank-final")
 
     build_run("rank", "rank-prod", "rank-wf1", weekdays()[-1], researched)
 
     assert ModelRun.objects.filter(run_key="rank-prod").exists()
+
+
+@pytest.mark.django_db
+def test_build_run_accepts_the_holdout_the_runner_really_wrote(
+    researched: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    last = weekdays()[-1]
+    frozen = replace(production.DESIGNS["rank"], research_run_key="rank-wf1")
+    monkeypatch.setitem(production.DESIGNS, "rank", frozen)
+    monkeypatch.setattr(holdout_runs, "latest_price_date", lambda: last)
+
+    outcome = holdout_runs.run_holdout("rank", "rank-final", last, researched)
+
+    built = build_run("rank", "rank-prod", "rank-wf1", last, researched)
+    assert outcome.ran
+    assert built.model
+    assert ModelRun.objects.filter(run_key="rank-prod").exists()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("relative", [False, True])
+def test_build_run_takes_the_baseline_brier_on_the_design_s_up_label(
+    researched: Path, monkeypatch: pytest.MonkeyPatch, relative: bool
+) -> None:
+    target = TargetVariant(market=False, relative_up=relative)
+    monkeypatch.setitem(production.DESIGNS, "interval", Design(CONFIG, target=target))
+    claim_all()
+    asked: list[tuple[str, bool]] = []
+
+    def brier(run_key: str, folds: list[Any], relative: bool) -> float:
+        asked.append((run_key, relative))
+        return math.nan
+
+    monkeypatch.setattr(production, "research_brier", brier)
+
+    with pytest.raises(RunError, match="no logistic baseline Brier"):
+        build_run("interval", "interval-prod", "interval-wf1", weekdays()[-1], researched)
+
+    assert asked == [("interval-wf1", relative)]
 
 
 @pytest.mark.django_db

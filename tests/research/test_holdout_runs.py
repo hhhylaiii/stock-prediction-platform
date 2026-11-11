@@ -1,3 +1,4 @@
+import shutil
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -28,7 +29,7 @@ from apps.research.management.commands import holdout as holdout_command
 from apps.research.models import HoldoutRun, LabelDaily, ModelRun
 from apps.research.prediction_cache import fold_cached, fold_path, load_fold_predictions
 from apps.research.production import DESIGN, Design
-from apps.research.runs import RunError
+from apps.research.runs import SCREENING_MODEL, RunError
 from apps.research.target_models import TargetVariant
 from apps.research.walkforward import Fold
 from tests.research.run_panels import CONFIG, folds, use_designs, weekdays
@@ -303,19 +304,114 @@ def test_a_claim_waits_for_every_holdout_fold_to_have_a_settled_label(frozen: Pa
 
 
 @pytest.mark.django_db
-def test_a_claim_needs_a_fresh_key_and_a_design_the_runners_accept(
+@pytest.mark.parametrize("left", ["runs", "caches"])
+def test_a_claim_needs_a_key_holding_neither_runs_nor_caches(
+    frozen: Path, settings: Any, left: str
+) -> None:
+    cached = Path(settings.RESEARCH_CACHE_DIR) / "interval-used"
+    if left == "runs":
+        fold = next(f for f in folds() if f.research)
+        baseline_runs.run_folds("interval", [fold], "interval-used", frozen, target=PLAIN)
+        shutil.rmtree(cached)
+    else:
+        cached.mkdir(parents=True)
+    assert ModelRun.objects.filter(run_key="interval-used").exists() is (left == "runs")
+
+    with pytest.raises(HoldoutError, match="already holds runs or caches"):
+        run_holdout("interval", "interval-used", LAST, frozen)
+
+    assert not HoldoutRun.objects.exists()
+
+
+@pytest.mark.django_db
+def test_a_claim_needs_a_design_the_runners_accept_and_a_screening(
     frozen: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    fold = next(f for f in folds() if f.research)
-    baseline_runs.run_folds("return", [fold], "return-used", frozen, target=PLAIN)
-    with pytest.raises(HoldoutError, match="already holds runs or caches"):
-        run_holdout("return", "return-used", LAST, frozen)
     target = Design(CONFIG, target=PLAIN, research_run_key="rank-wf1")
     monkeypatch.setitem(production.DESIGNS, "rank", target)
     with pytest.raises(ValueError, match="target variants apply"):
         run_holdout("rank", "rank-final", LAST, frozen)
+    ModelRun.objects.filter(model_type=SCREENING_MODEL).delete()
+    with pytest.raises(RunError, match="no feature screening is recorded"):
+        run_holdout("interval", "interval-final", LAST, frozen)
 
     assert not HoldoutRun.objects.exists()
+
+
+def disk_full(*args: Any, **kwargs: Any) -> list[Path]:
+    raise OSError("disk full")
+
+
+@pytest.mark.django_db
+def test_a_resume_on_another_design_or_other_features_is_refused(
+    frozen: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(holdout_runs, "save_holdout_fold", disk_full)
+    with pytest.raises(OSError, match="disk full"):
+        run_holdout("return", "return-final", LAST, frozen)
+    monkeypatch.setattr(holdout_runs, "save_holdout_fold", prediction_cache.save_holdout_fold)
+    began = production.DESIGNS["return"]
+    other = Design(CONFIG, target=TargetVariant(market=True), research_run_key="return-wf1")
+    monkeypatch.setitem(production.DESIGNS, "return", other)
+
+    with pytest.raises(
+        HoldoutError,
+        match="not the one holdout return-final ran; resume it on the design it began with",
+    ):
+        run_holdout("return", "return-final", LAST, frozen)
+    monkeypatch.setitem(production.DESIGNS, "return", began)
+    screening = ModelRun.objects.filter(model_type=SCREENING_MODEL)
+    kept = screening.get().feature_list
+    screening.update(feature_list=kept[1:])
+    with pytest.raises(HoldoutError, match="fit other features"):
+        run_holdout("return", "return-final", LAST, frozen)
+    screening.update(feature_list=kept)
+
+    assert run_holdout("return", "return-final", LAST, frozen).ran == [held()[0].index]
+    assert len({str(run.params[DESIGN]) for run in runs_of("return-final")}) == 1
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("linked", [(), (BASELINE,)])
+def test_a_fold_taken_but_not_fully_written_stops_the_resume(
+    frozen: Path, settings: Any, linked: tuple[str, ...]
+) -> None:
+    run_holdout("return", "return-final", LAST, frozen)
+    index = held()[0].index
+    for model in (BASELINE, MODEL):
+        if model not in linked:
+            fold_path("return-final", model, index).unlink()
+
+    with pytest.raises(HoldoutError, match=rf"folds \[{index}\] of return-final were taken but"):
+        run_holdout("return", "return-final", LAST, frozen)
+    for model in linked:
+        fold_path("return-final", model, index).unlink()
+    (Path(settings.RESEARCH_CACHE_DIR) / "return-final" / f"fold-{index:03d}.holdout").unlink()
+
+    again = run_holdout("return", "return-final", LAST, frozen)
+
+    assert (again.ran, again.kept) == ([index], [])
+    assert HoldoutRun.objects.count() == 1
+
+
+@pytest.mark.django_db
+def test_the_latest_claim_resumes_under_the_command_that_forced_it(
+    frozen: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_holdout("return", "return-final", LAST, frozen)
+    forced: dict[str, Any] = {"force": True, "reason": "labels rebuilt"}
+    monkeypatch.setattr(holdout_runs, "save_holdout_fold", disk_full)
+    with pytest.raises(OSError, match="disk full"):
+        run_holdout("return", "return-again", LAST, frozen, **forced)
+    monkeypatch.setattr(holdout_runs, "save_holdout_fold", prediction_cache.save_holdout_fold)
+
+    again = run_holdout("return", "return-again", LAST, frozen, **forced)
+
+    assert (again.ticket.attempt, again.ran) == (2, [held()[0].index])
+    assert HoldoutRun.objects.count() == 2
+    with pytest.raises(HoldoutError, match="already holds runs or caches"):
+        run_holdout("return", "return-final", LAST, frozen, **forced)
+    assert HoldoutRun.objects.count() == 2
 
 
 @pytest.mark.django_db
