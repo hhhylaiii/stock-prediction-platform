@@ -94,7 +94,7 @@ def test_model_output_checks_have_their_own_block(
     expect(width).to_contain_text("220／1,842 檔")
     expect(width.locator("i")).to_have_class("warn")
     odds = rows.filter(has_text="機率與中位數矛盾")
-    expect(odds).to_contain_text("少量標記，12／1,842 檔")
+    expect(odds).to_contain_text("參考，12／1,842 檔")
     expect(odds.locator("i")).not_to_have_class("warn")
     unscored = rows.filter(has_text="到期預測缺 label")
     expect(unscored).to_contain_text("2 筆")
@@ -802,8 +802,22 @@ def test_the_block_reads_the_last_day_monitored(
     expect(rows).to_have_count(2)
     expect(rows.filter(has_text="區間寬度比異常")).to_contain_text("沒有標記")
     odds = rows.filter(has_text="機率與中位數矛盾")
-    expect(odds).to_contain_text("少量標記，184／1,842 檔")
+    expect(odds).to_contain_text("參考，184／1,842 檔")
     expect(odds.locator("i")).not_to_have_class("warn")
+
+
+def test_the_odds_check_is_a_reference_even_above_the_alert_share(
+    page: Page, live_server: LiveServer, seeded: Seed
+) -> None:
+    many = {"share": 0.5, "flagged": 921, "n_stocks": 1842, "stocks": ["2330"]}
+    log(seeded, "output_odds_vs_q50", "info", many, back=2)
+
+    page.goto(f"{live_server.url}/#models")
+
+    odds = page.locator("#model-checks .check").filter(has_text="機率與中位數矛盾")
+    expect(odds).to_contain_text("參考，921／1,842 檔")
+    expect(odds.locator("i")).not_to_have_class("warn")
+    expect(page.locator("#model-checks-sub")).to_contain_text("機率矛盾只做參考")
 
 
 def test_a_model_check_error_fails_the_strip_like_the_gate(
