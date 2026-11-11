@@ -266,6 +266,10 @@ def test_a_settled_event_keeps_its_overwrite_on_record_when_the_day_runs_again()
     assert [(event["stock_id"], event["overwritten"]) for event in log.detail["events"]] == [
         ("6655", True)
     ]
+    again = _events(Action("6655", LED, Decimal("2.7"), Decimal("0"), 0.97, "ex_rights"))
+    write_events(again, "twse", date(2026, 11, 2))
+    log = DataQualityLog.objects.get(check_name=MISMATCH_CHECK)
+    assert [event["fields"]["cash_dividend"] for event in log.detail["events"]] == [["2.65", "2.7"]]
 
 
 @pytest.mark.django_db
