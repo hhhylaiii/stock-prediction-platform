@@ -124,8 +124,13 @@ docker compose logs -f worker
 
 ### 線上特徵覆蓋率檢查
 
-06:00 的 chain 在重算特徵之後、`predict` 之前，檢查凍結設計讀的每個特徵在 D 的 universe 裡有值的比例，和前 5 年同月份比（定義與門檻見 SPEC 第 5 節同名段落）。結果是 `data_quality_log` 的 `monitor_feature_coverage`，每天一列。
+06:00 的 chain 在重算特徵之後、`predict` 之前，檢查凍結設計讀的每個特徵在 D 的 universe 裡有值的比例，和前 5 年同月份比（定義與門檻見 SPEC 第 5 節「資料品質檢查」的「結果寫入」那一條）。結果是 `data_quality_log` 的 `monitor_feature_coverage`，每天一列。
 
+- 啟用前先補跑（第一次打開研究排程前，以及排程停過之後）：被這個檢查標過的（特徵、日期）不進之後的參考值，但只認 `data_quality_log` 裡有的列；沒跑過的缺口日會被當成正常日留在參考裡，隔年同月份的下緣可能被拉到 0，那個月就不判了。
+  - 第一次：`feature_coverage --start 2022-10-03 --end <最近一個交易日> --quiet`。2022-10-25 是回放裡第一個被標的日子，更早沒有。約 1,000 個交易日，主機上每天約 0.2 秒（容器裡還沒量過）。`--quiet` 只寫列、不發告警。
+  - 預期結果：warning 只出現在 `fund_days_to_ex_date`（2022-10、2024-09、2024-11、2025-10，以及 2026-10-29 起），沒有 error。出現 error 先看輸出，不要留著不管：error 列會算進每月重訓的上線門檻 (4)。
+  - 排程停過：從停的那天補到最近一個交易日，再打開開關。
+  - 一定要一次給一段連續的範圍、由指令依日期順序跑；後面日子的參考值會用到前面日子的結果。
 - 看結果：
 
   ```bash
@@ -133,13 +138,26 @@ docker compose logs -f worker
     "select date, severity, detail->'flagged' as flagged, detail->'unjudged' as unjudged, detail->'appeared' as appeared from data_quality_log where check_name = 'monitor_feature_coverage' order by date desc limit 5"
   ```
 
-- info：沒有特徵被標。`unjudged` 是這個月無法判的特徵與原因（`masked_month`、`short_reference`、`empty_reference`、`zero_low`），這些特徵當天沒有這道保護。`appeared` 是參考期整段全空、線上卻有值的特徵，代表訓練窗沒看過這一欄的值，回報給負責模型的人。
-- warning：`flagged` 列出低於門檻的特徵（`share` 是線上比例、`count` 是有值的檔數、`median` 與 `low` 是參考的中位數與第 5 百分位、`bound` 是門檻）。預測照常產出。先查那個特徵的來源當天有沒有抓到（`etl_run`、來源表的當日列數）；補好來源後跑 `build_features --date D`，再跑 `feature_coverage --date D` 重寫這一列。告警只在被標的名單和前一個交易日不同時才發，所以同一個缺口持續時只有第一天有告警，列還是每天寫。
-- error：平常大多有值的特徵（`low` ≥ 0.5）掉到 `low` 的一半以下，那筆的 `collapsed` 是 true。當天的 `predict` 會被研究閘門擋下（`research_morning` 記 `failed: predict`、`PredictionGateError`），之後的 `monitor` 也不跑；每天都會告警。處理：修好來源（補抓）→ `build_features --date D` → `feature_coverage --date D`（這一列變回 info 或 warning 才解除）→ `predict --date D` → `monitor --date D`。這一列留著的期間，訓練窗涵蓋 D 的正式 run 過不了每月重訓的上線門檻 (4)（訓練窗內 `data_quality_log` 無 error）。
-- 檢查自己跑不起來時（例如某一年的分區不在），這一列是 warning，`detail.error` 寫原因（不含主機路徑；沒有預期到的例外只寫例外類別，完整訊息在 worker 的 log），預測照常產出。當天已經有 error 列時不會被這種失敗蓋掉。
-- 補跑一段日子：`feature_coverage --start S --end E`，範圍內每個交易日各寫一列；不給日期時跑今天之前最後一個交易日。這個指令取研究鎖，排程的步驟在跑時會報錯，等它跑完再跑。
-- 被這個檢查標過的（特徵、日期）之後不進參考值，所以缺口期間的列要留著，不要刪；缺口那幾天後來補好了，就重跑那幾天，讓它們回到參考裡。
-- 限制：只看有沒有值，看不到值是否過期；`unjudged` 裡的特徵不判。
+- info：沒有特徵被標。`unjudged` 是這個月無法判的特徵與原因，這些特徵當天沒有這道保護：`masked_month`（當天的月份被 mask）、`short_reference`（參考不到 40 個交易日）、`empty_reference`（參考整段全空）、`zero_low`（參考的第 5 百分位是 0，那個月份本來就常常全空）。`appeared` 是參考期整段全空、線上卻有值的特徵，代表訓練窗沒看過這一欄的值，回報給負責模型的人。
+- warning：`flagged` 列出低於門檻的特徵（`share` 是線上比例、`count` 是有值的檔數、`median` 與 `low` 是參考的中位數與第 5 百分位、`bound` 是門檻）。預測照常產出。先查那個特徵的來源當天有沒有抓到（`etl_run`、來源表的當日列數）；補好來源後照下面「解除」的步驟做。告警只在被標的名單和前一個交易日不同時才發，所以同一個缺口持續時只有第一天有告警，列還是每天寫。
+- error：平常大多有值的特徵（`low` ≥ 0.5）掉到 `low` 的一半以下，那筆的 `collapsed` 是 true。當天的 `predict` 會被研究閘門擋下（`research_morning` 記 `failed: predict`、`PredictionGateError`），之後的 `monitor` 也不跑；每天都會告警。這一列留著的期間，訓練窗涵蓋 D 的正式 run 過不了每月重訓的上線門檻 (4)（訓練窗內 `data_quality_log` 無 error）。滾動窗的特徵（例如 5 日的當沖比）來源缺一天又沒補上時，會連續幾個交易日都是 error，要逐日解除。
+- 解除（warning 與 error 相同，error 另外要補預測）：
+  1. 修好來源，補抓缺的那幾天。
+  2. `build_features --date D`。
+  3. 先確認特徵真的補回來了，再重跑檢查。把 `<feature>` 換成被標的欄位，`filled / universe` 要回到那一列 `bound` 以上：
+
+     ```bash
+     docker compose exec db psql -U twp -d twp -c \
+       "select count(*) as universe, count(<feature>) as filled from feature_daily where date = 'D' and in_universe"
+     ```
+
+  4. `feature_coverage --date D`，這一列變回 info（或只剩別的特徵的 warning）才算解除。
+  5. 原本是 error 的日子再跑 `predict --date D`、`monitor --date D`。
+- 來源補不回來時：這一列不要刪、也不要手改，先回報，由使用者決定怎麼處理（例如確認是來源缺口後把那個月份列入 `MASKED_MONTHS` 並重建，之後那個特徵在那個月份就不判）。
+- 檢查自己跑不起來時（例如某一年的分區不在），這一列是 warning，`detail.error` 寫原因（不含主機路徑；沒有預期到的例外只寫例外類別，完整訊息在 worker 的 log），預測照常產出。排除原因後重跑 `feature_coverage --date D`，把這一列換成真正的結果。當天已經有 error 列時不會被這種失敗蓋掉；當天先前被標的名單也會留在這一列的 `flagged`。
+- 手動跑：`feature_coverage --date D`，或 `--start S --end E`（範圍內每個交易日各寫一列）；不給日期時跑今天之前最後一個交易日。這個指令取研究鎖，排程的步驟在跑時會報錯，等它跑完再跑。
+- 缺口期間的列要留著，不要刪；缺口那幾天後來補好了，就照「解除」重跑那幾天，讓它們回到參考裡。
+- 限制：只看有沒有值，看不到值是否過期（例如新一季財報沒抓到時特徵照樣有值）；`unjudged` 裡的特徵不判（參考的下緣是 0 或參考不到 40 個交易日）。
 
 ## 重試與失敗
 
