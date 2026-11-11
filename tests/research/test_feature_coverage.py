@@ -23,9 +23,10 @@ from apps.market.calendar import TradingDays
 from apps.market.models import TradingCalendar
 from apps.research import feature_coverage, production
 from apps.research.feature_coverage import (
-    CARRIED,
     CHECK,
+    FILLED,
     GAPPED,
+    KINDS,
     SOURCES,
     CoverageError,
     coverage_row,
@@ -160,7 +161,19 @@ def test_a_design_feature_without_listed_sources_is_refused(
         feature_coverage, "design_features", lambda scope, variant, target: [DENSE, "tech_new_1d"]
     )
 
-    with pytest.raises(CoverageError, match="tech_new_1d have no sources listed in SOURCES"):
+    with pytest.raises(CoverageError, match="tech_new_1d lack sources of a known kind in SOURCES"):
+        watched()
+
+
+def test_a_design_feature_reading_a_dataset_of_no_known_kind_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        feature_coverage, "design_features", lambda scope, variant, target: [DENSE, USUAL]
+    )
+    monkeypatch.setattr(feature_coverage, "SOURCES", {**SOURCES, USUAL: ("daily_price", "polls")})
+
+    with pytest.raises(CoverageError, match=f"^{USUAL} lack sources of a known kind"):
         watched()
 
 
@@ -175,12 +188,13 @@ def test_every_feature_a_frozen_design_can_read_has_its_sources_listed() -> None
     assert len(production.DESIGNS["rank"].variant.features) == 60
 
 
-def test_each_source_holds_the_gate_is_carried_forward_or_leaves_a_gap() -> None:
+def test_each_source_holds_the_gate_stays_filled_or_leaves_a_gap() -> None:
     read = {dataset for datasets in SOURCES.values() for dataset in datasets}
 
-    assert read <= GATE_DATASETS | CARRIED | GAPPED
-    assert not (CARRIED | GAPPED) & GATE_DATASETS
-    assert not CARRIED & GAPPED
+    assert read <= KINDS
+    assert GATE_DATASETS | FILLED | GAPPED == KINDS
+    assert not (FILLED | GAPPED) & GATE_DATASETS
+    assert not FILLED & GAPPED
     assert all(SOURCES.values())
 
 
@@ -191,15 +205,16 @@ def test_only_features_a_missed_day_empties_are_spared_the_error() -> None:
         "chip_day_trade_ratio_5d",
         "chip_big_holder_pct_chg_1w",
         "chip_holder_count_chg_1w",
-        "tech_attention_t",
     }
-    assert sorted(GAPPED) == ["attention", "day_trade", "weekly_holding"]
-    assert sorted(CARRIED) == [
+    assert sorted(GAPPED) == ["day_trade", "weekly_holding"]
+    assert sorted(FILLED) == [
+        "attention",
         "financial_statement",
         "monthly_revenue",
         "shares_outstanding",
         "stock_master",
     ]
+    assert stops_predictions("tech_attention_t")
 
 
 def test_designs_whose_features_cannot_be_read_are_refused() -> None:

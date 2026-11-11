@@ -13,6 +13,7 @@ from django.db import transaction
 
 from apps.etl.alerts import dispatch
 from apps.etl.models import DataQualityLog
+from apps.etl.tasks import GATE_DATASETS
 from apps.market.calendar import OutsideCalendarError, TradingDays
 from apps.research.features.residual import ACCEPT_GAP, ACCEPT_RATIO, MASKED_MONTHS, SHARE_DIGITS
 from apps.research.features.store import read_partitions
@@ -37,8 +38,9 @@ PRICE, INDEX, FLOWS, MARGIN, SBL = "daily_price", "index_daily", "institutional"
 HOLDING, VALUATION, EX_DATES = "foreign_holding", "daily_valuation", "dividend_event"
 SHARES, REVENUE, STATEMENTS = "shares_outstanding", "monthly_revenue", "financial_statement"
 MASTER, DAY_TRADE, WEEKLY, ATTENTION = "stock_master", "day_trade", "weekly_holding", "attention"
-CARRIED = frozenset({SHARES, REVENUE, STATEMENTS, MASTER})
-GAPPED = frozenset({DAY_TRADE, WEEKLY, ATTENTION})
+FILLED = frozenset({SHARES, REVENUE, STATEMENTS, MASTER, ATTENTION})
+GAPPED = frozenset({DAY_TRADE, WEEKLY})
+KINDS = GATE_DATASETS | FILLED | GAPPED
 Severity = DataQualityLog.Severity
 
 
@@ -96,11 +98,7 @@ class Verdict:
 
 
 def stops_predictions(name: str) -> bool:
-    """Whether the feature's collapse is an error, which shuts the day's predictions.
-
-    It only warns when a source is outside the research gate and not carried forward, so one
-    missed day leaves the feature empty: GAPPED. Classify a new feature in SOURCES by that rule.
-    """
+    """Whether its collapse is an error: no source is GAPPED, ungated and empty on a missed day."""
     return not GAPPED.intersection(SOURCES[name])
 
 
@@ -115,9 +113,11 @@ def watched() -> tuple[list[str], int]:
             raise CoverageError(f"the {scope} design's features cannot be read: {error}") from error
         names.update(dict.fromkeys(listed))
         months = max(months, design.config.train_months)
-    unlisted = [name for name in names if name not in SOURCES]
+    unlisted = [
+        name for name in names if name not in SOURCES or not KINDS.issuperset(SOURCES[name])
+    ]
     if unlisted:
-        raise CoverageError(f"{', '.join(unlisted)} have no sources listed in SOURCES")
+        raise CoverageError(f"{', '.join(unlisted)} lack sources of a known kind in SOURCES")
     return list(names), months // 12
 
 

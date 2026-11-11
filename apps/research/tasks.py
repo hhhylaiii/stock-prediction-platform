@@ -84,11 +84,7 @@ def _labels(day: date) -> str:
 
 
 def _coverage(day: date) -> str:
-    """The day's feature coverage row; a check that cannot run warns and the chain goes on.
-
-    The day's earlier error row stands and its flagged list is kept, so a failed recheck
-    neither reopens the day's predictions nor returns a flagged day to later references.
-    """
+    """The day's coverage row; a check that cannot run warns, keeping an earlier error or flags."""
     try:
         row = run_coverage(day, TradingDays.from_db(), settings.FEATURE_PARQUET_DIR)
     except Exception as error:

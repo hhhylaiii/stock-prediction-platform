@@ -744,6 +744,24 @@ def test_a_recheck_that_cannot_run_leaves_the_day_s_error_standing(
     assert sent == []
 
 
+def test_a_day_with_a_coverage_error_does_not_start_another_morning_chain(
+    now: Callable[[date, time], None],
+    ran: list[tuple[str, date, bool]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for check in (tasks.EVENING_CHECK, US_CLOSE_CHECK, *QUALITY_CHECKS):
+        record(WEDNESDAY, check)
+    coverage(WEDNESDAY, Severity.ERROR, collapsed=True)
+    now(WEDNESDAY + timedelta(days=1), time(6, 0))
+    monkeypatch.setattr("apps.etl.tasks.etl_complete", lambda day: True)
+
+    assert tasks.morning.apply().get() == "gate shut"
+
+    assert steps(ran) == []
+    assert marker(WEDNESDAY, tasks.MORNING_CHECK).detail == {"reason": tasks.GATE_SHUT}
+    assert marker(WEDNESDAY, tasks.COVERAGE_CHECK).severity == Severity.ERROR
+
+
 @pytest.mark.parametrize(
     ("severity", "collapsed", "stopped_by"),
     [(Severity.ERROR, True, "PredictionGateError"), (Severity.WARNING, False, "RunError")],
