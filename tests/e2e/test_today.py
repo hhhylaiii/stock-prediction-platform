@@ -83,6 +83,38 @@ def test_today_names_the_models_that_went_live_on_a_released_holdout(
     expect(meta).not_to_contain_text("放行")
 
 
+def test_five_days_names_only_the_released_models_it_shows(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    ModelRun.objects.filter(pk__in=["rank-h5", "reg-h5"]).update(params=released_on("未達標"))
+    ModelRun.objects.filter(pk="vol-h20").update(params=released_on("明顯退化"))
+    page.goto(live_server.url)
+    expect(page.locator("#rows .trow")).to_have_count(20)
+
+    page.get_by_role("button", name="5 日").click()
+
+    meta = page.locator("#today-meta")
+    expect(meta).to_contain_text(
+        "排名 5 日、絕對報酬 5 日模型的 holdout 判定未達標，經使用者放行上線。原因見模型頁。"
+    )
+    expect(meta).not_to_contain_text("波動率")
+
+
+def test_watch_only_names_the_released_models_too(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    ModelRun.objects.filter(pk="rank-h20").update(params=released_on("未達標"))
+    page.add_init_script("localStorage.setItem('twp-watch', JSON.stringify(['2330']))")
+    page.goto(live_server.url)
+
+    page.locator("#watch-only").click()
+
+    expect(page.locator("#count")).to_have_text("追蹤中的 1 檔")
+    expect(page.locator("#today-meta")).to_contain_text(
+        "排名 20 日模型的 holdout 判定未達標，經使用者放行上線。原因見模型頁。"
+    )
+
+
 def test_today_says_what_the_probability_and_the_band_mean(
     page: Page, live_server: LiveServer, predicted: Seed
 ) -> None:

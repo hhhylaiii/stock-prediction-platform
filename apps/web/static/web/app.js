@@ -183,13 +183,15 @@
       '<div class="right faint small">' + (row.prev_rank === null ? '—' : '昨 ' + row.prev_rank) + '</div></a>';
   }
 
+  const shownModels = (models, horizon) => (models || []).filter(model => horizon === 20 || ['rank', 'return'].includes(model.role));
+
   function releasedText(models) {
-    const seen = new Set(), groups = new Map(), order = Object.keys(OBJECTIVES);
+    const groups = new Map(), order = Object.keys(OBJECTIVES);
     [...models].sort((a, b) => order.indexOf(a.objective) - order.indexOf(b.objective) || b.horizon - a.horizon).forEach(model => {
-      if (!model.released_verdict || seen.has(model.run_id)) return;
-      seen.add(model.run_id);
+      if (!model.released_verdict) return;
       const name = (OBJECTIVES[model.objective] || model.objective) + ' ' + model.horizon + ' 日';
-      groups.set(model.released_verdict, [...(groups.get(model.released_verdict) || []), name]);
+      const names = groups.get(model.released_verdict) || [];
+      if (!names.includes(name)) groups.set(model.released_verdict, [...names, name]);
     });
     return [...groups].map(([verdict, names]) => names.join('、') + '模型的 holdout 判定' + verdict + '，經使用者放行上線').join('；');
   }
@@ -206,7 +208,7 @@
     const degraded = meta.degraded || [];
     const degradedRuns = new Set((meta.models || []).filter(model => degraded.includes(model.role)).map(model => model.run_id)).size;
     if (degraded.length) parts.push(degradedRuns + ' 個模型降級中，結果僅供參考' + (meta.interval_alert ? '，區間改用波動率區間' : ''));
-    const released = releasedText((meta.models || []).filter(model => state.h === 20 || ['rank', 'return'].includes(model.role)));
+    const released = releasedText(shownModels(meta.models, state.h));
     return parts.join('，') + '。' + (released ? released + '。原因見模型頁。' : '');
   }
 
@@ -477,7 +479,7 @@
     const realised = data.realized_vol && data.realized_vol.tech_vol_60d !== null ? data.realized_vol.tech_vol_60d : null;
     const rank = (twenty.models || []).find(model => model.role === 'rank') || (entries.flatMap(entry => entry.models || []).find(model => model.role === 'rank'));
     const degraded = entries.some(entry => (entry.degraded || []).length);
-    const released = releasedText(entries.flatMap(entry => entry.models || []));
+    const released = releasedText(entries.flatMap(entry => shownModels(entry.models, entry.horizon)));
     return '<p class="sub">排名、報酬與區間機率各由自己的模型產出；排名模型多用了幾個籌碼與除息日特徵，其餘特徵相同。價格以 ' + basis + ' 換算。</p><div class="list">' +
       '<div class="thead h-cols" style="padding-top:10px"><div>期間</div><div class="right">預測報酬</div><div class="right">預測價</div><div class="right">80% 區間</div><div class="right prob-head" title="' + esc(PROB_TIP) + '">' + PROB_HEAD + '</div></div>' +
       entries.map(forecastRowHtml).join('') + '</div>' + (quantileBand ? '<p class="note band-note">' + BAND_NOTE + '</p>' : '') +

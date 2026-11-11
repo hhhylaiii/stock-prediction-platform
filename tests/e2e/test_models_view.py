@@ -203,7 +203,8 @@ def test_a_model_built_on_a_released_holdout_says_the_verdict_and_the_reason(
     expect(page.locator("#model-table")).not_to_contain_text("/srv/host")
     expect(page.locator("#model-table img")).to_have_count(0)
     expect(page.locator("#model-rules")).to_contain_text(
-        "正式模型只建在 holdout 判定達標的設計上；判定未達標或明顯退化時，要經使用者放行才建"
+        "正式模型只建在 holdout 判定達標的設計上；判定未達標或明顯退化時，要經使用者放行才建，"
+        "判定與放行原因列在上表受影響的模型下方。"
     )
 
 
@@ -227,6 +228,27 @@ def test_adjacent_models_on_one_release_share_a_single_note(
     expect(rows.nth(3).locator(NEXT)).to_have_class("trow model-cols")
     expect(rows.nth(4).locator(NEXT)).to_have_class("trow model-cols has-release")
     expect(rows.nth(5).locator(NEXT)).to_have_class("released")
+
+
+def test_adjacent_models_on_different_releases_keep_their_own_notes(
+    page: Page, live_server: LiveServer, scored: Seed
+) -> None:
+    other = {**RELEASE, "reason": "另一筆放行"}
+    ModelRun.objects.filter(pk="rank-h20").update(params={"production": {HOLDOUT_RELEASE: RELEASE}})
+    ModelRun.objects.filter(pk="rank-h5").update(params={"production": {HOLDOUT_RELEASE: other}})
+
+    page.goto(f"{live_server.url}/#models")
+
+    notes = page.locator("#model-table .released")
+    expect(notes).to_have_count(2)
+    expect(notes.nth(0).locator("div").last).to_have_text(
+        f"2026-11-12 經使用者放行：{RELEASE_REASON}"
+    )
+    expect(notes.nth(1).locator("div").last).to_have_text("2026-11-12 經使用者放行：另一筆放行")
+    expect(page.locator("#model-table")).not_to_contain_text("以上")
+    rows = page.locator("#model-table .trow")
+    expect(rows.nth(0).locator(NEXT)).to_have_class("released")
+    expect(rows.nth(1).locator(NEXT)).to_have_class("released")
 
 
 BARS_INSIDE_PLOT = """() => {

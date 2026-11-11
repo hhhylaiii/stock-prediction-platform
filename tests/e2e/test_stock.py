@@ -12,7 +12,7 @@ from apps.research.models import (
     Prediction,
     PredictionContrib,
 )
-from tests.api.conftest import add_predictions
+from tests.api.conftest import add_model_run, add_predictions
 from tests.e2e.conftest import (
     BAND_NOTE,
     PROB_HEAD,
@@ -124,12 +124,13 @@ def test_the_header_ranks_the_stock_and_the_table_lists_both_horizons(
     expect(head).to_have_text(PROB_HEAD)
     expect(head).to_have_attribute("title", PROB_TIP)
     expect(page.locator("#forecasts .band-note")).to_have_text(BAND_NOTE)
+    expect(page.locator("#forecasts .released-note")).to_have_count(0)
 
 
 def test_the_forecasts_name_the_models_that_went_live_on_a_released_holdout(
     page: Page, live_server: LiveServer, explained: Seed
 ) -> None:
-    ModelRun.objects.filter(pk="rank-h5").update(params=released_on("未達標"))
+    ModelRun.objects.filter(pk__in=["rank-h5", "rank-h20"]).update(params=released_on("未達標"))
     ModelRun.objects.filter(pk__in=["quantile-h20", "vol-h20"]).update(
         params=released_on("明顯退化")
     )
@@ -138,11 +139,28 @@ def test_the_forecasts_name_the_models_that_went_live_on_a_released_holdout(
 
     note = page.locator("#forecasts .released-note")
     expect(note).to_have_text(
-        "排名 5 日模型的 holdout 判定未達標，經使用者放行上線；"
+        "排名 20 日、排名 5 日模型的 holdout 判定未達標，經使用者放行上線；"
         "報酬區間 20 日、波動率 20 日模型的 holdout 判定明顯退化，經使用者放行上線。原因在模型頁"
     )
     expect(note.locator("a")).to_have_attribute("href", "#models")
     expect(page.locator("#forecasts")).not_to_contain_text(RELEASE_REASON)
+
+
+def test_a_model_serving_both_horizons_on_different_days_is_named_once(
+    page: Page, live_server: LiveServer, explained: Seed
+) -> None:
+    last, previous = explained.last_session, explained.sessions[-2]
+    Prediction.objects.filter(run_id="rank-h20", date=last).delete()
+    add_predictions(
+        add_model_run("vol-old", "volatility"), previous, 20, {"2330": {"vol_pred": 0.3}}
+    )
+    ModelRun.objects.filter(pk__in=["vol-h20", "vol-old"]).update(params=released_on("明顯退化"))
+
+    page.goto(f"{live_server.url}/#stock-2330")
+
+    expect(page.locator("#forecasts .released-note")).to_have_text(
+        "波動率 20 日模型的 holdout 判定明顯退化，經使用者放行上線。原因在模型頁"
+    )
 
 
 def test_a_volatility_band_leaves_out_the_quantile_coverage_note(
