@@ -86,7 +86,7 @@ docker compose logs -f worker
 `.env` 設 `RESEARCH_SCHEDULE_ENABLED=true` 才跑；預設關閉，`research.evening`、`research.morning`、`research.retrain` 觸發了也直接結束（正式 run 上線後再打開）。
 
 - 23:00（`RESEARCH_AT_EVENING`，要晚於 22:50 的品質檢查）：當天是交易日、`ready_for_research` 通過時，用一條 Celery chain 依序跑 `build_features --end D --recent 60`、`build_labels --end D --recent 81`（SPEC §6 步驟 6：每天重算最近 60 個交易日，catch-up 回補、來源更正與還原因子改寫都由這裡補上；label 多 21 天，涵蓋前看窗口跨進這 60 天的那些）。閘門沒過就 30 分鐘後重試，最多 6 次（同 ETL），用完寫 warning；重試帶著 D，過了午夜仍是 D 的工作。
-- 06:00（`RESEARCH_AT_MORNING`，要晚於 05:30 的 `us_close`）：D 是今天之前最後一個交易日，閘門沒過就不預測、寫 warning。D 的 `us_close` 還沒寫就 5 分鐘後再看，最多 6 次（`RESEARCH_US_CLOSE_COUNTDOWN`、`RESEARCH_US_CLOSE_RETRIES`）；等不到照跑，市場特徵沿用前一個美股收盤，完成紀錄記 warning。chain 依序跑：`build_features --date D`（只算 D）→ `predict` → `monitor`，前一步成功才跑下一步；D 的 23:00 沒有成功時，改成補上 23:00 的兩步：先跑 81 天 label，`monitor` 之後再跑 60 天特徵（預測不用等它，也不受它失敗影響）。
+- 06:00（`RESEARCH_AT_MORNING`，要晚於 05:30 的 `us_close`）：D 是今天之前最後一個交易日，閘門沒過就不預測、寫 warning。D 的 `us_close` 還沒寫就 5 分鐘後再看，最多 6 次（`RESEARCH_US_CLOSE_COUNTDOWN`、`RESEARCH_US_CLOSE_RETRIES`）；等不到照跑，市場特徵沿用前一個美股收盤，完成紀錄記 warning。chain 依序跑：`build_features --date D`（只算 D）→ 特徵覆蓋率檢查（見「線上特徵覆蓋率檢查」）→ `predict` → `monitor`，前一步成功才跑下一步；D 的 23:00 沒有成功時，改成補上 23:00 的兩步：先跑 81 天 label，`monitor` 之後再跑 60 天特徵（預測不用等它，也不受它失敗影響）。
 - 每條 chain 跑完寫一列 `data_quality_log`（`research_evening`、`research_morning`，`date` 是 D）：成功是 info，`detail.steps` 依序列出每一步的輸出；有一步失敗是 warning，`detail` 寫哪一步、錯誤與已完成的步驟，後面的步驟不跑，並送告警。D 已經有 info 那列就不重跑，所以週六早上跑過週五後，週日、週一早上不會重複；失敗的 D 會在下一個早上（還是同一個 D 時，例如週末）重跑。
 - 每月重訓：每月前 5 個交易日裡，第一條在 06:00 到 09:00（`RESEARCH_AT_MORNING` 到 `RESEARCH_RETRAIN_BEFORE`）之間跑完的早上 chain（D，info 或缺美股收盤的 warning 都算）之後排一個 `research.retrain(D)`；不在這段時間跑完的（例如中午補跑、深夜才醒來補觸發）留給下一個早上，以免重訓壓到 15:10 的 ETL 或隔天 06:00 的預測。`retrain` 每次開始（含記憶體不足後的重試）也只在這段時間內動工，否則不寫列直接結束，留給下一個早上重排。每月一次：那個月已有 `research_retrain` 列就不排，排重了也不會重跑。前 5 個交易日都沒排成時，第 6 個交易日起第一條跑完的 chain 寫一列 warning（三個 scope 都是 `no morning chain finished before the cutoff ...`）並告警，當月不再自動重訓，要的話手動 `build_run` 再 `promote`。月中第一次打開開關時也會記這一列。
   - 開始前看可用記憶體（worker 容器讀 `/proc/meminfo`）：低於 `RESEARCH_RETRAIN_MIN_FREE`（50%）就 30 分鐘後再看，最多 6 次（`RESEARCH_RETRAIN_COUNTDOWN`、`RESEARCH_RETRAIN_RETRIES`），用完記 warning、全部拒建；重試到 09:00 之後就照上一條停下。讀不到就照跑。
@@ -104,7 +104,7 @@ docker compose logs -f worker
     "select date, check_name, severity, detail from data_quality_log where check_name like 'research_%' or check_name = 'adj_factor_changed' order by date desc limit 10"
   ```
 
-- Mac 在 06:00 睡著、同一天晚一點醒來時，beat 會補觸發 `research.morning` 照跑（可能已經開盤）；睡過午夜才醒的那次早於排定時間，會略過。平日的 D 沒跑成（閘門沒過、睡過午夜）不會自動補：隔天早上的 D 已經是新的一天。閘門沒過會記 warning 並告警；睡過午夜而被略過的那次，隔天早上會補記一列 `missed` warning（見上）。等 D 的 ETL 補齊（15:10 的補抓）後手動跑 `build_features --date D`、`predict --date D`、`monitor --date D`。
+- Mac 在 06:00 睡著、同一天晚一點醒來時，beat 會補觸發 `research.morning` 照跑（可能已經開盤）；睡過午夜才醒的那次早於排定時間，會略過。平日的 D 沒跑成（閘門沒過、睡過午夜）不會自動補：隔天早上的 D 已經是新的一天。閘門沒過會記 warning 並告警；睡過午夜而被略過的那次，隔天早上會補記一列 `missed` warning（見上）。等 D 的 ETL 補齊（15:10 的補抓）後手動跑 `build_features --date D`、`feature_coverage --date D`、`predict --date D`、`monitor --date D`。
 - 手動長時間重建特徵或 label（`build_features`、`build_labels` 不取研究鎖）時先關掉開關，或避開 23:00–02:30 與 06:00–08:00，否則排程那一步可能和它搶同一批列而失敗（記 warning）。會改還原因子的手動操作（`fetch --dataset dividend_event`、`recompute_adj_factor`、FinMind 股利或價格回補）也避開這兩段：chain 開始之後才寫進來的改動，可能被那條 chain 記成已處理卻沒算到，事後照那天 `adj_factor_changed` 的 E 手動跑下面重建用的兩個指令。
 - 排程的正確性假設 worker 只有一個（`CELERY_WORKER_CONCURRENCY=1`）：重訓和每日的 chain 靠排隊錯開，重訓本身不取研究鎖。`research.evening`、`research.morning`、`research.retrain` 開始時會讀 Celery 的 `worker_concurrency`，不是 1（包括設定成空值；環境變數沒設時預設是 1）就不跑，寫一列 warning（`reason` 寫明、`concurrency` 是讀到的值；重訓那列是每個 scope 都拒建，和記憶體不足一樣算用掉當月的重訓）並告警。只看設定值：`celery worker -c` 從指令列改的、`docker compose up --scale worker=2`、或在主機上另開一個連到同一個 redis 的 worker 都讀不到，不要那樣啟動。
 - 還原因子改寫後的重建：`refresh_adj_factor` 改寫了某檔的歷史因子時，在當天的 `adj_factor_changed`（info，資料層的列，研究層只讀）記下那檔第一個「新舊因子的倍數和前一個價格列不同」的交易日 E（單一事件就是除權息日；多個事件一起改取最早的）。只是整段等比例縮放（例如公布未來的除權息）不記，那些日子的比值不變；新價格列取得因子（`upsert_daily_prices`、FinMind 價格回補）也不記。同一天合成一列，超過 200 檔時 `detail` 只留最早的 E 與 `count`（收合時是檔數，之後每記一次加 1，同一檔再記會多算）。
@@ -117,6 +117,25 @@ docker compose logs -f worker
 - 打開開關前，先在真資料上手動跑一次 `build_run`、一次 `build_features --recent 60`，量時間與記憶體（上面手動操作要避開的時段照量到的時間調整：23:00 的閘門重試到 02:00 才開 chain 時，60 天特徵可能跑過 02:30）；重訓一旦跑過午夜，23:00 的 chain 與 ETL 的批次會因為早於排定時間被略過。
 - 打開開關時延長 `ops/launchd` 的 caffeinate：傍晚那次（15:00 起 `-t 39600`，到 02:00）改成 `-t 46800`（到 04:00），清晨那次（05:15 起 `-t 5400`）改成 `-t 9900`（到 08:00）。23:00 的閘門最晚重試到 02:00 才開始 chain，06:00 的 chain 最多等美股收盤 30 分鐘，每一步搶不到鎖還能再等 60 分鐘。
 - 上線前的日子要用 `predict --date D` 回填時（Phase 5 demo、驗收），先照「每日除權息、減資、面額變更」用 `fetch --source twse|tpex --dataset dividend_event` 補那段日子，否則研究閘門不會過。
+
+### 線上特徵覆蓋率檢查
+
+06:00 的 chain 在重算特徵之後、`predict` 之前，檢查凍結設計讀的每個特徵在 D 的 universe 裡有值的比例，和前 5 年同月份比（定義與門檻見 SPEC 第 5 節同名段落）。結果是 `data_quality_log` 的 `monitor_feature_coverage`，每天一列。
+
+- 看結果：
+
+  ```bash
+  docker compose exec db psql -U twp -d twp -c \
+    "select date, severity, detail->'flagged' as flagged, detail->'unjudged' as unjudged, detail->'appeared' as appeared from data_quality_log where check_name = 'monitor_feature_coverage' order by date desc limit 5"
+  ```
+
+- info：沒有特徵被標。`unjudged` 是這個月無法判的特徵與原因（`masked_month`、`short_reference`、`empty_reference`、`zero_low`），這些特徵當天沒有這道保護。`appeared` 是參考期整段全空、線上卻有值的特徵，代表訓練窗沒看過這一欄的值，回報給負責模型的人。
+- warning：`flagged` 列出低於門檻的特徵（`share` 是線上比例、`count` 是有值的檔數、`median` 與 `low` 是參考的中位數與第 5 百分位、`bound` 是門檻）。預測照常產出。先查那個特徵的來源當天有沒有抓到（`etl_run`、來源表的當日列數）；補好來源後跑 `build_features --date D`，再跑 `feature_coverage --date D` 重寫這一列。告警只在被標的名單和前一個交易日不同時才發，所以同一個缺口持續時只有第一天有告警，列還是每天寫。
+- error：平常大多有值的特徵（`low` ≥ 0.5）掉到 `low` 的一半以下，那筆的 `collapsed` 是 true。當天的 `predict` 會被研究閘門擋下（`research_morning` 記 `failed: predict`、`PredictionGateError`），之後的 `monitor` 也不跑；每天都會告警。處理：修好來源（補抓）→ `build_features --date D` → `feature_coverage --date D`（這一列變回 info 或 warning 才解除）→ `predict --date D` → `monitor --date D`。這一列留著的期間，訓練窗涵蓋 D 的正式 run 過不了每月重訓的上線門檻 (4)（訓練窗內 `data_quality_log` 無 error）。
+- 檢查自己跑不起來時（例如某一年的分區不在），這一列是 warning，`detail.error` 寫原因（不含主機路徑；沒有預期到的例外只寫例外類別，完整訊息在 worker 的 log），預測照常產出。當天已經有 error 列時不會被這種失敗蓋掉。
+- 補跑一段日子：`feature_coverage --start S --end E`，範圍內每個交易日各寫一列；不給日期時跑今天之前最後一個交易日。這個指令取研究鎖，排程的步驟在跑時會報錯，等它跑完再跑。
+- 被這個檢查標過的（特徵、日期）之後不進參考值，所以缺口期間的列要留著，不要刪；缺口那幾天後來補好了，就重跑那幾天，讓它們回到參考裡。
+- 限制：只看有沒有值，看不到值是否過期；`unjudged` 裡的特徵不判。
 
 ## 重試與失敗
 
