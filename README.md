@@ -1,6 +1,6 @@
 # stock-prediction-platform
 
-A daily prediction platform for common stocks listed on the Taiwan Stock Exchange (TWSE) and the Taipei Exchange (TPEx). After each close it produces, for the next 5 and 20 trading days, a return ranking, predicted returns with price intervals, and the probability of a rise. The specification is [docs/SPEC.md](docs/SPEC.md). For personal research use; see section 3 of the spec for the data licensing restrictions.
+A daily prediction platform for common stocks listed on the Taiwan Stock Exchange (TWSE) and the Taipei Exchange (TPEx). After each close it produces, for the next 5 and 20 trading days, a return ranking, predicted returns with price intervals, and the probability of beating the market. The specification is [docs/SPEC.md](docs/SPEC.md). For personal research use; see section 3 of the spec for the data licensing restrictions.
 
 The spec, the runbook and the web pages are written in Traditional Chinese.
 
@@ -20,7 +20,7 @@ The UI is a single page with three views, switched by the `#` fragment of the UR
 
 | View | URL | Content | Data needed |
 | --- | --- | --- | --- |
-| Today's predictions (今日預測) | `/#today` | Market-wide 5-day and 20-day rankings and predicted returns, the 20-day 80% price interval and the probability of gaining more than 5%; supports search and a watchlist-only filter | A live model |
+| Today's predictions (今日預測) | `/#today` | Market-wide 5-day and 20-day rankings and predicted returns, the 20-day 80% price interval and the probability that the 20-day return beats the market (the TAIEX total return index, dividends included) by 5 percentage points or more; supports search and a watchlist-only filter | A live model |
 | Stock (個股) | `/#stock-2330` | Candlestick or closing-price chart, how this prediction came about (feature contributions), past predictions against actual outcomes | Prices; the prediction blocks need a live model |
 | Models and data (模型與資料) | `/#models` | The live models, monthly rank IC against the baseline, today's data updates, data-quality and model-output checks, the data correction log | ETL records; the model blocks need a live model |
 
