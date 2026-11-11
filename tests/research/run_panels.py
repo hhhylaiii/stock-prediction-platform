@@ -1,7 +1,9 @@
 """A year of synthetic features and labels for the walk-forward runner tests."""
 
+import hashlib
 import json
 import math
+from dataclasses import asdict
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
@@ -15,7 +17,15 @@ from apps.market.calendar import TradingDays
 from apps.market.models import IndexDaily, TradingCalendar
 from apps.research import lgbm_runs, production
 from apps.research.features.store import export_year
-from apps.research.holdout import PASSED, claim_holdout, is_holdout, report_marker
+from apps.research.holdout import (
+    DEGRADED,
+    FAILED,
+    PASSED,
+    Reported,
+    claim_holdout,
+    is_holdout,
+    report_marker,
+)
 from apps.research.models import FeatureDaily, HoldoutScope, LabelDaily, ModelRun
 from apps.research.prediction_cache import fold_path
 from apps.research.production import Design
@@ -158,12 +168,17 @@ def write_holdout_markers(
                 written.touch()
 
 
+SHORT = {FAILED: (["5 日 MAE"], ["MAE 差"]), DEGRADED: ([], ["MAE 差"])}
+
+
 def write_holdout_report(scope: str, key: str, status: str = PASSED, path: str = "r.md") -> None:
-    """Mark the holdout under key reported with a verdict."""
+    """Mark the holdout under key reported with a verdict and what fell short in it."""
     marker = report_marker(key)
     marker.parent.mkdir(parents=True, exist_ok=True)
-    stored = {"scope": scope, "status": status, "path": path, "sha256": "0" * 64, "text": ""}
-    marker.write_text(json.dumps(stored), encoding="utf-8")
+    failed, flagged = SHORT.get(status, ([], []))
+    digest = hashlib.sha256(f"{key} {status}".encode()).hexdigest()
+    stored = Reported(scope, status, path, digest, "", failed, flagged)
+    marker.write_text(json.dumps(asdict(stored), ensure_ascii=False), encoding="utf-8")
 
 
 def finish_holdout(scope: str, key: str, reported: str | None = PASSED) -> None:

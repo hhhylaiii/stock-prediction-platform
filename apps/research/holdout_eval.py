@@ -409,10 +409,13 @@ def interval_verdict(
     )
 
 
-def marked_report(scope: str, status: str, output: str, text: str) -> Reported:
-    """A holdout's one report as its marker keeps it: verdict, absolute path, digest and text."""
+def marked_report(verdict: ScopeVerdict, output: str, text: str) -> Reported:
+    """A holdout's one report as its marker keeps it: verdict, what fell short, path and text."""
     path = str(Path(output).resolve())
-    return Reported(scope, status, path, hashlib.sha256(text.encode("utf-8")).hexdigest(), text)
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    failed = [gate.name for gate in verdict.gates if not gate.passed]
+    flagged = [raised.name for raised in verdict.flags if raised.flagged]
+    return Reported(verdict.scope, verdict.status, path, digest, text, failed, flagged)
 
 
 def unwritten_report(run_key: str, output: str) -> Reported | None:

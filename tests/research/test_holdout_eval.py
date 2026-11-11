@@ -255,12 +255,16 @@ def test_the_return_holdout_report_applies_the_fixed_criteria(frozen: Path, tmp_
     assert f"天數最少的摺：h5 摺 {held[0].index}（{days} 天）。" in text
     assert "逐摺等權平均不依天數加權" in text
     assert "只計 claim 的 last_date 當時 label 已到期的日子" in text
+    verdict = judged("return", frozen)
+    assert status == verdict.status
     assert marker("return-final") == {
         "scope": "return",
         "status": status,
         "path": str(report),
         "sha256": hashlib.sha256(report.read_bytes()).hexdigest(),
         "text": text,
+        "failed": [gate.name for gate in verdict.gates if not gate.passed],
+        "flagged": [raised.name for raised in verdict.flags if raised.flagged],
     }
     assert Path(marker("return-final")["path"]).is_absolute()
     with pytest.raises(CommandError, match="written once"):

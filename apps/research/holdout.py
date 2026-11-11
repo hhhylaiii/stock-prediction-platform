@@ -6,6 +6,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 from django.conf import settings
 from django.db import IntegrityError, transaction
@@ -166,11 +167,15 @@ PASSED, FAILED, DEGRADED = (verdict.value for verdict in HoldoutVerdict)
 
 @dataclass(frozen=True)
 class Reported:
+    """A holdout's one report: its verdict, the gates it failed and the flags it raised."""
+
     scope: str
     status: str
     path: str
     sha256: str
     text: str
+    failed: list[str]
+    flagged: list[str]
 
 
 def report_marker(run_key: str) -> Path:
@@ -215,13 +220,18 @@ def release_holdout(scope: str, status: str, reason: str) -> HoldoutRelease:
     try:
         with transaction.atomic():
             return HoldoutRelease.objects.create(
-                holdout=HoldoutRun.objects.get(run_key=key), status=status, reason=note
+                holdout=HoldoutRun.objects.get(run_key=key),
+                status=status,
+                failed=marked.failed,
+                flagged=marked.flagged,
+                report_sha256=marked.sha256,
+                reason=note,
             )
     except IntegrityError as error:
         raise HoldoutError(f"holdout {key} is already released") from error
 
 
-def released_verdict(granted: ProductionPass) -> dict[str, str] | None:
+def released_verdict(granted: ProductionPass) -> dict[str, Any] | None:
     """Leave to build on the scope's holdout: None when it passed, else its recorded release."""
     key = granted.frozen_by
     marked = _verdict(granted.scope, key)
@@ -229,7 +239,9 @@ def released_verdict(granted: ProductionPass) -> dict[str, str] | None:
         raise HoldoutError(f"holdout {key} has no report; a build waits for its verdict")
     if marked.status == PASSED:
         return None
-    release = HoldoutRelease.objects.filter(holdout__run_key=key, status=marked.status).first()
+    release = HoldoutRelease.objects.filter(
+        holdout__run_key=key, status=marked.status, report_sha256=marked.sha256
+    ).first()
     if release is None:
         raise HoldoutError(
             f"holdout {key} was judged {marked.status} (report {marked.path}); the build is "
@@ -237,7 +249,10 @@ def released_verdict(granted: ProductionPass) -> dict[str, str] | None:
         )
     return {
         "status": release.status,
+        "failed": release.failed,
+        "flagged": release.flagged,
         "reason": release.reason,
         "released_at": timezone.localtime(release.released_at).isoformat(),
         "report": marked.path,
+        "sha256": release.report_sha256,
     }

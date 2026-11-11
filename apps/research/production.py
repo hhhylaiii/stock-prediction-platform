@@ -321,7 +321,7 @@ def _run_ids(key: str) -> list[str]:
 
 
 def _alert_release(
-    scope: str, run_key: str, as_of: date, holdout: str, release: dict[str, str]
+    scope: str, run_key: str, as_of: date, holdout: str, release: dict[str, Any]
 ) -> None:
     """Warn that a production run was built on a holdout verdict the user released."""
     row = DataQualityLog.objects.create(

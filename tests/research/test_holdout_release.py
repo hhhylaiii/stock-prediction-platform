@@ -19,6 +19,7 @@ from apps.research.holdout import (
     claim_holdout,
     release_holdout,
     report_marker,
+    reported,
 )
 from apps.research.management.commands.release_holdout import Command as ReleaseCommand
 from apps.research.models import HoldoutRelease, ModelRun
@@ -83,12 +84,23 @@ def test_a_verdict_short_of_the_criteria_builds_only_after_its_release(
     build(researched)
 
     note = production_note("rank-prod")[HOLDOUT_RELEASE]
+    marked = reported("rank-final")
+    assert marked is not None
     assert note == {
         "status": status,
+        "failed": marked.failed,
+        "flagged": marked.flagged,
         "reason": "the user accepts the 5-day MAE gap",
         "released_at": timezone.localtime(released.released_at).isoformat(),
         "report": REPORT,
+        "sha256": marked.sha256,
     }
+    assert (released.failed, released.flagged, released.report_sha256) == (
+        marked.failed,
+        marked.flagged,
+        marked.sha256,
+    )
+    assert marked.flagged == ["MAE 差"]
     assert str(note["released_at"]).endswith("+08:00")
     assert HOLDOUT_RELEASE not in production_note("rank-prod-shadow")
     alert = DataQualityLog.objects.get(check_name=RELEASE_CHECK)
@@ -218,4 +230,5 @@ def test_the_release_command_records_the_user_s_decision(researched: Path) -> No
         "accepted",
     )
     assert f"rank-final: released {FAILED}" in out.getvalue()
+    assert "未達的門檻 ['5 日 MAE']，退化旗標 ['MAE 差']" in out.getvalue()
     assert "只有使用者明確同意後才能執行" in ReleaseCommand.help

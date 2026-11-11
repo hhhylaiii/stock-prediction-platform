@@ -34,5 +34,6 @@ class Command(BaseCommand):
             raise CommandError(str(error)) from error
         self.stdout.write(
             f"{release.holdout.run_key}: released {release.status} "
-            f"at {timezone.localtime(release.released_at).isoformat()}"
+            f"at {timezone.localtime(release.released_at).isoformat()}; "
+            f"未達的門檻 {release.failed}，退化旗標 {release.flagged}"
         )

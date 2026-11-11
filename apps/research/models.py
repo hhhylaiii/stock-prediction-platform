@@ -84,6 +84,9 @@ class HoldoutRelease(models.Model):
 
     holdout = models.OneToOneField(HoldoutRun, on_delete=models.PROTECT, related_name="release")
     status = models.CharField(max_length=16, choices=HoldoutVerdict.choices)
+    failed = models.JSONField(default=list)
+    flagged = models.JSONField(default=list)
+    report_sha256 = models.CharField(max_length=64)
     reason = models.TextField()
     released_at = models.DateTimeField(default=timezone.now)
 

@@ -29,6 +29,9 @@ class Migration(migrations.Migration):
                         max_length=16,
                     ),
                 ),
+                ("failed", models.JSONField(default=list)),
+                ("flagged", models.JSONField(default=list)),
+                ("report_sha256", models.CharField(max_length=64)),
                 ("reason", models.TextField()),
                 ("released_at", models.DateTimeField(default=django.utils.timezone.now)),
                 (
