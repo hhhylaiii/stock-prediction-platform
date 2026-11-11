@@ -97,3 +97,13 @@ def test_a_table_without_its_columns_is_refused(load_fixture: Callable[[str], An
 
     with pytest.raises(SchemaChangedError, match="現金股利"):
         tpex_notices(body)
+
+
+def test_an_answer_with_nothing_listed_reads_as_an_empty_list_and_an_odd_one_is_refused(
+    load_fixture: Callable[[str], Any],
+) -> None:
+    assert twse_notices({"stat": "很抱歉，沒有符合條件的資料!"}) == []
+    with pytest.raises(SchemaChangedError, match="stat"):
+        twse_notices({**load_fixture(TWSE), "stat": "查詢日期小於可查詢最小日期"})
+    with pytest.raises(SchemaChangedError, match="stat"):
+        tpex_notices({**load_fixture(TPEX), "stat": "error"})

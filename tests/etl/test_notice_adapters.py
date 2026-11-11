@@ -211,16 +211,19 @@ def test_reprocess_refuses_the_list_which_no_date_keys() -> None:
         replay_range("twse", "dividend_notice", NOV_11, NOV_11, CALENDAR)
 
 
+@time_machine.travel(_at(NOV_13, "21:30:00"), tick=False)
 def test_stored_lists_apply_again_in_the_order_and_session_they_were_fetched(
     load_fixture: Callable[[str], Any],
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _listed("2344", "6655")
+    _listed("2344", "6655", "00401A")
+    refused = {**load_fixture(TWSE_LIST), "stat": "查詢日期小於可查詢最小日期"}
     kept = (
         ("b", _at(NOV_11, "21:30:00"), load_fixture(TWSE_LIST)),
         ("a", _at(date(2026, 11, 7), "10:00:00"), load_fixture(EARLIER_TWSE_LIST)),
         ("c", _at(NOV_12, "21:30:00"), NO_DATA),
+        ("d", _at(NOV_12, "22:00:00"), refused),
     )
     for tag, moment, payload in kept:
         RawTwse.objects.create(
@@ -231,14 +234,17 @@ def test_stored_lists_apply_again_in_the_order_and_session_they_were_fetched(
             fetched_at=moment,
         )
     monkeypatch.setattr(TradingDays, "from_db", classmethod(lambda cls: CALENDAR))
+    alerted: list[object] = []
+    monkeypatch.setattr("apps.etl.dividend_notices.dispatch", alerted.append)
 
     call_command("reapply_dividend_notices")
     first = capsys.readouterr().out
     call_command("reapply_dividend_notices", "--source", "twse")
 
-    assert "twse: 2 lists read, 2 rows written, 1 skipped" in first
+    assert "twse: 2 lists read, 2 rows written, 2 skipped" in first
     assert "tpex: 0 lists read, 0 rows written, 0 skipped" in first
-    assert "twse: 2 lists read, 0 rows written, 1 skipped" in capsys.readouterr().out
+    assert "twse: 2 lists read, 0 rows written, 2 skipped" in capsys.readouterr().out
+    assert alerted == []
     assert _announced() == {
         ("2344", date(2026, 11, 18)): date(2026, 11, 9),
         ("6655", date(2026, 11, 24)): NOV_11,

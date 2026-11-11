@@ -335,11 +335,6 @@ class TwseAdapter(BaseAdapter):
         seen = timezone.now()
         kept = kept_by_session(self.calendar, seen, payload)
         self.save_raw(DIVIDEND_NOTICE, NOTICE_FORM, payload, kept)
-        stat = str(payload.get("stat", ""))
-        if NO_DATA_STAT in stat:
-            return seen_at([], seen, TWSE_LABEL)
-        if stat.upper() != "OK":
-            raise SchemaChangedError(f"TWSE {TWSE_NOTICE_PATH} answered with stat {stat!r}")
         return seen_at(twse_notices(payload), seen, TWSE_LABEL)
 
     def _detail(self, row: ExRight) -> tuple[Decimal, Decimal] | None:

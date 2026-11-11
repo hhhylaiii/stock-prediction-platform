@@ -1,6 +1,5 @@
 """The exchanges' ex-rights notice tables: the coming ex-dates and what each is due to pay."""
 
-import re
 from collections.abc import Iterable, Mapping
 from datetime import date, datetime
 from decimal import Decimal
@@ -11,6 +10,8 @@ import pandas as pd
 from apps.etl.adapters.corporate_actions import PER_THOUSAND, stock_value
 from apps.etl.adapters.dispositions import list_rows
 from apps.etl.adapters.exchange_actions import tpex_table
+from apps.etl.adapters.exchange_tables import NO_DATA_STAT
+from apps.etl.adapters.tpex_tables import OK_STAT
 from apps.etl.dividend_dates import session_seen
 from apps.etl.errors import SchemaChangedError, SourceNotReadyError
 from apps.etl.exchange_rows import parse_price, stock_code
@@ -25,7 +26,6 @@ TPEX_LABEL = "TPEx prePost"
 TWSE_FIELDS = ("除權除息日期", "股票代號", "無償配股率", "現金股利")
 TPEX_FIELDS = ("除權息日期", "代號", "每股無償配股率", "現金股利")
 PENDING = ("待公告", "尚未公告")
-TAGS = re.compile(r"<[^>]*>")
 ZERO = Decimal(0)
 NOTICE_FORM = {"response": "json"}
 NOTICE_COLUMNS = ["stock_id", "ex_date", "cash_dividend", "stock_dividend"]
@@ -41,10 +41,18 @@ class Notice(NamedTuple):
 
 
 def twse_notices(body: Mapping[str, Any]) -> list[Notice]:
+    """The list of an OK answer; none when nothing matched, and any other stat is refused."""
+    stat = str(body.get("stat", ""))
+    if NO_DATA_STAT in stat:
+        return []
+    if stat.upper() != "OK":
+        raise SchemaChangedError(f"{TWSE_LABEL} answered with stat {stat!r}")
     return _notices(list_rows(body, TWSE_LABEL, TWSE_FIELDS), TWSE_LABEL, TWSE_FIELDS)
 
 
 def tpex_notices(body: Mapping[str, Any]) -> list[Notice]:
+    if body.get("stat") != OK_STAT:
+        raise SchemaChangedError(f"{TPEX_LABEL} answered with stat {body.get('stat')!r}")
     table = tpex_table(body, TPEX_LABEL)
     return _notices(list_rows(table, TPEX_LABEL, TPEX_FIELDS), TPEX_LABEL, TPEX_FIELDS)
 
@@ -95,7 +103,7 @@ def _due(text: Any, where: str) -> Decimal:
 
     Any other wording is a table we no longer know how to read, so the whole list is refused.
     """
-    cleaned = TAGS.sub("", str(text)).strip()
+    cleaned = str(text).strip()
     if any(mark in cleaned for mark in PENDING):
         return ZERO
     try:

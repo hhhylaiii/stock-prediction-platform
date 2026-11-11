@@ -317,9 +317,6 @@ class TpexAdapter(BaseAdapter):
         seen = timezone.now()
         kept = kept_by_session(self.calendar, seen, payload)
         self.save_raw(DIVIDEND_NOTICE, NOTICE_FORM, payload, kept)
-        if payload.get("stat") != OK_STAT:
-            stat = payload.get("stat")
-            raise SchemaChangedError(f"TPEx {TPEX_NOTICE_PATH} answered with stat {stat!r}")
         return seen_at(tpex_notices(payload), seen, TPEX_LABEL)
 
     def _fetch_day(self, dataset: str, day: date) -> pd.DataFrame:
