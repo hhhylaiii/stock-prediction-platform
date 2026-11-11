@@ -22,6 +22,7 @@ from apps.research.experiments import (
     compared_folds,
     daily_ics,
     experiment_report,
+    group_verdict,
     stopping_rounds,
     summary,
     verdict,
@@ -358,6 +359,64 @@ def test_summary_averages_the_seeds_and_reports_their_spread() -> None:
     assert verdict(chosen, table) == "base"
     one = summary(chosen, seeded_daily({("base", 0): 0.1, ("w60", 0): 0.2}))
     assert np.isnan(float(one["sd"].astype(float)["base"]))
+
+
+def group_daily(
+    base: str, challenger: str, gaps: dict[int, float], level: float = 0.135
+) -> pd.DataFrame:
+    """Each seed's base arm at one level and the challenger above it by that seed's gap."""
+    values = {(base, seed): level for seed in gaps}
+    return seeded_daily(values | {(challenger, seed): level + gap for seed, gap in gaps.items()})
+
+
+def test_the_group_rule_needs_seeds_0_3_6_a_gain_of_0_001_and_two_seeds_higher() -> None:
+    chosen = experiment("group", "w60-floor", "w60-floor-chip")
+
+    def judged(gaps: dict[int, float], level: float = 0.135) -> str | None:
+        return group_verdict(chosen, group_daily("w60-floor", "w60-floor-chip", gaps, level))
+
+    assert judged({0: 0.0014, 3: 0.0008, 6: 0.0012}) == "w60-floor-chip"
+    assert judged({0: 0.0010, 3: 0.0008, 6: 0.0010}) == "w60-floor"
+    assert judged({0: 0.0040, 3: -0.0005, 6: -0.0001}) == "w60-floor"
+    assert judged({0: 0.0015, 3: 0.0015, 6: 0.0}, level=0.2) == "w60-floor-chip"
+    assert judged({0: 0.0030, 3: 0.0030, 6: math.nan}) == "w60-floor"
+    assert judged({0: 0.0030}) is None
+    assert judged({0: 0.0030, 3: 0.0030}) is None
+    assert judged({1: 0.0030, 2: 0.0030, 4: 0.0030}) is None
+    assert judged({0: 0.0030, 3: 0.0030, 6: -0.0001, 9: -0.0001}) is None
+    with pytest.raises(ValueError, match="use group_verdict"):
+        verdict(chosen, table({"w60-floor": 0.135, "w60-floor-chip": 0.137}))
+
+
+def test_group_reports_hold_back_the_verdict_off_seeds_0_3_6_and_print_the_gap() -> None:
+    chosen = experiment("group", "w60-floor", "w60-floor-ind")
+
+    def report(gaps: dict[int, float]) -> str:
+        return experiment_report(chosen, "rank-f2", group_daily("w60-floor", "w60-floor-ind", gaps))
+
+    one = report({0: 0.0007})
+    other = report({1: 0.0007, 2: 0.0009, 4: 0.0002})
+    kept = report({0: 0.0014, 3: 0.0008, 6: 0.0012})
+    held = report({0: 0.0007, 3: 0.0009, 6: 0.0002})
+
+    rule = (
+        "- 判定規則：seed 0、3、6 的平均至少比 w60-floor 高 0.001，"
+        "而且 3 個 seed 裡至少 2 個較高才採用（§6 第 7 步）"
+    )
+    assert all(rule in text for text in (one, other, kept, held))
+    assert "**判定（暫定）：只跑了 1 個 seed，不給採用判定**" in one
+    assert "- w60-floor-ind 比 w60-floor 高 +0.000700000；要用 `--seeds 0,3,6` 重跑再判定" in one
+    assert "**判定（暫定）：seed 是 1、2、4，不是 0、3、6，不給採用判定**" in other
+    assert all("判定：採用" not in text for text in (one, other))
+    assert "**判定：採用 w60-floor-ind**" in kept
+    assert "- w60-floor-ind 比 w60-floor 高 +0.001133333（門檻 +0.001），3 個 seed 裡 3 個較高" in (
+        kept
+    )
+    assert "**判定：採用 w60-floor**" in held
+    assert "- w60-floor-ind 比 w60-floor 高 +0.000600000（門檻 +0.001），3 個 seed 裡 3 個較高" in (
+        held
+    )
+    assert all("差距小於" not in text for text in (one, other, kept, held))
 
 
 def test_experiment_report_shows_the_verdict_small_gaps_and_folds() -> None:
