@@ -260,11 +260,15 @@ def test_a_model_swapped_in_by_force_says_which_gates_failed_and_why(
     ModelRun.objects.filter(pk="rank-h20").update(
         params={**forced, "production": {HOLDOUT_RELEASE: RELEASE}}
     )
+    ModelRun.objects.filter(pk="prob-h20").update(
+        params=forced_params("prob-h20", "classification")
+    )
 
     page.goto(f"{live_server.url}/#models")
 
-    note = page.locator("#model-table .forced")
-    expect(note).to_have_count(1)
+    notes = page.locator("#model-table .forced")
+    expect(notes).to_have_count(2)
+    note = notes.nth(0)
     expect(note.locator("div")).to_have_text(
         [
             "換模門檻沒過：與現役模型的預測相關（實際 0.412，門檻 >= 0.5，樣本 1,842 檔）、"
@@ -276,6 +280,9 @@ def test_a_model_swapped_in_by_force_says_which_gates_failed_and_why(
     expect(rows.nth(0)).to_have_class("trow model-cols has-release")
     expect(rows.nth(0).locator(NEXT)).to_have_class("forced")
     expect(note.locator(NEXT)).to_have_class("released")
+    expect(rows.nth(5)).to_have_class("trow model-cols has-release")
+    expect(rows.nth(5).locator(NEXT)).to_have_class("forced")
+    expect(page.locator("#model-table .released")).to_have_count(1)
     expect(page.locator("#model-table img")).to_have_count(0)
     expect(page.locator("#model-rules")).to_contain_text(
         "換模門檻沒過而經使用者強制換上的模型，沒過的門檻與原因也列在該模型下方。"

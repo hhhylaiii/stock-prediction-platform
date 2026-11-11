@@ -9,7 +9,7 @@ from django.test import Client
 from django.test.utils import CaptureQueriesContext
 from pytest_django import DjangoAssertNumQueries
 
-from apps.api.serving import HOLDOUT_RELEASE
+from apps.api.serving import HOLDOUT_RELEASE, warn_unreadable
 from apps.market.models import TradingCalendar
 from apps.research.holdout import DEGRADED, FAILED, PASSED, PRODUCTION
 from apps.research.models import FeatureDaily, ModelMonitor, ModelRun, Prediction
@@ -153,6 +153,7 @@ def test_the_released_verdict_is_read_once_per_request_not_per_prediction_row(
 def test_a_release_the_model_page_cannot_show_is_not_served_as_released(
     client: Client, runs: Runs, caplog: pytest.LogCaptureFixture
 ) -> None:
+    warn_unreadable.cache_clear()
     half = {PRODUCTION: {HOLDOUT_RELEASE: {"status": FAILED, "reason": "half a record"}}}
     ModelRun.objects.filter(pk="rank-h20").update(params=half)
 
@@ -219,8 +220,9 @@ FORCED_NOTE = forced_params("rank-h20")[PROMOTION]
     ],
 )
 def test_a_promotion_note_that_names_no_failed_gate_is_not_served_as_forced(
-    client: Client, runs: Runs, note: object
+    client: Client, runs: Runs, note: object, caplog: pytest.LogCaptureFixture
 ) -> None:
+    warn_unreadable.cache_clear()
     ModelRun.objects.filter(pk="rank-h20").update(params={PROMOTION: note})
 
     body = envelope_of(client.get("/api/predictions"))
@@ -228,6 +230,8 @@ def test_a_promotion_note_that_names_no_failed_gate_is_not_served_as_forced(
 
     assert gates_of(body)["rank"] is None
     assert [row["forced_promotion"] for row in listed if row["run_id"] == "rank-h20"] == [None]
+    forced = isinstance(note, dict) and note["forced"] is True
+    assert ("run rank-h20 has an unreadable forced promotion" in caplog.text) is forced
 
 
 @pytest.mark.parametrize("status", [PASSED, "released", 1, None, [FAILED]])

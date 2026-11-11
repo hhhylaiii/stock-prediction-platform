@@ -573,6 +573,23 @@ def test_a_model_swapped_in_by_force_carries_the_day_the_reason_and_the_failed_g
     assert rows[("quantile", 20)]["forced_promotion"] is None
 
 
+def test_a_forced_promotion_serves_only_the_listed_gate_fields_and_a_text_reason(
+    client: Client, runs: Runs
+) -> None:
+    params = forced_params("rank-h20")
+    params[promotion.PROMOTION]["reason"] = ["not", "text"]
+    stored = params[promotion.PROMOTION]["failed"][0]["gates"][0]
+    stored["errors"] = [{"date": "2026-10-01", "check": "/srv/host/errors.log"}]
+    ModelRun.objects.filter(pk="rank-h20").update(params=params)
+
+    response = client.get("/api/models")
+
+    forced = by_slot(envelope_of(response))[("rank", 20)]["forced_promotion"]
+    assert forced["reason"] is None
+    assert [sorted(gate) for gate in forced["gates"]] == [sorted(serving.GATE_FIELDS)] * 2
+    assert "/srv/host/errors.log" not in response.content.decode()
+
+
 def test_no_models_served_yet(client: Client, db: None) -> None:
     assert envelope_of(client.get("/api/models"))["data"] == []
 
