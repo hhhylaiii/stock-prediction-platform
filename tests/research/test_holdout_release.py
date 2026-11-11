@@ -77,8 +77,11 @@ def test_a_verdict_short_of_the_criteria_builds_only_after_its_release(
     claim_all(reported=status)
     write_holdout_report("rank", "rank-final", status, REPORT)
 
-    with pytest.raises(HoldoutError, match=f"was judged {status} \\(report {REPORT}\\)"):
+    with pytest.raises(
+        HoldoutError, match=f"was judged {status} \\(report rank-final.md\\)"
+    ) as refused:
         build(researched)
+    assert "/" not in str(refused.value)
     assert not ModelRun.objects.filter(run_key="rank-prod").exists()
     released = release_holdout("rank", status, "  the user accepts the 5-day MAE gap  ")
 
@@ -141,8 +144,10 @@ def test_a_release_of_one_verdict_does_not_cover_another(researched: Path) -> No
     report_marker("rank-final").unlink()
     write_holdout_report("rank", "rank-final", FAILED, REPORT)
 
-    with pytest.raises(HoldoutError, match="rank-final was released for another report or verdict"):
+    with pytest.raises(HoldoutError, match="rank-final was released for another") as refused:
         build(researched)
+    assert "report rank-final.md" in str(refused.value)
+    assert "/" not in str(refused.value)
 
 
 @pytest.mark.django_db
@@ -227,16 +232,25 @@ def test_a_marker_of_another_scope_neither_builds_nor_releases(researched: Path)
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize("stored", [json.dumps({"scope": "rank", "status": FAILED}), "{not json"])
+@pytest.mark.parametrize(
+    "stored",
+    [
+        json.dumps({"scope": "rank", "status": FAILED}).encode(),
+        b"{not json",
+        b'{"path": "/abs/report.md"\xff',
+    ],
+)
 def test_a_marker_that_cannot_be_read_is_named_in_the_refusal(
-    researched: Path, stored: str
+    researched: Path, stored: bytes
 ) -> None:
     claim_all(reported=FAILED)
-    report_marker("rank-final").write_text(stored, encoding="utf-8")
+    report_marker("rank-final").write_bytes(stored)
     named = "rank-final/holdout.report is not a holdout report marker"
 
-    with pytest.raises(HoldoutError, match=named):
+    with pytest.raises(HoldoutError, match=named) as refused:
         build(researched)
+    assert str(refused.value).startswith(named)
+    assert "/abs" not in str(refused.value)
     with pytest.raises(CommandError, match=named):
         call_command("release_holdout", scope="rank", status=FAILED, reason="accepted")
 
