@@ -16,11 +16,14 @@ from apps.api.params import MonthlyIcQuery, parse
 from apps.api.serving import (
     HOLDOUT_RELEASE,
     MONITOR_FIELDS,
+    PROMOTION,
     SERVING_FIELDS,
     ServingRun,
     Slot,
     best_runs,
+    day_of,
     eligible,
+    forced_gates,
     latest_days,
     latest_served_date,
     months_before,
@@ -41,7 +44,7 @@ from apps.research.models import (
     ModelRun,
     ModelStatus,
 )
-from apps.research.monitor import DEGRADED_WINDOW
+from apps.research.monitor import DEGRADED_WINDOW, PROMOTED_ON
 
 PAGE_ORDER = (
     Slot(ModelObjective.RANK, 20),
@@ -209,6 +212,20 @@ def holdout_release(params: dict[str, Any]) -> dict[str, Any] | None:
     return release_of(production.get(HOLDOUT_RELEASE)) if isinstance(production, dict) else None
 
 
+def forced_promotion(params: dict[str, Any]) -> dict[str, Any] | None:
+    """The forced swap a serving run came in by: its day, the reason and the gates overridden."""
+    note = params.get(PROMOTION)
+    gates = forced_gates(note)
+    if gates is None or not isinstance(note, dict):
+        return None
+    reason = note.get("reason")
+    return {
+        "promoted_on": day_of(params.get(PROMOTED_ON)),
+        "reason": reason if isinstance(reason, str) else None,
+        "gates": gates,
+    }
+
+
 class ModelListView(ReadOnlyView):
     def get(self, request: Request) -> Response:
         models = serving_models()
@@ -236,6 +253,7 @@ class ModelListView(ReadOnlyView):
                         else None
                     ),
                     "holdout_release": holdout_release(params.get(run.run_id) or {}),
+                    "forced_promotion": forced_promotion(params.get(run.run_id) or {}),
                     "recent": recent[Slot(run.objective, run.horizon)],
                     **research,
                 }

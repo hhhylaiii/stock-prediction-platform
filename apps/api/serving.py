@@ -41,6 +41,9 @@ HOLDOUT_RELEASE = "holdout_release"
 RELEASE = f"params__{PRODUCTION}__{HOLDOUT_RELEASE}"
 RELEASE_TEXTS = ("status", "reason", "released_at")
 RELEASE_LISTS = ("failed", "flagged")
+PROMOTION = "promotion"
+GATE_FIELDS = ("name", "reason", "value", "threshold", "sample", "sample_unit")
+NO_CAVEATS: dict[str, Any] = {"released_verdict": None, "forced_gates": None}
 ISO_DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
 SERVING_FIELDS = (
     "run_id",
@@ -121,8 +124,8 @@ def periods_of(run_id: str, value: object) -> tuple[tuple[date, date], ...]:
 
 
 @functools.cache
-def warn_unreadable_release(run_id: str) -> None:
-    logger.warning("run %s has an unreadable holdout release; it is shown as not released", run_id)
+def warn_unreadable(run_id: str, note: str) -> None:
+    logger.warning("run %s has an unreadable %s; the pages leave it out", run_id, note)
 
 
 def is_names(value: object) -> bool:
@@ -139,17 +142,35 @@ def release_of(value: object) -> dict[str, Any] | None:
     return shown if texts and lists and shown["status"] in (FAILED, DEGRADED) else None
 
 
-def released_verdicts(run_ids: Iterable[str]) -> dict[str, str]:
-    """The verdict each run's holdout was released on, one row read per run built on a release."""
-    rows = ModelRun.objects.filter(run_id__in=set(run_ids)).values_list("run_id", RELEASE)
-    verdicts = {}
-    for run_id, recorded in rows:
-        release = release_of(recorded)
-        if release is not None:
-            verdicts[run_id] = release["status"]
-        elif recorded is not None:
-            warn_unreadable_release(run_id)
-    return verdicts
+def forced_gates(value: object) -> list[dict[str, Any]] | None:
+    """The gates a forced promotion overrode; None unless the note is forced and names them."""
+    if not isinstance(value, dict) or value.get("forced") is not True:
+        return None
+    failed = value.get("failed")
+    items = failed if isinstance(failed, list) else []
+    listed = [item.get("gates") for item in items if isinstance(item, dict)]
+    gates = [gate for found in listed if isinstance(found, list) for gate in found]
+    named = all(isinstance(gate, dict) and isinstance(gate.get("name"), str) for gate in gates)
+    if not gates or not named:
+        return None
+    return [{name: gate.get(name) for name in GATE_FIELDS} for gate in gates]
+
+
+def caveats(run_ids: Iterable[str]) -> dict[str, dict[str, Any]]:
+    """Per run, read once: the verdict its holdout was released on and the gates forced past."""
+    runs = ModelRun.objects.filter(run_id__in=set(run_ids))
+    found = {}
+    for run_id, recorded, promotion in runs.values_list("run_id", RELEASE, f"params__{PROMOTION}"):
+        release, gates = release_of(recorded), forced_gates(promotion)
+        if release is None and recorded is not None:
+            warn_unreadable(run_id, "holdout release")
+        if gates is None and isinstance(promotion, dict) and promotion.get("forced") is True:
+            warn_unreadable(run_id, "forced promotion")
+        found[run_id] = {
+            "released_verdict": None if release is None else release["status"],
+            "forced_gates": None if gates is None else [gate["name"] for gate in gates],
+        }
+    return found
 
 
 def interval_alert(run: ServingRun | None, day: date) -> bool:

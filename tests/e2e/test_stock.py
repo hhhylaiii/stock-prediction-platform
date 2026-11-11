@@ -12,7 +12,7 @@ from apps.research.models import (
     Prediction,
     PredictionContrib,
 )
-from tests.api.conftest import add_model_run, add_predictions
+from tests.api.conftest import FORCED_REASON, add_model_run, add_predictions, forced_params
 from tests.e2e.conftest import (
     BAND_NOTE,
     PROB_HEAD,
@@ -124,7 +124,7 @@ def test_the_header_ranks_the_stock_and_the_table_lists_both_horizons(
     expect(head).to_have_text(PROB_HEAD)
     expect(head).to_have_attribute("title", PROB_TIP)
     expect(page.locator("#forecasts .band-note")).to_have_text(BAND_NOTE)
-    expect(page.locator("#forecasts .released-note")).to_have_count(0)
+    expect(page.locator("#forecasts .caveat-note")).to_have_count(0)
 
 
 def test_the_forecasts_name_the_models_that_went_live_on_a_released_holdout(
@@ -137,13 +137,29 @@ def test_the_forecasts_name_the_models_that_went_live_on_a_released_holdout(
 
     page.goto(f"{live_server.url}/#stock-2330")
 
-    note = page.locator("#forecasts .released-note")
+    note = page.locator("#forecasts .caveat-note")
     expect(note).to_have_text(
         "排名 20 日、排名 5 日模型的 holdout 判定未達標，經使用者放行上線；"
         "報酬區間 20 日、波動率 20 日模型的 holdout 判定明顯退化，經使用者放行上線。原因在模型頁"
     )
     expect(note.locator("a")).to_have_attribute("href", "#models")
     expect(page.locator("#forecasts")).not_to_contain_text(RELEASE_REASON)
+
+
+def test_the_forecasts_name_the_models_swapped_in_by_force(
+    page: Page, live_server: LiveServer, explained: Seed
+) -> None:
+    ModelRun.objects.filter(pk="reg-h5").update(params=forced_params("reg-h5", "regression", 5))
+
+    page.goto(f"{live_server.url}/#stock-2330")
+
+    note = page.locator("#forecasts .caveat-note")
+    expect(note).to_have_text(
+        "絕對報酬 5 日模型的換模門檻沒過（與現役模型的預測相關、影子模型最近 6 個月 OOS），"
+        "經使用者強制換上。原因在模型頁"
+    )
+    expect(note.locator("a")).to_have_attribute("href", "#models")
+    expect(page.locator("#forecasts")).not_to_contain_text(FORCED_REASON)
 
 
 def test_a_model_serving_both_horizons_on_different_days_is_named_once(
@@ -158,7 +174,7 @@ def test_a_model_serving_both_horizons_on_different_days_is_named_once(
 
     page.goto(f"{live_server.url}/#stock-2330")
 
-    expect(page.locator("#forecasts .released-note")).to_have_text(
+    expect(page.locator("#forecasts .caveat-note")).to_have_text(
         "波動率 20 日模型的 holdout 判定明顯退化，經使用者放行上線。原因在模型頁"
     )
 
