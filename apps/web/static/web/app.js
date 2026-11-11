@@ -34,6 +34,8 @@
     revenue_source_mismatch: '月營收兩來源數字不同',
     statement_history_mismatch: '財報由 MOPS 歷史彙總頁補缺',
     dividend_source_mismatch: '股利兩來源不同',
+    dividend_notice: '除權除息預告表',
+    ex_date_unannounced: '除息日沒有公告日',
     exchange_fill: '交易所逐日表補缺',
     industry_fill: '交易所產業補缺',
     output_width_ratio: '區間寬度比異常',

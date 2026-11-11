@@ -132,11 +132,11 @@ def test_a_return_index_day_is_done_only_with_its_own_row() -> None:
     assert missing_days(job, DAYS) == [DAYS[0], DAYS[2]]
 
 
-def test_every_daily_exchange_dataset_is_caught_up_and_share_counts_are_rebuilt() -> None:
+def test_every_daily_dataset_with_history_is_caught_up_and_share_counts_are_rebuilt() -> None:
     keys = {job.key: job for job in JOBS}
     for source in ("twse", "tpex"):
         datasets = {job.dataset for job in JOBS if job.source == source}
-        assert datasets == set(ADAPTERS[source].datasets)
+        assert datasets == set(ADAPTERS[source].datasets) - {"dividend_notice"}
         assert keys[f"{source}/shares_outstanding"].rebuild_later
         assert keys[f"{source}/shares_outstanding"].present is None
     assert {job.dataset for job in JOBS if job.source == "yahoo"} == {"sox", "tsm_adr", "usdtwd"}

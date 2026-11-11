@@ -6,7 +6,13 @@ import pytest
 from django.core.management import CommandError, call_command
 
 from apps.etl.models import DataQualityLog
-from apps.etl.quality import CHECKS, run_checks, should_run_prediction
+from apps.etl.quality import (
+    CHECKS,
+    UNANNOUNCED,
+    run_checks,
+    should_run_prediction,
+    unannounced_result,
+)
 from apps.market.calendar import NotATradingDayError, OutsideCalendarError, TradingDays
 from apps.market.models import (
     DailyChip,
@@ -481,3 +487,38 @@ def test_market_series_that_stopped_updating_are_flagged(
     row = DataQualityLog.objects.get(date=DAY, check_name="index_freshness")
     assert set(row.detail["stale"]) == stale
     assert row.severity == (WARNING if stale else INFO)
+
+
+def _ex_date(code: str, ex_date: date, cash: str = "1.5", announced: date | None = None) -> None:
+    DividendEvent.objects.create(
+        stock_id=code, ex_date=ex_date, cash_dividend=Decimal(cash), announce_date=announced
+    )
+
+
+@pytest.mark.django_db
+def test_cash_ex_dates_of_the_next_thirty_days_without_a_date_warn() -> None:
+    _ex_date("2330", date(2026, 10, 29))
+    _ex_date("2317", date(2026, 11, 27))
+    _ex_date("1101", DAY)
+    _ex_date("1102", date(2026, 11, 28))
+    _ex_date("1216", date(2026, 11, 5), cash="0")
+    _ex_date("1301", date(2026, 11, 5), announced=date(2026, 10, 20))
+
+    result = unannounced_result(DAY)
+
+    assert (result.check_name, result.severity) == (UNANNOUNCED, "warning")
+    assert result.detail == {
+        "table": "dividend_event",
+        "count": 2,
+        "events": ["2330@2026-10-29", "2317@2026-11-27"],
+    }
+
+
+@pytest.mark.django_db
+def test_no_undated_cash_ex_date_ahead_passes_and_the_gate_does_not_wait_on_it() -> None:
+    _ex_date("1301", date(2026, 11, 5), announced=date(2026, 10, 20))
+
+    result = unannounced_result(DAY)
+
+    assert (result.severity, result.detail["count"]) == ("info", 0)
+    assert UNANNOUNCED not in CHECKS

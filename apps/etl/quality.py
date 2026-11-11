@@ -27,6 +27,9 @@ MISSING = "missing_values"
 CALENDAR = "trading_calendar"
 FRESHNESS = "index_freshness"
 CHECKS = (ROW_COUNT, BIG_MOVE, MISSING, CALENDAR, FRESHNESS)
+UNANNOUNCED = "ex_date_unannounced"
+UNANNOUNCED_AHEAD = timedelta(days=30)
+UNANNOUNCED_LISTED = 50
 ROW_CHANGE_LIMIT = 0.05
 BIG_MOVE_LIMIT = Decimal("0.10")
 MISSING_LIMIT = 0.01
@@ -114,6 +117,26 @@ def row_count_results(day: date, previous: date | None) -> list[DataQualityLog]:
         detail = {"table": table, "count": count, "previous": before}
         results.append(_result(day, ROW_COUNT, severity, detail))
     return results
+
+
+def unannounced_result(day: date) -> DataQualityLog:
+    """Cash ex-dates of the next 30 days no notice has dated, which the ex-date feature misses."""
+    rows = DividendEvent.objects.filter(
+        ex_date__gt=day,
+        ex_date__lte=day + UNANNOUNCED_AHEAD,
+        cash_dividend__gt=0,
+        announce_date__isnull=True,
+    ).order_by("ex_date", "stock_id")
+    events = [
+        f"{code}@{ex_date.isoformat()}" for code, ex_date in rows.values_list("stock_id", "ex_date")
+    ]
+    severity = Severity.WARNING if events else Severity.INFO
+    detail = {
+        "table": "dividend_event",
+        "count": len(events),
+        "events": events[:UNANNOUNCED_LISTED],
+    }
+    return _result(day, UNANNOUNCED, severity, detail)
 
 
 def big_move_result(day: date, previous: date | None) -> DataQualityLog:
