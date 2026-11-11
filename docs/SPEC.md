@@ -64,8 +64,8 @@ Oct 29, 2026 · @Owen Lai
 | 來源 | 提供資料 | 存取方式 | 限制 | 授權 | 在系統中的角色 |
 | --- | --- | --- | --- | --- | --- |
 | [FinMind](https://pypi.org/project/FinMind/) | 日價量、PER/PBR、加權指數、三大法人、融資券、借券、外資持股、股權分散表、月營收、三大財報、股利與除權息、美股、匯率、利率 | Python SDK `FinMind`，或 REST `api.finmindtrade.com/api/v4/data` | 300 次/小時，註冊並驗證信箱後 600 次/小時；超限封鎖約 1 小時；週日 00:00–07:00 維護 | 教育與非商業用途 | 歷史回補（2010 起，一次性）；除權息歷史補洞；股權分散表限付費會員，不用 |
-| [證交所 TWSE OpenAPI](https://glama.ai/mcp/servers/taux-io/twse-mcp) | 上市日成交、三大法人買賣超、融資融券、借券、處置與注意股、除權除息與減資、面額變更的參考價、當沖交易統計（第二批） | REST `openapi.twse.com.tw/v1`，端點多為當日快照；歷史用 `exchangeReport/STOCK_DAY?date=&stockNo=`，一次回傳整月 | 無公開配額，頻繁請求會封 IP；請求間隔至少 3 秒 | 政府資料開放授權；對外再提供行情須另取得資訊使用授權 | 上市股票每日增量 |
-| [櫃買中心 TPEx OpenAPI](https://scidm.nchc.org.tw/en/dataset/best_wish11391) | 上櫃日成交、三大法人、融資融券、櫃買指數、除權除息與減資、面額變更的參考價、當沖交易統計（第二批） | REST，Swagger 文件 `tpex.org.tw/openapi/swagger.json` | 同證交所 | 政府資料開放授權 | 上櫃股票每日增量 |
+| [證交所 TWSE OpenAPI](https://glama.ai/mcp/servers/taux-io/twse-mcp) | 上市日成交、三大法人買賣超、融資融券、借券、處置與注意股、除權除息預告表、除權除息與減資、面額變更的參考價、當沖交易統計（第二批） | REST `openapi.twse.com.tw/v1`，端點多為當日快照；歷史用 `exchangeReport/STOCK_DAY?date=&stockNo=`，一次回傳整月 | 無公開配額，頻繁請求會封 IP；請求間隔至少 3 秒 | 政府資料開放授權；對外再提供行情須另取得資訊使用授權 | 上市股票每日增量 |
+| [櫃買中心 TPEx OpenAPI](https://scidm.nchc.org.tw/en/dataset/best_wish11391) | 上櫃日成交、三大法人、融資融券、櫃買指數、除權除息預告表、除權除息與減資、面額變更的參考價、當沖交易統計（第二批） | REST，Swagger 文件 `tpex.org.tw/openapi/swagger.json` | 同證交所 | 政府資料開放授權 | 上櫃股票每日增量 |
 | 公開資訊觀測站 MOPS | 財報（XBRL）、月營收、董監與內部人持股、重大訊息 | 網頁表單與檔案下載 `mops.twse.com.tw`，無正式 API | 需爬蟲，頁面格式會變；要記錄公告日 | 公開資料 | 月營收與財報每日掃描；取得 announce\_date |
 | [集保 TDCC 股權分散表](https://scidm.nchc.org.tw/en/dataset/best_wish11452) | 每週各持股級距的人數、股數、占集保庫存比例 | 開放資料 CSV，每週最後一個營業日結算後發布 | CSV 只有最新一週，歷史要自己累積 | 政府資料開放授權 | 每週六增量累積；不回補歷史，`chip_*_1w` 在開始累積之前為空 |
 | [TEJ Tool API](https://pypi.org/project/tej-tool-api) | PIT 資料庫 600 多個指標；財務數據依公告日對應 | Python `tej-tool-api`，需 API key | 付費；預設起始日 2013-01-01；僅台灣市場 | 商業授權；學校圖書館可能有 | 財報 PIT 對齊的對照組（可選） |
@@ -99,7 +99,7 @@ Oct 29, 2026 · @Owen Lai
 | `market_history` | id；唯一鍵 stock\_id, start\_date | end\_date（含當天；每檔最後一段留空，代表到目前）、market（TWSE/TPEx）；同一檔的區間連續、不重疊 | 證交所、櫃買中心（歷史：每日外資持股頁；每日：當天報價） | start\_date、end\_date |
 | `trading_calendar` | date | is\_trading\_day、note（補班、颱風假） | 證交所 | — |
 | `daily_price` | stock\_id, date | open、high、low、close、volume（股）、turnover（元）、adj\_factor | 證交所、櫃買中心 | date |
-| `dividend_event` | stock\_id, ex\_date | cash\_dividend、stock\_dividend、adj\_factor、announce\_date（除權息日第一次公開的交易日，22:40 以後公告的算下一個交易日；沒有公告日的留空）；減資、分割、面額變更存成只帶 adj\_factor 的列（現金、股票股利為 0） | FinMind（歷史）；證交所、櫃買中心（每日） | ex\_date、announce\_date |
+| `dividend_event` | stock\_id, ex\_date | cash\_dividend、stock\_dividend、adj\_factor、announce\_date（除權息日第一次公開的交易日，22:40 以後公告的算下一個交易日；沒有公告日的留空）；減資、分割、面額變更存成只帶 adj\_factor 的列（現金、股票股利為 0） | FinMind（歷史，除權息日到 2026-10-30）；證交所、櫃買中心（每日：預告表先寫列與 announce\_date，結果表定金額與 adj\_factor） | ex\_date、announce\_date |
 | `daily_chip` | stock\_id, date | fi\_net、it\_net、dealer\_self\_net、dealer\_hedge\_net（股）、margin\_balance、margin\_limit、short\_balance、sbl\_short\_balance、fi\_holding\_pct、day\_trade\_volume（股，第二批） | 證交所、櫃買中心 | date |
 | `weekly_holding` | stock\_id, data\_date, level | level（1–15）、holders、shares、pct、publish\_date | 集保 | publish\_date（data\_date 隔日） |
 | `monthly_revenue` | stock\_id, period（YYYY-MM） | revenue、yoy、mom | MOPS | announce\_date |
@@ -167,7 +167,7 @@ Oct 29, 2026 · @Owen Lai
 | 18:30 | 櫃買的外資持股與流通股數變動（櫃買每日 18:00、22:00 更新） | 櫃買中心 | 每交易日 |
 | 19:00、22:40 | 月營收掃描 | MOPS | 每交易日，營收月份的次月 1 日到法定截止日後 20 天 |
 | 19:00、22:40 | 財報掃描 | MOPS | 每交易日，季底隔天到保守截止日後 45 天（等於全年每天掃，每天 24 到 36 個請求） |
-| 21:30 | 融資融券餘額、借券（約 20:30、22:30 更新）；當沖交易統計（第二批）抓當日與前兩個交易日（T、T+1、T+2 各更新一次，以 T+2 為準）；證交所的外資持股與流通股數變動（2026-11-09 觀測在 20:30 到 21:00 之間公布） | 證交所、櫃買中心 | 每交易日 |
+| 21:30 | 融資融券餘額、借券（約 20:30、22:30 更新）；當沖交易統計（第二批）抓當日與前兩個交易日（T、T+1、T+2 各更新一次，以 T+2 為準）；證交所的外資持股與流通股數變動（2026-11-09 觀測在 20:30 到 21:00 之間公布）；除權除息預告表（只有當下的名單，沒有歷史） | 證交所、櫃買中心 | 每交易日 |
 | 22:40 | 注意與處置名單再抓一次（名單可能晚於 16:30 公布） | 證交所、櫃買中心 | 每交易日 |
 | 22:50 | 資料品質檢查，並列出當日該跑卻沒有成功的工作 | — | 每交易日 |
 | 23:00 | 個股層級特徵重算最近 60 個交易日、label 重算最近 81 個交易日（第 6 節處理步驟 6）；還原因子改寫了歷史時，受影響日在這 60 個交易日內的由這兩步涵蓋，更早的告警、手動重建；這一步出錯只告警，不擋當天 | 研究層 | 每交易日，研究閘門通過後（見資料品質檢查） |
@@ -192,7 +192,7 @@ Oct 29, 2026 · @Owen Lai
 - 日期必須存在於 `trading_calendar`，否則整批拒收；歷史回補只拒收該檔（見歷史回補）。
 - 指數新鮮度：TAIEX、TAIEX\_TR、TPEX 當天要有收盤，SOX、TSM\_ADR、USDTWD 最多落後 4 個日曆日，超過就告警（warning）。
 - 結果寫入 `data_quality_log`，severity 為 error 時不執行當日預測。
-- 研究閘門：研究層的每日任務要等兩個交易所的日價量、指數、三大法人、融資融券、借券、外資持股、本益比與淨值比這些當日快照，以及除權息事件（除權息日的還原價要用到當天的因子），都有成功的 `etl_run`，且當日品質檢查沒有 error；注意、處置、全額交割、流通股數變動、當沖、加權股價報酬指數不擋，漏一天只是晚一天反映，隔日補抓；報酬指數只給第 7 節相對大盤的機率 label 用，停止更新時由指數新鮮度檢查告警。
+- 研究閘門：研究層的每日任務要等兩個交易所的日價量、指數、三大法人、融資融券、借券、外資持股、本益比與淨值比這些當日快照，以及除權息事件（除權息日的還原價要用到當天的因子），都有成功的 `etl_run`，且當日品質檢查沒有 error；注意、處置、全額交割、流通股數變動、當沖、加權股價報酬指數、除權除息預告表不擋，漏一天只是晚一天反映，隔日補抓（預告表沒有歷史，漏掉的那天不補抓，之後任何一次抓到就算補上）；報酬指數只給第 7 節相對大盤的機率 label 用，停止更新時由指數新鮮度檢查告警。另有一項只告警、不擋閘門的檢查（`ex_date_unannounced`）：未來 30 個日曆天內除息、有現金股利、卻沒有 `announce_date` 的事件數大於 0 就記 warning，因為 `fund_days_to_ex_date` 看不到這些事件。
 
 **失敗處理**
 
@@ -353,7 +353,7 @@ Oct 29, 2026 · @Owen Lai
    - **MOPS 補 FinMind 沒有的月份與季（plan K17，2013-Q1 起）**：FinMind 沒有某檔某期的月營收或財報列時，整列用 MOPS 歷史彙總頁、XBRL 檢視頁或單一公司月營收查詢（新站 JSON API，2014-01 起）新增，財報的兩個利益率由 MOPS 的損益表算；這一步不改 FinMind 已有的列（已有列的覆寫與清空照上一條），數字不同記 `revenue_history_mismatch`、`statement_history_mismatch`、`statement_viewer_mismatch`；單一公司查詢只問沒有列的月份，`revenue_company_mismatch` 記補進來的與查不到的月份。每日掃描接手之後的期別（第一次成功的每日掃描那天還在看的最早一期起）由掃描以第一次看到的 session 記公告日，MOPS 的這幾種回補都不補。
    - **交易所逐日表補歷史缺值（plan K17c）**：FinMind 歷史回補缺的部分，用證交所、櫃買的逐日全市場表補，只寫當天在 `daily_price` 有價的代號，已有的值不改：`daily_chip` 的外資持股比、融資餘額、融資限額、融券餘額與借券賣出餘額是那天沒有列就新增、欄位空的才補（各欄分開看）；`daily_valuation` 的本益比、股價淨值比、殖利率是那天整列沒有才新增；`shares_outstanding` 只補每檔第一筆已存股數之前的日子（界線取第一次補缺時的值，沒有已存股數的股票整段都補），只寫股數變動的那天，股數只和界線那天的已存股數比對，跑完刪掉和補上的股數重複的已存列（生效的股數不變，刪掉的列記在 log）。`stock_master` 的產業以 FinMind 股票清單為 primary；空的用交易所依產業別的季底收盤行情補（多季看到時取最後一次，新上市的代號每季再補），不比對已有的，也不記差異。
    - **外資持股比的 0（plan K21）**：只看普通股（不含存託憑證）；交易所的值讀已存的 raw 頁、不重抓，同一天有幾份時取最新的。FinMind 存 0、交易所當天的值大於 0 時，只有兩種情況改成交易所的值：同一檔依日期排序的已存非空值裡連續 20 天以上的 0，90% 以上的日子交易所頁面有這檔，且其中 90% 以上大於 0（整段裡大於 0 的日子都改）；連續不到 20 天的 0（大於 0 的那幾天改）。其餘長段的 0 不改。每改一列寫一列 `fi_holding_zero_replaced`，記舊值、新值與交易所 raw。
-   - **除權息事件（plan 2.7）**：FinMind 回補的列 `adj_factor` 是空的時，用交易所除權除息、恢復買賣結果表的因子補；已有的金額、因子和交易所不同時不改，記 `dividend_source_mismatch`，空的因子照樣補。交易所寫的列 `announce_date` 留空；已存的 FinMind 回應裡有公告日的由 `reapply_dividend_dates` 補（只補空的），其餘等 plan 2.7b 的預告表。FinMind 股利回補只到 2026-10-30：它對已存的列會覆寫金額與因子，之後的日子不用 FinMind 重跑。
+   - **除權息事件（plan 2.7、2.7b）**：除權息日在 2026-10-30 以前的列以 FinMind 回補為準：`adj_factor` 是空的時，用交易所除權除息、恢復買賣結果表的因子補；已有的金額、因子和交易所不同時不改，記 `dividend_source_mismatch`。除權息日在 2026-10-31 以後的列以交易所為準（`DIVIDEND_EXCHANGE_PRIMARY_FROM`）：結果表的金額、因子和已存的不同時覆寫，同樣記在 `dividend_source_mismatch`（標 `overwritten`）；FinMind 不新增這些列，也不改它們的金額與因子。公告日：每天抓兩個交易所的除權除息預告表。預告表只有當下的名單，沒有歷史，也沒有公告日欄，所以除權息日還沒到的列，第一次在名單上看到的交易日就是 `announce_date`（抓取時刻在交易日 22:40 前算當天，其餘算下一個交易日）。表上有、庫裡沒有的事件先新增一列：金額用表上的，待公告的金額先存 0，`adj_factor` 留空；已有的列只補空的 `announce_date`。預告表新增的列在結果表寫入因子之前，金額跟著名單更新。減資、面額變更不在預告表上，這類列的 `announce_date` 維持空的。改期或取消：預告表新增、還沒除權息、`adj_factor` 是空的列，要連續兩個不同交易日的名單都沒有它，而且這兩次名單都正常，才刪除，並把整列記在 `data_quality_log`（`dividend_notice`，warning）。名單正常是指上面還有未到的除權息日，而且上一次列著、這次該還在卻不見的列數，不超過 5 列與 20% 兩者中較大的。刪掉的事件再出現時，沿用原本第一次看到的交易日。FinMind 的公告時間只在手動補日期時用（`reapply_dividend_dates`）：預設只補空的；加 `--earlier` 時，已存日期比公告交易日晚的也往前改（第一次看到只會比公告晚），不會往後改。每日排程不抓 FinMind。
    - **市場歷史（`market_history`）**：歷史以每日外資持股頁為 primary，每日以當天報價接著寫；兩個交易所的頁都在的日子以頁面為準，頁面看不到的日子（缺一邊或兩邊都沒有頁）保留報價寫的界線。重建改到既有的段時記 `market_history_rebuilt`；只差第一段起日的（新股的頁面常比報價早一天列出）另計 `start_shifted`。
 6. **上市、上櫃分流**：證交所與櫃買中心格式不同，adapter 分開寫，normalize 後才合併。興櫃股票無漲跌幅限制，第一版排除。
 7. **交易日曆**：以證交所公告為準，含補班日與颱風假。所有日期運算走 `trading_calendar`，不用 `pandas.bdate_range`。
