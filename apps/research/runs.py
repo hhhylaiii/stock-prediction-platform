@@ -19,6 +19,7 @@ from django.db import connection, transaction
 
 from apps.research.features.store import existing_partition
 from apps.research.holdout import (
+    PRODUCTION,
     HoldoutTicket,
     ProductionPass,
     authorize_folds,
@@ -31,7 +32,6 @@ from apps.research.prediction_cache import fold_cached, fold_record, other_layou
 from apps.research.ranges import years
 from apps.research.walkforward import Fold
 
-PRODUCTION = "production"
 LIBRARIES = ("django", "numpy", "pandas", "pyarrow", "scikit-learn", "lightgbm")
 MODEL_SUFFIX = ".pkl"
 CHUNK = 1 << 20
