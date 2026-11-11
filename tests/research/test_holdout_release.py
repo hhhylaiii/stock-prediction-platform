@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from django.core.management import call_command
 from django.core.management.base import CommandError
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from apps.etl.models import DataQualityLog
@@ -22,7 +23,7 @@ from apps.research.holdout import (
     reported,
 )
 from apps.research.management.commands.release_holdout import Command as ReleaseCommand
-from apps.research.models import HoldoutRelease, ModelRun
+from apps.research.models import HoldoutRelease, HoldoutRun, ModelRun
 from apps.research.production import HOLDOUT_RELEASE, RELEASE_CHECK, build_run
 from apps.research.runs import PRODUCTION
 from tests.research.run_panels import claim_all, finish_holdout, weekdays, write_holdout_report
@@ -109,7 +110,10 @@ def test_a_verdict_short_of_the_criteria_builds_only_after_its_release(
         "scope": "rank",
         "run_key": "rank-prod",
         "holdout": "rank-final",
-        **note,
+        "status": status,
+        "failed": marked.failed,
+        "flagged": marked.flagged,
+        "released_at": note["released_at"],
     }
     assert sent == [[alert]]
 
@@ -137,8 +141,49 @@ def test_a_release_of_one_verdict_does_not_cover_another(researched: Path) -> No
     report_marker("rank-final").unlink()
     write_holdout_report("rank", "rank-final", FAILED, REPORT)
 
-    with pytest.raises(HoldoutError, match=f"was judged {FAILED}"):
+    with pytest.raises(HoldoutError, match="rank-final was released for another report or verdict"):
         build(researched)
+
+
+@pytest.mark.django_db
+def test_a_release_covers_only_the_report_it_was_recorded_for(researched: Path) -> None:
+    claim_all(reported=FAILED)
+    release_holdout("rank", FAILED, "the user accepts it")
+    report_marker("rank-final").unlink()
+    write_holdout_report("rank", "rank-final", FAILED, text="another report")
+
+    with pytest.raises(HoldoutError, match="rank-final was released for another report or verdict"):
+        build(researched)
+
+
+@pytest.mark.django_db
+def test_a_marker_with_fields_a_later_version_added_is_still_read(researched: Path) -> None:
+    claim_all()
+    marker = report_marker("rank-final")
+    marker.write_text(
+        json.dumps({**json.loads(marker.read_text(encoding="utf-8")), "later": 1}),
+        encoding="utf-8",
+    )
+
+    build(researched)
+
+    assert ModelRun.objects.filter(run_key="rank-prod").exists()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("status", "reason"), [(PASSED, "the user accepts it"), (FAILED, " "), ("通過", "x")]
+)
+def test_the_table_refuses_a_release_of_a_pass_or_without_a_reason(
+    researched: Path, status: str, reason: str
+) -> None:
+    claim_all(reported=FAILED)
+    claim = HoldoutRun.objects.get(run_key="rank-final")
+
+    with pytest.raises(IntegrityError), transaction.atomic():
+        HoldoutRelease.objects.create(
+            holdout=claim, status=status, reason=reason, report_sha256="0" * 64
+        )
 
 
 @pytest.mark.django_db
@@ -230,5 +275,6 @@ def test_the_release_command_records_the_user_s_decision(researched: Path) -> No
         "accepted",
     )
     assert f"rank-final: released {FAILED}" in out.getvalue()
+    assert "+08:00;" in out.getvalue()
     assert "未達的門檻 ['5 日 MAE']，退化旗標 ['MAE 差']" in out.getvalue()
     assert "只有使用者明確同意後才能執行" in ReleaseCommand.help

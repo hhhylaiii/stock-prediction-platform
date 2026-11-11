@@ -171,13 +171,15 @@ def write_holdout_markers(
 SHORT = {FAILED: (["5 日 MAE"], ["MAE 差"]), DEGRADED: ([], ["MAE 差"])}
 
 
-def write_holdout_report(scope: str, key: str, status: str = PASSED, path: str = "r.md") -> None:
+def write_holdout_report(
+    scope: str, key: str, status: str = PASSED, path: str = "r.md", text: str = ""
+) -> None:
     """Mark the holdout under key reported with a verdict and what fell short in it."""
     marker = report_marker(key)
     marker.parent.mkdir(parents=True, exist_ok=True)
     failed, flagged = SHORT.get(status, ([], []))
-    digest = hashlib.sha256(f"{key} {status}".encode()).hexdigest()
-    stored = Reported(scope, status, path, digest, "", failed, flagged)
+    digest = hashlib.sha256(text.encode()).hexdigest()
+    stored = Reported(scope, status, path, digest, text, failed, flagged)
     marker.write_text(json.dumps(asdict(stored), ensure_ascii=False), encoding="utf-8")
 
 

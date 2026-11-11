@@ -3,7 +3,7 @@
 import json
 import re
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -189,9 +189,10 @@ def reported(run_key: str) -> Reported | None:
     if not marker.exists():
         return None
     try:
-        return Reported(**json.loads(marker.read_text(encoding="utf-8")))
-    except (ValueError, TypeError) as error:
-        raise HoldoutError(f"{marker} is not a holdout report marker: {error}") from error
+        stored = json.loads(marker.read_text(encoding="utf-8"))
+        return Reported(**{field.name: stored[field.name] for field in fields(Reported)})
+    except (ValueError, TypeError, KeyError) as error:
+        raise HoldoutError(f"{marker} is not a holdout report marker: {error!r}") from error
 
 
 def _verdict(scope: str, key: str) -> Reported | None:
@@ -242,6 +243,11 @@ def released_verdict(granted: ProductionPass) -> dict[str, Any] | None:
     release = HoldoutRelease.objects.filter(
         holdout__run_key=key, status=marked.status, report_sha256=marked.sha256
     ).first()
+    if release is None and HoldoutRelease.objects.filter(holdout__run_key=key).exists():
+        raise HoldoutError(
+            f"holdout {key} was released for another report or verdict than its marker holds "
+            f"now ({marked.status}, report {marked.path}); the marker changed after the release"
+        )
     if release is None:
         raise HoldoutError(
             f"holdout {key} was judged {marked.status} (report {marked.path}); the build is "

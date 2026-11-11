@@ -139,6 +139,7 @@ BAGS = 5
 HOLDOUT_MODELS = (baseline_runs.BASELINE, MODEL)
 HOLDOUT_RELEASE = "holdout_release"
 RELEASE_CHECK = "model_holdout_release"
+ALERTED = ("status", "failed", "flagged", "released_at")
 SHADOW = "shadow"
 GATES = "gates"
 BASELINED = (HoldoutScope.RETURN, HoldoutScope.INTERVAL)
@@ -323,12 +324,13 @@ def _run_ids(key: str) -> list[str]:
 def _alert_release(
     scope: str, run_key: str, as_of: date, holdout: str, release: dict[str, Any]
 ) -> None:
-    """Warn that a production run was built on a holdout verdict the user released."""
+    """Warn that a production run was built on a released verdict; the reason stays in params."""
+    shown = {name: release[name] for name in ALERTED}
     row = DataQualityLog.objects.create(
         date=as_of,
         check_name=RELEASE_CHECK,
         severity=DataQualityLog.Severity.WARNING,
-        detail={"scope": scope, "run_key": run_key, "holdout": holdout, **release},
+        detail={"scope": scope, "run_key": run_key, "holdout": holdout, **shown},
     )
     dispatch([row])
 

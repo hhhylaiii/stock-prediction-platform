@@ -145,6 +145,29 @@ def test_a_failed_gate_outranks_a_flag_and_a_flag_outranks_a_pass(
     assert verdict(gates, flags).status == status
 
 
+def test_the_marked_report_lists_the_gates_that_failed_and_the_flags_raised() -> None:
+    passed = {"a": True, "b": False, "c": False}
+    gates = tuple(Check(name, 0.0, "", "", met) for name, met in passed.items())
+    bound = Window(0.01, 8, 15)
+    flags = (Flag("x", 0.0, HIGHER, bound, bound), Flag("y", 0.05, HIGHER, bound, bound))
+    judged = ScopeVerdict("rank", gates, flags, (), (), pd.DataFrame())
+
+    marked = holdout_eval.marked_report(judged, "out.md", "the text")
+
+    assert (marked.scope, marked.status) == ("rank", FAILED)
+    assert (marked.failed, marked.flagged) == (["b", "c"], ["x"])
+    assert marked.sha256 == hashlib.sha256(b"the text").hexdigest()
+    assert (marked.text, Path(marked.path).is_absolute()) == ("the text", True)
+
+
+def test_a_short_verdict_is_reported_as_refused_until_the_user_releases_it() -> None:
+    for status in (FAILED, DEGRADED):
+        assert "預設不上線" in HANDLING[status]
+        assert "`release_holdout`" in HANDLING[status]
+    assert "release_holdout" not in HANDLING[PASSED]
+    assert "不上線" not in HANDLING[PASSED]
+
+
 def test_every_cited_spec_line_still_holds_its_clause() -> None:
     lines = (Path(settings.BASE_DIR) / "docs" / "SPEC.md").read_text().splitlines()
 
