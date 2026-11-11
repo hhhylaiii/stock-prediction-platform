@@ -14,6 +14,7 @@ from rest_framework.response import Response
 from apps.api.envelope import envelope
 from apps.api.params import MonthlyIcQuery, parse
 from apps.api.serving import (
+    HOLDOUT_RELEASE,
     MONITOR_FIELDS,
     SERVING_FIELDS,
     ServingRun,
@@ -57,7 +58,6 @@ MONTH_IC, MONTH_DAYS = RANK_METRICS[0], RANK_METRICS[-1]
 ENTRY_FIELDS = ("run_id", "run_key", "model_type", "version", "status", "train_start", "train_end")
 TOTAL_FIELDS = ("run_key", "model_type", "metric", "segment", "value", "period_start", "period_end")
 WINDOW_FIELDS = {"own_rows": int, "days": int, "mostly_predecessors": bool}
-HOLDOUT_RELEASE = "holdout_release"
 RELEASE_TEXTS = ("status", "reason", "released_at")
 RELEASE_LISTS = ("failed", "flagged")
 

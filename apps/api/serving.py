@@ -14,6 +14,7 @@ from typing import Any
 from django.db.models import F, OuterRef, Q, QuerySet, Subquery
 
 from apps.market.calendar import CalendarError, TradingDays
+from apps.research.holdout import DEGRADED, FAILED, PRODUCTION
 from apps.research.models import ModelMonitor, ModelObjective, ModelRun, ModelStatus, Prediction
 from apps.research.runs import SCREENING_MODEL
 from apps.research.walkforward import oos_start
@@ -36,6 +37,8 @@ RUN_FIELDS = (
 )
 DEGRADED_ON = "run__params__degraded_on"
 ALERT_PERIODS = "run__params__alert_periods"
+HOLDOUT_RELEASE = "holdout_release"
+RELEASED = f"run__params__{PRODUCTION}__{HOLDOUT_RELEASE}__status"
 ISO_DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
 SERVING_FIELDS = (
     "run_id",
@@ -44,6 +47,7 @@ SERVING_FIELDS = (
     *(f"run__{name}" for name in RUN_FIELDS),
     DEGRADED_ON,
     ALERT_PERIODS,
+    RELEASED,
 )
 
 logger = logging.getLogger(__name__)
@@ -69,6 +73,7 @@ class ServingRun:
     created_at: datetime
     degraded_on: date | None = None
     alert_periods: tuple[tuple[date, date], ...] = ()
+    released: str | None = None
 
     def order(self) -> tuple[int, float, str]:
         return (STATUS_ORDER.index(self.status), -self.created_at.timestamp(), self.run_id)
@@ -113,6 +118,11 @@ def periods_of(run_id: str, value: object) -> tuple[tuple[date, date], ...]:
     if len(periods) < len(value):
         warn_unreadable_periods(run_id)
     return tuple(periods)
+
+
+def released_as(value: object) -> str | None:
+    """The verdict a run's holdout was released on; None for anything a release cannot name."""
+    return value if isinstance(value, str) and value in (FAILED, DEGRADED) else None
 
 
 def interval_alert(run: ServingRun | None, day: date) -> bool:
@@ -215,6 +225,7 @@ def serving_run(row: dict[str, Any]) -> ServingRun:
         **{name: row[f"run__{name}"] for name in RUN_FIELDS},
         degraded_on=day_of(row.get(DEGRADED_ON)),
         alert_periods=periods_of(row["run_id"], row.get(ALERT_PERIODS)),
+        released=released_as(row.get(RELEASED)),
     )
 
 

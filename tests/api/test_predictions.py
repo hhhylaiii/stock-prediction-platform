@@ -7,7 +7,9 @@ import pytest
 from django.test import Client
 from pytest_django import DjangoAssertNumQueries
 
+from apps.api.serving import HOLDOUT_RELEASE
 from apps.market.models import TradingCalendar
+from apps.research.holdout import DEGRADED, FAILED, PASSED, PRODUCTION
 from apps.research.models import FeatureDaily, ModelMonitor, ModelRun, Prediction
 from tests.api.conftest import (
     CALENDAR_START,
@@ -96,8 +98,64 @@ def test_meta_names_the_date_universe_and_serving_models(client: Client, runs: R
         "status": "active",
         "train_start": "2023-10-01",
         "train_end": "2026-09-30",
+        "released_verdict": None,
     }
     assert (meta["degraded"], meta["interval_alert"]) == ([], False)
+
+
+def released_on(status: object) -> dict[str, Any]:
+    release = {
+        "status": status,
+        "failed": ["排名 20 日 IC"],
+        "flagged": [],
+        "reason": "kept for the model page",
+        "released_at": "2026-11-12T10:03:00+08:00",
+        "report": "/srv/host/reports/rank-holdout.md",
+        "sha256": "ab" * 32,
+    }
+    return {PRODUCTION: {"role": "model", HOLDOUT_RELEASE: release}}
+
+
+def verdicts_of(body: dict[str, Any]) -> dict[str, str | None]:
+    return {model["role"]: model["released_verdict"] for model in body["meta"]["models"]}
+
+
+@pytest.mark.parametrize("status", [FAILED, DEGRADED])
+def test_a_model_built_on_a_released_holdout_names_the_verdict_and_not_the_reason(
+    client: Client, runs: Runs, status: str
+) -> None:
+    ModelRun.objects.filter(pk="quantile-h20").update(params=released_on(status))
+
+    response = client.get("/api/predictions")
+
+    assert verdicts_of(envelope_of(response)) == {
+        "rank": None,
+        "return": status,
+        "interval": status,
+        "volatility": None,
+        "probability": None,
+    }
+    assert "kept for the model page" not in response.content.decode()
+
+
+@pytest.mark.parametrize("status", [PASSED, "released", 1, None, [FAILED]])
+def test_a_status_no_release_can_name_is_not_served_as_released(
+    client: Client, runs: Runs, status: object
+) -> None:
+    ModelRun.objects.filter(pk="rank-h20").update(params=released_on(status))
+
+    assert verdicts_of(envelope_of(client.get("/api/predictions")))["rank"] is None
+
+
+def test_production_params_without_a_release_are_not_served_as_released(
+    client: Client, runs: Runs
+) -> None:
+    ModelRun.objects.filter(pk="rank-h20").update(params={PRODUCTION: "rank-2026-11"})
+    ModelRun.objects.filter(pk="vol-h20").update(params={PRODUCTION: {HOLDOUT_RELEASE: FAILED}})
+
+    verdicts = verdicts_of(envelope_of(client.get("/api/predictions")))
+
+    assert (verdicts["rank"], verdicts["volatility"]) == (None, None)
 
 
 def test_a_stock_without_quantiles_gets_the_volatility_band(client: Client, runs: Runs) -> None:

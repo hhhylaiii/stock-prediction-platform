@@ -7,7 +7,8 @@ import pytest
 from django.test import Client
 from pytest_django import DjangoAssertNumQueries
 
-from apps.api.model_runs import HOLDOUT_RELEASE, MONTH_DAYS, MONTH_IC
+from apps.api.model_runs import MONTH_DAYS, MONTH_IC
+from apps.api.serving import HOLDOUT_RELEASE
 from apps.research import production
 from apps.research.eval_report import RANK_METRICS
 from apps.research.holdout import (
@@ -497,6 +498,8 @@ def test_the_release_a_build_records_reaches_the_endpoint_with_its_reason(
     assert shown["failed"]
     assert shown["flagged"]
     assert REPORT_PATH not in response.content.decode()
+    served = envelope_of(client.get("/api/predictions"))["meta"]["models"]
+    assert [model["released_verdict"] for model in served if model["role"] == "rank"] == [FAILED]
 
 
 @pytest.mark.parametrize(

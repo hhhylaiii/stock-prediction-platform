@@ -4,6 +4,8 @@ import pytest
 from django.test import Client
 from pytest_django import DjangoAssertNumQueries
 
+from apps.api.serving import HOLDOUT_RELEASE
+from apps.research.holdout import DEGRADED, PRODUCTION
 from apps.research.models import FeatureDaily, ModelRun, Prediction
 from tests.api.conftest import (
     NOV_2,
@@ -49,6 +51,24 @@ def test_both_horizons_merge_every_serving_model(client: Client, runs: Runs) -> 
     assert [model["role"] for model in five["models"]] == ["rank", "return", "volatility"]
     assert twenty["models"][1]["run_id"] == "quantile-h20"
     assert (five["degraded"], twenty["degraded"]) == ([], [])
+
+
+def test_each_horizon_names_its_models_built_on_a_released_holdout(
+    client: Client, runs: Runs
+) -> None:
+    release = {"status": DEGRADED, "reason": "kept for the model page"}
+    ModelRun.objects.filter(pk="rank-h5").update(params={PRODUCTION: {HOLDOUT_RELEASE: release}})
+
+    response = client.get("/api/stocks/2330/predictions")
+
+    five, twenty = horizons_of(envelope_of(response))[5], horizons_of(envelope_of(response))[20]
+    assert {model["role"]: model["released_verdict"] for model in five["models"]} == {
+        "rank": DEGRADED,
+        "return": None,
+        "volatility": None,
+    }
+    assert {model["released_verdict"] for model in twenty["models"]} == {None}
+    assert "kept for the model page" not in response.content.decode()
 
 
 def test_realised_volatility_comes_from_the_twenty_day_prediction_date(

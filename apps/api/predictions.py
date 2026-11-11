@@ -48,6 +48,7 @@ def model_meta(role: str, run: ServingRun) -> dict[str, Any]:
         "status": run.status,
         "train_start": run.train_start,
         "train_end": run.train_end,
+        "released_verdict": run.released,
     }
 
 
