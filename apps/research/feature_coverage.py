@@ -212,7 +212,9 @@ def coverage_summary(row: DataQualityLog) -> str:
 
 
 @locked("coverage")
-def run_coverage(day: date, calendar: TradingDays, directory: Path) -> DataQualityLog:
+def run_coverage(
+    day: date, calendar: TradingDays, directory: Path, alert: bool = True
+) -> DataQualityLog:
     """Write the day's row over its earlier one; an error always alerts, a warning on a new list.
 
     An error row shuts the day's prediction gate, which reads data_quality_log.
@@ -224,6 +226,6 @@ def run_coverage(day: date, calendar: TradingDays, directory: Path) -> DataQuali
         DataQualityLog.objects.filter(date=day, check_name=CHECK).delete()
         row.save()
     changed = _names(row) != _flagged_before(day, calendar)
-    if row.severity == Severity.ERROR or (row.severity == Severity.WARNING and changed):
+    if alert and (row.severity == Severity.ERROR or (row.severity == Severity.WARNING and changed)):
         dispatch([row])
     return row

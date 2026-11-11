@@ -23,6 +23,9 @@ class Command(BaseCommand):
         )
         parser.add_argument("--start", type=date.fromisoformat, help="First day of a range.")
         parser.add_argument("--end", type=date.fromisoformat, help="Last day of a range.")
+        parser.add_argument(
+            "--quiet", action="store_true", help="Write the rows without alerting, as a backfill."
+        )
 
     def _days(self, calendar: TradingDays, options: dict[str, Any]) -> tuple[date, ...]:
         day, start, end = options.get("date"), options.get("start"), options.get("end")
@@ -39,7 +42,9 @@ class Command(BaseCommand):
         try:
             calendar = TradingDays.from_db()
             for day in self._days(calendar, options):
-                row = run_coverage(day, calendar, settings.FEATURE_PARQUET_DIR)
+                row = run_coverage(
+                    day, calendar, settings.FEATURE_PARQUET_DIR, alert=not options.get("quiet")
+                )
                 self.stdout.write(
                     f"feature coverage {day}: {row.severity}, {coverage_summary(row)}"
                 )

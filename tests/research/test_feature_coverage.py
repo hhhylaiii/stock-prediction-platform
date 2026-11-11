@@ -313,7 +313,7 @@ def test_a_feature_masked_in_the_day_s_own_month_is_not_judged(
 
 def test_days_this_check_flagged_stay_out_of_the_reference(tmp_path: Path) -> None:
     history(tmp_path, years={2025: {SPARSE: 0.0, DENSE: 0.4}})
-    live(tmp_path, {SPARSE: 0.0})
+    live(tmp_path, {SPARSE: 0.0, DENSE: 0.3})
     assert coverage_row(DAY, tmp_path).detail["unjudged"] == {SPARSE: "zero_low"}
 
     DataQualityLog.objects.bulk_create(
@@ -453,6 +453,29 @@ def test_an_error_is_sent_every_day(
     assert sent == [(THURSDAY, Severity.ERROR), (DAY, Severity.ERROR)]
 
 
+def test_a_quiet_run_writes_the_row_without_alerting(
+    tmp_path: Path, calendar: TradingDays, sent: list[tuple[date, str]]
+) -> None:
+    history(tmp_path)
+    write(
+        tmp_path,
+        2026,
+        pd.concat(
+            [
+                rows([THURSDAY], {**USUAL_SHARES, SPARSE: 0.0}),
+                rows([DAY], {**USUAL_SHARES, DENSE: 0.1}),
+            ],
+            ignore_index=True,
+        ),
+    )
+
+    found = [run_coverage(day, calendar, tmp_path, alert=False) for day in (THURSDAY, DAY)]
+
+    assert [row.severity for row in found] == [Severity.WARNING, Severity.ERROR]
+    assert DataQualityLog.objects.filter(check_name=CHECK).count() == 2
+    assert sent == []
+
+
 def test_the_first_calendar_day_has_no_earlier_row_to_compare(
     tmp_path: Path, sent: list[tuple[date, str]]
 ) -> None:
@@ -512,6 +535,19 @@ def test_the_command_writes_a_row_for_each_trading_day_of_a_range(stored_calenda
     ]
     written = DataQualityLog.objects.filter(check_name=CHECK).order_by("date")
     assert [row.date for row in written] == [THURSDAY, DAY, MONDAY]
+
+
+def test_the_command_backfills_quietly_when_asked(
+    stored_calendar: Path, sent: list[tuple[date, str]]
+) -> None:
+    history(stored_calendar)
+    live(stored_calendar, {SPARSE: 0.0}, days=(THURSDAY, DAY))
+
+    call_command("feature_coverage", start=THURSDAY, end=DAY, quiet=True, stdout=StringIO())
+    assert sent == []
+
+    call_command("feature_coverage", date=THURSDAY, stdout=StringIO())
+    assert sent == [(THURSDAY, Severity.WARNING)]
 
 
 def test_the_command_takes_one_day(stored_calendar: Path) -> None:
