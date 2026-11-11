@@ -132,3 +132,5 @@ lambdarank-notrunc: best 1 valid 0.4177 test IC 0.3906
 | 4.8b interval LightGBM | 74.0 分 | 7.12 GB |
 | 4.8b interval baseline | 37.5 分 | 8.14 GB |
 | 4.8b interval 評估 | 2.0 分 | 6.98 GB |
+| 季底天數 return（seed 0） | 12.8 分 | 7.72 GB |
+| 季底天數 interval（seed 0） | 45.5 分 | 8.44 GB |
