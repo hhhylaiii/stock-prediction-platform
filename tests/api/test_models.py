@@ -508,6 +508,7 @@ def test_the_release_a_build_records_reaches_the_endpoint_with_its_reason(
         "未達標",
         {name: value for name, value in RELEASE.items() if name != "reason"},
         {**RELEASE, "status": None},
+        {**RELEASE, "status": "達標"},
         {**RELEASE, "released_at": 20261112},
         {**RELEASE, "failed": "排名 20 日 IC"},
         {**RELEASE, "flagged": [1]},

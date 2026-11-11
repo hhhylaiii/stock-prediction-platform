@@ -19,6 +19,7 @@ from apps.api.serving import (
     latest_served_date,
     ranks_on,
     recent_means,
+    released_verdicts,
     roles_for,
     runs_on,
 )
@@ -37,7 +38,7 @@ def rounded(value: float | None, digits: int) -> float | None:
     return None if value is None else round(value, digits)
 
 
-def model_meta(role: str, run: ServingRun) -> dict[str, Any]:
+def model_meta(role: str, run: ServingRun, released: str | None) -> dict[str, Any]:
     return {
         "role": role,
         "run_id": run.run_id,
@@ -48,7 +49,7 @@ def model_meta(role: str, run: ServingRun) -> dict[str, Any]:
         "status": run.status,
         "train_start": run.train_start,
         "train_end": run.train_end,
-        "released_verdict": run.released,
+        "released_verdict": released,
     }
 
 
@@ -214,7 +215,9 @@ def rank_rows(
 
 
 def served_models(roles: dict[str, Slot], runs: dict[Slot, ServingRun]) -> list[dict[str, Any]]:
-    return [model_meta(role, runs[slot]) for role, slot in roles.items() if slot in runs]
+    serving = [(role, runs[slot]) for role, slot in roles.items() if slot in runs]
+    verdicts = released_verdicts(run.run_id for _, run in serving) if serving else {}
+    return [model_meta(role, run, verdicts.get(run.run_id)) for role, run in serving]
 
 
 def band_alert(day: date, roles: dict[str, Slot], runs: dict[Slot, ServingRun]) -> bool:

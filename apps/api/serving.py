@@ -38,7 +38,9 @@ RUN_FIELDS = (
 DEGRADED_ON = "run__params__degraded_on"
 ALERT_PERIODS = "run__params__alert_periods"
 HOLDOUT_RELEASE = "holdout_release"
-RELEASED = f"run__params__{PRODUCTION}__{HOLDOUT_RELEASE}__status"
+RELEASE = f"params__{PRODUCTION}__{HOLDOUT_RELEASE}"
+RELEASE_TEXTS = ("status", "reason", "released_at")
+RELEASE_LISTS = ("failed", "flagged")
 ISO_DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
 SERVING_FIELDS = (
     "run_id",
@@ -47,7 +49,6 @@ SERVING_FIELDS = (
     *(f"run__{name}" for name in RUN_FIELDS),
     DEGRADED_ON,
     ALERT_PERIODS,
-    RELEASED,
 )
 
 logger = logging.getLogger(__name__)
@@ -73,7 +74,6 @@ class ServingRun:
     created_at: datetime
     degraded_on: date | None = None
     alert_periods: tuple[tuple[date, date], ...] = ()
-    released: str | None = None
 
     def order(self) -> tuple[int, float, str]:
         return (STATUS_ORDER.index(self.status), -self.created_at.timestamp(), self.run_id)
@@ -120,9 +120,36 @@ def periods_of(run_id: str, value: object) -> tuple[tuple[date, date], ...]:
     return tuple(periods)
 
 
-def released_as(value: object) -> str | None:
-    """The verdict a run's holdout was released on; None for anything a release cannot name."""
-    return value if isinstance(value, str) and value in (FAILED, DEGRADED) else None
+@functools.cache
+def warn_unreadable_release(run_id: str) -> None:
+    logger.warning("run %s has an unreadable holdout release; it is shown as not released", run_id)
+
+
+def is_names(value: object) -> bool:
+    return isinstance(value, list) and all(isinstance(name, str) for name in value)
+
+
+def release_of(value: object) -> dict[str, Any] | None:
+    """A recorded holdout release without its report path or hash; None unless all of it reads."""
+    if not isinstance(value, dict):
+        return None
+    shown = {name: value.get(name) for name in (*RELEASE_TEXTS, *RELEASE_LISTS)}
+    texts = all(isinstance(shown[name], str) for name in RELEASE_TEXTS)
+    lists = all(is_names(shown[name]) for name in RELEASE_LISTS)
+    return shown if texts and lists and shown["status"] in (FAILED, DEGRADED) else None
+
+
+def released_verdicts(run_ids: Iterable[str]) -> dict[str, str]:
+    """The verdict each run's holdout was released on, one row read per run built on a release."""
+    rows = ModelRun.objects.filter(run_id__in=set(run_ids)).values_list("run_id", RELEASE)
+    verdicts = {}
+    for run_id, recorded in rows:
+        release = release_of(recorded)
+        if release is not None:
+            verdicts[run_id] = release["status"]
+        elif recorded is not None:
+            warn_unreadable_release(run_id)
+    return verdicts
 
 
 def interval_alert(run: ServingRun | None, day: date) -> bool:
@@ -225,7 +252,6 @@ def serving_run(row: dict[str, Any]) -> ServingRun:
         **{name: row[f"run__{name}"] for name in RUN_FIELDS},
         degraded_on=day_of(row.get(DEGRADED_ON)),
         alert_periods=periods_of(row["run_id"], row.get(ALERT_PERIODS)),
-        released=released_as(row.get(RELEASED)),
     )
 
 

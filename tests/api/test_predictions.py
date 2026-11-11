@@ -4,7 +4,9 @@ from datetime import date
 from typing import Any
 
 import pytest
+from django.db import connection
 from django.test import Client
+from django.test.utils import CaptureQueriesContext
 from pytest_django import DjangoAssertNumQueries
 
 from apps.api.serving import HOLDOUT_RELEASE
@@ -18,12 +20,15 @@ from tests.api.conftest import (
     OCT_28,
     OCT_29,
     OCT_30,
+    RELEASE_REASON,
+    RELEASE_REPORT,
     Runs,
     add_bars,
     add_model_run,
     add_predictions,
     add_stock,
     envelope_of,
+    release_params,
     sessions_until,
     taipei,
     trained_until,
@@ -103,19 +108,6 @@ def test_meta_names_the_date_universe_and_serving_models(client: Client, runs: R
     assert (meta["degraded"], meta["interval_alert"]) == ([], False)
 
 
-def released_on(status: object) -> dict[str, Any]:
-    release = {
-        "status": status,
-        "failed": ["排名 20 日 IC"],
-        "flagged": [],
-        "reason": "kept for the model page",
-        "released_at": "2026-11-12T10:03:00+08:00",
-        "report": "/srv/host/reports/rank-holdout.md",
-        "sha256": "ab" * 32,
-    }
-    return {PRODUCTION: {"role": "model", HOLDOUT_RELEASE: release}}
-
-
 def verdicts_of(body: dict[str, Any]) -> dict[str, str | None]:
     return {model["role"]: model["released_verdict"] for model in body["meta"]["models"]}
 
@@ -124,7 +116,7 @@ def verdicts_of(body: dict[str, Any]) -> dict[str, str | None]:
 def test_a_model_built_on_a_released_holdout_names_the_verdict_and_not_the_reason(
     client: Client, runs: Runs, status: str
 ) -> None:
-    ModelRun.objects.filter(pk="quantile-h20").update(params=released_on(status))
+    ModelRun.objects.filter(pk="quantile-h20").update(params=release_params(status))
 
     response = client.get("/api/predictions")
 
@@ -135,14 +127,45 @@ def test_a_model_built_on_a_released_holdout_names_the_verdict_and_not_the_reaso
         "volatility": None,
         "probability": None,
     }
-    assert "kept for the model page" not in response.content.decode()
+    body = response.content.decode()
+    assert RELEASE_REASON not in body
+    assert RELEASE_REPORT not in body
+
+
+def test_the_released_verdict_is_read_once_per_request_not_per_prediction_row(
+    client: Client, runs: Runs
+) -> None:
+    ModelRun.objects.filter(pk="rank-h20").update(params=release_params(FAILED))
+
+    with CaptureQueriesContext(connection) as queries:
+        body = envelope_of(client.get("/api/predictions"))
+
+    reading = [query["sql"] for query in queries if HOLDOUT_RELEASE in query["sql"]]
+    assert verdicts_of(body)["rank"] == FAILED
+    assert len(reading) == 1
+    assert '"prediction"' not in reading[0]
+
+
+def test_a_release_the_model_page_cannot_show_is_not_served_as_released(
+    client: Client, runs: Runs, caplog: pytest.LogCaptureFixture
+) -> None:
+    half = {PRODUCTION: {HOLDOUT_RELEASE: {"status": FAILED, "reason": "half a record"}}}
+    ModelRun.objects.filter(pk="rank-h20").update(params=half)
+
+    verdicts = verdicts_of(envelope_of(client.get("/api/predictions")))
+    listed = envelope_of(client.get("/api/models"))["data"]
+
+    assert verdicts["rank"] is None
+    assert [row["holdout_release"] for row in listed if row["run_id"] == "rank-h20"] == [None]
+    assert "rank-h20" in caplog.text
+    assert "holdout release" in caplog.text
 
 
 @pytest.mark.parametrize("status", [PASSED, "released", 1, None, [FAILED]])
 def test_a_status_no_release_can_name_is_not_served_as_released(
     client: Client, runs: Runs, status: object
 ) -> None:
-    ModelRun.objects.filter(pk="rank-h20").update(params=released_on(status))
+    ModelRun.objects.filter(pk="rank-h20").update(params=release_params(status))
 
     assert verdicts_of(envelope_of(client.get("/api/predictions")))["rank"] is None
 
@@ -478,7 +501,7 @@ def test_predictions_query_count_on_the_tech_vol_path(
         for day in (OCT_29, OCT_30)
     )
 
-    with django_assert_max_num_queries(13):
+    with django_assert_max_num_queries(14):
         response = client.get("/api/predictions")
 
     body = envelope_of(response)

@@ -24,6 +24,7 @@ from apps.api.serving import (
     latest_days,
     latest_served_date,
     months_before,
+    release_of,
     runs_on,
     served_monitor,
     serving_run,
@@ -58,8 +59,6 @@ MONTH_IC, MONTH_DAYS = RANK_METRICS[0], RANK_METRICS[-1]
 ENTRY_FIELDS = ("run_id", "run_key", "model_type", "version", "status", "train_start", "train_end")
 TOTAL_FIELDS = ("run_key", "model_type", "metric", "segment", "value", "period_start", "period_end")
 WINDOW_FIELDS = {"own_rows": int, "days": int, "mostly_predecessors": bool}
-RELEASE_TEXTS = ("status", "reason", "released_at")
-RELEASE_LISTS = ("failed", "flagged")
 
 
 def serving_models() -> list[tuple[ServingRun, date]]:
@@ -204,20 +203,10 @@ def degraded_window(params: dict[str, Any]) -> dict[str, Any] | None:
     return {name: window[name] for name in WINDOW_FIELDS}
 
 
-def is_names(value: object) -> bool:
-    return isinstance(value, list) and all(isinstance(name, str) for name in value)
-
-
 def holdout_release(params: dict[str, Any]) -> dict[str, Any] | None:
-    """The released verdict a production run was built on, without its report path or hash."""
+    """The released verdict a production run was built on, as the prediction endpoints read it."""
     production = params.get(PRODUCTION)
-    release = production.get(HOLDOUT_RELEASE) if isinstance(production, dict) else None
-    if not isinstance(release, dict):
-        return None
-    shown = {name: release.get(name) for name in (*RELEASE_TEXTS, *RELEASE_LISTS)}
-    texts = all(isinstance(shown[name], str) for name in RELEASE_TEXTS)
-    lists = all(is_names(shown[name]) for name in RELEASE_LISTS)
-    return shown if texts and lists else None
+    return release_of(production.get(HOLDOUT_RELEASE)) if isinstance(production, dict) else None
 
 
 class ModelListView(ReadOnlyView):
