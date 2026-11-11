@@ -45,11 +45,13 @@ from apps.research.prediction_cache import (
 )
 from apps.research.relative_up import RELATIVE_LABEL, market_digest, relative_up
 from apps.research.runs import (
+    FittedFold,
     RunError,
     feature_hash,
     label_hash,
     lib_versions,
     record_run,
+    refuse_holdout_key,
     refuse_other_layout,
     refuse_production_key,
     screened_features,
@@ -333,7 +335,7 @@ def run_fold(
     target: TargetVariant = TARGET_RECIPE,
 ) -> Path:
     """Fit one fold's baselines; its old cache goes first and the new one is written last."""
-    relative = relative_flag(scope, target)
+    relative_flag(scope, target)
     if production is not None:
         check_run_key(scope, run_key)
         authorize_production(run_key, production, fold)
@@ -341,26 +343,40 @@ def run_fold(
         raise HoldoutError(f"fold {fold.index} is holdout; it runs once with the Phase 4 models")
     require_candidates(run_key, fold)
     fold_path(run_key, BASELINE, fold.index).unlink(missing_ok=True)
+    fitted = fit_fold(scope, fold, run_key, directory, features, target)
+    for run, model in fitted.trained:
+        if annotate is not None:
+            run.params = {**run.params, **annotate(run)}
+        record_run(run, model, fold=fold, production=production)
+    return save_fold_predictions(
+        run_key, BASELINE, fold, fitted.predictions, notes=fitted.notes, production=production
+    )
+
+
+def fit_fold(
+    scope: str,
+    fold: Fold,
+    run_key: str,
+    directory: Path,
+    features: list[str],
+    target: TargetVariant = TARGET_RECIPE,
+) -> FittedFold:
+    """Fit one fold's baselines without writing; labels may not change meanwhile."""
+    relative = relative_flag(scope, target)
     labels = label_digest(scope, fold, relative)
     inputs = fold_inputs(fold, first_day(scope, fold), fold.test_end, directory, features)
     result = _interval(inputs, run_key, relative) if relative else SCOPES[scope](inputs, run_key)
     if label_digest(scope, fold, relative) != labels:
         changed = "label_daily or TAIEX_TR" if relative else "label_daily"
         raise RuntimeError(f"{changed} changed while fitting fold {fold.index}; run it again")
-    for item in result.trained:
-        if annotate is not None:
-            item.run.params = {**item.run.params, **annotate(item.run)}
-        record_run(item.run, item.model, fold=fold, production=production)
     rows = inputs.raw.loc[inputs.test, ROW_KEYS].reset_index(drop=True)
     notes = {
         "feature_hash": inputs.feature_hash,
         "label_hash": labels,
         "recipe": recipe(features, relative),
     }
-    predictions = rows.assign(**result.columns)
-    return save_fold_predictions(
-        run_key, BASELINE, fold, predictions, notes=notes, production=production
-    )
+    trained = [(item.run, item.model) for item in result.trained]
+    return FittedFold(trained, rows.assign(**result.columns), notes)
 
 
 def check_run_key(scope: str, run_key: str) -> None:
@@ -394,6 +410,7 @@ def run_folds(
     check_run_key(scope, run_key)
     relative = relative_flag(scope, target)
     refuse_production_key(run_key)
+    refuse_holdout_key(run_key)
     chosen = list(folds)
     held = [fold.index for fold in chosen if is_holdout(fold)]
     if held:

@@ -54,14 +54,14 @@ h2{margin:0;font-size:15px;font-weight:500}
 .ghost[disabled]{color:var(--ink-4);border-color:var(--line);cursor:default}
 .ghost[aria-pressed="true"]{background:var(--raised);border-color:var(--raised)}
 .scroll{overflow-x:auto}
-.table{min-width:1180px;border-top:1px solid var(--line)}
+.table{min-width:1232px;border-top:1px solid var(--line)}
 .table.auto{min-width:0}
 .thead,.trow{display:grid;gap:16px;align-items:center;padding:0 8px}
 .thead{align-items:end;padding-top:14px;padding-bottom:10px;border-bottom:1px solid var(--line);color:var(--ink-3);font-size:12px}
 .trow{height:52px;border-bottom:1px solid var(--line-soft);color:var(--ink);text-decoration:none}
 .trow.short{height:44px}
 a.trow:hover{background:var(--hover);color:var(--ink)}
-.rank-cols{grid-template-columns:48px minmax(150px,1fr) 56px 92px 112px 92px 170px 140px 124px 72px}
+.rank-cols{grid-template-columns:48px minmax(150px,1fr) 56px 92px 112px 92px 170px 140px 140px 72px}
 .stockcell{display:flex;align-items:baseline;gap:10px;min-width:0}
 .stockcell .name{font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .range{position:relative;height:20px}
@@ -133,6 +133,8 @@ a.trow:hover{background:var(--hover);color:var(--ink)}
 .pair .v{font-size:22px;font-weight:300;line-height:1.3}
 .note{margin:12px 8px 0;color:var(--ink-3);font-size:12px}
 .model-cols{grid-template-columns:110px 190px 110px 170px minmax(0,1.4fr) minmax(0,1.2fr)}
+.trow.has-release{border-bottom:0}
+.released{padding:0 8px 12px 134px;border-bottom:1px solid var(--line-soft);color:var(--ink-3);font-size:13px}
 .etl-cols{grid-template-columns:56px minmax(0,1.3fr) minmax(0,1fr) 90px 130px}
 .check{display:flex;align-items:flex-start;gap:12px;padding:14px 8px;border-bottom:1px solid var(--line-soft)}
 .check i{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--ink);margin-top:7px;flex:none}

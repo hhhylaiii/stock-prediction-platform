@@ -1,4 +1,5 @@
 from datetime import date, timedelta
+from pathlib import Path
 from statistics import fmean, stdev
 from typing import Any
 
@@ -7,7 +8,16 @@ from django.test import Client
 from pytest_django import DjangoAssertNumQueries
 
 from apps.api.model_runs import MONTH_DAYS, MONTH_IC
+from apps.api.serving import HOLDOUT_RELEASE
+from apps.research import production
 from apps.research.eval_report import RANK_METRICS
+from apps.research.holdout import (
+    FAILED,
+    claim_holdout,
+    production_pass,
+    release_holdout,
+    released_verdict,
+)
 from apps.research.models import BacktestMetric, HoldoutRun, ModelMonitor, ModelRun, Prediction
 from tests.api.conftest import (
     EARLY_CALENDAR_START,
@@ -21,6 +31,7 @@ from tests.api.conftest import (
     taipei,
     trained_until,
 )
+from tests.research.run_panels import write_holdout_report
 
 pytestmark = pytest.mark.usefixtures("calendar_in_db")
 
@@ -430,6 +441,97 @@ def test_a_window_left_behind_on_a_restored_run_is_not_served(client: Client, ru
         None,
         None,
     )
+
+
+REPORT_PATH = "/srv/host/reports/rank-holdout-20261111.md"
+RELEASE: dict[str, Any] = {
+    "status": "未達標",
+    "failed": ["排名 20 日 IC"],
+    "flagged": ["排名 5 日 IC"],
+    "reason": "差距在 seed 間標準差內，先上線觀察",
+    "released_at": "2026-11-12T10:03:00+08:00",
+    "report": REPORT_PATH,
+    "sha256": "ab" * 32,
+}
+RELEASE_SHOWN = ("status", "failed", "flagged", "reason", "released_at")
+
+
+def released(release: object) -> dict[str, Any]:
+    return {"production": {"role": "model", "frozen_by": "rank-holdout", HOLDOUT_RELEASE: release}}
+
+
+def test_the_release_key_is_the_one_a_production_run_records() -> None:
+    assert HOLDOUT_RELEASE == production.HOLDOUT_RELEASE
+
+
+def test_a_model_built_on_a_released_holdout_carries_the_release_without_its_report(
+    client: Client, runs: Runs
+) -> None:
+    ModelRun.objects.filter(pk="rank-h20").update(params=released(RELEASE))
+
+    response = client.get("/api/models")
+
+    rows = by_slot(envelope_of(response))
+    assert rows[("rank", 20)]["holdout_release"] == {name: RELEASE[name] for name in RELEASE_SHOWN}
+    assert rows[("quantile", 20)]["holdout_release"] is None
+    body = response.content.decode()
+    assert REPORT_PATH not in body
+    assert RELEASE["sha256"] not in body
+
+
+def test_the_release_a_build_records_reaches_the_endpoint_with_its_reason(
+    client: Client, runs: Runs, settings: Any, tmp_path: Path
+) -> None:
+    settings.RESEARCH_CACHE_DIR = str(tmp_path)
+    claim_holdout("rank", "rank-final", OCT_30)
+    write_holdout_report("rank", "rank-final", FAILED, REPORT_PATH)
+    release_holdout("rank", FAILED, "the user accepts the gap")
+    recorded = released_verdict(production_pass("rank"))
+    assert recorded is not None
+    ModelRun.objects.filter(pk="rank-h20").update(params=released(recorded))
+
+    response = client.get("/api/models")
+
+    shown = by_slot(envelope_of(response))[("rank", 20)]["holdout_release"]
+    assert shown == {name: recorded[name] for name in RELEASE_SHOWN}
+    assert (shown["status"], shown["reason"]) == (FAILED, "the user accepts the gap")
+    assert shown["failed"]
+    assert shown["flagged"]
+    assert REPORT_PATH not in response.content.decode()
+    served = envelope_of(client.get("/api/predictions"))["meta"]["models"]
+    assert [model["released_verdict"] for model in served if model["role"] == "rank"] == [FAILED]
+
+
+@pytest.mark.parametrize(
+    "release",
+    [
+        "未達標",
+        {name: value for name, value in RELEASE.items() if name != "reason"},
+        {**RELEASE, "status": None},
+        {**RELEASE, "status": "達標"},
+        {**RELEASE, "released_at": 20261112},
+        {**RELEASE, "failed": "排名 20 日 IC"},
+        {**RELEASE, "flagged": [1]},
+    ],
+)
+def test_an_unreadable_holdout_release_is_left_out(
+    client: Client, runs: Runs, release: object
+) -> None:
+    ModelRun.objects.filter(pk="rank-h20").update(params=released(release))
+
+    rows = by_slot(envelope_of(client.get("/api/models")))
+
+    assert rows[("rank", 20)]["holdout_release"] is None
+
+
+def test_production_params_that_are_not_a_mapping_carry_no_release(
+    client: Client, runs: Runs
+) -> None:
+    ModelRun.objects.filter(pk="rank-h20").update(params={"production": "rank-2026-11"})
+
+    rows = by_slot(envelope_of(client.get("/api/models")))
+
+    assert rows[("rank", 20)]["holdout_release"] is None
 
 
 def test_no_models_served_yet(client: Client, db: None) -> None:

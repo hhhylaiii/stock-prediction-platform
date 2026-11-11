@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from apps.market.models import IndexDaily, TradingCalendar
 from apps.research.metrics.forecast import daily_brier
 from apps.research.metrics.ic import daily_rank_ic
 from apps.research.models import LabelDaily, ModelRun
@@ -18,6 +19,7 @@ from apps.research.monitor_refs import (
     store_references,
 )
 from apps.research.prediction_cache import save_fold_predictions
+from apps.research.relative_up import RELATIVE_LABEL
 from apps.research.walkforward import Fold
 
 STOCKS = [str(1000 + n) for n in range(40)]
@@ -116,7 +118,15 @@ def store(frame: pd.DataFrame, model: str, columns: list[str]) -> None:
 
 
 def write_labels(frame: pd.DataFrame) -> None:
-    names = ["stock_id", "date", "fwd_rank_pct_5", "fwd_rank_pct", "fwd_up_5pct", "untradable_t1"]
+    names = [
+        "stock_id",
+        "date",
+        "fwd_rank_pct_5",
+        "fwd_rank_pct",
+        "fwd_up_5pct",
+        "untradable_t1",
+        "truth",
+    ]
     columns = zip(*(frame[name] for name in names), strict=True)
     LabelDaily.objects.bulk_create(
         LabelDaily(
@@ -124,10 +134,11 @@ def write_labels(frame: pd.DataFrame) -> None:
             date=day,
             horizon=horizon,
             fwd_rank_pct=None if math.isnan(pct) else float(pct),
+            fwd_ret_open=float(ret),
             fwd_up_5pct=bool(up) if horizon == 20 else None,
             untradable_t1=bool(stuck),
         )
-        for stock, day, short, long, up, stuck in columns
+        for stock, day, short, long, up, stuck, ret in columns
         for horizon, pct in ((5, short), (20, long))
     )
 
@@ -171,6 +182,68 @@ def test_baseline_brier_is_the_research_mean_of_the_logistic_baseline() -> None:
     daily = daily_brier(rows.assign(up=rows["fwd_up_5pct"].astype(float)), "up", "logistic_h20")
     assert brier == pytest.approx(daily.mean())
     assert brier < 0.2
+
+
+def market_rows() -> dict[date, float]:
+    """A 2016 weekday calendar and TAIEX_TR's 20-session return from each day."""
+    every = (date(2016, 1, 1) + timedelta(days=n) for n in range(366))
+    TradingCalendar.objects.bulk_create(
+        TradingCalendar(date=day, is_trading_day=day.weekday() < 5) for day in every
+    )
+    days = weekdays(date(2016, 1, 1), date(2016, 12, 31))
+    closes = [1000.0 + n for n in range(len(days))]
+    IndexDaily.objects.bulk_create(
+        IndexDaily(index_id="TAIEX_TR", date=day, close=close)
+        for day, close in zip(days, closes, strict=True)
+    )
+    return {day: closes[n + 20] / closes[n] - 1 for n, day in enumerate(days[:-20])}
+
+
+def logistic_run(label: str) -> None:
+    ModelRun.objects.create(
+        run_id="wf1.logistic.h20.f001",
+        run_key="wf1",
+        model_type="logistic",
+        objective="classification",
+        version="2016-08",
+        train_start=date(2013, 1, 2),
+        train_end=date(2016, 1, 31),
+        lib_versions={},
+        feature_hash="0" * 64,
+        params={"horizon": 20, "label": label},
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.usefixtures("cache")
+def test_baseline_brier_on_the_relative_label_nets_out_the_market() -> None:
+    frame, labels = panel(2)
+    store(frame, "baseline", ["logistic_h20"])
+    write_labels(labels)
+    moves = market_rows()
+    logistic_run(RELATIVE_LABEL)
+
+    brier = research_brier("wf1", FOLDS, relative=True)
+
+    rows = frame[frame["in_universe"] & ~frame["untradable_t1"] & frame["date"].map(counted)]
+    beats = rows["truth"] - rows["date"].map(moves) > 0.05
+    assert 0 < beats.sum() < rows["fwd_up_5pct"].sum()
+    daily = daily_brier(rows.assign(up=beats.astype(float)), "up", "logistic_h20")
+    alone = daily_brier(rows.assign(up=rows["fwd_up_5pct"].astype(float)), "up", "logistic_h20")
+    assert brier == pytest.approx(daily.mean())
+    assert brier != pytest.approx(alone.mean())
+
+
+@pytest.mark.django_db
+@pytest.mark.usefixtures("cache")
+def test_baseline_brier_refuses_a_label_the_logistic_was_not_fit_on() -> None:
+    frame, labels = panel(2)
+    store(frame, "baseline", ["logistic_h20"])
+    write_labels(labels)
+    logistic_run("fwd_up_5pct")
+
+    with pytest.raises(ValueError, match="fit on fwd_up_5pct, not fwd_up_5pct_vs_taiex_tr"):
+        research_brier("wf1", FOLDS, relative=True)
 
 
 def make_run(**params: Any) -> ModelRun:

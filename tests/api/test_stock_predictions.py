@@ -4,15 +4,18 @@ import pytest
 from django.test import Client
 from pytest_django import DjangoAssertNumQueries
 
+from apps.research.holdout import DEGRADED
 from apps.research.models import FeatureDaily, ModelRun, Prediction
 from tests.api.conftest import (
     NOV_2,
     OCT_29,
     OCT_30,
+    RELEASE_REASON,
     Runs,
     add_predictions,
     add_stock,
     envelope_of,
+    release_params,
 )
 
 pytestmark = pytest.mark.usefixtures("calendar_in_db")
@@ -49,6 +52,23 @@ def test_both_horizons_merge_every_serving_model(client: Client, runs: Runs) -> 
     assert [model["role"] for model in five["models"]] == ["rank", "return", "volatility"]
     assert twenty["models"][1]["run_id"] == "quantile-h20"
     assert (five["degraded"], twenty["degraded"]) == ([], [])
+
+
+def test_each_horizon_names_its_models_built_on_a_released_holdout(
+    client: Client, runs: Runs
+) -> None:
+    ModelRun.objects.filter(pk="rank-h5").update(params=release_params(DEGRADED))
+
+    response = client.get("/api/stocks/2330/predictions")
+
+    five, twenty = horizons_of(envelope_of(response))[5], horizons_of(envelope_of(response))[20]
+    assert {model["role"]: model["released_verdict"] for model in five["models"]} == {
+        "rank": DEGRADED,
+        "return": None,
+        "volatility": None,
+    }
+    assert {model["released_verdict"] for model in twenty["models"]} == {None}
+    assert RELEASE_REASON not in response.content.decode()
 
 
 def test_realised_volatility_comes_from_the_twenty_day_prediction_date(
@@ -149,7 +169,7 @@ def test_stock_predictions_query_count_on_the_worst_path(
     add_predictions(runs.rank5, OCT_29, 5, {"6488": {"score": 0.1, "rank": 1, "pct": 1.0}})
     FeatureDaily.objects.create(stock_id="6488", date=OCT_30, in_universe=True, tech_vol_20d=0.5)
 
-    with django_assert_max_num_queries(22):
+    with django_assert_max_num_queries(24):
         response = client.get("/api/stocks/6488/predictions")
 
     entries = horizons_of(envelope_of(response))

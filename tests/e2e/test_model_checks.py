@@ -8,7 +8,7 @@ from pytest_django.live_server_helper import LiveServer
 from apps.etl.models import DataQualityLog
 from apps.market.adjust import ADJ_CHECK, _merged
 from apps.market.calendar import TradingDays
-from apps.research import tasks
+from apps.research import production, tasks
 from apps.research.gates import SAMPLE_UNITS, Gate, SlotGates
 from apps.research.monitor import MODE_FIELDS, MODES, alert_problems
 from apps.research.predict import Slot
@@ -94,7 +94,7 @@ def test_model_output_checks_have_their_own_block(
     expect(width).to_contain_text("220／1,842 檔")
     expect(width.locator("i")).to_have_class("warn")
     odds = rows.filter(has_text="機率與中位數矛盾")
-    expect(odds).to_contain_text("少量標記，12／1,842 檔")
+    expect(odds).to_contain_text("參考，12／1,842 檔")
     expect(odds.locator("i")).not_to_have_class("warn")
     unscored = rows.filter(has_text="到期預測缺 label")
     expect(unscored).to_contain_text("2 筆")
@@ -109,7 +109,9 @@ def test_model_output_checks_have_their_own_block(
     expect(lines.nth(1)).to_have_text(
         "quantile-h20（報酬區間 20 日）：覆蓋率超出範圍，近 60 日 65.2%，門檻 70.0%–90.0%"
     )
-    expect(lines.nth(2)).to_have_text("prob-h20（上漲機率 20 日）：Brier 缺參考值，近 60 日 0.231")
+    expect(lines.nth(2)).to_have_text(
+        "prob-h20（跑贏大盤機率 20 日）：Brier 缺參考值，近 60 日 0.231"
+    )
     expect(page.locator("#model-checks img")).to_have_count(0)
     expect(page.locator("#model-checks-sub")).to_contain_text(checked.last_session.isoformat())
 
@@ -802,8 +804,22 @@ def test_the_block_reads_the_last_day_monitored(
     expect(rows).to_have_count(2)
     expect(rows.filter(has_text="區間寬度比異常")).to_contain_text("沒有標記")
     odds = rows.filter(has_text="機率與中位數矛盾")
-    expect(odds).to_contain_text("少量標記，184／1,842 檔")
+    expect(odds).to_contain_text("參考，184／1,842 檔")
     expect(odds.locator("i")).not_to_have_class("warn")
+
+
+def test_the_odds_check_is_a_reference_even_above_the_alert_share(
+    page: Page, live_server: LiveServer, seeded: Seed
+) -> None:
+    many = {"share": 0.5, "flagged": 921, "n_stocks": 1842, "stocks": ["2330"]}
+    log(seeded, "output_odds_vs_q50", "info", many, back=2)
+
+    page.goto(f"{live_server.url}/#models")
+
+    odds = page.locator("#model-checks .check").filter(has_text="機率與中位數矛盾")
+    expect(odds).to_contain_text("參考，921／1,842 檔")
+    expect(odds.locator("i")).not_to_have_class("warn")
+    expect(page.locator("#model-checks-sub")).to_contain_text("機率矛盾只做參考")
 
 
 def test_a_model_check_error_fails_the_strip_like_the_gate(
@@ -832,3 +848,121 @@ def test_the_block_reads_the_alert_share_from_the_api(
     expect(width).to_contain_text("少量標記，220／1,842 檔")
     expect(width.locator("i")).not_to_have_class("warn")
     expect(page.locator("#model-checks-sub")).to_contain_text("超過 20% 才算警告")
+
+
+RELEASE_REASON = "差距在 seed 間標準差內，先上線觀察"
+RELEASE: dict[str, object] = {
+    "status": "未達標",
+    "failed": ["排名 20 日 IC"],
+    "flagged": ["排名 5 日 IC"],
+    "reason": RELEASE_REASON,
+    "released_at": "2026-11-12T10:03:00.123456+08:00",
+    "report": "/srv/host/reports/rank-holdout-20261111.md",
+    "sha256": "ab" * 32,
+}
+
+
+def built_on_release(
+    seed: Seed,
+    monkeypatch: pytest.MonkeyPatch,
+    back: int = 1,
+    scope: str = "rank",
+    run_key: str = "rank-2026-11",
+    **changed: object,
+) -> None:
+    monkeypatch.setattr(production, "dispatch", lambda rows: None)
+    production._alert_release(
+        scope, run_key, seed.sessions[-back], f"{scope}-holdout-20261111", {**RELEASE, **changed}
+    )
+
+
+def release_rows(page: Page) -> Locator:
+    return page.locator("#model-checks .check").filter(has_text="holdout 放行後建模")
+
+
+def test_a_build_on_a_released_holdout_names_its_scope_verdict_and_what_fell_short(
+    page: Page, live_server: LiveServer, seeded: Seed, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    built_on_release(seeded, monkeypatch, failed=["排名 20 日 IC", XSS_NAME])
+
+    page.goto(f"{live_server.url}/#models")
+
+    row = release_rows(page)
+    expect(row.locator("i")).to_have_class("warn")
+    expect(row.locator(".run")).to_have_text(
+        [
+            "排名（rank-2026-11）：holdout 判定「未達標」，經使用者放行後建模",
+            f"未達的門檻：排名 20 日 IC、{XSS_NAME}",
+            "退化旗標：排名 5 日 IC",
+            "2026-11-12 10:03 放行，holdout rank-holdout-20261111",
+        ]
+    )
+    expect(row.locator(".pinned")).to_have_text(seeded.last_session.isoformat())
+    block = page.locator("#model-checks")
+    expect(block).not_to_contain_text(RELEASE_REASON)
+    expect(block).not_to_contain_text("/srv/host")
+    expect(block.locator("img")).to_have_count(0)
+    expect(page.locator("#model-checks-sub")).to_have_text("")
+    assert page.evaluate("window.__xss") is None
+
+
+def test_each_scope_keeps_its_latest_release_pinned_after_the_day_it_was_built(
+    page: Page, live_server: LiveServer, seeded: Seed, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    built_on_release(seeded, monkeypatch, back=25, run_key="rank-2026-10")
+    built_on_release(seeded, monkeypatch, back=4, run_key="rank-2026-11")
+    built_on_release(
+        seeded,
+        monkeypatch,
+        back=4,
+        scope="interval",
+        run_key="interval-2026-11",
+        status="明顯退化",
+        failed=[],
+    )
+    swapped_in(seeded, "rank-2026-11", back=3)
+    clean = {"share": 0.0, "flagged": 0, "n_stocks": 1842, "stocks": []}
+    log(seeded, "output_width_ratio", "info", clean)
+
+    page.goto(f"{live_server.url}/#models")
+
+    checks = page.locator("#model-checks .check")
+    expect(checks).to_have_count(4)
+    expect(checks.nth(0)).to_contain_text("換模")
+    expect(checks.nth(3)).to_contain_text("區間寬度比異常")
+    rows = release_rows(page)
+    expect(rows).to_have_count(2)
+    expect(rows.nth(0).locator(".run")).to_have_text(
+        [
+            "區間與機率（interval-2026-11）：holdout 判定「明顯退化」，經使用者放行後建模",
+            "退化旗標：排名 5 日 IC",
+            "2026-11-12 10:03 放行，holdout interval-holdout-20261111",
+        ]
+    )
+    expect(rows.nth(1).locator(".run").first).to_contain_text("排名（rank-2026-11）")
+    for row in (rows.nth(0), rows.nth(1)):
+        expect(row.locator(".pinned")).to_have_text(seeded.sessions[-4].isoformat())
+    expect(page.locator("#model-checks-sub")).to_contain_text(seeded.last_session.isoformat())
+
+
+def test_a_retrain_says_why_each_scope_was_refused_or_failed(
+    page: Page, live_server: LiveServer, seeded: Seed
+) -> None:
+    verdict = (
+        "HoldoutError: holdout rank-holdout-20261111 was judged 未達標 (report "
+        "rank-holdout-20261111.md); the build is refused until release_holdout records the "
+        "user's decision"
+    )
+    retrained(seeded, 1, {"return": "return-2026-11"}, NOT_FROZEN, {"rank": verdict})
+
+    page.goto(f"{live_server.url}/#models")
+
+    row = page.locator("#model-checks .check").filter(has_text="每月重訓")
+    expect(row.locator(".muted")).to_have_text(
+        [
+            "建 1、拒 1、失敗 1",
+            f"區間與機率拒建：{tasks.NOT_FROZEN}",
+            f"排名失敗：{verdict}",
+        ]
+    )
+    expect(row.locator("i")).to_have_class("warn")

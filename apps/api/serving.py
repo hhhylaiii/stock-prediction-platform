@@ -14,6 +14,7 @@ from typing import Any
 from django.db.models import F, OuterRef, Q, QuerySet, Subquery
 
 from apps.market.calendar import CalendarError, TradingDays
+from apps.research.holdout import DEGRADED, FAILED, PRODUCTION
 from apps.research.models import ModelMonitor, ModelObjective, ModelRun, ModelStatus, Prediction
 from apps.research.runs import SCREENING_MODEL
 from apps.research.walkforward import oos_start
@@ -36,6 +37,10 @@ RUN_FIELDS = (
 )
 DEGRADED_ON = "run__params__degraded_on"
 ALERT_PERIODS = "run__params__alert_periods"
+HOLDOUT_RELEASE = "holdout_release"
+RELEASE = f"params__{PRODUCTION}__{HOLDOUT_RELEASE}"
+RELEASE_TEXTS = ("status", "reason", "released_at")
+RELEASE_LISTS = ("failed", "flagged")
 ISO_DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
 SERVING_FIELDS = (
     "run_id",
@@ -113,6 +118,38 @@ def periods_of(run_id: str, value: object) -> tuple[tuple[date, date], ...]:
     if len(periods) < len(value):
         warn_unreadable_periods(run_id)
     return tuple(periods)
+
+
+@functools.cache
+def warn_unreadable_release(run_id: str) -> None:
+    logger.warning("run %s has an unreadable holdout release; it is shown as not released", run_id)
+
+
+def is_names(value: object) -> bool:
+    return isinstance(value, list) and all(isinstance(name, str) for name in value)
+
+
+def release_of(value: object) -> dict[str, Any] | None:
+    """A recorded holdout release without its report path or hash; None unless all of it reads."""
+    if not isinstance(value, dict):
+        return None
+    shown = {name: value.get(name) for name in (*RELEASE_TEXTS, *RELEASE_LISTS)}
+    texts = all(isinstance(shown[name], str) for name in RELEASE_TEXTS)
+    lists = all(is_names(shown[name]) for name in RELEASE_LISTS)
+    return shown if texts and lists and shown["status"] in (FAILED, DEGRADED) else None
+
+
+def released_verdicts(run_ids: Iterable[str]) -> dict[str, str]:
+    """The verdict each run's holdout was released on, one row read per run built on a release."""
+    rows = ModelRun.objects.filter(run_id__in=set(run_ids)).values_list("run_id", RELEASE)
+    verdicts = {}
+    for run_id, recorded in rows:
+        release = release_of(recorded)
+        if release is not None:
+            verdicts[run_id] = release["status"]
+        elif recorded is not None:
+            warn_unreadable_release(run_id)
+    return verdicts
 
 
 def interval_alert(run: ServingRun | None, day: date) -> bool:

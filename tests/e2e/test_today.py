@@ -11,7 +11,18 @@ from apps.market.calendar import TradingDays
 from apps.market.models import TradingCalendar
 from apps.research.models import FeatureDaily, ModelMonitor, ModelRun, Prediction
 from tests.api.conftest import add_predictions
-from tests.e2e.conftest import EXTRA_STOCKS, TPEX_EXTRAS, XSS_NAME, Seed, at
+from tests.e2e.conftest import (
+    BAND_NOTE,
+    EXTRA_STOCKS,
+    PROB_HEAD,
+    PROB_TIP,
+    RELEASE_REASON,
+    TPEX_EXTRAS,
+    XSS_NAME,
+    Seed,
+    at,
+    released_on,
+)
 
 pytestmark = pytest.mark.e2e
 
@@ -43,7 +54,82 @@ def test_today_lists_the_ranking_with_prices_and_bands(
     expect(page.locator("#today-meta")).to_contain_text("涵蓋 25 檔")
     expect(page.locator("#today-meta")).to_contain_text("LightGBM 2026-10")
     expect(page.locator("#status")).not_to_contain_text("預測尚未產出")
+    expect(page.locator("#today-meta")).not_to_contain_text("放行")
     assert page.evaluate("window.__xss") is None
+
+
+def test_today_names_the_models_that_went_live_on_a_released_holdout(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    ModelRun.objects.filter(pk="rank-h20").update(params=released_on("未達標"))
+    ModelRun.objects.filter(pk__in=["quantile-h20", "vol-h20", "prob-h20"]).update(
+        params=released_on("明顯退化")
+    )
+
+    page.goto(live_server.url)
+
+    meta = page.locator("#today-meta")
+    expect(meta).to_contain_text(
+        "排名 20 日模型的 holdout 判定未達標，經使用者放行上線；"
+        "報酬區間 20 日、波動率 20 日、跑贏大盤機率 20 日模型的 holdout 判定明顯退化，"
+        "經使用者放行上線。原因見模型頁。"
+    )
+    expect(meta).not_to_contain_text(RELEASE_REASON)
+
+    page.get_by_role("button", name="5 日").click()
+
+    expect(page.locator("#rows .trow").nth(0)).to_contain_text("9999")
+    expect(meta).to_contain_text("涵蓋 25 檔")
+    expect(meta).not_to_contain_text("放行")
+
+
+def test_five_days_names_only_the_released_models_it_shows(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    ModelRun.objects.filter(pk__in=["rank-h5", "reg-h5"]).update(params=released_on("未達標"))
+    ModelRun.objects.filter(pk="vol-h20").update(params=released_on("明顯退化"))
+    page.goto(live_server.url)
+    expect(page.locator("#rows .trow")).to_have_count(20)
+
+    page.get_by_role("button", name="5 日").click()
+
+    meta = page.locator("#today-meta")
+    expect(meta).to_contain_text(
+        "排名 5 日、絕對報酬 5 日模型的 holdout 判定未達標，經使用者放行上線。原因見模型頁。"
+    )
+    expect(meta).not_to_contain_text("波動率")
+
+
+def test_watch_only_names_the_released_models_too(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    ModelRun.objects.filter(pk="rank-h20").update(params=released_on("未達標"))
+    page.add_init_script("localStorage.setItem('twp-watch', JSON.stringify(['2330']))")
+    page.goto(live_server.url)
+
+    page.locator("#watch-only").click()
+
+    expect(page.locator("#count")).to_have_text("追蹤中的 1 檔")
+    expect(page.locator("#today-meta")).to_contain_text(
+        "排名 20 日模型的 holdout 判定未達標，經使用者放行上線。原因見模型頁。"
+    )
+
+
+def test_today_says_what_the_probability_and_the_band_mean(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    page.goto(live_server.url)
+    expect(page.locator("#rows .trow")).to_have_count(20)
+
+    expect(page.locator("#view-today .lead")).to_contain_text(
+        "20 日的 80% 價格區間與報酬跑贏大盤（加權股價報酬指數，含息）超過 5 個百分點的機率"
+    )
+    head = page.locator("#prob-head")
+    expect(head).to_have_text(PROB_HEAD)
+    expect(head).to_have_attribute("title", PROB_TIP)
+    expect(page.locator("#band-note")).to_have_text(BAND_NOTE)
+    expect(page.locator("#band-note")).to_be_visible()
+    expect(page.locator("#model-note")).to_be_hidden()
 
 
 def test_five_days_reads_the_five_day_models(
@@ -62,6 +148,108 @@ def test_five_days_reads_the_five_day_models(
     expect(page.locator("#ret-head")).to_have_text("5 日預測報酬")
     expect(page.locator("#band-head")).to_have_text("80% 預測區間（僅 20 日）")
     expect(page.locator("#rows .band")).to_have_count(0)
+    expect(page.locator("#band-note")).to_be_hidden()
+    expect(page.locator("#model-note")).to_be_hidden()
+
+
+MODEL_REQUIRES = "模型要在 holdout 判定達標之後才會上線，判定未達標或明顯退化時要經使用者放行"
+ONLINE = f"{MODEL_REQUIRES}；上線中的模型列在模型頁。"
+
+
+def test_no_predictions_yet_says_what_puts_a_model_online(
+    page: Page, live_server: LiveServer, seeded: Seed
+) -> None:
+    page.goto(live_server.url)
+
+    expect(page.locator("#today-empty")).to_have_text(
+        f"預測資料尚未產出。排名{MODEL_REQUIRES}；上線後，這裡會列出全市場的排名。"
+    )
+    expect(page.locator("#band-note")).to_be_hidden()
+    expect(page.locator("#model-note")).to_be_hidden()
+
+
+def test_a_day_without_the_band_and_odds_models_says_which_columns_wait(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    Prediction.objects.filter(run_id__in=["quantile-h20", "prob-h20"]).delete()
+
+    page.goto(live_server.url)
+
+    rows = page.locator("#rows .trow")
+    expect(rows).to_have_count(20)
+    expect(rows.nth(0)).to_contain_text("（波動率區間）")
+    expect(rows.nth(0).locator(".prob")).to_have_text("—")
+    expect(page.locator("#model-note")).to_have_text(
+        "這一期沒有報酬區間、跑贏大盤機率模型的預測：預測報酬、預測價、跑贏大盤機率留空，"
+        f"價格區間改用波動估計。{ONLINE}"
+    )
+    expect(page.locator("#band-note")).to_be_hidden()
+
+    page.get_by_role("button", name="5 日").click()
+
+    expect(page.locator("#rows .trow").nth(0)).to_contain_text("9999")
+    expect(page.locator("#model-note")).to_be_hidden()
+
+
+def test_five_days_without_the_return_model_says_so(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    Prediction.objects.filter(run_id="reg-h5").delete()
+    page.goto(live_server.url)
+    expect(page.locator("#rows .trow")).to_have_count(20)
+
+    page.get_by_role("button", name="5 日").click()
+
+    expect(page.locator("#model-note")).to_have_text(
+        f"這一期沒有絕對報酬模型的預測：預測報酬、預測價留空。{ONLINE}"
+    )
+
+    page.get_by_role("button", name="20 日").click()
+
+    expect(page.locator("#band-note")).to_be_visible()
+    expect(page.locator("#model-note")).to_be_hidden()
+
+
+def test_a_request_that_fails_after_a_good_one_clears_both_notes(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    Prediction.objects.filter(run_id="prob-h20").delete()
+    page.goto(live_server.url)
+    expect(page.locator("#band-note")).to_be_visible()
+    expect(page.locator("#model-note")).to_be_visible()
+    page.route("**/api/predictions?**", lambda route: route.abort())
+
+    page.get_by_role("button", name="5 日").click()
+
+    expect(page.locator("#rows .error")).to_have_text("無法連線到伺服器。")
+    expect(page.locator("#band-note")).to_be_hidden()
+    expect(page.locator("#model-note")).to_be_hidden()
+
+
+def test_a_search_without_a_match_drops_the_missing_model_note(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    Prediction.objects.filter(run_id="prob-h20").delete()
+    page.goto(live_server.url)
+    expect(page.locator("#model-note")).to_be_visible()
+
+    page.locator("#q").fill("zzz")
+
+    expect(page.locator("#rows .empty")).to_contain_text("今日預測裡沒有符合「zzz」的股票")
+    expect(page.locator("#model-note")).to_be_hidden()
+
+
+def test_a_day_missing_only_the_odds_model_keeps_the_band_note(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    Prediction.objects.filter(run_id="prob-h20").delete()
+
+    page.goto(live_server.url)
+
+    expect(page.locator("#model-note")).to_have_text(
+        f"這一期沒有跑贏大盤機率模型的預測：跑贏大盤機率留空。{ONLINE}"
+    )
+    expect(page.locator("#band-note")).to_be_visible()
 
 
 def test_market_and_search_filter_on_the_server(
@@ -159,6 +347,7 @@ def test_degraded_models_monitoring_and_band_sources_are_shown(
     expect(meta).to_contain_text("rank IC 0.050")
     expect(meta).to_contain_text("80% 區間的實際覆蓋率 80%")
     expect(meta).to_contain_text("1 個模型降級中，結果僅供參考，區間改用波動率區間")
+    expect(page.locator("#band-note")).to_be_hidden()
     status = page.locator("#status")
     expect(status).to_contain_text("1 個模型降級中")
     expect(status).to_contain_text("23:04 更新")
@@ -172,6 +361,8 @@ def test_a_failed_ranking_request_is_shown(
 
     expect(page.locator("#rows .error")).to_have_text("無法連線到伺服器。")
     expect(page.locator("#today-meta")).to_have_text("")
+    expect(page.locator("#band-note")).to_be_hidden()
+    expect(page.locator("#model-note")).to_be_hidden()
 
 
 def test_watch_only_shows_the_watched_stocks(
@@ -317,6 +508,7 @@ def test_a_band_degraded_after_the_shown_day_is_not_called_replaced(
     meta = page.locator("#today-meta")
     expect(meta).to_contain_text("1 個模型降級中，結果僅供參考")
     expect(meta).not_to_contain_text("區間改用波動率區間")
+    expect(page.locator("#band-note")).to_be_visible()
 
 
 def test_watch_only_names_the_replaced_band(

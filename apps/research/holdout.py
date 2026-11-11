@@ -1,19 +1,31 @@
 """Holdout guard: a scope runs its holdout folds once unless forced with a reason (SPEC §7)."""
 
+import json
 import re
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import date
+from pathlib import Path
+from typing import Any
 
+from django.conf import settings
 from django.db import IntegrityError, transaction
 from django.db.models import Max
+from django.utils import timezone
 
-from apps.research.models import HoldoutRun, HoldoutScope
+from apps.research.models import (
+    HoldoutRelease,
+    HoldoutRun,
+    HoldoutScope,
+    HoldoutVerdict,
+    ModelRun,
+)
 from apps.research.walkforward import Fold, WalkForwardConfig
 
 KEY_PATTERN = re.compile(r"[a-z0-9][a-z0-9_.-]{0,63}", re.ASCII)
 SPEC_HOLDOUT_START = WalkForwardConfig().holdout_start
 PRODUCTION_FOLD = 0
+PRODUCTION = "production"
 
 
 class HoldoutError(RuntimeError):
@@ -63,6 +75,8 @@ def claim_holdout(
         raise HoldoutError("a forced holdout rerun needs a reason")
     if HoldoutRun.objects.filter(run_key=run_key).exists():
         raise HoldoutError(f"{run_key} already holds a holdout run; a rerun needs a new run_key")
+    if ModelRun.objects.filter(run_key=run_key, params__has_key=PRODUCTION).exists():
+        raise HoldoutError(f"{run_key} holds a production build; the holdout needs its own run_key")
     attempt = _last_attempt(scope) + 1 if force else 1
     try:
         with transaction.atomic(durable=True):
@@ -146,3 +160,109 @@ def authorize_folds(folds: Iterable[Fold], run_key: str, ticket: HoldoutTicket |
     beyond = [fold.index for fold in holdout if fold.test_end > ticket.last_date]
     if beyond:
         raise HoldoutError(f"folds {beyond} run past the claimed last_date {ticket.last_date}")
+
+
+PASSED, FAILED, DEGRADED = (verdict.value for verdict in HoldoutVerdict)
+
+
+@dataclass(frozen=True)
+class Reported:
+    """A holdout's one report: its verdict, the gates it failed and the flags it raised."""
+
+    scope: str
+    status: str
+    path: str
+    sha256: str
+    text: str
+    failed: list[str]
+    flagged: list[str]
+
+
+def report_marker(run_key: str) -> Path:
+    """File that keeps a holdout's one report and verdict under its cache directory."""
+    return Path(settings.RESEARCH_CACHE_DIR) / require_key(run_key) / "holdout.report"
+
+
+def reported(run_key: str) -> Reported | None:
+    """The one report and verdict a holdout was marked with, or None before it."""
+    marker = report_marker(run_key)
+    if not marker.exists():
+        return None
+    try:
+        stored = json.loads(marker.read_text(encoding="utf-8"))
+        return Reported(**{field.name: stored[field.name] for field in fields(Reported)})
+    except (ValueError, TypeError, KeyError) as error:
+        named = f"{run_key}/{marker.name}"
+        raise HoldoutError(
+            f"{named} is not a holdout report marker: {type(error).__name__}: {error}"
+        ) from error
+
+
+def _verdict(scope: str, key: str) -> Reported | None:
+    """The report marked for the scope's holdout; one of another scope is none."""
+    marked = reported(key)
+    return marked if marked is not None and marked.scope == scope else None
+
+
+def release_holdout(scope: str, status: str, reason: str) -> HoldoutRelease:
+    """Record the user's decision to build on the scope's latest holdout despite its verdict."""
+    note = reason.strip()
+    if not note:
+        raise HoldoutError("a holdout release needs the user's reason")
+    if status not in (FAILED, DEGRADED):
+        raise HoldoutError(f"a release names {FAILED} or {DEGRADED}, not {status!r}")
+    key = production_pass(scope).frozen_by
+    marked = _verdict(scope, key)
+    if marked is None:
+        raise HoldoutError(f"holdout {key} has no report yet; there is no verdict to release")
+    if marked.status == PASSED:
+        raise HoldoutError(f"holdout {key} was judged {PASSED}; it needs no release")
+    if marked.status != status:
+        raise HoldoutError(
+            f"holdout {key} was judged {marked.status}, not {status}; release the verdict it has"
+        )
+    try:
+        with transaction.atomic():
+            return HoldoutRelease.objects.create(
+                holdout=HoldoutRun.objects.get(run_key=key),
+                status=status,
+                failed=marked.failed,
+                flagged=marked.flagged,
+                report_sha256=marked.sha256,
+                reason=note,
+            )
+    except IntegrityError as error:
+        raise HoldoutError(f"holdout {key} is already released") from error
+
+
+def released_verdict(granted: ProductionPass) -> dict[str, Any] | None:
+    """Leave to build on the scope's holdout: None when it passed, else its recorded release."""
+    key = granted.frozen_by
+    marked = _verdict(granted.scope, key)
+    if marked is None:
+        raise HoldoutError(f"holdout {key} has no report; a build waits for its verdict")
+    if marked.status == PASSED:
+        return None
+    release = HoldoutRelease.objects.filter(
+        holdout__run_key=key, status=marked.status, report_sha256=marked.sha256
+    ).first()
+    report = Path(marked.path).name
+    if release is None and HoldoutRelease.objects.filter(holdout__run_key=key).exists():
+        raise HoldoutError(
+            f"holdout {key} was released for another report or verdict than its marker holds "
+            f"now ({marked.status}, report {report}); the marker changed after the release"
+        )
+    if release is None:
+        raise HoldoutError(
+            f"holdout {key} was judged {marked.status} (report {report}); the build is "
+            "refused until release_holdout records the user's decision"
+        )
+    return {
+        "status": release.status,
+        "failed": release.failed,
+        "flagged": release.flagged,
+        "reason": release.reason,
+        "released_at": timezone.localtime(release.released_at).isoformat(),
+        "report": marked.path,
+        "sha256": release.report_sha256,
+    }

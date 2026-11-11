@@ -173,7 +173,7 @@ def test_group_arms_build_on_the_chosen_base_and_name_their_groups() -> None:
     later = group_experiment(floor, ["tech"], [*KEPT, GAP], "chip", KEPT)
     assert [arm.name for arm in later.arms] == ["w60-floor-tech", "w60-floor-tech-chip"]
     assert later.arms[0].variant.features == (*KEPT, GAP)
-    assert later.rule == "better"
+    assert first.rule == later.rule == "group"
 
 
 def test_the_screening_lines_name_the_group_verdicts_and_displaced_features() -> None:

@@ -14,6 +14,7 @@ from rest_framework.response import Response
 from apps.api.envelope import envelope
 from apps.api.params import MonthlyIcQuery, parse
 from apps.api.serving import (
+    HOLDOUT_RELEASE,
     MONITOR_FIELDS,
     SERVING_FIELDS,
     ServingRun,
@@ -23,12 +24,14 @@ from apps.api.serving import (
     latest_days,
     latest_served_date,
     months_before,
+    release_of,
     runs_on,
     served_monitor,
     serving_run,
 )
 from apps.api.views import ReadOnlyView
 from apps.research.eval_report import RANK_METRICS
+from apps.research.holdout import PRODUCTION
 from apps.research.models import (
     BacktestMetric,
     HoldoutRun,
@@ -200,6 +203,12 @@ def degraded_window(params: dict[str, Any]) -> dict[str, Any] | None:
     return {name: window[name] for name in WINDOW_FIELDS}
 
 
+def holdout_release(params: dict[str, Any]) -> dict[str, Any] | None:
+    """The released verdict a production run was built on, as the prediction endpoints read it."""
+    production = params.get(PRODUCTION)
+    return release_of(production.get(HOLDOUT_RELEASE)) if isinstance(production, dict) else None
+
+
 class ModelListView(ReadOnlyView):
     def get(self, request: Request) -> Response:
         models = serving_models()
@@ -226,6 +235,7 @@ class ModelListView(ReadOnlyView):
                         if run.status == ModelStatus.DEGRADED
                         else None
                     ),
+                    "holdout_release": holdout_release(params.get(run.run_id) or {}),
                     "recent": recent[Slot(run.objective, run.horizon)],
                     **research,
                 }

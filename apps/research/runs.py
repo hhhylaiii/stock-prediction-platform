@@ -13,11 +13,13 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
 from django.conf import settings
 from django.db import connection, transaction
 
 from apps.research.features.store import existing_partition
 from apps.research.holdout import (
+    PRODUCTION,
     HoldoutTicket,
     ProductionPass,
     authorize_folds,
@@ -30,7 +32,6 @@ from apps.research.prediction_cache import fold_cached, fold_record, other_layou
 from apps.research.ranges import years
 from apps.research.walkforward import Fold
 
-PRODUCTION = "production"
 LIBRARIES = ("django", "numpy", "pandas", "pyarrow", "scikit-learn", "lightgbm")
 MODEL_SUFFIX = ".pkl"
 CHUNK = 1 << 20
@@ -39,6 +40,15 @@ SCREENING_MODEL = "screening"
 
 class RunError(RuntimeError):
     """A run cannot be written or dropped without losing a record that must stay."""
+
+
+@dataclass(frozen=True)
+class FittedFold:
+    """One model's fold fitted but not written: its runs with their models, predictions, notes."""
+
+    trained: list[tuple[ModelRun, Any]]
+    predictions: pd.DataFrame
+    notes: dict[str, str]
 
 
 @dataclass(frozen=True)
@@ -176,6 +186,12 @@ def record_run(
         if temporary is not None:
             Path(temporary).unlink(missing_ok=True)
     return run
+
+
+def refuse_holdout_key(run_key: str) -> None:
+    """Refuse research fits under a run_key that holds a holdout claim."""
+    if HoldoutRun.objects.filter(run_key=run_key).exists():
+        raise RunError(f"{run_key} holds a holdout claim; the holdout command fits it")
 
 
 def refuse_production_key(run_key: str) -> None:

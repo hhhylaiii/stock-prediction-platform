@@ -142,11 +142,15 @@ def stale_folds(
 
 
 def target_frame(
-    run_key: str, folds: Sequence[Fold], directory: Path, relative: bool = False
+    run_key: str,
+    folds: Sequence[Fold],
+    directory: Path,
+    relative: bool = False,
+    holdout: bool = False,
 ) -> pd.DataFrame:
-    """Both caches of the tuning and research folds up to each eval_end, with labels as fit."""
+    """Both caches of the folds up to each eval_end, with labels as fit; holdout ones on request."""
     scope = scope_of(run_key)
-    kept = [fold for fold in folds if not fold.holdout]
+    kept = list(folds) if holdout else [fold for fold in folds if not fold.holdout]
     keys = [*KEYS, "in_universe", "fold"]
     boosted = load_predictions(run_key, MODEL, kept)
     rules = load_predictions(run_key, BASELINE, kept).drop(columns=["in_universe"])

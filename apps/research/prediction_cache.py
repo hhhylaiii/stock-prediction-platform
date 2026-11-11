@@ -64,6 +64,13 @@ def fold_cached(run_key: str, index: int) -> bool:
     return marker.exists() or any(marker.parent.glob(f"*/{_name(index)}"))
 
 
+def fold_written(run_key: str, index: int, models: Iterable[str]) -> bool:
+    """Whether a holdout write finished: its marker and every model's file are in place."""
+    return _marker(run_key, index).exists() and all(
+        fold_path(run_key, model, index).exists() for model in models
+    )
+
+
 def fold_record(fold: Fold) -> dict[str, object]:
     return {
         name: value.isoformat() if isinstance(value, date) else value

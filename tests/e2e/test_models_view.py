@@ -6,6 +6,7 @@ import pytest
 from playwright.sync_api import Page, Route, expect
 from pytest_django.live_server_helper import LiveServer
 
+from apps.api.serving import HOLDOUT_RELEASE
 from apps.market.calendar import TradingDays
 from apps.research.models import BacktestMetric, ModelMonitor, ModelRun
 from tests.e2e.conftest import Seed
@@ -131,7 +132,7 @@ def test_the_serving_models_are_listed_with_their_scores(
     expect(rules).to_contain_text("近 6 個月")
     expect(rules).to_contain_text("換版後接著累積")
     expect(rules).to_contain_text("報酬區間模型 20 日覆蓋率不在 70%–90%")
-    expect(rules).to_contain_text("上漲機率模型 20 日 Brier 高於 baseline")
+    expect(rules).to_contain_text("跑贏大盤機率模型 20 日 Brier 高於 baseline")
     expect(rules).to_contain_text("降級不會自動恢復，要人工 restore")
     expect(rules).to_contain_text("換模後的寬限期與 restore 後的重設期只告警、不降級")
     expect(rules).to_contain_text(
@@ -159,6 +160,95 @@ def test_a_degraded_model_says_since_when_and_whose_rows_judged_it(
     )
     expect(rows.nth(3).locator(".degraded")).to_have_text("2026-10-21 起")
     expect(rows.nth(0).locator(".degraded")).to_have_count(0)
+
+
+RELEASE_REASON = f"差距在 seed 間標準差內，先上線觀察 {XSS_VERSION}"
+RELEASE = {
+    "status": "未達標",
+    "failed": ["排名 20 日 IC"],
+    "flagged": ["排名 5 日 IC"],
+    "reason": RELEASE_REASON,
+    "released_at": "2026-11-12T10:03:00.123456+08:00",
+    "report": "/srv/host/reports/rank-holdout-20261111.md",
+    "sha256": "ab" * 32,
+}
+NEXT = "xpath=following-sibling::*[1]"
+
+
+def test_a_model_built_on_a_released_holdout_says_the_verdict_and_the_reason(
+    page: Page, live_server: LiveServer, scored: Seed
+) -> None:
+    flagged = {**RELEASE, "status": "明顯退化", "failed": []}
+    ModelRun.objects.filter(pk="rank-h20").update(params={"production": {HOLDOUT_RELEASE: RELEASE}})
+    ModelRun.objects.filter(pk="prob-h20").update(params={"production": {HOLDOUT_RELEASE: flagged}})
+
+    page.goto(f"{live_server.url}/#models")
+
+    notes = page.locator("#model-table .released")
+    expect(notes).to_have_count(2)
+    expect(notes.nth(0).locator("div")).to_have_text(
+        [
+            "holdout 判定「未達標」，未達的門檻：排名 20 日 IC；退化旗標：排名 5 日 IC",
+            f"2026-11-12 經使用者放行：{RELEASE_REASON}",
+        ]
+    )
+    expect(notes.nth(1).locator("div").first).to_have_text(
+        "holdout 判定「明顯退化」，退化旗標：排名 5 日 IC"
+    )
+    rows = page.locator("#model-table .trow")
+    expect(rows).to_have_count(6)
+    expect(rows.nth(0).locator(NEXT)).to_have_class("released")
+    expect(rows.nth(1).locator(NEXT)).to_have_class("trow model-cols")
+    expect(rows.nth(5).locator(NEXT)).to_have_class("released")
+    expect(page.locator("#model-table")).not_to_contain_text("/srv/host")
+    expect(page.locator("#model-table img")).to_have_count(0)
+    expect(page.locator("#model-rules")).to_contain_text(
+        "正式模型只建在 holdout 判定達標的設計上；判定未達標或明顯退化時，要經使用者放行才建，"
+        "判定與放行原因列在上表受影響的模型下方。"
+    )
+
+
+def test_adjacent_models_on_one_release_share_a_single_note(
+    page: Page, live_server: LiveServer, scored: Seed
+) -> None:
+    shared = ["rank-h20", "quantile-h20", "vol-h20", "prob-h20"]
+    ModelRun.objects.filter(pk__in=shared).update(params={"production": {HOLDOUT_RELEASE: RELEASE}})
+
+    page.goto(f"{live_server.url}/#models")
+
+    notes = page.locator("#model-table .released")
+    expect(notes).to_have_count(2)
+    verdict = "holdout 判定「未達標」，未達的門檻：排名 20 日 IC；退化旗標：排名 5 日 IC"
+    expect(notes.nth(0).locator("div").first).to_have_text(verdict)
+    expect(notes.nth(1).locator("div")).to_have_text(
+        [f"以上 3 個模型：{verdict}", f"2026-11-12 經使用者放行：{RELEASE_REASON}"]
+    )
+    rows = page.locator("#model-table .trow")
+    expect(rows.nth(0).locator(NEXT)).to_have_class("released")
+    expect(rows.nth(3).locator(NEXT)).to_have_class("trow model-cols")
+    expect(rows.nth(4).locator(NEXT)).to_have_class("trow model-cols has-release")
+    expect(rows.nth(5).locator(NEXT)).to_have_class("released")
+
+
+def test_adjacent_models_on_different_releases_keep_their_own_notes(
+    page: Page, live_server: LiveServer, scored: Seed
+) -> None:
+    other = {**RELEASE, "reason": "另一筆放行"}
+    ModelRun.objects.filter(pk="rank-h20").update(params={"production": {HOLDOUT_RELEASE: RELEASE}})
+    ModelRun.objects.filter(pk="rank-h5").update(params={"production": {HOLDOUT_RELEASE: other}})
+
+    page.goto(f"{live_server.url}/#models")
+
+    notes = page.locator("#model-table .released")
+    expect(notes).to_have_count(2)
+    expect(notes.nth(0).locator("div").last).to_have_text(
+        f"2026-11-12 經使用者放行：{RELEASE_REASON}"
+    )
+    expect(notes.nth(1).locator("div").last).to_have_text("2026-11-12 經使用者放行：另一筆放行")
+    expect(page.locator("#model-table")).not_to_contain_text("以上")
+    rows = page.locator("#model-table .trow")
+    expect(rows.nth(0).locator(NEXT)).to_have_class("released")
+    expect(rows.nth(1).locator(NEXT)).to_have_class("released")
 
 
 BARS_INSIDE_PLOT = """() => {
