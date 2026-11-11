@@ -13,6 +13,10 @@ uv run python manage.py refresh_stock_master
 
 - 第一次 15:10 的 `prepare_day` 會補抓前 14 天缺的日子；靠 `etl_run` 判斷缺日的 dataset（股數、注意、處置、全額交割）在排程前沒有每日紀錄，會整段補抓，股數還會重建之後的日子，每個補到的日子都跑一次品質檢查並告警。先看 `--dry-run` 的清單，太長就先在 ETL 時段外手動跑 `catchup`。
 - `refresh_stock_master` 先手動跑一次，確認第一次新增與下市的代號合理，再交給 16:00 的排程。
+- 排名模型的已知缺口與硬性前提（2026-11-11 凍結時記下，SPEC 第 6 節特徵表）：`fund_days_to_ex_date` 的線上來源是 plan 2.7b（證交所 TWT48U 與櫃買的除權除息預告表）。
+  - 2.7b 上線前，2026-10-31 起這一欄線上全是 NaN，模型把所有股票當成沒有已公告的除息日。淡季影響很小（universe 列裡有值的比例：2025-11 是 0.4%），旺季大（2026-06 是 18.1%、2026-07 是 14.4%）。
+  - 2.7b 必須在 2027-04-30 前上線，並核對新來源的公告提前天數和 FinMind 的歷史分布相近（中位數 15–17 天、5% 分位 13 天）。4 月底是最後期限，不是計畫日期。
+  - 排名 holdout 的數字代表「有這個來源時」的表現；2.7b 上線前的除息旺季不適用。
 
 啟動 worker 之後，確認排程真的載入了：
 
@@ -90,7 +94,7 @@ docker compose logs -f worker
 - 每條 chain 跑完寫一列 `data_quality_log`（`research_evening`、`research_morning`，`date` 是 D）：成功是 info，`detail.steps` 依序列出每一步的輸出；有一步失敗是 warning，`detail` 寫哪一步、錯誤與已完成的步驟，後面的步驟不跑，並送告警。D 已經有 info 那列就不重跑，所以週六早上跑過週五後，週日、週一早上不會重複；失敗的 D 會在下一個早上（還是同一個 D 時，例如週末）重跑。
 - 每月重訓：每月前 5 個交易日裡，第一條在 06:00 到 09:00（`RESEARCH_AT_MORNING` 到 `RESEARCH_RETRAIN_BEFORE`）之間跑完的早上 chain（D，info 或缺美股收盤的 warning 都算）之後排一個 `research.retrain(D)`；不在這段時間跑完的（例如中午補跑、深夜才醒來補觸發）留給下一個早上，以免重訓壓到 15:10 的 ETL 或隔天 06:00 的預測。`retrain` 每次開始（含記憶體不足後的重試）也只在這段時間內動工，否則不寫列直接結束，留給下一個早上重排。每月一次：那個月已有 `research_retrain` 列就不排，排重了也不會重跑。前 5 個交易日都沒排成時，第 6 個交易日起第一條跑完的 chain 寫一列 warning（三個 scope 都是 `no morning chain finished before the cutoff ...`）並告警，當月不再自動重訓，要的話手動 `build_run` 再 `promote`。月中第一次打開開關時也會記這一列。
   - 開始前看可用記憶體（worker 容器讀 `/proc/meminfo`）：低於 `RESEARCH_RETRAIN_MIN_FREE`（50%）就 30 分鐘後再看，最多 6 次（`RESEARCH_RETRAIN_COUNTDOWN`、`RESEARCH_RETRAIN_RETRIES`），用完記 warning、全部拒建；重試到 09:00 之後就照上一條停下。讀不到就照跑。
-  - 每個 scope 各自處理：`production.DESIGNS[scope].research_run_key` 是 None（設計還沒凍結）就拒建；`label_daily` 還沒建到 D 就全部拒建；那個月已經手動建過（當月建立、`<scope>-` 開頭的正式 build，重訓自己的 `<scope>-YYYY-MM` 與它的 shadow 不算）就拒建（`already built this month`）；否則 `build_run`，run_key 是 `<scope>-YYYY-MM`。上次重訓中斷留下的 `<scope>-YYYY-MM` 會被重建。
+  - 每個 scope 各自處理：`production.DESIGNS[scope].research_run_key` 是 None（設計還沒凍結）就拒建（2026-11-11 凍結後三個 scope 都有值，這一條不再發生；凍結後、holdout 的 claim 與報告出來之前，`build_run` 會以 `HoldoutError` 被擋，重訓把那個 scope 記在 `failed`）；`label_daily` 還沒建到 D 就全部拒建；那個月已經手動建過（當月建立、`<scope>-` 開頭的正式 build，重訓自己的 `<scope>-YYYY-MM` 與它的 shadow 不算）就拒建（`already built this month`）；否則 `build_run`，run_key 是 `<scope>-YYYY-MM`。上次重訓中斷留下的 `<scope>-YYYY-MM` 會被重建。
   - 結果寫一列 `research_retrain`（`date` 是 D）：全部建好是 info，有拒建或失敗是 warning 並告警。`detail` 有 `built`、`refused`、`failed`、`free_percent`（開始時的可用記憶體 %）與 `runs`（每個 scope 的 `elapsed_s`，以及建完那個 scope 時 worker 行程到當時為止的最高 RSS `peak_rss_mb`，會跨 scope 累積）。
   - 重訓不取研究鎖，但會佔住唯一的 worker 好幾個小時（真資料上的時間還沒量過）。那段時間不要手動重建特徵或 label、不要停 worker（`acks_late`：中斷的重訓要等 12 小時的 `CELERY_VISIBILITY_TIMEOUT` 才重新投遞，那時已不在動工時段，會直接結束；下一個早上若還在前 5 個交易日內會重排、從頭重建），並讓 Mac 醒到這列寫完：清晨的 caffeinate 只到 08:00，重訓那天手動再跑一次 `caffeinate -i -t 36000`，或確認能源選項的「顯示器關閉時避免自動進入睡眠」已開。
 - 換模：下一個早上起，06:00 的 chain 在 monitor 之後多一步 `promote`，把當月 `research_retrain` 建好、還沒試過的 run_key 一個個 `promote`，`--date` 取 D 與預設日（slot 已有列的最後一天）較晚的一天，所以第一次上線的 scope 也從 D 起服務。門檻沒過就舊模型續用並告警（`model_promotion` warning），之後由人決定要不要 `--force`。`promote` 報錯時其他 scope 照跑，chain 照常完成，另寫一列 `research_promote` warning（`detail.failed` 是 run_key 對錯誤、`detail.done` 是其他 scope 的結果）並告警；報錯的 run_key 不再自動重試，修好後先看它是不是已經 active（`model_promotion` 有沒有 `promoted: true` 那列），沒有再手動 `promote`。有 `model_promotion` 或 `research_promote` 列的 run_key 都算試過。設計凍結的那支 PR 要在 `DESIGNS` 填 `research_run_key`（不放環境變數）；填了之後，`build_run` 拒絕其他研究 run。
@@ -240,7 +244,7 @@ uv run python manage.py reapply_dividend_dates --stock 2884 --stock 2885
   uv run python manage.py fetch --source tpex --dataset dividend_event --start 2026-10-26 --end <今天>
   ```
 
-- 還沒做（plan 2.7b）：用預告表定 `announce_date`。在那之前，2026-10-30 之後新公告的除息日 `announce_date` 是空的，`fund_days_to_ex_date` 看不到。
+- 還沒做（plan 2.7b）：用預告表定 `announce_date`。在那之前，2026-10-30 之後新公告的除息日 `announce_date` 是空的，`fund_days_to_ex_date` 看不到。排名的凍結設計讀這一欄，所以 2.7b 是硬性前提，期限 2027-04-30（見「上線前」）。
 
 ## 財報每日掃描
 

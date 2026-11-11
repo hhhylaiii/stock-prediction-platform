@@ -17,6 +17,7 @@ from apps.market.calendar import TradingDays
 from apps.market.models import DailyPrice, IndexDaily, StockMaster
 from apps.research import baseline_runs, lgbm_runs, target_eval
 from apps.research.baseline_runs import BASELINE, run_folds
+from apps.research.features.transforms import SECOND_STOCK_LEVEL, STOCK_LEVEL
 from apps.research.management.commands import (
     ensemble_check,
     evaluate_rank,
@@ -55,12 +56,34 @@ def test_the_frozen_design_is_what_the_research_period_chose() -> None:
             holdout_start=date(2025, 1, 1),
         )
     }
-    assert DESIGNS["rank"].variant == Variant(min_rounds=200)
+    features = DESIGNS["rank"].variant.features
+    assert DESIGNS["rank"].variant == Variant(min_rounds=200, features=features)
     assert DESIGNS["rank"].target == TARGET_RECIPE
     assert DESIGNS["return"].target == TargetVariant(market=False)
     assert DESIGNS["interval"].target == RELATIVE
     assert {DESIGNS[scope].variant for scope in ("return", "interval")} == {SPEC_RECIPE}
-    assert all(design.research_run_key is None for design in DESIGNS.values())
+    assert {scope: design.research_run_key for scope, design in DESIGNS.items()} == {
+        "rank": "rank-cand60",
+        "return": "return-std1109",
+        "interval": "interval-std1109",
+    }
+
+
+def test_the_frozen_rank_design_reads_the_second_batch_features_that_passed() -> None:
+    features = DESIGNS["rank"].variant.features
+    added = [name for name in features if name in SECOND_STOCK_LEVEL]
+
+    assert len(features) == len(set(features)) == 60
+    assert [name for name in STOCK_LEVEL if name not in features] == ["tech_vol_60d", "fund_bp"]
+    assert list(features[:55]) == [name for name in STOCK_LEVEL if name in features]
+    assert added == [
+        "chip_day_trade_ratio_5d",
+        "chip_fi_holding_chg_20d",
+        "chip_it_net_20d",
+        "chip_fi_buy_streak",
+        "fund_days_to_ex_date",
+    ]
+    assert not [name for name in features if name not in (*STOCK_LEVEL, *SECOND_STOCK_LEVEL)]
 
 
 def test_the_spec_design_is_the_recipe_the_choice_was_made_against() -> None:
