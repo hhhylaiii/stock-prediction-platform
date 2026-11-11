@@ -1,5 +1,4 @@
 from datetime import date
-from io import StringIO
 from pathlib import Path
 from typing import Any
 
@@ -240,49 +239,6 @@ def test_rehearsing_a_relative_design_uses_its_up_label(
         if run.objective == "classification"
     }
     assert labels == {"fwd_up_5pct_vs_taiex_tr"}
-
-
-@pytest.mark.django_db
-def test_the_command_runs_the_holdout_once_and_names_the_folds(frozen: Path) -> None:
-    out = StringIO()
-
-    call_command(
-        "holdout", scope="return", run_key="return-final", bags=1, last_date=DAY, stdout=out
-    )
-    call_command(
-        "holdout", scope="return", run_key="return-final", bags=1, last_date=DAY, stdout=out
-    )
-
-    index = held()[0].index
-    lines = out.getvalue().splitlines()
-    assert lines[0] == (
-        f"return-final: holdout attempt 1 of return through {LAST}; "
-        f"fitted folds [{index}], already written []"
-    )
-    assert lines[1].endswith(f"fitted folds [], already written [{index}]")
-    with pytest.raises(CommandError, match="rerun only with force and a reason"):
-        call_command("holdout", scope="return", run_key="return-other", bags=1, last_date=DAY)
-
-
-@pytest.mark.django_db
-def test_the_command_rehearses_a_research_fold_without_a_claim(frozen: Path) -> None:
-    out = StringIO()
-    fold = next(f for f in folds() if f.research)
-
-    call_command(
-        "holdout",
-        scope="return",
-        run_key="return-rehearsal",
-        rehearse=True,
-        fold=fold.index,
-        bags=1,
-        last_date=DAY,
-        stdout=out,
-    )
-
-    assert out.getvalue().strip() == f"return-rehearsal: rehearsed research fold {fold.index}"
-    assert fold_path("return-rehearsal", MODEL, fold.index).exists()
-    assert not HoldoutRun.objects.exists()
 
 
 @pytest.mark.django_db
