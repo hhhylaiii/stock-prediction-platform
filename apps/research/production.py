@@ -118,6 +118,7 @@ DESIGNS: dict[str, Design] = {
     ),
 }
 FROZEN, SPEC = "frozen", "spec"
+DESIGN = "design"
 DESIGN_NAMES = (FROZEN, SPEC)
 
 
@@ -183,6 +184,25 @@ def _annotation(
         return {**note, **{key: value for key, value in references.items() if key == wanted}}
 
     return annotate
+
+
+def _canonical(note: Any) -> str:
+    return json.dumps(note, sort_keys=True)
+
+
+def check_holdout_design(scope: str, granted: ProductionPass, design: Design) -> None:
+    """Refuse a build unless every run of the holdout that froze the scope ran this design."""
+    runs = ModelRun.objects.filter(run_key=granted.frozen_by)
+    recorded = {_canonical(params.get(DESIGN)) for params in runs.values_list("params", flat=True)}
+    if not recorded:
+        raise RunError(
+            f"holdout {granted.frozen_by} recorded no run; run the {scope} holdout before building"
+        )
+    if recorded != {_canonical(json.loads(json.dumps(design_note(design))))}:
+        raise RunError(
+            f"the {scope} design is not the one holdout {granted.frozen_by} ran; "
+            "production builds only that design"
+        )
 
 
 def _check_keys(scope: str, run_key: str, research_run_key: str, granted: ProductionPass) -> None:
@@ -275,12 +295,13 @@ def build_run(
     calendar = TradingDays.from_db()
     research = [fold for fold in generate_folds(calendar, as_of, design.config) if fold.research]
     features = design_features(scope, design.variant, design.target)
+    check_holdout_design(scope, granted, design)
     _check_research(scope, research_run_key, design, features)
     references = _references(scope, research_run_key, research)
     shared = {
         "as_of": as_of.isoformat(),
         "frozen_by": granted.frozen_by,
-        "design": design_note(design),
+        DESIGN: design_note(design),
     }
     roles = {
         "shadow": {**shared, "role": SHADOW, "shadow_of": run_key},

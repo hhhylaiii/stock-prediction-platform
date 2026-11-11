@@ -504,8 +504,8 @@ def test_build_run_leaves_a_settled_build_and_its_shadow_alone(researched: Path)
 def test_build_run_takes_rank_thresholds_only_from_the_frozen_design(
     researched: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    claim_all()
     monkeypatch.setitem(production.DESIGNS, "rank", Design(CONFIG))
+    claim_all()
 
     with pytest.raises(RunError, match="rank-wf1 was not fit on the frozen rank design"):
         build_run("rank", "rank-prod", "rank-wf1", weekdays()[-1], researched)
@@ -542,6 +542,19 @@ def test_build_run_refuses_missing_references_before_fitting(
 
     assert not ModelRun.objects.filter(run_key__endswith="-prod").exists()
     assert not ModelRun.objects.filter(run_key__endswith="-prod-shadow").exists()
+
+
+@pytest.mark.django_db
+def test_build_run_waits_for_a_holdout_that_ran_the_frozen_design(researched: Path) -> None:
+    claim_holdout("rank", "rank-final", weekdays()[-1])
+
+    with pytest.raises(RunError, match="holdout rank-final recorded no run"):
+        build_run("rank", "rank-prod", "rank-wf1", weekdays()[-1], researched)
+    research_row("rank-final", design={"config": {}, "variant": {}, "target": {}})
+    with pytest.raises(RunError, match="not the one holdout rank-final ran"):
+        build_run("rank", "rank-prod", "rank-wf1", weekdays()[-1], researched)
+
+    assert not ModelRun.objects.filter(run_key__startswith="rank-prod").exists()
 
 
 @pytest.mark.django_db

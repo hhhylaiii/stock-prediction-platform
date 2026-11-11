@@ -1,5 +1,6 @@
 """A year of synthetic features and labels for the walk-forward runner tests."""
 
+import json
 import math
 from datetime import date, timedelta
 from pathlib import Path
@@ -136,9 +137,28 @@ def panel_calendar() -> TradingDays:
     return TradingDays(days, days[0], days[-1])
 
 
+HOLDOUT_OBJECTIVES = {"rank": "rank", "return": "regression", "interval": "quantile"}
+
+
 def claim_all() -> None:
-    for scope in ("rank", "return", "interval"):
-        claim_holdout(scope, f"{scope}-final", weekdays()[-1])
+    """Claim every scope's holdout with one run that ran the scope's frozen design."""
+    for scope, objective in HOLDOUT_OBJECTIVES.items():
+        key = f"{scope}-final"
+        claim_holdout(scope, key, weekdays()[-1])
+        note = json.loads(json.dumps(production.design_note(production.DESIGNS[scope])))
+        ModelRun.objects.create(
+            run_id=f"{key}.lightgbm.h20.f099",
+            run_key=key,
+            model_type="lightgbm",
+            objective=objective,
+            version="4",
+            train_start=START,
+            train_end=END,
+            params={production.DESIGN: note},
+            feature_list=[],
+            lib_versions={},
+            feature_hash="0" * 64,
+        )
 
 
 def use_designs(
