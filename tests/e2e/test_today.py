@@ -10,7 +10,7 @@ from apps.etl.models import EtlRun
 from apps.market.calendar import TradingDays
 from apps.market.models import TradingCalendar
 from apps.research.models import FeatureDaily, ModelMonitor, ModelRun, Prediction
-from tests.api.conftest import add_predictions
+from tests.api.conftest import FORCED_REASON, add_predictions, forced_params
 from tests.e2e.conftest import (
     BAND_NOTE,
     EXTRA_STOCKS,
@@ -81,6 +81,30 @@ def test_today_names_the_models_that_went_live_on_a_released_holdout(
     expect(page.locator("#rows .trow").nth(0)).to_contain_text("9999")
     expect(meta).to_contain_text("涵蓋 25 檔")
     expect(meta).not_to_contain_text("放行")
+
+
+FORCED_GATES_TEXT = "與現役模型的預測相關、影子模型最近 6 個月 OOS"
+
+
+def test_today_names_the_models_swapped_in_by_force_after_the_released_ones(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    ModelRun.objects.filter(pk="rank-h20").update(
+        params={**released_on("未達標"), **forced_params("rank-h20")}
+    )
+    ModelRun.objects.filter(pk="prob-h20").update(
+        params=forced_params("prob-h20", "classification")
+    )
+
+    page.goto(live_server.url)
+
+    meta = page.locator("#today-meta")
+    expect(meta).to_contain_text(
+        "排名 20 日模型的 holdout 判定未達標，經使用者放行上線；"
+        f"排名 20 日、跑贏大盤機率 20 日模型的換模門檻沒過（{FORCED_GATES_TEXT}），"
+        "經使用者強制換上。原因見模型頁。"
+    )
+    expect(meta).not_to_contain_text(FORCED_REASON)
 
 
 def test_five_days_names_only_the_released_models_it_shows(

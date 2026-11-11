@@ -9,6 +9,7 @@ from pytest_django.live_server_helper import LiveServer
 from apps.api.serving import HOLDOUT_RELEASE
 from apps.market.calendar import TradingDays
 from apps.research.models import BacktestMetric, ModelMonitor, ModelRun
+from tests.api.conftest import forced_params
 from tests.e2e.conftest import Seed
 
 pytestmark = pytest.mark.e2e
@@ -249,6 +250,36 @@ def test_adjacent_models_on_different_releases_keep_their_own_notes(
     rows = page.locator("#model-table .trow")
     expect(rows.nth(0).locator(NEXT)).to_have_class("released")
     expect(rows.nth(1).locator(NEXT)).to_have_class("released")
+
+
+def test_a_model_swapped_in_by_force_says_which_gates_failed_and_why(
+    page: Page, live_server: LiveServer, scored: Seed
+) -> None:
+    reason = f"影子模型樣本不足，先換上觀察 {XSS_VERSION}"
+    forced = forced_params("rank-h20", reason=reason)
+    ModelRun.objects.filter(pk="rank-h20").update(
+        params={**forced, "production": {HOLDOUT_RELEASE: RELEASE}}
+    )
+
+    page.goto(f"{live_server.url}/#models")
+
+    note = page.locator("#model-table .forced")
+    expect(note).to_have_count(1)
+    expect(note.locator("div")).to_have_text(
+        [
+            "換模門檻沒過：與現役模型的預測相關（實際 0.412，門檻 >= 0.5，樣本 1,842 檔）、"
+            "影子模型最近 6 個月 OOS（no shadow rows，實際 -0.004，門檻 > 0，樣本 120 天）",
+            f"2026-10-30 經使用者強制換上：{reason}",
+        ]
+    )
+    rows = page.locator("#model-table .trow")
+    expect(rows.nth(0)).to_have_class("trow model-cols has-release")
+    expect(rows.nth(0).locator(NEXT)).to_have_class("forced")
+    expect(note.locator(NEXT)).to_have_class("released")
+    expect(page.locator("#model-table img")).to_have_count(0)
+    expect(page.locator("#model-rules")).to_contain_text(
+        "換模門檻沒過而經使用者強制換上的模型，沒過的門檻與原因也列在該模型下方。"
+    )
 
 
 BARS_INSIDE_PLOT = """() => {
