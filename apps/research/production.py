@@ -114,13 +114,80 @@ class Built:
 
 
 FROZEN_MONTHS, FROZEN_MIN_ROUNDS = 60, 200
+FROZEN_RANK_FEATURES = (
+    "tech_ret_1d",
+    "tech_ret_5d",
+    "tech_ret_20d",
+    "tech_ret_60d",
+    "tech_mom_250_20",
+    "tech_ma_gap_5d",
+    "tech_ma_gap_20d",
+    "tech_ma_gap_60d",
+    "tech_vol_20d",
+    "tech_volume_ratio_5_20",
+    "tech_turnover_rate_5d",
+    "tech_rsi_14",
+    "tech_kd_k",
+    "tech_kd_d",
+    "tech_macd_hist_pct",
+    "tech_high_52w_gap",
+    "tech_low_52w_gap",
+    "tech_limit_up_t",
+    "tech_limit_up_cnt_20d",
+    "tech_limit_down_cnt_20d",
+    "tech_attention_t",
+    "size_log_mcap",
+    "liq_dollar_vol_med_20d",
+    "liq_amihud_20d",
+    "chip_fi_net_1d",
+    "chip_fi_net_5d",
+    "chip_fi_net_20d",
+    "chip_it_net_5d",
+    "chip_dealer_self_net_5d",
+    "chip_dealer_hedge_net_5d",
+    "chip_margin_chg_5d",
+    "chip_margin_usage",
+    "chip_short_ratio",
+    "chip_fi_holding_pct",
+    "chip_sbl_short_chg_5d",
+    "chip_big_holder_pct_chg_1w",
+    "chip_holder_count_chg_1w",
+    "fund_rev_yoy",
+    "fund_rev_3m_yoy",
+    "fund_ep",
+    "fund_eps_yoy",
+    "fund_dividend_yield",
+    "fund_roe_ttm",
+    "fund_gross_margin",
+    "fund_op_margin",
+    "fund_debt_ratio",
+    "fund_gm_yoy_chg",
+    "fund_opm_yoy_chg",
+    "fund_cfo_to_ni",
+    "fund_days_since_fs",
+    "fund_rev_yoy_q",
+    "risk_beta_250d",
+    "risk_idio_vol_60d",
+    "ind_sector_ret_20d",
+    "ind_rel_ret_20d",
+    "chip_day_trade_ratio_5d",
+    "chip_fi_holding_chg_20d",
+    "chip_it_net_20d",
+    "chip_fi_buy_streak",
+    "fund_days_to_ex_date",
+)
 FROZEN_CONFIG = replace(WalkForwardConfig(), train_months=FROZEN_MONTHS)
+FROZEN_RANK = replace(SPEC_RECIPE, min_rounds=FROZEN_MIN_ROUNDS, features=FROZEN_RANK_FEATURES)
 SPEC_DESIGNS: dict[str, Design] = {scope: Design() for scope in HoldoutScope.values}
 DESIGNS: dict[str, Design] = {
-    HoldoutScope.RANK: Design(FROZEN_CONFIG, replace(SPEC_RECIPE, min_rounds=FROZEN_MIN_ROUNDS)),
-    HoldoutScope.RETURN: Design(FROZEN_CONFIG, target=TargetVariant(market=False)),
+    HoldoutScope.RANK: Design(FROZEN_CONFIG, FROZEN_RANK, research_run_key="rank-cand60"),
+    HoldoutScope.RETURN: Design(
+        FROZEN_CONFIG, target=TargetVariant(market=False), research_run_key="return-std1109"
+    ),
     HoldoutScope.INTERVAL: Design(
-        FROZEN_CONFIG, target=TargetVariant(market=False, relative_up=True)
+        FROZEN_CONFIG,
+        target=TargetVariant(market=False, relative_up=True),
+        research_run_key="interval-std1109",
     ),
 }
 FROZEN, SPEC = "frozen", "spec"
