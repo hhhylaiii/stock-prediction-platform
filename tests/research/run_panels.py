@@ -9,12 +9,13 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import pytest
+from django.conf import settings
 
 from apps.market.calendar import TradingDays
 from apps.market.models import IndexDaily, TradingCalendar
-from apps.research import production
+from apps.research import lgbm_runs, production
 from apps.research.features.store import export_year
-from apps.research.holdout import claim_holdout
+from apps.research.holdout import claim_holdout, is_holdout
 from apps.research.models import FeatureDaily, HoldoutScope, LabelDaily, ModelRun
 from apps.research.production import Design
 from apps.research.runs import SCREENING_MODEL
@@ -140,12 +141,27 @@ def panel_calendar() -> TradingDays:
 HOLDOUT_OBJECTIVES = {"rank": "rank", "return": "regression", "interval": "quantile"}
 
 
-def claim_all() -> None:
-    """Claim every scope's holdout with one run that ran the scope's frozen design."""
+def write_holdout_markers(scope: str, key: str) -> None:
+    """Mark every holdout fold of the scope's frozen design written under key."""
+    calendar = TradingDays.from_db()
+    for fold in generate_folds(calendar, weekdays()[-1], production.DESIGNS[scope].config):
+        if is_holdout(fold):
+            marker = Path(settings.RESEARCH_CACHE_DIR) / key / f"fold-{fold.index:03d}.holdout"
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.touch()
+
+
+def claim_all(finished: bool = True) -> None:
+    """Claim every scope's holdout, finished by default: a run of its design, every fold written."""
     for scope, objective in HOLDOUT_OBJECTIVES.items():
         key = f"{scope}-final"
         claim_holdout(scope, key, weekdays()[-1])
-        note = json.loads(json.dumps(production.design_note(production.DESIGNS[scope])))
+        if not finished:
+            continue
+        write_holdout_markers(scope, key)
+        design = production.DESIGNS[scope]
+        note = json.loads(json.dumps(production.design_note(design)))
+        features = lgbm_runs.design_features(scope, design.variant, design.target)
         ModelRun.objects.create(
             run_id=f"{key}.lightgbm.h20.f099",
             run_key=key,
@@ -155,7 +171,7 @@ def claim_all() -> None:
             train_start=START,
             train_end=END,
             params={production.DESIGN: note},
-            feature_list=[],
+            feature_list=features,
             lib_versions={},
             feature_hash="0" * 64,
         )

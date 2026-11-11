@@ -152,7 +152,7 @@ def test_no_scope_names_its_research_run_before_the_design_is_frozen() -> None:
 def test_a_build_refuses_a_research_run_other_than_the_frozen_one(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    claim_all()
+    claim_all(finished=False)
     monkeypatch.setitem(DESIGNS, "rank", replace(DESIGNS["rank"], research_run_key="rank-wf1"))
     fitted: list[str] = []
 
@@ -171,7 +171,7 @@ def test_a_build_refuses_a_research_run_other_than_the_frozen_one(
 def test_a_build_from_the_frozen_research_run_passes_the_freeze_check(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    claim_all()
+    claim_all(finished=False)
     monkeypatch.setitem(DESIGNS, "rank", replace(DESIGNS["rank"], research_run_key="rank-wf1"))
 
     with pytest.raises(RunError, match="no model_run of the research run rank-wf1"):
