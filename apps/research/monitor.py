@@ -56,6 +56,7 @@ ODDS_CHECK = "output_odds_vs_q50"
 UNSCORED_CHECK = "monitor_unscored"
 ALERT_CHECK = "model_alert"
 OUTPUT_CHECKS = (WIDTH_CHECK, ODDS_CHECK)
+REFERENCE_CHECKS = (ODDS_CHECK,)
 CHECKS = (*OUTPUT_CHECKS, UNSCORED_CHECK, ALERT_CHECK)
 IC_THRESHOLD = "rolling_ic_threshold"
 BRIER_BASELINE = "brier_baseline"
@@ -267,12 +268,16 @@ def _consistency_row(
         "n_stocks": len(flagged),
         "stocks": marked,
     }
-    severity = DataQualityLog.Severity.WARNING if marked else DataQualityLog.Severity.INFO
+    warned = marked and check not in REFERENCE_CHECKS
+    severity = DataQualityLog.Severity.WARNING if warned else DataQualityLog.Severity.INFO
     return DataQualityLog(date=day, check_name=check, severity=severity, detail=detail)
 
 
 def consistency_checks(day: date) -> list[DataQualityLog]:
-    """Width-ratio and odds-versus-q50 rows of the day's outputs, each skipped without inputs."""
+    """Width-ratio and odds-versus-q50 rows of the day's outputs, each skipped without inputs.
+
+    The odds row is a reference: the up label is against the market, q50 is not.
+    """
     frame = _outputs_on(day)
     checks = {
         WIDTH_CHECK: wide_bands(frame, "q10", "q90", "vol_pred"),
@@ -539,7 +544,7 @@ def _degrade(day: date, entries: list[dict[str, Any]]) -> list[str]:
 def _alerting(row: DataQualityLog) -> bool:
     if row.check_name in (UNSCORED_CHECK, ALERT_CHECK):
         return True
-    return bool(row.detail["share"] > ALERT_SHARE)
+    return row.check_name not in REFERENCE_CHECKS and bool(row.detail["share"] > ALERT_SHARE)
 
 
 def recheck_outputs(day: date) -> list[DataQualityLog]:

@@ -372,23 +372,37 @@ def logged(check: str) -> DataQualityLog:
 def test_consistency_rows_count_universe_stocks_and_alert_above_ten_percent(
     dispatched: list[DataQualityLog],
 ) -> None:
-    seed_today(narrow=2, against=6)
+    seed_today(narrow=6, against=2)
 
     run_monitor(DAY, calendar())
 
     width = logged(WIDTH_CHECK)
     assert width.severity == "warning"
     assert width.detail == {
-        "share": 0.05,
-        "flagged": 2,
+        "share": 0.15,
+        "flagged": 6,
         "n_stocks": 40,
-        "stocks": STOCKS[:2],
+        "stocks": STOCKS[:6],
     }
     odds = logged(ODDS_CHECK)
-    assert odds.severity == "warning"
-    assert odds.detail["share"] == pytest.approx(0.15)
-    assert odds.detail["stocks"] == STOCKS[2:8]
-    assert [row.check_name for row in dispatched] == [ODDS_CHECK]
+    assert odds.severity == "info"
+    assert odds.detail["share"] == pytest.approx(0.05)
+    assert odds.detail["stocks"] == STOCKS[6:8]
+    assert [row.check_name for row in dispatched] == [WIDTH_CHECK]
+
+
+def test_the_odds_check_is_a_reference_logged_as_info_and_never_sent(
+    dispatched: list[DataQualityLog],
+) -> None:
+    seed_today(narrow=0, against=20)
+
+    run_monitor(DAY, calendar())
+
+    odds = logged(ODDS_CHECK)
+    assert odds.severity == "info"
+    assert odds.detail["share"] == pytest.approx(0.5)
+    assert odds.detail["stocks"] == STOCKS[:20]
+    assert dispatched == []
 
 
 def test_consistency_without_flags_is_logged_as_info_and_without_inputs_not_at_all(
@@ -409,7 +423,7 @@ def test_consistency_without_flags_is_logged_as_info_and_without_inputs_not_at_a
 def test_a_recheck_rewrites_only_the_day_s_output_rows_and_sends_their_alerts(
     dispatched: list[DataQualityLog],
 ) -> None:
-    seed_today(narrow=0, against=6)
+    seed_today(narrow=6, against=6)
     stale = {"share": 0.5, "flagged": 20, "n_stocks": 40, "stocks": []}
     DataQualityLog.objects.bulk_create(
         [
@@ -423,11 +437,11 @@ def test_a_recheck_rewrites_only_the_day_s_output_rows_and_sends_their_alerts(
 
     monitor.recheck_outputs(DAY)
 
-    assert logged(WIDTH_CHECK).detail["flagged"] == 0
+    assert logged(WIDTH_CHECK).detail["flagged"] == 6
     assert logged(ODDS_CHECK).detail["flagged"] == 6
     assert logged(UNSCORED_CHECK).detail == {}
     assert DataQualityLog.objects.filter(date=DAY - timedelta(days=1)).count() == 1
-    assert [row.check_name for row in dispatched] == [ODDS_CHECK]
+    assert [row.check_name for row in dispatched] == [WIDTH_CHECK]
 
 
 def serves(run: ModelRun, horizon: int, day: date = DAY) -> None:

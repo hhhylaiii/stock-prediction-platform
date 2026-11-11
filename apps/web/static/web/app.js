@@ -990,9 +990,9 @@
     const stocks = fmtInt(d.flagged || 0) + '／' + fmtInt(d.n_stocks || 0) + ' 檔';
     switch (check.check_name) {
       case 'output_width_ratio':
-      case 'output_odds_vs_q50':
         if ((d.share || 0) > alertShare) return ['warn', ['警告，' + stocks]];
         return ['', [d.flagged ? '少量標記，' + stocks : '沒有標記']];
+      case 'output_odds_vs_q50': return ['', [d.flagged ? '參考，' + stocks : '沒有標記']];
       case 'monitor_unscored': return ['warn', [fmtInt(sizeOf(d.runs)) + ' 筆']];
       case 'model_alert': return ['warn', (d.runs || []).map(run => alertLine(run, date))];
       case 'model_promotion': return [check.severity === 'info' ? '' : 'warn', promotionLines(d)];
@@ -1048,7 +1048,7 @@
     const sub = document.getElementById('model-checks-sub'), host = document.getElementById('model-checks');
     const day = data.find(entry => (entry.model_checks || []).some(check => !isPromotion(check) && !isResearch(check)));
     const share = meta.output_alert_share;
-    sub.textContent = day ? '最近一次寫入的交易日：' + day.date + '；區間寬度比與機率矛盾的標記超過 ' + Math.round(share * 100) + '% 才算警告。' : '';
+    sub.textContent = day ? '最近一次寫入的交易日：' + day.date + '；區間寬度比的標記超過 ' + Math.round(share * 100) + '% 才算警告，機率矛盾只做參考。' : '';
     const promotions = latestBy(data, isPromotion, scopeOf);
     const count = promotions.total > promotions.shown.length ? '，近 ' + data.length + ' 個交易日共 ' + promotions.total + ' 筆' : '';
     const research = researchPins(data);
