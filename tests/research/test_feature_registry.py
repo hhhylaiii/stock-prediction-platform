@@ -4,6 +4,7 @@ import pytest
 
 from apps.research.features.build import FEATURE_COLUMNS, FIRST_BATCH_COLUMNS, MODEL_COLUMNS
 from apps.research.features.registry import (
+    DORMANT,
     FEATURES,
     UNUSED,
     Availability,
@@ -13,6 +14,7 @@ from apps.research.features.registry import (
 )
 from apps.research.features.transforms import STOCK_LEVEL
 from apps.research.management.commands.ic_report import UNSCREENED
+from apps.research.production import DESIGNS
 from apps.research.training import LINEAR_FEATURES, linear_features
 
 FIRST_BATCH_GROUPS = {
@@ -153,3 +155,14 @@ def test_monthly_revenue_mom_is_stored_but_no_batch_reads_it() -> None:
     assert "fund_rev_mom" not in read
     with pytest.raises(ValueError, match="fund_rev_mom"):
         linear_features(["fund_ep", "fund_rev_mom"])
+
+
+def test_dormant_features_keep_their_place_in_the_registry_and_the_frozen_design() -> None:
+    assert sorted(DORMANT) == ["chip_big_holder_pct_chg_1w", "chip_holder_count_chg_1w"]
+    assert all(DORMANT.values())
+    assert set(DORMANT) <= set(STOCK_LEVEL)
+    assert set(DORMANT) <= set(FEATURE_COLUMNS)
+    assert set(DORMANT) <= set(FIRST_BATCH_COLUMNS)
+    rank = DESIGNS["rank"].variant.features
+    assert len(rank) == 60
+    assert set(DORMANT) <= set(rank)

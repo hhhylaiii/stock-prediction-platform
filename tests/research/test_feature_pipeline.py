@@ -39,7 +39,7 @@ from apps.research.features.build import (
 )
 from apps.research.features.chip import SOURCED_CHIPS
 from apps.research.features.fundamental import sourced_name
-from apps.research.features.registry import FEATURES, feature_names
+from apps.research.features.registry import DORMANT, FEATURES, feature_names
 from apps.research.features.residual import (
     FALLBACKS,
     fallback_filled,
@@ -154,6 +154,44 @@ def test_feature_daily_holds_the_raw_values_of_both_batches() -> None:
     ]
 
 
+def test_dormant_features_stay_empty_and_leave_every_other_value_alone() -> None:
+    listed("2330", "2015-06-01", "2016-04-29")
+    inputs("2330")
+    days = (d("2016-03-01"), d("2016-03-15"))
+
+    frame = build_feature_frame(CALENDAR, *days, masked={})
+    computed = build_feature_frame(CALENDAR, *days, masked={}, dormant=())
+
+    assert sorted(DORMANT) == ["chip_big_holder_pct_chg_1w", "chip_holder_count_chg_1w"]
+    assert computed[list(DORMANT)].notna().any().all()
+    assert frame[list(DORMANT)].isna().all().all()
+    assert list(frame.columns) == FRAME_COLUMNS
+    assert frame.dtypes.equals(computed.dtypes)
+    others = [name for name in FRAME_COLUMNS if name not in DORMANT]
+    pd.testing.assert_frame_equal(frame[others], computed[others])
+
+
+def test_a_rebuild_empties_dormant_values_written_earlier(tmp_path: Path, settings: Any) -> None:
+    settings.FEATURE_PARQUET_DIR = tmp_path
+    calendar_rows()
+    listed("2330", "2015-06-01", "2016-04-29")
+    inputs("2330")
+    days = (d("2016-03-01"), d("2016-03-04"))
+    written = build_feature_frame(CALENDAR, *days, masked={}, dormant=())
+    store.write_features(written, *days)
+    assert stored()[list(DORMANT)].notna().any().all()
+
+    call_command("build_features", start=days[0], end=days[1])
+
+    rows = stored()
+    assert len(rows) == len(written)
+    assert rows[list(DORMANT)].isna().all().all()
+    assert rows["chip_fi_net_1d"].notna().all()
+    exported = read_partitions(*days, tmp_path, ["stock_id", "date", *DORMANT, "chip_fi_net_1d"])
+    assert exported[list(DORMANT)].isna().all().all()
+    assert exported["chip_fi_net_1d"].notna().all()
+
+
 def test_the_frame_has_one_row_per_listed_stock_and_trading_day_in_range() -> None:
     listed("2330", "2015-06-01", "2016-03-31")
     listed("1101", "2015-06-01", "2016-02-26", step=0.2)
@@ -187,7 +225,7 @@ def test_every_input_group_reaches_the_frame() -> None:
         announce_date=d("2016-02-24"),
     )
 
-    frame = build_feature_frame(CALENDAR, d("2016-03-01"), d("2016-04-15"), masked={})
+    frame = build_feature_frame(CALENDAR, d("2016-03-01"), d("2016-04-15"), masked={}, dormant=())
 
     row = frame[frame["date"] == d("2016-03-02")].iloc[0]
     assert row["chip_fi_net_1d"] == pytest.approx(2_000 / 1_000_000)

@@ -1,8 +1,10 @@
 """Every SPEC §6 feature with its group, availability time, screening role and batch."""
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from fnmatch import fnmatchcase
+from types import MappingProxyType
 
 
 class Group(StrEnum):
@@ -108,6 +110,13 @@ FEATURES: tuple[FeatureSpec, ...] = (
     *_specs(MKT, "mkt_days_to_quarter_end", batch=2),
 )
 BY_NAME = {spec.name: spec for spec in FEATURES}
+UNSEEN_HOLDINGS = (
+    "weekly_holding starts on 2026-11-06, so no research or holdout fold saw a value; "
+    "it stays empty until an evaluation enables it (SPEC §6)"
+)
+DORMANT: Mapping[str, str] = MappingProxyType(
+    dict.fromkeys(("chip_big_holder_pct_chg_1w", "chip_holder_count_chg_1w"), UNSEEN_HOLDINGS)
+)
 
 
 def feature(name: str) -> FeatureSpec:
