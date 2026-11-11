@@ -278,3 +278,4 @@ def test_the_release_command_records_the_user_s_decision(researched: Path) -> No
     assert "+08:00;" in out.getvalue()
     assert "未達的門檻 ['5 日 MAE']，退化旗標 ['MAE 差']" in out.getvalue()
     assert "只有使用者明確同意後才能執行" in ReleaseCommand.help
+    assert "原因會顯示在模型頁，不要寫私人資訊或主機路徑" in ReleaseCommand.help

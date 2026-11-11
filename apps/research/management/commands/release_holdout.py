@@ -14,7 +14,8 @@ class Command(BaseCommand):
     help = (
         "Release the verdict of a scope's latest holdout (未達標 or 明顯退化) so build_run and "
         "the monthly retrain may build on it. 只有使用者明確同意後才能執行; --reason keeps the "
-        "user's reason with the release, and every build on it carries the release and alerts."
+        "user's reason with the release, and every build on it carries the release and alerts. "
+        "原因會顯示在模型頁，不要寫私人資訊或主機路徑。"
     )
 
     def add_arguments(self, parser: ArgumentParser) -> None:
@@ -25,7 +26,11 @@ class Command(BaseCommand):
             choices=[FAILED, DEGRADED],
             help="The verdict its report gives.",
         )
-        parser.add_argument("--reason", required=True, help="Why the user accepts the verdict.")
+        parser.add_argument(
+            "--reason",
+            required=True,
+            help="Why the user accepts the verdict; shown on the model page, so nothing private.",
+        )
 
     def handle(self, *args: Any, **options: Any) -> None:
         try:
