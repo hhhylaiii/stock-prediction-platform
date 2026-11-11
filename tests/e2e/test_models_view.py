@@ -6,6 +6,7 @@ import pytest
 from playwright.sync_api import Page, Route, expect
 from pytest_django.live_server_helper import LiveServer
 
+from apps.api.model_runs import HOLDOUT_RELEASE
 from apps.market.calendar import TradingDays
 from apps.research.models import BacktestMetric, ModelMonitor, ModelRun
 from tests.e2e.conftest import Seed
@@ -159,6 +160,51 @@ def test_a_degraded_model_says_since_when_and_whose_rows_judged_it(
     )
     expect(rows.nth(3).locator(".degraded")).to_have_text("2026-10-21 起")
     expect(rows.nth(0).locator(".degraded")).to_have_count(0)
+
+
+RELEASE_REASON = f"差距在 seed 間標準差內，先上線觀察 {XSS_VERSION}"
+RELEASE = {
+    "status": "未達標",
+    "failed": ["排名 20 日 IC"],
+    "flagged": ["排名 5 日 IC"],
+    "reason": RELEASE_REASON,
+    "released_at": "2026-11-12T10:03:00.123456+08:00",
+    "report": "/srv/host/reports/rank-holdout-20261111.md",
+    "sha256": "ab" * 32,
+}
+NEXT = "xpath=following-sibling::*[1]"
+
+
+def test_a_model_built_on_a_released_holdout_says_the_verdict_and_the_reason(
+    page: Page, live_server: LiveServer, scored: Seed
+) -> None:
+    flagged = {**RELEASE, "status": "明顯退化", "failed": []}
+    ModelRun.objects.filter(pk="rank-h20").update(params={"production": {HOLDOUT_RELEASE: RELEASE}})
+    ModelRun.objects.filter(pk="prob-h20").update(params={"production": {HOLDOUT_RELEASE: flagged}})
+
+    page.goto(f"{live_server.url}/#models")
+
+    notes = page.locator("#model-table .released")
+    expect(notes).to_have_count(2)
+    expect(notes.nth(0).locator("div")).to_have_text(
+        [
+            "holdout 判定「未達標」，未達的門檻：排名 20 日 IC；退化旗標：排名 5 日 IC",
+            f"2026-11-12 經使用者放行：{RELEASE_REASON}",
+        ]
+    )
+    expect(notes.nth(1).locator("div").first).to_have_text(
+        "holdout 判定「明顯退化」，退化旗標：排名 5 日 IC"
+    )
+    rows = page.locator("#model-table .trow")
+    expect(rows).to_have_count(6)
+    expect(rows.nth(0).locator(NEXT)).to_have_class("released")
+    expect(rows.nth(1).locator(NEXT)).to_have_class("trow model-cols")
+    expect(rows.nth(5).locator(NEXT)).to_have_class("released")
+    expect(page.locator("#model-table")).not_to_contain_text("/srv/host")
+    expect(page.locator("#model-table img")).to_have_count(0)
+    expect(page.locator("#model-rules")).to_contain_text(
+        "正式模型只建在 holdout 判定達標的設計上；判定未達標或明顯退化時，要經使用者放行才建"
+    )
 
 
 BARS_INSIDE_PLOT = """() => {

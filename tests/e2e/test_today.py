@@ -69,6 +69,7 @@ def test_today_says_what_the_probability_and_the_band_mean(
     expect(head).to_have_attribute("title", PROB_TIP)
     expect(page.locator("#band-note")).to_have_text(BAND_NOTE)
     expect(page.locator("#band-note")).to_be_visible()
+    expect(page.locator("#model-note")).to_be_hidden()
 
 
 def test_five_days_reads_the_five_day_models(
@@ -87,6 +88,79 @@ def test_five_days_reads_the_five_day_models(
     expect(page.locator("#ret-head")).to_have_text("5 日預測報酬")
     expect(page.locator("#band-head")).to_have_text("80% 預測區間（僅 20 日）")
     expect(page.locator("#rows .band")).to_have_count(0)
+    expect(page.locator("#band-note")).to_be_hidden()
+    expect(page.locator("#model-note")).to_be_hidden()
+
+
+MODEL_REQUIRES = "模型要在 holdout 判定達標之後才會上線，判定未達標或明顯退化時要經使用者放行"
+ONLINE = f"{MODEL_REQUIRES}；上線中的模型列在模型頁。"
+
+
+def test_no_predictions_yet_says_what_puts_a_model_online(
+    page: Page, live_server: LiveServer, seeded: Seed
+) -> None:
+    page.goto(live_server.url)
+
+    expect(page.locator("#today-empty")).to_have_text(
+        f"預測資料尚未產出。排名{MODEL_REQUIRES}；上線後，這裡會列出全市場的排名。"
+    )
+    expect(page.locator("#band-note")).to_be_hidden()
+    expect(page.locator("#model-note")).to_be_hidden()
+
+
+def test_a_day_without_the_band_and_odds_models_says_which_columns_wait(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    Prediction.objects.filter(run_id__in=["quantile-h20", "prob-h20"]).delete()
+
+    page.goto(live_server.url)
+
+    rows = page.locator("#rows .trow")
+    expect(rows).to_have_count(20)
+    expect(rows.nth(0)).to_contain_text("（波動率區間）")
+    expect(rows.nth(0).locator(".prob")).to_have_text("—")
+    expect(page.locator("#model-note")).to_have_text(
+        "這一期沒有報酬區間、跑贏大盤機率模型的預測：預測報酬、預測價、跑贏大盤機率留空，"
+        f"價格區間改用波動估計。{ONLINE}"
+    )
+    expect(page.locator("#band-note")).to_be_hidden()
+
+    page.get_by_role("button", name="5 日").click()
+
+    expect(page.locator("#rows .trow").nth(0)).to_contain_text("9999")
+    expect(page.locator("#model-note")).to_be_hidden()
+
+
+def test_five_days_without_the_return_model_says_so(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    Prediction.objects.filter(run_id="reg-h5").delete()
+    page.goto(live_server.url)
+    expect(page.locator("#rows .trow")).to_have_count(20)
+
+    page.get_by_role("button", name="5 日").click()
+
+    expect(page.locator("#model-note")).to_have_text(
+        f"這一期沒有絕對報酬模型的預測：預測報酬、預測價留空。{ONLINE}"
+    )
+
+    page.get_by_role("button", name="20 日").click()
+
+    expect(page.locator("#band-note")).to_be_visible()
+    expect(page.locator("#model-note")).to_be_hidden()
+
+
+def test_a_day_missing_only_the_odds_model_keeps_the_band_note(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    Prediction.objects.filter(run_id="prob-h20").delete()
+
+    page.goto(live_server.url)
+
+    expect(page.locator("#model-note")).to_have_text(
+        f"這一期沒有跑贏大盤機率模型的預測：跑贏大盤機率留空。{ONLINE}"
+    )
+    expect(page.locator("#band-note")).to_be_visible()
 
 
 def test_market_and_search_filter_on_the_server(
@@ -198,6 +272,8 @@ def test_a_failed_ranking_request_is_shown(
 
     expect(page.locator("#rows .error")).to_have_text("無法連線到伺服器。")
     expect(page.locator("#today-meta")).to_have_text("")
+    expect(page.locator("#band-note")).to_be_hidden()
+    expect(page.locator("#model-note")).to_be_hidden()
 
 
 def test_watch_only_shows_the_watched_stocks(
