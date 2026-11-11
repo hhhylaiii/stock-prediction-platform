@@ -215,7 +215,7 @@ uv run python manage.py reapply_dividend_dates --stock 2884 --stock 2885
   ```
 
 - 減資、分割這類只有參考價、沒有配息公告的事件，FinMind 沒有日期，預告表也不列，`announce_date` 維持空的；`fund_days_to_ex_date` 只看現金股利，不受影響。
-- `--earlier`：FinMind 的公告交易日比已存的日期早，就改用它；只會往前，不會往後。預告表記的是「第一次看到」，只會比真正的公告晚，所以上線當天和每次核對時用這個選項把日期修回公告日。`--dry-run` 只列出會改哪些列，不寫入，最後一行印「已存日期比公告晚幾個交易日」的分布（0 是同一天，負數是已存的比較早）：
+- `--earlier`：FinMind 的公告交易日比已存的日期早，就改用它；只會往前，不會往後。只對除權息日在 2026-10-31（`DIVIDEND_EXCHANGE_PRIMARY_FROM`）以後的列生效，之前的列（研究期的資料）不會動。預告表記的是「第一次看到」，只會比真正的公告晚，所以上線當天和每次核對時用這個選項把日期修回公告日。`--dry-run` 只列出會改哪些列，不寫入，最後一行印「已存日期比公告晚幾個交易日」的分布（0 是同一天，負數是已存的比較早）：
 
   ```bash
   uv run python manage.py reapply_dividend_dates --earlier --dry-run --stock 6655
@@ -241,7 +241,7 @@ uv run python manage.py reapply_dividend_dates --stock 2884 --stock 2885
 - 因子：除權息 = 除權息參考價 ÷ 除權息前收盤價，和 FinMind 回補用的 `after_price` 同一個數；減資、面額變更 = 恢復買賣參考價 ÷ 停止買賣前收盤價。同一檔同一天有兩種以上時相乘。寫入或補上因子的股票會重算 `daily_price.adj_factor`；改到既有歷史時，研究排程會從受影響的交易日重建（見「研究排程」）。
 - 金額：現金股利（元／股）；股票股利換成元／股（每仟股無償配股 ÷ 100，面額 10 元），和 FinMind 的單位相同。減資、面額變更的列金額是 0。退還股款的減資（例如 2026-10-12 的 2323，恢復買賣參考價 10.88、停止買賣前收盤 11.00）金額也存 0：每股退多少只在 TWTAUU 的詳細資料頁，這支不讀；因子照參考價算，還原價不受影響。
 - 已有的列分兩段。除權息日在 2026-10-30 以前（FinMind 回補過的）：只補空的 `adj_factor`；金額或因子不同時不覆蓋，記一列 `dividend_source_mismatch`（info，每個執行日、每個來源一列，重跑時取代）。除權息日在 2026-10-31 以後（`DIVIDEND_EXCHANGE_PRIMARY_FROM`，多半是預告表先寫的列）：結果表的金額、因子不同就覆寫，同一列 log 裡那筆事件標 `overwritten`，同一天重跑也會留著。結果表新增的列 `announce_date` 留空：結果表不是公告，公告日由預告表給。
-- raw 各頁分開存：`ex_rights`、`ex_rights_detail`、`capital_reduction`、`par_value_change`。`reprocess --dataset dividend_event` 會照網址找回各自的頁，但和每日執行一樣只補空的因子，不改已存的列。要用改過的解析重套某段日期：先刪掉那段 `ex_date` 的列（2026-10-31 之後的都是交易所寫的，之前的是 FinMind 回補，不要刪），`reprocess` 那段日期，再 `reapply_dividend_dates` 補回 FinMind 的公告日；刪掉後沒有重寫回來的股票，用 `recompute_adj_factor --stock <代號>` 重算。
+- raw 各頁分開存：`ex_rights`、`ex_rights_detail`、`capital_reduction`、`par_value_change`。`reprocess --dataset dividend_event` 會照網址找回各自的頁，寫入規則和每日執行一樣：除權息日在 2026-10-30 以前的列只補空的因子、不改已存的；2026-10-31 以後的列，金額或因子不同就覆寫。要用改過的解析重套某段日期：先刪掉那段 `ex_date` 的列（2026-10-31 之後的都是交易所寫的，之前的是 FinMind 回補，不要刪），`reprocess` 那段日期，再跑 `reapply_dividend_notices` 把預告表記的公告日補回來（刪掉的列裡有預告表新增的）；刪掉後沒有重寫回來的股票，用 `recompute_adj_factor --stock <代號>` 重算。
 - `dividend_event` 擋研究閘門：除權息日當天的技術面報酬要用到當天的因子。閘門只認證交所、櫃買的 run（FinMind 回補不算），所以上線前的交易日不再通過 `ready_for_research`；要重算某段過去的預測，先用下面的 `fetch` 補那段的 `dividend_event`。
 - 同一檔同一天有好幾張表時，因子相乘；其中一張的價格不能用、因子留空時，那天的因子整個留空，不寫只乘了一部分的數。
 - 證交所在 200 回應裡回「系統忙碌中」時，client 原地退避重試，那份回應不存 raw；每個證交所端點都一樣。
@@ -263,26 +263,49 @@ uv run python manage.py reapply_dividend_dates --stock 2884 --stock 2885
 | 證交所 | `/rwd/zh/exRight/TWT48U` | 不收日期參數，帶了也回當下的名單 |
 | 櫃買 | `/www/zh-tw/bulletin/prePost` | 同上；會留著本月已除權息的列 |
 
-- dataset 是 `dividend_notice`，排在 21:30 的 night 批次。不擋研究閘門；沒抓到會出現在 22:50 `etl_runs` 的 missing（warning）。名單沒有歷史，漏掉的那天沒辦法補抓，所以 catchup 不跑它，之後任何一次成功就算補上。手動抓一次（日期只是 `etl_run` 的標籤，內容一律是當下的名單）：
+- dataset 是 `dividend_notice`，排在 21:30 的 night 批次。不擋研究閘門；沒抓到會出現在 22:50 `etl_runs` 的 missing（warning）。名單沒有歷史，漏掉的那天沒辦法補抓，所以 catchup 不跑它，之後任何一次成功就算補上。手動抓一次（一次只能給一天，給區間會被拒絕；日期只是 `etl_run` 的標籤，內容一律是當下的名單）：
 
   ```bash
-  uv run python manage.py fetch --source twse --dataset dividend_notice --start <今天> --end <今天>
-  uv run python manage.py fetch --source tpex --dataset dividend_notice --start <今天> --end <今天>
+  uv run python manage.py fetch --source twse --dataset dividend_notice --date <今天>
+  uv run python manage.py fetch --source tpex --dataset dividend_notice --date <今天>
+  ```
+
+- 先看會寫什麼、不寫入：`preview_dividend_notices` 抓當下的名單，走和正式執行同一段程式，印出會新增、補日期、改金額、刪除的列，最後整筆交易回滾。raw、`dividend_event`、`dividend_notice`、log 都不留，也不發告警。
+
+  ```bash
+  uv run python manage.py preview_dividend_notices
+  uv run python manage.py preview_dividend_notices --source twse
   ```
 
 - 公告日的算法：名單沒有公告日欄，用「第一次看到的交易日」。抓取時刻在交易日 22:40（`FILING_VISIBLE_BEFORE`）前算當天，其餘算下一個交易日；重試拖過 22:40 或隔天才抓到的，就記成較晚的那個交易日。2026-11-11 的觀測：當天 09:23、10:45 公告的事件，15:13 已經在證交所名單上。
-- 只處理除權息日還沒到的列。表上有、庫裡沒有：新增一列，金額用表上的（「待公告實際收益分配金額」「尚未公告」先存 0，多半是 ETF），`adj_factor` 留空。庫裡已有：只補空的 `announce_date`。只寫 `stock_master` 有的代號。
+- 只處理除權息日還沒到的列。表上有、庫裡沒有：新增一列，金額用表上的，`adj_factor` 留空。庫裡已有：只補空的 `announce_date`。只寫 `stock_master` 有的代號。同一筆事件兩個交易所都列過時（股票轉市場），公告日取兩邊最早看到的那天。
+- 金額欄寫「待公告實際收益分配金額」「尚未公告」（多半是 ETF）、空白或 `--` 的先存 0。其他讀不懂的文字會讓整份名單被拒收（`SchemaChangedError`），那天這個來源記 failed；這代表表格換了寫法，要改解析。
 - 預告表新增的列在除權息日之前，金額跟著名單更新；除權息日當天結果表寫入因子後就不再跟。
-- 每個來源每一列第一次、最後一次看到的交易日記在 `dividend_notice` 表（`created_event` 表示那列事件是預告表新增的）。
-- 每次執行在 `data_quality_log` 留一列 `dividend_notice`（每個交易日、每個來源一列）：`listed` 名單上未到的列數、`created`／`dated`／`revised` 新增、補日期、改金額的列數、`gone` 上次有這次沒有的列、`sound` 名單是否正常、`removed` 刪掉的列、`unsettled` 除權息日已到卻沒有因子的列。`sound` 是 false、或 `removed`、`unsettled` 不是空的時是 warning。
+- 預告表新增的列沒有因子，不會改到任何一天的還原價（`daily_price.adj_factor` 只算有因子的事件）；除權息日當天結果表寫入後，金額、因子、還原價都和沒有預告表先寫時相同，只差多了公告日。
+- 每個來源每一列第一次、最後一次看到的交易日記在 `dividend_notice` 表：`created_event` 表示那列事件是預告表新增的，`withdrawn` 是判定它已從名單撤下的交易日（之後又列出來就清掉）。
+- 每次執行在 `data_quality_log` 留一列 `dividend_notice`（每個交易日、每個來源一列）：`listed` 名單上未到的列數、`created`／`dated`／`revised` 新增、補日期、改金額的列數、`gone` 之前列過、該還在卻不在這份名單上的列、`sound` 名單是否正常、`removed` 刪掉的列、`unsettled` 除權息日已到卻沒有因子的列。`sound` 是 false、或 `removed`、`unsettled` 不是空的時是 warning。
 
 ### 改期或取消
 
 - 刪除的條件要全部成立：那列是預告表新增的、還沒除權息、`adj_factor` 是空的、連續兩個不同交易日的名單都沒有它、這兩次名單都正常。只缺一次不刪。
-- 名單正常：上面還有未到的除權息日，而且上一次列著、這次該還在（除權息日還沒到）卻不見的列數，不超過 5 列與 20% 兩者中較大的。不正常的那次不刪任何列；之後要再連續兩次正常才會刪。
+- 名單正常：上面還有未到的除權息日，而且之前列過、該還在（除權息日還沒到、還沒判定撤下）卻不在這份名單上的列數不超過 3 列。超過就不正常，那次不刪任何列，並記 warning。
+- 不見的列在判定撤下之前每天都算進去。所以名單連續幾天都缺一大段時，每天都是不正常，不會因為「和昨天一樣」就開始刪；要等名單恢復、或人工處理後才會再刪。
 - 改期時舊日期那列照上面的規則刪掉，新日期是一列新事件，`announce_date` 是改期後第一次看到的交易日。
 - 刪掉的事件之後又出現在名單上，會自動加回來，`announce_date` 沿用原本第一次看到的交易日。
-- 手動還原：`removed` 裡有整列的內容。先確認公司沒有取消或改期，再照 log 寫回去（下例的值都來自 log）：
+- 另一個交易所之後列過同一筆事件的（股票轉市場）不刪。
+- 一次超過 3 列不見（warning 每天都會出現）：到交易所網站確認。真的改期或取消的，手動刪掉事件並把那幾列標成已撤下，名單才會恢復正常（下例的代號、日期換成 `gone` 裡的）：
+
+  ```bash
+  uv run python manage.py shell -v 0 -c "
+  from datetime import date
+  from apps.etl.models import DividendNotice as N
+  from apps.market.models import DividendEvent as D
+  D.objects.filter(stock_id='6655', ex_date='2026-11-24', adj_factor__isnull=True).delete()
+  N.objects.filter(stock_id='6655', ex_date='2026-11-24').update(withdrawn=date.today())
+  "
+  ```
+
+- 手動還原誤刪的列：`removed` 裡有整列的內容。先確認公司沒有取消或改期，再照 log 寫回去（下例的值都來自 log）。寫回去的列不會再被自動刪，因為那筆已經標成撤下；之後它又出現在名單上時也不會重複新增。
 
   ```bash
   uv run python manage.py shell -v 0 -c "
@@ -296,13 +319,27 @@ uv run python manage.py reapply_dividend_dates --stock 2884 --stock 2885
   "
   ```
 
-- `unsettled`：取消或改期發生在除權息日前兩個交易日內時，來不及等到兩次名單，那列會留著、沒有因子。確認後手動刪除那一列（同上，用 `D.objects.filter(...).delete()`）。這類列有現金股利、有公告日，`fund_days_to_ex_date` 會把它當成真的除息日，所以看到就要處理。
+- `unsettled`：預告表新增的列到了除權息日卻沒有因子，代表結果表沒有這筆。兩種情況：
+  - 取消或改期發生在除權息日前兩個交易日內，來不及等到兩次名單。確認後手動刪除那一列（`D.objects.filter(...).delete()`）。
+  - 除權息日當天臨時休市（例如颱風假），除權息順延到下一個交易日。順延後的那筆由結果表新增，沒有公告日。處理：把舊列的 `announce_date` 抄到新列，再刪舊列。
+
+    ```bash
+    uv run python manage.py shell -v 0 -c "
+    from apps.market.models import DividendEvent as D
+    old = D.objects.get(stock_id='6655', ex_date='2026-11-24')
+    D.objects.filter(stock_id='6655', ex_date='2026-11-25', announce_date__isnull=True).update(announce_date=old.announce_date)
+    old.delete()
+    "
+    ```
+
+  這類列有現金股利、有公告日、沒有因子，`fund_days_to_ex_date` 會把它當成真的除息日，所以看到就要處理。
 
 ### 上線步驟（一次）
 
 1. worker 重建後先 `migrate`（etl 0006，新增 `dividend_notice` 表）。
-2. 手動抓兩個來源各一次（上面的 `fetch`）。這次名單上已經列著的事件，`announce_date` 都會記成今天，比真正的公告晚。
-3. 抓這些股票的 FinMind 股利，再用真正的公告日往前修。同一步也把 2026-10-31 之後已除息、沒有公告日的列補上。FinMind 的股利政策表是用配息基準日查的，還沒除息的事件基準日在未來，所以 `--to` 要給到今天之後 90 天（2026-11-11 實測：5483 除息日 2027-01-05，`--to` 只給到今天查不到，給到未來才查得到）：
+2. 乾跑：`preview_dividend_notices`，把輸出給協調看過。第一次不會有刪除；名單上已經列著的事件，`announce_date` 都會記成今天，比真正的公告晚，下一步會修。
+3. 正式抓兩個來源各一次（上面的 `fetch`）。
+4. 抓這些股票的 FinMind 股利，再用真正的公告日往前修。同一步也把 2026-10-31 之後已除息、沒有公告日的列補上。FinMind 的股利政策表是用配息基準日查的，還沒除息的事件基準日在未來，所以 `--to` 要給到今天之後 90 天（2026-11-11 實測：5483 除息日 2027-01-05，`--to` 只給到今天查不到，給到未來才查得到）。先用 `--dry-run` 看會改哪些列，再正式套用：
 
    ```bash
    uv run python manage.py backfill --source finmind --dataset dividend_event --from 2026-10-01 --to <今天後 90 天> --stock <代號> ...
@@ -310,7 +347,8 @@ uv run python manage.py reapply_dividend_dates --stock 2884 --stock 2885
    uv run python manage.py reapply_dividend_dates --earlier --stock <代號> ...
    ```
 
-4. 補完公告日後重建受影響日期的特徵（見「研究排程」）。
+5. 補完公告日後重建受影響日期的特徵（見「研究排程」）。
+6. 確認交易日曆涵蓋到名單上最晚的除權息日。`fund_days_to_ex_date` 算的是交易日數，除權息日晚於 `trading_calendar` 最後一天的事件算不出來、會是 NaN（2026-11-11：日曆到 2026-12-31，名單上已有 2027-01-05 的事件）。見「交易日曆延伸」。
 
 ### 核對公告提前天數
 
@@ -328,10 +366,22 @@ uv run python manage.py reapply_dividend_dates --stock 2884 --stock 2885
 
 - 上線兩週後、明年 6 月除息旺季前各核對一次。
 
+### `ex_date_unannounced`
+
+- 22:50 的稽核另外跑的一項檢查（不在研究閘門要等的那組裡）：今天到 30 個日曆天後除息、有現金股利、沒有公告日的事件數，大於 0 記 warning。
+- 會出現的情況：事件到了除息日才由結果表新增（預告表沒列過，或那幾天沒抓到），所以沒有公告日。處理：照「除權息日的公告日」用 FinMind 補（抓那檔的股利，再 `reapply_dividend_dates --stock <代號>`）。
+
+### 以結果表為準的開關
+
+- `DIVIDEND_RESULTS_SETTLE`（預設開）：除權息日在 2026-10-31 以後的列，結果表的金額、因子和已存的不同時覆寫。這是 SPEC 第 8 節第 5 條「除權息事件」例外的一部分。
+- 關掉時，結果表對所有列都回到「不同只記、不改，空的因子照補」；預告表、公告日、刪除規則、FinMind 守門都不受影響。關掉的後果：預告表先寫的金額會一直留著，公司在除息前調整配息率、預告表沒跟著更新時，金額會和結果表不同，只留一筆 info 紀錄。還原價不受影響（因子照樣由結果表補上），`fund_days_to_ex_date` 只看金額是否大於 0、也不受影響；受影響的是金額本身的正確性。
+- 要關掉時，SPEC 那一條與這一節要一起改回去。
+
 ### 重套
 
 - `reprocess` 不收 `dividend_notice`：raw 沒有日期可以對。改用 `reapply_dividend_notices`（可加 `--source twse`），它照抓取時間的先後把存過的名單逐份重套，每份算在它抓取時刻所屬的交易日。raw 每個交易日各存一份，內容和前一天完全相同也存；同一個交易日內重抓到相同內容的只存第一份。
-- 對沒被動過的資料庫重套不會改任何列。
+- 重套不會把已經判定撤下的事件加回來，也不會替除權息日已到的事件新增列（那些由結果表負責）。對每日執行跑過的資料庫重套，不會改任何列。
+- 沒有 `--stock`：一律重套全部名單。清掉某幾檔的 `announce_date` 之後跑它，其他股票不受影響。
 
 ## 財報每日掃描
 
