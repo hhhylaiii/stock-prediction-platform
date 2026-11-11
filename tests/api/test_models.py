@@ -7,9 +7,10 @@ import pytest
 from django.test import Client
 from pytest_django import DjangoAssertNumQueries
 
+from apps.api import serving
 from apps.api.model_runs import MONTH_DAYS, MONTH_IC
 from apps.api.serving import HOLDOUT_RELEASE
-from apps.research import production
+from apps.research import production, promotion
 from apps.research.eval_report import RANK_METRICS
 from apps.research.holdout import (
     FAILED,
@@ -21,12 +22,14 @@ from apps.research.holdout import (
 from apps.research.models import BacktestMetric, HoldoutRun, ModelMonitor, ModelRun, Prediction
 from tests.api.conftest import (
     EARLY_CALENDAR_START,
+    FORCED_REASON,
     OCT_29,
     OCT_30,
     Runs,
     add_model_run,
     add_predictions,
     envelope_of,
+    forced_params,
     sessions_until,
     taipei,
     trained_until,
@@ -532,6 +535,42 @@ def test_production_params_that_are_not_a_mapping_carry_no_release(
     rows = by_slot(envelope_of(client.get("/api/models")))
 
     assert rows[("rank", 20)]["holdout_release"] is None
+
+
+def test_the_promotion_key_is_the_one_promote_records() -> None:
+    assert serving.PROMOTION == promotion.PROMOTION
+
+
+def test_a_model_swapped_in_by_force_carries_the_day_the_reason_and_the_failed_gates(
+    client: Client, runs: Runs
+) -> None:
+    ModelRun.objects.filter(pk="rank-h20").update(params=forced_params("rank-h20"))
+
+    rows = by_slot(envelope_of(client.get("/api/models")))
+
+    assert rows[("rank", 20)]["forced_promotion"] == {
+        "promoted_on": "2026-10-30",
+        "reason": FORCED_REASON,
+        "gates": [
+            {
+                "name": "agreement",
+                "reason": "",
+                "value": 0.412,
+                "threshold": ">= 0.5",
+                "sample": 1842,
+                "sample_unit": "stocks",
+            },
+            {
+                "name": "shadow_oos",
+                "reason": "no shadow rows",
+                "value": -0.004,
+                "threshold": "> 0",
+                "sample": 120,
+                "sample_unit": "days",
+            },
+        ],
+    }
+    assert rows[("quantile", 20)]["forced_promotion"] is None
 
 
 def test_no_models_served_yet(client: Client, db: None) -> None:
