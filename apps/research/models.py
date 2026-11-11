@@ -73,6 +73,38 @@ class HoldoutRun(models.Model):
         return f"{self.scope} #{self.attempt} {self.run_key}"
 
 
+class HoldoutVerdict(models.TextChoices):
+    PASSED = "達標"
+    FAILED = "未達標"
+    DEGRADED = "明顯退化"
+
+
+class HoldoutRelease(models.Model):
+    """The user's recorded decision to build on a holdout judged short of its criteria."""
+
+    holdout = models.OneToOneField(HoldoutRun, on_delete=models.PROTECT, related_name="release")
+    status = models.CharField(max_length=16, choices=HoldoutVerdict.choices)
+    reason = models.TextField()
+    released_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        db_table = "holdout_release"
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(
+                    status__in=[HoldoutVerdict.FAILED.value, HoldoutVerdict.DEGRADED.value]
+                ),
+                name="holdout_release_status_short",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(reason__regex=r"\S"), name="holdout_release_has_reason"
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.holdout.run_key} released {self.status}"
+
+
 class ModelObjective(models.TextChoices):
     RANK = "rank", "排名"
     REGRESSION = "regression", "絕對報酬"
