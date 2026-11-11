@@ -13,9 +13,9 @@ from tests.api.conftest import add_bars, add_model_run, add_predictions, add_sto
 
 XSS_NAME = '<img src=x onerror="window.__xss=1">'
 PROB_HEAD = "跑贏大盤 5 個百分點機率"
-PROB_TIP = "20 日報酬跑贏大盤（加權股價報酬指數，含息）5 個百分點以上的機率"
+PROB_TIP = "20 日報酬跑贏大盤（加權股價報酬指數，含息）超過 5 個百分點的機率"
 BAND_NOTE = (
-    "20 日價格區間是 80% 區間：研究期（2014–2024）實際報酬落在區間內的比例是 77.7%；"
+    "20 日價格區間是 80% 區間：研究期 2016–2024 年的測試資料裡，實際報酬落在區間內的比例是 77.7%；"
     "大盤急跌的季度曾明顯偏低，2020 年第 1 季 49%、2022 年第 2 季 66%、第 3 季 68%。"
 )
 BAR_COUNT = 70

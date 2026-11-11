@@ -62,7 +62,7 @@ def test_today_says_what_the_probability_and_the_band_mean(
     expect(page.locator("#rows .trow")).to_have_count(20)
 
     expect(page.locator("#view-today .lead")).to_contain_text(
-        "20 日的 80% 價格區間與報酬跑贏大盤（加權股價報酬指數，含息）5 個百分點以上的機率"
+        "20 日的 80% 價格區間與報酬跑贏大盤（加權股價報酬指數，含息）超過 5 個百分點的機率"
     )
     head = page.locator("#prob-head")
     expect(head).to_have_text(PROB_HEAD)
@@ -184,6 +184,7 @@ def test_degraded_models_monitoring_and_band_sources_are_shown(
     expect(meta).to_contain_text("rank IC 0.050")
     expect(meta).to_contain_text("80% 區間的實際覆蓋率 80%")
     expect(meta).to_contain_text("1 個模型降級中，結果僅供參考，區間改用波動率區間")
+    expect(page.locator("#band-note")).to_be_hidden()
     status = page.locator("#status")
     expect(status).to_contain_text("1 個模型降級中")
     expect(status).to_contain_text("23:04 更新")
@@ -342,6 +343,7 @@ def test_a_band_degraded_after_the_shown_day_is_not_called_replaced(
     meta = page.locator("#today-meta")
     expect(meta).to_contain_text("1 個模型降級中，結果僅供參考")
     expect(meta).not_to_contain_text("區間改用波動率區間")
+    expect(page.locator("#band-note")).to_be_visible()
 
 
 def test_watch_only_names_the_replaced_band(
