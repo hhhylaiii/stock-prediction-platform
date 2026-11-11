@@ -120,9 +120,9 @@ def row_count_results(day: date, previous: date | None) -> list[DataQualityLog]:
 
 
 def unannounced_result(day: date) -> DataQualityLog:
-    """Cash ex-dates of the next 30 days no notice has dated, which the ex-date feature misses."""
+    """Cash ex-dates from today through 30 days that no notice dated: the feature missed them."""
     rows = DividendEvent.objects.filter(
-        ex_date__gt=day,
+        ex_date__gte=day,
         ex_date__lte=day + UNANNOUNCED_AHEAD,
         cash_dividend__gt=0,
         announce_date__isnull=True,

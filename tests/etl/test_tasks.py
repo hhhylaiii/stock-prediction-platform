@@ -724,16 +724,17 @@ def test_a_later_master_refresh_clears_a_missed_one_but_a_later_week_does_not(
     assert (row.severity, row.detail["missing"]) == ("warning", ["tdcc/weekly_holding"])
 
 
+@pytest.mark.parametrize("source", ["twse", "tpex"])
 @pytest.mark.usefixtures("catch_ups", "sent")
 def test_any_later_notice_list_clears_a_missed_one(
-    today: Callable[..., None], monkeypatch: pytest.MonkeyPatch
+    today: Callable[..., None], monkeypatch: pytest.MonkeyPatch, source: str
 ) -> None:
     monkeypatch.setattr("apps.etl.tasks.call_command", lambda name, **kwargs: None)
     session = date(2026, 10, 27)
-    notice = ("twse", "dividend_notice")
+    notice = (source, "dividend_notice")
     landed(session, (DAILY_JOBS | SCANS | {MASTER}) - {notice})
     refreshed(session)
-    assert missing_on(session, today) == ["tdcc/weekly_holding", "twse/dividend_notice"]
+    assert missing_on(session, today) == ["tdcc/weekly_holding", f"{source}/dividend_notice"]
     landed(date(2026, 10, 28), {notice})
     today(date(2026, 10, 29), time(15, 10))
     tasks.prepare_day()

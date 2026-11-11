@@ -496,10 +496,11 @@ def _ex_date(code: str, ex_date: date, cash: str = "1.5", announced: date | None
 
 
 @pytest.mark.django_db
-def test_cash_ex_dates_of_the_next_thirty_days_without_a_date_warn() -> None:
+def test_cash_ex_dates_from_today_through_thirty_days_without_a_date_warn() -> None:
     _ex_date("2330", date(2026, 10, 29))
     _ex_date("2317", date(2026, 11, 27))
     _ex_date("1101", DAY)
+    _ex_date("1103", PREV)
     _ex_date("1102", date(2026, 11, 28))
     _ex_date("1216", date(2026, 11, 5), cash="0")
     _ex_date("1301", date(2026, 11, 5), announced=date(2026, 10, 20))
@@ -509,8 +510,8 @@ def test_cash_ex_dates_of_the_next_thirty_days_without_a_date_warn() -> None:
     assert (result.check_name, result.severity) == (UNANNOUNCED, "warning")
     assert result.detail == {
         "table": "dividend_event",
-        "count": 2,
-        "events": ["2330@2026-10-29", "2317@2026-11-27"],
+        "count": 3,
+        "events": ["1101@2026-10-28", "2330@2026-10-29", "2317@2026-11-27"],
     }
 
 
