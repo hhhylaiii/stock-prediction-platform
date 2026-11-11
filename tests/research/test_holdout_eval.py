@@ -1,4 +1,5 @@
 import math
+import re
 from io import StringIO
 from pathlib import Path
 
@@ -17,11 +18,14 @@ from apps.research import (
     lgbm_runs,
     prediction_cache,
     production,
+    rank_eval,
 )
 from apps.research.eval_report import RANK_METRICS
+from apps.research.evaluation import rank_report
 from apps.research.holdout_eval import (
     DEGRADED,
     FAILED,
+    HANDLING,
     HIGHER,
     INSIDE,
     LOWER,
@@ -34,10 +38,11 @@ from apps.research.holdout_eval import (
     flag,
     windows,
 )
+from apps.research.labels import HORIZONS
 from apps.research.management.commands import holdout as holdout_command
-from apps.research.models import BacktestMetric
+from apps.research.models import BacktestMetric, HoldoutRun, MetricGrain
 from apps.research.production import Design
-from apps.research.target_eval import evaluate_return, target_frame
+from apps.research.target_eval import evaluate_interval, evaluate_return, target_frame
 from apps.research.target_models import TargetVariant
 from tests.research.run_panels import CONFIG, folds, use_designs, weekdays
 
@@ -96,6 +101,13 @@ def test_the_flag_weighs_holdout_folds_equally() -> None:
     made = flag("ic", research, holdout_folds, HIGHER)
 
     assert made.holdout == pytest.approx(0.015)
+    assert made.flagged
+
+
+def test_a_holdout_fold_without_a_value_raises_the_flag() -> None:
+    made = flag("ic", series([0.05] * 36), series([0.10, math.nan, 0.10], first=44), HIGHER)
+
+    assert math.isnan(made.holdout)
     assert made.flagged
 
 
@@ -193,11 +205,19 @@ def test_the_return_holdout_report_applies_the_fixed_criteria(frozen: Path, tmp_
     )
     assert f"研究摺 {research[0]}–{research[1]}" in text
     assert text.splitlines()[4] in {f"## 結論：{status}" for status in (PASSED, FAILED, DEGRADED)}
+    status = text.splitlines()[4].removeprefix("## 結論：")
+    assert HANDLING[status] in text
     assert "docs/SPEC.md:313" in text
     assert "MAE 逐摺差 NW t" in text
+    assert "MAE 對過去 60 日平均的逐摺差 NW t" in text
     assert "## 每摺覆蓋率" not in text
-    with pytest.raises(CommandError, match="reported once"):
+    assert "backtest_metric rows" not in printed
+    with pytest.raises(CommandError, match="written once"):
         run("return", report)
+    elsewhere = tmp_path / "again.md"
+    with pytest.raises(CommandError, match=re.escape(f"was reported in {report}")):
+        run("return", elsewhere)
+    assert not elsewhere.exists()
 
 
 @pytest.mark.django_db
@@ -216,6 +236,24 @@ def test_the_rank_holdout_stores_its_metrics_under_its_own_run_key(
     assert "| 排名 5 日 IC |" in text
     assert "| 排名 20 日 IC |" in text
     assert "贏 Ridge 的摺比例" in text
+    held = [fold for fold in folds() if fold.holdout]
+    research = [fold for fold in folds() if fold.research]
+    verdict, _ = holdout_eval.judge(
+        "rank", "rank-final", held, "rank-wf1", folds(), frozen, relative=False
+    )
+    for horizon, gate, raised in zip(HORIZONS, verdict.gates, verdict.flags, strict=True):
+        stored = rows.get(
+            model_type="lightgbm",
+            metric="rank_ic",
+            horizon=horizon,
+            grain=MetricGrain.TOTAL,
+            segment="",
+        )
+        assert gate.value == pytest.approx(stored.value)
+        frame = rank_eval.evaluation_frame("rank-wf1", research, horizon, frozen)
+        past = rank_report(frame, f"lightgbm_h{horizon}", horizon, research)
+        means = past.by_fold["mean"].loc[[fold.index for fold in research]]
+        assert raised.low.mean == pytest.approx(float(means.mean()))
 
 
 @pytest.mark.django_db
@@ -235,33 +273,64 @@ def test_the_interval_holdout_judges_three_gates_and_lists_waived_folds(
     text = (tmp_path / "interval.md").read_text()
     for name in ("20 日總覆蓋率", "機率 Brier", "波動率 QLIKE"):
         assert f"| {name} |" in text
-    assert "## 每摺覆蓋率 70%–90%：使用者 2026-11-11 豁免一次，不作判定" in text
-    held = next(fold for fold in folds() if fold.holdout)
-    assert f"| 摺 {held.index} 覆蓋率 |" in text
+    assert "## 每摺覆蓋率 70%–90%（docs/SPEC.md:313）：使用者 2026-11-11 豁免一次，不作判定" in text
+    held = [fold for fold in folds() if fold.holdout]
+    research = [fold for fold in folds() if fold.research]
+    assert f"| 摺 {held[0].index} 覆蓋率 |" in text
     assert "| 20 日覆蓋率 |" in text
     assert "Brier 差（模型減 logistic）" in text
+    assert "pinball 對歷史分位數" in text
+    assert re.search(r"\| 分位數交叉列數 \| \d+ \|", text)
+    now = evaluate_interval(
+        target_frame("interval-final", held, frozen, True, holdout=True), holdout_eval.scored(held)
+    )
+    past = evaluate_interval(target_frame("interval-wf1", research, frozen, True), research)
+    verdict, _ = holdout_eval.judge(
+        "interval", "interval-final", held, "interval-wf1", folds(), frozen, relative=True
+    )
+    assert verdict.gates[0].value == pytest.approx(now.coverage)
+    covered = verdict.flags[-1]
+    research_means = past.coverage_by_fold["mean"].loc[[fold.index for fold in research]]
+    assert covered.low.mean == pytest.approx(float(research_means.mean()))
+    assert covered.holdout == pytest.approx(float(now.coverage_by_fold["mean"].mean()))
+    assert [check.value for check in verdict.waived] == pytest.approx(
+        now.coverage_by_fold["mean"].tolist()
+    )
 
 
-@pytest.mark.django_db
-def test_a_rehearsal_reports_without_a_verdict_or_metrics(frozen: Path) -> None:
-    researched("return", frozen)
-    fold = max(fold.index for fold in folds() if fold.research)
+def rehearse(output: Path | None = None) -> str:
     out = StringIO()
-
+    options = {} if output is None else {"output": str(output)}
     call_command(
         "holdout",
-        scope="return",
-        run_key="return-rehearsal",
+        scope="rank",
+        run_key="rank-rehearsal",
         rehearse=True,
         bags=1,
         last_date=DAY,
         stdout=out,
+        **options,
     )
+    return out.getvalue()
 
-    printed = out.getvalue()
-    assert f"return-rehearsal: rehearsed research fold {fold}" in printed
+
+@pytest.mark.django_db
+def test_a_rehearsal_reports_without_a_verdict_or_metrics(frozen: Path, tmp_path: Path) -> None:
+    researched("rank", frozen)
+    fold = max(fold.index for fold in folds() if fold.research)
+
+    printed = rehearse()
+
+    assert f"rank-rehearsal: rehearsed research fold {fold}" in printed
     assert "## 結論：演練不作判定" in printed
-    assert not BacktestMetric.objects.filter(run_key="return-rehearsal").exists()
+    assert "backtest_metric rows" not in printed
+    assert not BacktestMetric.objects.filter(run_key="rank-rehearsal").exists()
+    assert not HoldoutRun.objects.exists()
+    kept = tmp_path / "kept.md"
+    kept.write_text("kept")
+    with pytest.raises(CommandError, match="written once"):
+        rehearse(kept)
+    assert kept.read_text() == "kept"
 
 
 @pytest.mark.django_db
@@ -271,10 +340,50 @@ def test_the_holdout_needs_a_report_path_that_does_not_exist(frozen: Path, tmp_p
 
     with pytest.raises(CommandError, match="give --output"):
         call_command("holdout", scope="return", run_key="return-final")
-    with pytest.raises(CommandError, match="reported once"):
+    with pytest.raises(CommandError, match="written once"):
         run("return", taken)
 
     assert taken.read_text() == "kept"
+    assert not HoldoutRun.objects.exists()
+
+
+@pytest.mark.django_db
+def test_the_holdout_is_refused_before_its_claim_when_a_research_cache_is_gone(
+    frozen: Path, tmp_path: Path
+) -> None:
+    research = researched("return", frozen)
+    prediction_cache.fold_path("return-wf1", lgbm_runs.MODEL, research[-1]).unlink()
+
+    with pytest.raises(CommandError, match=rf"folds \[{research[-1]}\]"):
+        run("return", tmp_path / "return.md")
+
+    assert not HoldoutRun.objects.exists()
+    assert not (tmp_path / "return.md").exists()
+
+
+@pytest.mark.django_db
+def test_a_holdout_that_failed_to_report_resumes_and_reports_once(
+    frozen: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    researched("return", frozen)
+    report = tmp_path / "return.md"
+    judged = holdout_command.judge
+
+    def interrupted(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("interrupted")
+
+    monkeypatch.setattr(holdout_command, "judge", interrupted)
+    with pytest.raises(CommandError, match="run the same command again to resume"):
+        run("return", report)
+    assert not report.exists()
+    monkeypatch.setattr(holdout_command, "judge", judged)
+
+    printed = run("return", report)
+
+    index = next(fold.index for fold in folds() if fold.holdout)
+    assert f"fitted folds [], already written [{index}]" in printed
+    assert report.exists()
+    assert HoldoutRun.objects.count() == 1
 
 
 @pytest.mark.django_db

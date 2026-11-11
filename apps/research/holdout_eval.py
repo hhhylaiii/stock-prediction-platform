@@ -3,6 +3,8 @@
 The criteria are the coordinator's of 2026-11-11, written down before any holdout result.
 """
 
+import hashlib
+import json
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
@@ -10,13 +12,22 @@ from datetime import date
 from pathlib import Path
 
 import pandas as pd
+from django.conf import settings
 
-from apps.research import lgbm_runs, rank_eval, target_eval
+from apps.research import baseline_runs, lgbm_runs, rank_eval, target_eval
 from apps.research.eval_report import write_rank_metrics
 from apps.research.evaluation import RankReport, rank_report, tradable_rows
+from apps.research.gates import COVERAGE as COVERAGE_GATE
+from apps.research.holdout import require_key
 from apps.research.labels import HORIZONS
 from apps.research.metrics.forecast import mean_by_fold
 from apps.research.models import HoldoutScope, ModelRun
+from apps.research.prediction_cache import (
+    FoldMismatchError,
+    MissingFoldsError,
+    missing_folds,
+    other_layout,
+)
 from apps.research.walkforward import Fold
 
 MODEL, RIDGE = lgbm_runs.MODEL, rank_eval.RIDGE
@@ -26,12 +37,10 @@ SPEC_LINES: dict[str, tuple[int, str]] = {
     "rank": (323, "- 排名："),
     "return": (328, "- 絕對報酬（5 日）"),
     "interval": (329, "- 區間："),
-    "volatility": (330, "- 波動率："),
     "probability": (331, "- 機率："),
     "gate": (337, "- 每月重訓"),
     "acceptance": (392, "| Phase 4 主模型"),
 }
-COVERAGE_GATE = (0.70, 0.90)
 GATE_SHARE = rank_eval.GATE_SHARE
 ECE_LIMIT = 0.05
 PASSED, FAILED, DEGRADED = "達標", "未達標", "明顯退化"
@@ -50,6 +59,7 @@ class Check:
     rule: str
     basis: str
     passed: bool
+    digits: int = 5
 
 
 @dataclass(frozen=True)
@@ -120,11 +130,12 @@ def windows(values: pd.Series, size: int) -> tuple[Window, Window]:
 
 
 def flag(name: str, research: pd.Series, holdout: pd.Series, better: str) -> Flag:
-    """The degradation flag of one metric: holdout folds weighted equally against the bounds."""
+    """The degradation flag of one metric: holdout folds weighted equally; a missing fold flags."""
     low, high = windows(research, WINDOW)
     ordered = holdout.sort_index()
     values = tuple(zip([int(index) for index in ordered.index], ordered.astype(float), strict=True))
-    return Flag(name, float(holdout.mean()), better, low, high, values)
+    mean = math.nan if holdout.isna().any() else float(holdout.mean())
+    return Flag(name, mean, better, low, high, values)
 
 
 def _research_rows(by_fold: pd.DataFrame, folds: Sequence[Fold]) -> pd.DataFrame:
@@ -222,7 +233,8 @@ def return_verdict(
         _frame(research_key, research, directory, False, False), research
     )
     frame = _frame(holdout_key, held, directory, False, True)
-    now = target_eval.evaluate_return(frame, scored(held)).mae["zero"]
+    evaluated = target_eval.evaluate_return(frame, scored(held))
+    now = evaluated.mae["zero"]
     before = past.mae["zero"]
     gate = Check(
         "5 日 MAE",
@@ -237,11 +249,21 @@ def return_verdict(
         _diff(now),
         LOWER,
     )
-    reference = Check(
-        "MAE 逐摺差 NW t", now.nw_t, "< -2 且 MAE 較低", cite("return"), target_eval.beats(now)
+    trailing = evaluated.mae["trailing"]
+    references = (
+        Check(
+            "MAE 逐摺差 NW t", now.nw_t, "< -2 且 MAE 較低", cite("return"), target_eval.beats(now)
+        ),
+        Check(
+            "MAE 對過去 60 日平均的逐摺差 NW t",
+            trailing.nw_t,
+            "< -2 且 MAE 較低",
+            cite("return"),
+            target_eval.beats(trailing),
+        ),
     )
     days = pd.DataFrame({"h5": _days(frame, target_eval.LABEL, scored(held))})
-    return ScopeVerdict(HoldoutScope.RETURN, (gate,), (degraded,), (reference,), (), days)
+    return ScopeVerdict(HoldoutScope.RETURN, (gate,), (degraded,), references, (), days)
 
 
 def interval_verdict(
@@ -316,7 +338,14 @@ def interval_verdict(
             cite("interval"),
             total_low <= now.coverage <= total_high,
         ),
-        Check("分位數交叉列數", float(now.crossed), "= 0", cite("interval"), now.crossed == 0),
+        Check(
+            "pinball 對歷史分位數",
+            now.history.model,
+            f"< 歷史分位數 {now.history.baseline:.5f}（sanity 下限）",
+            cite("interval"),
+            now.history.model < now.history.baseline,
+        ),
+        Check("分位數交叉列數", float(now.crossed), "= 0", cite("interval"), now.crossed == 0, 0),
         Check("機率 ECE", now.ece, f"< {ECE_LIMIT}", cite("probability"), now.ece < ECE_LIMIT),
     )
     fold_low, fold_high = target_eval.COVERAGE_FOLD
@@ -332,6 +361,47 @@ def interval_verdict(
     )
     days = pd.DataFrame({"h20": _days(frame, target_eval.LABEL, counted)})
     return ScopeVerdict(HoldoutScope.INTERVAL, gates, flags, references, waived, days)
+
+
+def require_research_caches(run_key: str, folds: Sequence[Fold]) -> None:
+    """Refuse before any fit when the research run lacks a research fold the flags read."""
+    chosen = [fold for fold in folds if fold.research]
+    moved = other_layout(run_key, chosen)
+    if moved:
+        raise FoldMismatchError(f"{run_key} cached folds {moved} for other fold boundaries")
+    for model in (baseline_runs.BASELINE, MODEL):
+        missing = missing_folds(run_key, model, chosen)
+        if missing:
+            raise MissingFoldsError(run_key, model, missing)
+
+
+def _report_marker(run_key: str) -> Path:
+    return Path(settings.RESEARCH_CACHE_DIR) / require_key(run_key) / "holdout.report"
+
+
+def reported_in(run_key: str) -> str | None:
+    """The path a holdout's report was written to, or None before its report."""
+    marker = _report_marker(run_key)
+    if not marker.exists():
+        return None
+    return str(json.loads(marker.read_text(encoding="utf-8"))["path"])
+
+
+def write_once(output: str, text: str) -> None:
+    """Write a report to a path that must not exist yet."""
+    path = Path(output)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("x", encoding="utf-8") as handle:
+        handle.write(text)
+
+
+def mark_reported(run_key: str, output: str, text: str) -> None:
+    """Record that a holdout was reported, so no later path takes a second report."""
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    marker = _report_marker(run_key)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    with marker.open("x", encoding="utf-8") as handle:
+        json.dump({"path": output, "sha256": digest}, handle)
 
 
 def bags_of(run_key: str) -> list[int]:
@@ -373,7 +443,8 @@ def _checks(rows: Sequence[Check], judged: bool) -> list[str]:
     lines = [head, "| --- | --- | --- | --- | --- |"]
     for row in rows:
         verdict = _mark(row.passed) if judged else ("滿足" if row.passed else "不滿足")
-        lines.append(f"| {row.name} | {_value(row.value)} | {row.rule} | {row.basis} | {verdict} |")
+        value = _value(row.value, row.digits)
+        lines.append(f"| {row.name} | {value} | {row.rule} | {row.basis} | {verdict} |")
     return lines
 
 
@@ -409,23 +480,38 @@ def _days_table(days: pd.DataFrame) -> list[str]:
     return lines
 
 
+HANDLING = {
+    PASSED: "門檻 (3) 全部達標、沒有明顯退化旗標：可以進上線流程。",
+    FAILED: f"有門檻未達標：這個目標不上線，報協調；照 {cite('record')} 只記錄、不改設計重跑。",
+    DEGRADED: (
+        "門檻 (3) 全部達標，但有明顯退化旗標：停下，上線與否由使用者決定；"
+        f"照 {cite('record')} 只記錄、不改設計重跑。"
+    ),
+}
+REHEARSAL_NOTE = "演練跑在研究摺上，只驗證程式路徑與資料形狀，數字不作任何判定。"
+
+
 def render(header: Header, verdict: ScopeVerdict, bags: dict[str, list[int]]) -> str:
     """Markdown of one scope's holdout: verdict, gate (3), flags, references, waived, days."""
     kind = "演練（研究摺，不作判定）" if header.rehearsal else f"attempt {header.attempt}"
     status = "演練不作判定" if header.rehearsal else verdict.status
+    handling = REHEARSAL_NOTE if header.rehearsal else HANDLING[verdict.status]
     lines = [
         f"# Holdout：{header.scope}（{header.run_key}，{kind}，資料到 {header.last_date}）",
         "",
-        "判讀標準在結果出來前寫死（協調 2026-11-11），本報告只套用，不改判。"
-        f"未達標或明顯退化的處理照 {cite('record')}：只記錄、不改設計重跑，上線與否由使用者決定。",
+        f"判讀標準在結果出來前寫死（協調 2026-11-11，{cite('record')}），本報告只套用，不改判；"
+        f"{cite('acceptance')} 的 Phase 4 驗收對 holdout 要求只跑一次並記錄。",
         "",
         f"## 結論：{status}",
+        "",
+        handling,
         "",
         f"## 判定：{cite('gate')} 門檻 (3) 的絕對門檻，holdout 各摺合併",
         "",
         *_checks(verdict.gates, judged=True),
         "",
-        f"## 明顯退化旗標：研究期 `{header.research_key}` 任意連續 {WINDOW} 摺的最差逐摺平均",
+        f"## 明顯退化旗標（{cite('record')}）："
+        f"研究期 `{header.research_key}` 任意連續 {WINDOW} 摺的最差逐摺平均",
         "",
         "研究期與 holdout 都是逐摺等權平均。"
         f"LightGBM 的 bags：研究期 {bags['research']}，holdout {bags['holdout']}。",
@@ -436,7 +522,8 @@ def render(header: Header, verdict: ScopeVerdict, bags: dict[str, list[int]]) ->
         "",
         *_fold_values(verdict.flags),
         "",
-        f"## 參考：研究期關卡套在 holdout 各摺（{len(verdict.holdout_folds)} 摺，檢定力低），"
+        f"## 參考（{cite('record')}）：研究期關卡套在 holdout 各摺"
+        f"（{len(verdict.holdout_folds)} 摺，檢定力低），"
         "不作判定",
         "",
         *_checks(verdict.references, judged=False),
@@ -444,7 +531,7 @@ def render(header: Header, verdict: ScopeVerdict, bags: dict[str, list[int]]) ->
     if verdict.waived:
         lines += [
             "",
-            "## 每摺覆蓋率 70%–90%：使用者 2026-11-11 豁免一次，不作判定",
+            f"## 每摺覆蓋率 70%–90%（{cite('record')}）：使用者 2026-11-11 豁免一次，不作判定",
             "",
             *_checks(verdict.waived, judged=False),
         ]
