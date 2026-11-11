@@ -7,6 +7,7 @@ from typing import Any, ClassVar
 import pandas as pd
 import requests
 from django.conf import settings
+from django.utils import timezone
 
 from apps.etl.adapters.base import BaseAdapter
 from apps.etl.adapters.corporate_actions import (
@@ -31,6 +32,16 @@ from apps.etl.adapters.exchange_actions import (
     restart_actions,
     tpex_ex_rights,
     tpex_table,
+)
+from apps.etl.adapters.exchange_notices import (
+    DIVIDEND_NOTICE,
+    NOTICE_FORM,
+    TPEX_LABEL,
+    TPEX_NOTICE_PATH,
+    kept_by_session,
+    one_day,
+    seen_at,
+    tpex_notices,
 )
 from apps.etl.adapters.exchange_tables import (
     check_published,
@@ -57,6 +68,7 @@ from apps.etl.adapters.tpex_tables import (
     quoted_codes,
 )
 from apps.etl.client import SourceClient
+from apps.etl.dividend_notices import write_notices
 from apps.etl.errors import SchemaChangedError, SourceNotReadyError
 from apps.etl.exchange_rows import TPEX_LAYOUT, OfficialDay, official_days
 from apps.etl.models import RawTpex
@@ -175,7 +187,9 @@ def _range_form(first: date, last: date) -> dict[str, str]:
 class TpexAdapter(BaseAdapter):
     source = "tpex"
     raw_model = RawTpex
-    datasets = frozenset({DAILY_PRICE, INDEX_DAILY, DIVIDEND_EVENT, *TABLES, *EVENT_DATASETS})
+    datasets = frozenset(
+        {DAILY_PRICE, INDEX_DAILY, DIVIDEND_EVENT, DIVIDEND_NOTICE, *TABLES, *EVENT_DATASETS}
+    )
     monthly_datasets = frozenset({INDEX_DAILY, ATTENTION, DISPOSITION})
     raw_pages: ClassVar[Mapping[str, Mapping[str, str]]] = {
         DIVIDEND_EVENT: {
@@ -197,6 +211,8 @@ class TpexAdapter(BaseAdapter):
         self, dataset: str, start: date, end: date, stock_id: str | None = None
     ) -> pd.DataFrame:
         self.require_dataset(dataset)
+        if dataset == DIVIDEND_NOTICE:
+            return self._fetch_notices(start, end)
         spans = self.units(dataset, start, end)
         frames = [self._fetch_span(dataset, first, last) for first, last in spans]
         frame = pd.concat(frames, ignore_index=True)
@@ -209,6 +225,8 @@ class TpexAdapter(BaseAdapter):
             events = events_from(raw_df)
             events.attrs["day"] = raw_df.attrs["day"]
             return events
+        if dataset == DIVIDEND_NOTICE:
+            return raw_df
         if dataset in EVENT_DATASETS:
             return standard_events(raw_df)
         if dataset == DAILY_PRICE:
@@ -232,6 +250,8 @@ class TpexAdapter(BaseAdapter):
         self.require_dataset(dataset)
         if dataset == DIVIDEND_EVENT:
             return write_events(frame, self.source, frame.attrs["day"])
+        if dataset == DIVIDEND_NOTICE:
+            return write_notices(self.source, frame, self.calendar)
         if dataset in EVENT_DATASETS:
             return upsert_events(frame)
         if dataset == DAILY_PRICE:
@@ -282,6 +302,19 @@ class TpexAdapter(BaseAdapter):
             payload = self._answered(table.raw, table.path, form)
             actions.extend(restart_actions(tpex_table(payload, table.label), table, span))
         return action_frame(actions)
+
+    def _fetch_notices(self, start: date, end: date) -> pd.DataFrame:
+        """prePost as it reads now; it takes no date, so the day asked only names the run."""
+        one_day(start, end)
+        self.trading_days(start, end)
+        payload = self.client.post_json(TPEX_NOTICE_PATH, NOTICE_FORM)
+        seen = timezone.now()
+        kept = kept_by_session(self.calendar, seen, payload)
+        self.save_raw(DIVIDEND_NOTICE, NOTICE_FORM, payload, kept)
+        if payload.get("stat") != OK_STAT:
+            stat = payload.get("stat")
+            raise SchemaChangedError(f"TPEx {TPEX_NOTICE_PATH} answered with stat {stat!r}")
+        return seen_at(tpex_notices(payload), seen, TPEX_LABEL)
 
     def _fetch_day(self, dataset: str, day: date) -> pd.DataFrame:
         if dataset == FULL_DELIVERY:

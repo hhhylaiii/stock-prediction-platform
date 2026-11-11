@@ -9,6 +9,7 @@ from typing import Any, ClassVar
 import pandas as pd
 import requests
 from django.conf import settings
+from django.utils import timezone
 
 from apps.etl.adapters.base import BaseAdapter
 from apps.etl.adapters.corporate_actions import (
@@ -42,6 +43,16 @@ from apps.etl.adapters.exchange_actions import (
     twse_detail,
     twse_ex_rights,
 )
+from apps.etl.adapters.exchange_notices import (
+    DIVIDEND_NOTICE,
+    NOTICE_FORM,
+    TWSE_LABEL,
+    TWSE_NOTICE_PATH,
+    kept_by_session,
+    one_day,
+    seen_at,
+    twse_notices,
+)
 from apps.etl.adapters.exchange_tables import (
     NO_DATA_STAT,
     check_published,
@@ -66,6 +77,7 @@ from apps.etl.adapters.twse_tables import (
     taiex_rows,
 )
 from apps.etl.client import SourceClient
+from apps.etl.dividend_notices import write_notices
 from apps.etl.errors import SchemaChangedError, SourceNotReadyError
 from apps.etl.exchange_rows import TWSE_LAYOUT, OfficialDay, official_days
 from apps.etl.models import RawTwse
@@ -191,7 +203,15 @@ class TwseAdapter(BaseAdapter):
     source = "twse"
     raw_model = RawTwse
     datasets = frozenset(
-        {DAILY_PRICE, INDEX_DAILY, RETURN_INDEX, DIVIDEND_EVENT, *TABLES, *EVENT_DATASETS}
+        {
+            DAILY_PRICE,
+            INDEX_DAILY,
+            RETURN_INDEX,
+            DIVIDEND_EVENT,
+            DIVIDEND_NOTICE,
+            *TABLES,
+            *EVENT_DATASETS,
+        }
     )
     monthly_datasets = frozenset({INDEX_DAILY, RETURN_INDEX, ATTENTION, DISPOSITION})
     raw_pages: ClassVar[Mapping[str, Mapping[str, str]]] = {
@@ -215,6 +235,8 @@ class TwseAdapter(BaseAdapter):
         self, dataset: str, start: date, end: date, stock_id: str | None = None
     ) -> pd.DataFrame:
         self.require_dataset(dataset)
+        if dataset == DIVIDEND_NOTICE:
+            return self._fetch_notices(start, end)
         spans = self.units(dataset, start, end)
         frames = [self._fetch_span(dataset, first, last) for first, last in spans]
         frame = pd.concat(frames, ignore_index=True)
@@ -227,6 +249,8 @@ class TwseAdapter(BaseAdapter):
             events = events_from(raw_df)
             events.attrs["day"] = raw_df.attrs["day"]
             return events
+        if dataset == DIVIDEND_NOTICE:
+            return raw_df
         if dataset in EVENT_DATASETS:
             return standard_events(raw_df)
         if dataset == DAILY_PRICE:
@@ -252,6 +276,8 @@ class TwseAdapter(BaseAdapter):
         self.require_dataset(dataset)
         if dataset == DIVIDEND_EVENT:
             return write_events(frame, self.source, frame.attrs["day"])
+        if dataset == DIVIDEND_NOTICE:
+            return write_notices(self.source, frame, self.calendar)
         if dataset in EVENT_DATASETS:
             return upsert_events(frame)
         if dataset == DAILY_PRICE:
@@ -294,6 +320,21 @@ class TwseAdapter(BaseAdapter):
             body = self._listed(table.raw, table.path, params)
             actions.extend(restart_actions(body, table, span) if body is not None else [])
         return action_frame(actions)
+
+    def _fetch_notices(self, start: date, end: date) -> pd.DataFrame:
+        """TWT48U as it reads now; it takes no date, so the day asked only names the run."""
+        one_day(start, end)
+        self.trading_days(start, end)
+        payload = self.client.get_json(TWSE_NOTICE_PATH, NOTICE_FORM)
+        seen = timezone.now()
+        kept = kept_by_session(self.calendar, seen, payload)
+        self.save_raw(DIVIDEND_NOTICE, NOTICE_FORM, payload, kept)
+        stat = str(payload.get("stat", ""))
+        if NO_DATA_STAT in stat:
+            return seen_at([], seen, TWSE_LABEL)
+        if stat.upper() != "OK":
+            raise SchemaChangedError(f"TWSE {TWSE_NOTICE_PATH} answered with stat {stat!r}")
+        return seen_at(twse_notices(payload), seen, TWSE_LABEL)
 
     def _detail(self, row: ExRight) -> tuple[Decimal, Decimal] | None:
         """Cash per share and bonus shares per thousand from TWT49UDetail, for non-cash rows."""
