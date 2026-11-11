@@ -12,13 +12,15 @@ from apps.etl.management.options import as_date
 from apps.market.calendar import CalendarError, TradingDays
 from apps.research.holdout import HoldoutError
 from apps.research.holdout_eval import (
+    Bounds,
     Header,
     bags_of,
     judge,
     mark_reported,
+    marked_report,
     render,
-    reported_in,
-    require_research_caches,
+    research_bounds,
+    unwritten_report,
     write_holdout_metrics,
     write_once,
 )
@@ -97,59 +99,56 @@ class Command(BaseCommand):
         if output and Path(output).exists():
             raise CommandError(f"{output} exists; a report is written once and never replaced")
 
-    def _research(self, scope: str, last: date) -> tuple[str, list[Fold]]:
-        """The frozen research run and its folds, refused before any fit when a cache is gone."""
+    def _research(self, scope: str, last: date) -> tuple[str, Bounds]:
+        """The frozen research run and its flag bounds, read before any claim or fit."""
         design = frozen_design(scope)
         key = str(design.research_run_key)
-        research = generate_folds(TradingDays.from_db(), last, design.config)
-        require_research_caches(key, research)
-        return key, research
+        folds = generate_folds(TradingDays.from_db(), last, design.config)
+        relative = design.target.relative_up
+        return key, research_bounds(scope, key, folds, settings.FEATURE_PARQUET_DIR, relative)
 
-    def _report(
-        self, header: Header, held: list[Fold], research: list[Fold], output: str | None
-    ) -> str:
-        design = frozen_design(header.scope)
-        verdict, reports = judge(
-            header.scope,
-            header.run_key,
-            held,
-            header.research_key,
-            research,
-            settings.FEATURE_PARQUET_DIR,
-            design.target.relative_up,
-        )
+    def _report(self, header: Header, held: list[Fold], bounds: Bounds) -> tuple[str, str]:
+        """The rendered report and its status, after the rank metrics are stored."""
+        relative = frozen_design(header.scope).target.relative_up
+        directory = settings.FEATURE_PARQUET_DIR
+        verdict, reports = judge(header, held, bounds, directory, relative, TradingDays.from_db())
         if reports and not header.rehearsal:
             stored = write_holdout_metrics(header.run_key, reports)
             self.stdout.write(f"{header.run_key}: {stored} backtest_metric rows")
         bags = {"research": bags_of(header.research_key), "holdout": bags_of(header.run_key)}
-        text = render(header, verdict, bags)
-        if output:
-            write_once(output, text)
-            self.stdout.write(f"wrote {output}")
-        else:
-            self.stdout.write(text)
-        return text
+        return render(header, verdict, bags), verdict.status
+
+    def _write(self, output: str, text: str) -> None:
+        write_once(output, text)
+        self.stdout.write(f"wrote {output}")
 
     def _rehearse(self, scope: str, run_key: str, options: dict[str, Any]) -> None:
-        last = as_date(options["last_date"], "--last-date") or latest_price_date()
-        if last is None:
+        latest = latest_price_date()
+        if latest is None:
             raise ValueError("daily_price is empty")
-        key, research = self._research(scope, last)
+        last = as_date(options["last_date"], "--last-date") or latest
+        key, bounds = self._research(scope, latest)
         fold = research_fold(scope, options["fold"], last, TradingDays.from_db())
         seed, bags = options["seed"] or 0, options["bags"] or 1
         rehearse(scope, run_key, fold, settings.FEATURE_PARQUET_DIR, seed=seed, bags=bags)
         self.stdout.write(f"{run_key}: rehearsed research fold {fold.index}")
         header = Header(scope, run_key, key, None, last, rehearsal=True)
-        self._report(header, [fold], research, options["output"])
+        text, _ = self._report(header, [fold], bounds)
+        if options["output"]:
+            self._write(options["output"], text)
+        else:
+            self.stdout.write(text)
 
     def _holdout(self, scope: str, run_key: str, options: dict[str, Any]) -> None:
-        earlier = reported_in(run_key)
-        if earlier is not None:
-            raise HoldoutError(f"holdout {run_key} was reported in {earlier}; it is reported once")
+        output = options["output"]
+        marked = unwritten_report(run_key, output)
+        if marked is not None:
+            self._write(output, marked.text)
+            return
         last = latest_price_date()
         if last is None:
             raise ValueError("daily_price is empty")
-        key, research = self._research(scope, last)
+        key, bounds = self._research(scope, last)
         outcome = run_holdout(
             scope,
             run_key,
@@ -165,8 +164,9 @@ class Command(BaseCommand):
         )
         held = holdout_folds(scope, ticket.last_date, TradingDays.from_db())
         header = Header(scope, run_key, key, ticket.attempt, ticket.last_date, rehearsal=False)
-        text = self._report(header, held, research, options["output"])
-        mark_reported(run_key, options["output"], text)
+        text, status = self._report(header, held, bounds)
+        mark_reported(run_key, marked_report(scope, status, output, text))
+        self._write(output, text)
 
     def handle(self, *args: Any, **options: Any) -> None:
         self._check(options)

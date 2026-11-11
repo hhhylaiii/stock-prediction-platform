@@ -304,6 +304,17 @@ def test_a_claim_waits_for_every_holdout_fold_to_have_a_settled_label(frozen: Pa
 
 
 @pytest.mark.django_db
+def test_a_claim_waits_for_label_daily_to_be_built_through_its_last_date(frozen: Path) -> None:
+    day = holdout_runs.TradingDays.from_db().shift(LAST, -5)
+    LabelDaily.objects.filter(date=day, horizon=5).update(fwd_ret_open=None)
+
+    with pytest.raises(HoldoutError, match=f"not built through {LAST}: .* 5 days on {day}"):
+        run_holdout("return", "return-final", LAST, frozen)
+
+    assert not HoldoutRun.objects.exists()
+
+
+@pytest.mark.django_db
 @pytest.mark.parametrize("left", ["runs", "caches"])
 def test_a_claim_needs_a_key_holding_neither_runs_nor_caches(
     frozen: Path, settings: Any, left: str

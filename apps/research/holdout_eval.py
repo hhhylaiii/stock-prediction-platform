@@ -6,19 +6,21 @@ The criteria are the coordinator's of 2026-11-11, written down before any holdou
 import hashlib
 import json
 import math
+import os
 from collections.abc import Sequence
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import date
 from pathlib import Path
 
 import pandas as pd
 from django.conf import settings
 
+from apps.market.calendar import TradingDays
 from apps.research import baseline_runs, lgbm_runs, rank_eval, target_eval
 from apps.research.eval_report import write_rank_metrics
 from apps.research.evaluation import RankReport, rank_report, tradable_rows
 from apps.research.gates import COVERAGE as COVERAGE_GATE
-from apps.research.holdout import require_key
+from apps.research.holdout import HoldoutError, require_key
 from apps.research.labels import HORIZONS
 from apps.research.metrics.forecast import mean_by_fold
 from apps.research.models import HoldoutScope, ModelRun
@@ -28,6 +30,7 @@ from apps.research.prediction_cache import (
     missing_folds,
     other_layout,
 )
+from apps.research.target_models import ECE_LIMIT
 from apps.research.walkforward import Fold
 
 MODEL, RIDGE = lgbm_runs.MODEL, rank_eval.RIDGE
@@ -42,9 +45,13 @@ SPEC_LINES: dict[str, tuple[int, str]] = {
     "acceptance": (392, "| Phase 4 主模型"),
 }
 GATE_SHARE = rank_eval.GATE_SHARE
-ECE_LIMIT = 0.05
 PASSED, FAILED, DEGRADED = "達標", "未達標", "明顯退化"
 HIGHER, LOWER, INSIDE = "higher", "lower", "inside"
+IC_FLAG = "排名 {horizon} 日 IC"
+MAE_FLAG = "MAE 差（模型減零預測）"
+PINBALL_FLAG = "pinball 差（模型減波動率區間）"
+BRIER_FLAG = "Brier 差（模型減 logistic）"
+COVERAGE_FLAG = "20 日覆蓋率"
 
 
 def cite(name: str) -> str:
@@ -67,6 +74,9 @@ class Window:
     mean: float
     first: int
     last: int
+
+
+Bounds = dict[str, tuple[Window, Window]]
 
 
 @dataclass(frozen=True)
@@ -129,56 +139,109 @@ def windows(values: pd.Series, size: int) -> tuple[Window, Window]:
     return window(int(means.argmin())), window(int(means.argmax()))
 
 
-def flag(name: str, research: pd.Series, holdout: pd.Series, better: str) -> Flag:
+def flag(name: str, bounds: tuple[Window, Window], holdout: pd.Series, better: str) -> Flag:
     """The degradation flag of one metric: holdout folds weighted equally; a missing fold flags."""
-    low, high = windows(research, WINDOW)
+    low, high = bounds
     ordered = holdout.sort_index()
     values = tuple(zip([int(index) for index in ordered.index], ordered.astype(float), strict=True))
     mean = math.nan if holdout.isna().any() else float(holdout.mean())
     return Flag(name, mean, better, low, high, values)
 
 
-def _research_rows(by_fold: pd.DataFrame, folds: Sequence[Fold]) -> pd.DataFrame:
-    return by_fold.loc[[fold.index for fold in folds if fold.research]]
+def require_research_caches(run_key: str, folds: Sequence[Fold]) -> None:
+    """Refuse before any fit when the research run lacks a research fold the flags read."""
+    chosen = [fold for fold in folds if fold.research]
+    moved = other_layout(run_key, chosen)
+    if moved:
+        raise FoldMismatchError(f"{run_key} cached folds {moved} for other fold boundaries")
+    for model in (baseline_runs.BASELINE, MODEL):
+        missing = missing_folds(run_key, model, chosen)
+        if missing:
+            raise MissingFoldsError(run_key, model, missing)
 
 
-def _rank_reports(
-    run_key: str, loaded: Sequence[Fold], counted: Sequence[Fold], directory: Path
-) -> dict[int, tuple[RankReport, RankReport]]:
-    """Per horizon, LightGBM against Ridge and Ridge alone over the counted folds."""
-    reports = {}
-    for horizon in HORIZONS:
-        frame = rank_eval.evaluation_frame(run_key, loaded, horizon, directory)
-        boosted, ridge = f"{MODEL}_h{horizon}", f"{RIDGE}_h{horizon}"
-        reports[horizon] = (
-            rank_report(frame, boosted, horizon, counted, baseline=ridge),
-            rank_report(frame, ridge, horizon, counted),
+def _frame(
+    run_key: str, folds: Sequence[Fold], directory: Path, relative: bool, holdout: bool
+) -> pd.DataFrame:
+    return target_eval.target_frame(run_key, folds, directory, relative, holdout=holdout)
+
+
+def _diff(compared: target_eval.Comparison) -> pd.Series:
+    return compared.by_fold["model"] - compared.by_fold["baseline"]
+
+
+def _refuse_stale(run_key: str, stale: list[int]) -> None:
+    if stale:
+        raise ValueError(
+            f"folds {stale} of {run_key} cache models fit on features or labels that are stale; "
+            "rerun train for the baselines and LightGBM before the holdout reads their bounds"
         )
-    return reports
+
+
+def _rank_series(run_key: str, folds: Sequence[Fold], directory: Path) -> dict[str, pd.Series]:
+    _refuse_stale(run_key, rank_eval.stale_folds(run_key, folds, directory))
+    series = {}
+    for horizon in HORIZONS:
+        frame = rank_eval.evaluation_frame(run_key, folds, horizon, directory)
+        report = rank_report(frame, f"{MODEL}_h{horizon}", horizon, folds)
+        series[IC_FLAG.format(horizon=horizon)] = report.by_fold["mean"]
+    return series
+
+
+def _target_series(
+    scope: str, run_key: str, folds: Sequence[Fold], directory: Path, relative: bool
+) -> dict[str, pd.Series]:
+    if scope == HoldoutScope.INTERVAL:
+        target_eval.check_up_label(run_key, relative, folds)
+    _refuse_stale(run_key, target_eval.stale_folds(scope, run_key, folds, directory, relative))
+    frame = _frame(run_key, folds, directory, relative, False)
+    if scope == HoldoutScope.RETURN:
+        return {MAE_FLAG: _diff(target_eval.evaluate_return(frame, folds).mae["zero"])}
+    past = target_eval.evaluate_interval(frame, folds)
+    return {
+        PINBALL_FLAG: _diff(past.pinball),
+        BRIER_FLAG: _diff(past.brier),
+        COVERAGE_FLAG: past.coverage_by_fold["mean"],
+    }
+
+
+def research_bounds(
+    scope: str, run_key: str, folds: Sequence[Fold], directory: Path, relative: bool
+) -> Bounds:
+    """Each flag's worst research windows, read before the claim so a bad research run stops it."""
+    chosen = [fold for fold in folds if fold.research]
+    require_research_caches(run_key, chosen)
+    if scope == HoldoutScope.RANK:
+        series = _rank_series(run_key, chosen, directory)
+    else:
+        series = _target_series(scope, run_key, chosen, directory, relative)
+    indexes = [fold.index for fold in chosen]
+    return {name: windows(values.loc[indexes], WINDOW) for name, values in series.items()}
+
+
+def _settled(frame: pd.DataFrame, cutoff: date) -> pd.DataFrame:
+    """Rows whose label had settled when the holdout was claimed."""
+    return frame[frame["date"] <= cutoff]
 
 
 def rank_verdict(
-    research_key: str,
-    research: Sequence[Fold],
     holdout_key: str,
     held: Sequence[Fold],
+    bounds: Bounds,
     directory: Path,
+    cutoffs: dict[int, date],
 ) -> tuple[ScopeVerdict, dict[int, tuple[RankReport, RankReport]]]:
-    past = _rank_reports(research_key, research, research, directory)
-    now = _rank_reports(holdout_key, held, scored(held), directory)
-    gates, flags, references, days = [], [], [], {}
+    counted = scored(held)
+    gates, flags, references, days, reports = [], [], [], {}, {}
     for horizon in HORIZONS:
-        model, earlier = now[horizon][0], past[horizon][0]
-        name = f"排名 {horizon} 日 IC"
+        loaded = rank_eval.evaluation_frame(holdout_key, held, horizon, directory)
+        frame = _settled(loaded, cutoffs[horizon])
+        boosted, ridge = f"{MODEL}_h{horizon}", f"{RIDGE}_h{horizon}"
+        model = rank_report(frame, boosted, horizon, counted, baseline=ridge)
+        reports[horizon] = (model, rank_report(frame, ridge, horizon, counted))
+        name = IC_FLAG.format(horizon=horizon)
         gates.append(Check(name, model.total.mean, "> 0", cite("gate"), model.total.mean > 0))
-        flags.append(
-            flag(
-                name,
-                _research_rows(earlier.by_fold, research)["mean"],
-                model.by_fold["mean"],
-                HIGHER,
-            )
-        )
+        flags.append(flag(name, bounds[name], model.by_fold["mean"], HIGHER))
         significant = model.total.mean > 0 and model.total.nw_t > 2
         references += [
             Check(
@@ -194,20 +257,9 @@ def rank_verdict(
         ]
         days[f"h{horizon}"] = model.by_fold["n_days"]
     verdict = ScopeVerdict(
-        HoldoutScope.RANK,
-        tuple(gates),
-        tuple(flags),
-        tuple(references),
-        (),
-        pd.DataFrame(days),
+        HoldoutScope.RANK, tuple(gates), tuple(flags), tuple(references), (), pd.DataFrame(days)
     )
-    return verdict, now
-
-
-def _frame(
-    run_key: str, folds: Sequence[Fold], directory: Path, relative: bool, holdout: bool
-) -> pd.DataFrame:
-    return target_eval.target_frame(run_key, folds, directory, relative, holdout=holdout)
+    return verdict, reports
 
 
 def _days(frame: pd.DataFrame, label: str, folds: Sequence[Fold]) -> pd.Series:
@@ -218,24 +270,13 @@ def _days(frame: pd.DataFrame, label: str, folds: Sequence[Fold]) -> pd.Series:
     return mean_by_fold(daily, folds)["n_days"]
 
 
-def _diff(compared: target_eval.Comparison) -> pd.Series:
-    return compared.by_fold["model"] - compared.by_fold["baseline"]
-
-
 def return_verdict(
-    research_key: str,
-    research: Sequence[Fold],
-    holdout_key: str,
-    held: Sequence[Fold],
-    directory: Path,
+    holdout_key: str, held: Sequence[Fold], bounds: Bounds, directory: Path, cutoff: date
 ) -> ScopeVerdict:
-    past = target_eval.evaluate_return(
-        _frame(research_key, research, directory, False, False), research
-    )
-    frame = _frame(holdout_key, held, directory, False, True)
-    evaluated = target_eval.evaluate_return(frame, scored(held))
-    now = evaluated.mae["zero"]
-    before = past.mae["zero"]
+    frame = _settled(_frame(holdout_key, held, directory, False, True), cutoff)
+    counted = scored(held)
+    evaluated = target_eval.evaluate_return(frame, counted)
+    now, trailing = evaluated.mae["zero"], evaluated.mae["trailing"]
     gate = Check(
         "5 日 MAE",
         now.model,
@@ -243,13 +284,7 @@ def return_verdict(
         cite("gate"),
         now.model <= now.baseline,
     )
-    degraded = flag(
-        "MAE 差（模型減零預測）",
-        _research_rows(before.by_fold.assign(diff=_diff(before)), research)["diff"],
-        _diff(now),
-        LOWER,
-    )
-    trailing = evaluated.mae["trailing"]
+    degraded = flag(MAE_FLAG, bounds[MAE_FLAG], _diff(now), LOWER)
     references = (
         Check(
             "MAE 逐摺差 NW t", now.nw_t, "< -2 且 MAE 較低", cite("return"), target_eval.beats(now)
@@ -262,28 +297,13 @@ def return_verdict(
             target_eval.beats(trailing),
         ),
     )
-    days = pd.DataFrame({"h5": _days(frame, target_eval.LABEL, scored(held))})
+    days = pd.DataFrame({"h5": _days(frame, target_eval.LABEL, counted)})
     return ScopeVerdict(HoldoutScope.RETURN, (gate,), (degraded,), references, (), days)
 
 
-def interval_verdict(
-    research_key: str,
-    research: Sequence[Fold],
-    holdout_key: str,
-    held: Sequence[Fold],
-    directory: Path,
-    relative: bool,
-) -> ScopeVerdict:
-    target_eval.check_up_label(holdout_key, relative, held)
-    target_eval.check_up_label(research_key, relative, research)
-    past = target_eval.evaluate_interval(
-        _frame(research_key, research, directory, relative, False), research
-    )
-    frame = _frame(holdout_key, held, directory, relative, True)
-    counted = scored(held)
-    now = target_eval.evaluate_interval(frame, counted)
+def _interval_gates(now: target_eval.IntervalEvaluation) -> tuple[Check, ...]:
     low, high = COVERAGE_GATE
-    gates = (
+    return (
         Check(
             "20 日總覆蓋率",
             now.coverage,
@@ -306,24 +326,11 @@ def interval_verdict(
             target_eval.no_worse(now.qlike),
         ),
     )
-    covered = _research_rows(past.coverage_by_fold, research)["mean"]
-    flags = (
-        flag(
-            "pinball 差（模型減波動率區間）",
-            _research_rows(past.pinball.by_fold.assign(diff=_diff(past.pinball)), research)["diff"],
-            _diff(now.pinball),
-            LOWER,
-        ),
-        flag(
-            "Brier 差（模型減 logistic）",
-            _research_rows(past.brier.by_fold.assign(diff=_diff(past.brier)), research)["diff"],
-            _diff(now.brier),
-            LOWER,
-        ),
-        flag("20 日覆蓋率", covered, now.coverage_by_fold["mean"], INSIDE),
-    )
-    total_low, total_high = target_eval.COVERAGE_TOTAL
-    references = (
+
+
+def _interval_references(now: target_eval.IntervalEvaluation) -> tuple[Check, ...]:
+    low, high = target_eval.COVERAGE_TOTAL
+    return (
         Check(
             "pinball 逐摺差 NW t",
             now.pinball.nw_t,
@@ -334,9 +341,9 @@ def interval_verdict(
         Check(
             "20 日總覆蓋率",
             now.coverage,
-            f"{total_low:.0%}–{total_high:.0%}",
+            f"{low:.0%}–{high:.0%}",
             cite("interval"),
-            total_low <= now.coverage <= total_high,
+            low <= now.coverage <= high,
         ),
         Check(
             "pinball 對歷史分位數",
@@ -345,63 +352,110 @@ def interval_verdict(
             cite("interval"),
             now.history.model < now.history.baseline,
         ),
-        Check("分位數交叉列數", float(now.crossed), "= 0", cite("interval"), now.crossed == 0, 0),
+        Check("分位數交叉列數", float(now.crossed), "= 0", cite("acceptance"), now.crossed == 0, 0),
         Check("機率 ECE", now.ece, f"< {ECE_LIMIT}", cite("probability"), now.ece < ECE_LIMIT),
     )
-    fold_low, fold_high = target_eval.COVERAGE_FOLD
-    waived = tuple(
+
+
+def _waived(now: target_eval.IntervalEvaluation) -> tuple[Check, ...]:
+    low, high = target_eval.COVERAGE_FOLD
+    return tuple(
         Check(
             f"摺 {index} 覆蓋率",
             float(value),
-            f"{fold_low:.0%}–{fold_high:.0%}",
+            f"{low:.0%}–{high:.0%}",
             cite("interval"),
-            fold_low <= value <= fold_high,
+            low <= value <= high,
         )
         for index, value in now.coverage_by_fold["mean"].items()
     )
+
+
+def interval_verdict(
+    holdout_key: str,
+    held: Sequence[Fold],
+    bounds: Bounds,
+    directory: Path,
+    relative: bool,
+    cutoff: date,
+) -> ScopeVerdict:
+    target_eval.check_up_label(holdout_key, relative, held)
+    frame = _settled(_frame(holdout_key, held, directory, relative, True), cutoff)
+    counted = scored(held)
+    now = target_eval.evaluate_interval(frame, counted)
+    flags = (
+        flag(PINBALL_FLAG, bounds[PINBALL_FLAG], _diff(now.pinball), LOWER),
+        flag(BRIER_FLAG, bounds[BRIER_FLAG], _diff(now.brier), LOWER),
+        flag(COVERAGE_FLAG, bounds[COVERAGE_FLAG], now.coverage_by_fold["mean"], INSIDE),
+    )
     days = pd.DataFrame({"h20": _days(frame, target_eval.LABEL, counted)})
-    return ScopeVerdict(HoldoutScope.INTERVAL, gates, flags, references, waived, days)
-
-
-def require_research_caches(run_key: str, folds: Sequence[Fold]) -> None:
-    """Refuse before any fit when the research run lacks a research fold the flags read."""
-    chosen = [fold for fold in folds if fold.research]
-    moved = other_layout(run_key, chosen)
-    if moved:
-        raise FoldMismatchError(f"{run_key} cached folds {moved} for other fold boundaries")
-    for model in (baseline_runs.BASELINE, MODEL):
-        missing = missing_folds(run_key, model, chosen)
-        if missing:
-            raise MissingFoldsError(run_key, model, missing)
+    return ScopeVerdict(
+        HoldoutScope.INTERVAL,
+        _interval_gates(now),
+        flags,
+        _interval_references(now),
+        _waived(now),
+        days,
+    )
 
 
 def _report_marker(run_key: str) -> Path:
     return Path(settings.RESEARCH_CACHE_DIR) / require_key(run_key) / "holdout.report"
 
 
-def reported_in(run_key: str) -> str | None:
-    """The path a holdout's report was written to, or None before its report."""
+@dataclass(frozen=True)
+class Reported:
+    scope: str
+    status: str
+    path: str
+    sha256: str
+    text: str
+
+
+def marked_report(scope: str, status: str, output: str, text: str) -> Reported:
+    """A holdout's one report as its marker keeps it: verdict, path, digest and the text itself."""
+    return Reported(scope, status, output, hashlib.sha256(text.encode("utf-8")).hexdigest(), text)
+
+
+def reported(run_key: str) -> Reported | None:
+    """The one report and verdict a holdout was marked with, or None before it."""
     marker = _report_marker(run_key)
     if not marker.exists():
         return None
-    return str(json.loads(marker.read_text(encoding="utf-8"))["path"])
+    return Reported(**json.loads(marker.read_text(encoding="utf-8")))
+
+
+def unwritten_report(run_key: str, output: str) -> Reported | None:
+    """The marker of a report cut short before its file; refused once written or elsewhere."""
+    marked = reported(run_key)
+    if marked is None:
+        return None
+    if Path(marked.path).exists():
+        raise HoldoutError(f"holdout {run_key} was reported in {marked.path}; it is reported once")
+    if Path(marked.path).resolve() != Path(output).resolve():
+        raise HoldoutError(f"holdout {run_key} is marked for {marked.path}; its report goes there")
+    return marked
+
+
+def _link_whole(path: Path, text: str) -> None:
+    """Create path with all of text or not at all; an existing path is an error."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    staged = path.with_name(f".{path.name}.staged")
+    staged.write_text(text, encoding="utf-8")
+    try:
+        os.link(staged, path)
+    finally:
+        staged.unlink()
 
 
 def write_once(output: str, text: str) -> None:
-    """Write a report to a path that must not exist yet."""
-    path = Path(output)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("x", encoding="utf-8") as handle:
-        handle.write(text)
+    """Write a report whole to a path that must not exist yet."""
+    _link_whole(Path(output), text)
 
 
-def mark_reported(run_key: str, output: str, text: str) -> None:
-    """Record that a holdout was reported, so no later path takes a second report."""
-    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
-    marker = _report_marker(run_key)
-    marker.parent.mkdir(parents=True, exist_ok=True)
-    with marker.open("x", encoding="utf-8") as handle:
-        json.dump({"path": output, "sha256": digest}, handle)
+def mark_reported(run_key: str, marked: Reported) -> None:
+    """Record a holdout's one report and verdict before the report file is written."""
+    _link_whole(_report_marker(run_key), json.dumps(asdict(marked), ensure_ascii=False))
 
 
 def bags_of(run_key: str) -> list[int]:
@@ -480,6 +534,17 @@ def _days_table(days: pd.DataFrame) -> list[str]:
     return lines
 
 
+def _shortest(days: pd.DataFrame) -> str:
+    """The fold with the fewest labelled days per horizon; the per-fold mean ignores the count."""
+    parts = [
+        f"{name} 摺 {days[name].idxmin()}（{int(days[name].min())} 天）" for name in days.columns
+    ]
+    return (
+        "只計 claim 的 last_date 當時 label 已到期的日子（各 horizon 往前 h 個交易日）。"
+        "逐摺等權平均不依天數加權；天數最少的摺：" + "、".join(parts) + "。"
+    )
+
+
 HANDLING = {
     PASSED: "門檻 (3) 全部達標、沒有明顯退化旗標：可以進上線流程。",
     FAILED: f"有門檻未達標：這個目標不上線，報協調；照 {cite('record')} 只記錄、不改設計重跑。",
@@ -535,23 +600,28 @@ def render(header: Header, verdict: ScopeVerdict, bags: dict[str, list[int]]) ->
             "",
             *_checks(verdict.waived, judged=False),
         ]
-    lines += ["", "## 各摺有 label 的天數", "", *_days_table(verdict.holdout_folds), ""]
+    days = verdict.holdout_folds
+    lines += ["", "## 各摺有 label 的天數", "", _shortest(days), "", *_days_table(days), ""]
     return "\n".join(lines)
 
 
 def judge(
-    scope: str,
-    holdout_key: str,
+    header: Header,
     held: Sequence[Fold],
-    research_key: str,
-    research: Sequence[Fold],
+    bounds: Bounds,
     directory: Path,
     relative: bool,
+    calendar: TradingDays,
 ) -> tuple[ScopeVerdict, dict[int, tuple[RankReport, RankReport]]]:
-    """The scope's verdict, and for rank the reports its backtest_metric rows come from."""
-    chosen = [fold for fold in research if fold.research]
+    """The scope's verdict on labels settled by the last date, and its rank metric reports."""
+    scope, key = header.scope, header.run_key
+    cutoffs = {
+        horizon: calendar.shift(header.last_date, -horizon)
+        for horizon in lgbm_runs.SCOPE_HORIZONS[scope]
+    }
     if scope == HoldoutScope.RANK:
-        return rank_verdict(research_key, chosen, holdout_key, held, directory)
+        return rank_verdict(key, held, bounds, directory, cutoffs)
+    cutoff = next(iter(cutoffs.values()))
     if scope == HoldoutScope.RETURN:
-        return return_verdict(research_key, chosen, holdout_key, held, directory), {}
-    return interval_verdict(research_key, chosen, holdout_key, held, directory, relative), {}
+        return return_verdict(key, held, bounds, directory, cutoff), {}
+    return interval_verdict(key, held, bounds, directory, relative, cutoff), {}
