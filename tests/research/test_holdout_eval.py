@@ -262,6 +262,7 @@ def test_the_return_holdout_report_applies_the_fixed_criteria(frozen: Path, tmp_
         "sha256": hashlib.sha256(report.read_bytes()).hexdigest(),
         "text": text,
     }
+    assert Path(marker("return-final")["path"]).is_absolute()
     with pytest.raises(CommandError, match="written once"):
         run("return", report)
     elsewhere = tmp_path / "again.md"
@@ -496,20 +497,22 @@ def test_a_marker_that_failed_leaves_no_report_and_the_command_reports_again(
 ) -> None:
     researched("return", frozen)
     report = tmp_path / "return.md"
+    monkeypatch.chdir(tmp_path)
 
     def killed(*args: object, **kwargs: object) -> None:
         raise OSError("killed before the marker")
 
     monkeypatch.setattr(holdout_command, "mark_reported", killed)
     with pytest.raises(CommandError, match="killed before the marker"):
-        run("return", report)
+        run("return", Path("return.md"))
     assert not report.exists()
     assert holdout_eval.reported("return-final") is None
     monkeypatch.setattr(holdout_command, "mark_reported", holdout_eval.mark_reported)
 
-    run("return", report)
+    run("return", Path("return.md"))
 
     assert marker("return-final")["text"] == report.read_text()
+    assert marker("return-final")["path"] == str(report.resolve())
     assert HoldoutRun.objects.count() == 1
 
 

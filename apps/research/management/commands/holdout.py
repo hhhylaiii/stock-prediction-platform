@@ -14,6 +14,7 @@ from apps.research.holdout import HoldoutError
 from apps.research.holdout_eval import (
     Bounds,
     Header,
+    ScopeVerdict,
     bags_of,
     judge,
     mark_reported,
@@ -24,6 +25,7 @@ from apps.research.holdout_eval import (
     write_holdout_metrics,
     write_once,
 )
+from apps.research.holdout_reconcile import reconcile
 from apps.research.holdout_runs import (
     frozen_design,
     holdout_folds,
@@ -107,8 +109,8 @@ class Command(BaseCommand):
         relative = design.target.relative_up
         return key, research_bounds(scope, key, folds, settings.FEATURE_PARQUET_DIR, relative)
 
-    def _report(self, header: Header, held: list[Fold], bounds: Bounds) -> tuple[str, str]:
-        """The rendered report and its status, after the rank metrics are stored."""
+    def _report(self, header: Header, held: list[Fold], bounds: Bounds) -> tuple[str, ScopeVerdict]:
+        """The rendered report and its verdict, after the rank metrics are stored."""
         relative = frozen_design(header.scope).target.relative_up
         directory = settings.FEATURE_PARQUET_DIR
         verdict, reports = judge(header, held, bounds, directory, relative, TradingDays.from_db())
@@ -116,7 +118,7 @@ class Command(BaseCommand):
             stored = write_holdout_metrics(header.run_key, reports)
             self.stdout.write(f"{header.run_key}: {stored} backtest_metric rows")
         bags = {"research": bags_of(header.research_key), "holdout": bags_of(header.run_key)}
-        return render(header, verdict, bags), verdict.status
+        return render(header, verdict, bags), verdict
 
     def _write(self, output: str, text: str) -> None:
         write_once(output, text)
@@ -132,12 +134,21 @@ class Command(BaseCommand):
         seed, bags = options["seed"] or 0, options["bags"] or 1
         rehearse(scope, run_key, fold, settings.FEATURE_PARQUET_DIR, seed=seed, bags=bags)
         self.stdout.write(f"{run_key}: rehearsed research fold {fold.index}")
-        header = Header(scope, run_key, key, None, last, rehearsal=True)
-        text, _ = self._report(header, [fold], bounds)
+        header = Header(scope, run_key, key, None, latest, rehearsal=True)
+        report, verdict = self._report(header, [fold], bounds)
+        relative = frozen_design(scope).target.relative_up
+        directory = settings.FEATURE_PARQUET_DIR
+        matched = reconcile(scope, verdict, run_key, key, fold, directory, relative)
+        text = f"{report}\n{matched.text}"
         if options["output"]:
             self._write(options["output"], text)
         else:
             self.stdout.write(text)
+        if matched.differing:
+            raise CommandError(
+                f"{run_key} does not reconcile with {key} on fold {fold.index}: "
+                f"{', '.join(matched.differing)}; do not run the holdout"
+            )
 
     def _holdout(self, scope: str, run_key: str, options: dict[str, Any]) -> None:
         output = options["output"]
@@ -164,8 +175,8 @@ class Command(BaseCommand):
         )
         held = holdout_folds(scope, ticket.last_date, TradingDays.from_db())
         header = Header(scope, run_key, key, ticket.attempt, ticket.last_date, rehearsal=False)
-        text, status = self._report(header, held, bounds)
-        mark_reported(run_key, marked_report(scope, status, output, text))
+        text, verdict = self._report(header, held, bounds)
+        mark_reported(run_key, marked_report(scope, verdict.status, output, text))
         self._write(output, text)
 
     def handle(self, *args: Any, **options: Any) -> None:

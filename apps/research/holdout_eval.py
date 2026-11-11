@@ -42,6 +42,7 @@ SPEC_LINES: dict[str, tuple[int, str]] = {
     "interval": (329, "- 區間："),
     "probability": (331, "- 機率："),
     "gate": (337, "- 每月重訓"),
+    "bagging": (281, "| LightGBM seed bagging"),
     "acceptance": (392, "| Phase 4 主模型"),
 }
 GATE_SHARE = rank_eval.GATE_SHARE
@@ -52,6 +53,8 @@ MAE_FLAG = "MAE 差（模型減零預測）"
 PINBALL_FLAG = "pinball 差（模型減波動率區間）"
 BRIER_FLAG = "Brier 差（模型減 logistic）"
 COVERAGE_FLAG = "20 日覆蓋率"
+MAE_GATE, COVERAGE_TOTAL = "5 日 MAE", "20 日總覆蓋率"
+BRIER_GATE, QLIKE_GATE = "機率 Brier", "波動率 QLIKE"
 
 
 def cite(name: str) -> str:
@@ -166,7 +169,8 @@ def _frame(
     return target_eval.target_frame(run_key, folds, directory, relative, holdout=holdout)
 
 
-def _diff(compared: target_eval.Comparison) -> pd.Series:
+def fold_gap(compared: target_eval.Comparison) -> pd.Series:
+    """Per fold, the model's loss less its baseline's."""
     return compared.by_fold["model"] - compared.by_fold["baseline"]
 
 
@@ -196,11 +200,11 @@ def _target_series(
     _refuse_stale(run_key, target_eval.stale_folds(scope, run_key, folds, directory, relative))
     frame = _frame(run_key, folds, directory, relative, False)
     if scope == HoldoutScope.RETURN:
-        return {MAE_FLAG: _diff(target_eval.evaluate_return(frame, folds).mae["zero"])}
+        return {MAE_FLAG: fold_gap(target_eval.evaluate_return(frame, folds).mae["zero"])}
     past = target_eval.evaluate_interval(frame, folds)
     return {
-        PINBALL_FLAG: _diff(past.pinball),
-        BRIER_FLAG: _diff(past.brier),
+        PINBALL_FLAG: fold_gap(past.pinball),
+        BRIER_FLAG: fold_gap(past.brier),
         COVERAGE_FLAG: past.coverage_by_fold["mean"],
     }
 
@@ -278,13 +282,13 @@ def return_verdict(
     evaluated = target_eval.evaluate_return(frame, counted)
     now, trailing = evaluated.mae["zero"], evaluated.mae["trailing"]
     gate = Check(
-        "5 日 MAE",
+        MAE_GATE,
         now.model,
         f"<= 零預測 {now.baseline:.5f}",
         cite("gate"),
         now.model <= now.baseline,
     )
-    degraded = flag(MAE_FLAG, bounds[MAE_FLAG], _diff(now), LOWER)
+    degraded = flag(MAE_FLAG, bounds[MAE_FLAG], fold_gap(now), LOWER)
     references = (
         Check(
             "MAE 逐摺差 NW t", now.nw_t, "< -2 且 MAE 較低", cite("return"), target_eval.beats(now)
@@ -305,21 +309,21 @@ def _interval_gates(now: target_eval.IntervalEvaluation) -> tuple[Check, ...]:
     low, high = COVERAGE_GATE
     return (
         Check(
-            "20 日總覆蓋率",
+            COVERAGE_TOTAL,
             now.coverage,
             f"{low:.0%}–{high:.0%}",
             cite("gate"),
             low <= now.coverage <= high,
         ),
         Check(
-            "機率 Brier",
+            BRIER_GATE,
             now.brier.model,
             f"<= logistic {now.brier.baseline:.5f}",
             cite("gate"),
             target_eval.no_worse(now.brier),
         ),
         Check(
-            "波動率 QLIKE",
+            QLIKE_GATE,
             now.qlike.model,
             f"<= tech_vol_20d {now.qlike.baseline:.5f}",
             cite("gate"),
@@ -339,7 +343,7 @@ def _interval_references(now: target_eval.IntervalEvaluation) -> tuple[Check, ..
             target_eval.beats(now.pinball),
         ),
         Check(
-            "20 日總覆蓋率",
+            COVERAGE_TOTAL,
             now.coverage,
             f"{low:.0%}–{high:.0%}",
             cite("interval"),
@@ -384,8 +388,8 @@ def interval_verdict(
     counted = scored(held)
     now = target_eval.evaluate_interval(frame, counted)
     flags = (
-        flag(PINBALL_FLAG, bounds[PINBALL_FLAG], _diff(now.pinball), LOWER),
-        flag(BRIER_FLAG, bounds[BRIER_FLAG], _diff(now.brier), LOWER),
+        flag(PINBALL_FLAG, bounds[PINBALL_FLAG], fold_gap(now.pinball), LOWER),
+        flag(BRIER_FLAG, bounds[BRIER_FLAG], fold_gap(now.brier), LOWER),
         flag(COVERAGE_FLAG, bounds[COVERAGE_FLAG], now.coverage_by_fold["mean"], INSIDE),
     )
     days = pd.DataFrame({"h20": _days(frame, target_eval.LABEL, counted)})
@@ -413,8 +417,9 @@ class Reported:
 
 
 def marked_report(scope: str, status: str, output: str, text: str) -> Reported:
-    """A holdout's one report as its marker keeps it: verdict, path, digest and the text itself."""
-    return Reported(scope, status, output, hashlib.sha256(text.encode("utf-8")).hexdigest(), text)
+    """A holdout's one report as its marker keeps it: verdict, absolute path, digest and text."""
+    path = str(Path(output).resolve())
+    return Reported(scope, status, path, hashlib.sha256(text.encode("utf-8")).hexdigest(), text)
 
 
 def reported(run_key: str) -> Reported | None:
@@ -579,7 +584,9 @@ def render(header: Header, verdict: ScopeVerdict, bags: dict[str, list[int]]) ->
         f"研究期 `{header.research_key}` 任意連續 {WINDOW} 摺的最差逐摺平均",
         "",
         "研究期與 holdout 都是逐摺等權平均。"
-        f"LightGBM 的 bags：研究期 {bags['research']}，holdout {bags['holdout']}。",
+        f"LightGBM 的 bags：研究期 {bags['research']}，holdout {bags['holdout']}"
+        f"（{cite('bagging')}：研究階段單 seed、最終驗證 5 seed；"
+        "bagging 對各指標的增益沒有量過，界線沒有為此修正）。",
         "",
         *_flags(verdict.flags),
         "",
