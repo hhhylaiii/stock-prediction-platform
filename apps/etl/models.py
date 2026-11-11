@@ -110,7 +110,10 @@ class RawMops(RawRecord):
 
 
 class DividendNotice(models.Model):
-    """A coming ex-date an exchange's notice table listed, and the sessions that saw it."""
+    """A coming ex-date an exchange's notice table listed, and the sessions that saw it.
+
+    withdrawn is the session two sound lists in a row had dropped it by; it clears on return.
+    """
 
     id = models.BigAutoField(primary_key=True)
     source = models.CharField(max_length=32)
@@ -119,6 +122,7 @@ class DividendNotice(models.Model):
     first_seen = models.DateField()
     last_seen = models.DateField()
     created_event = models.BooleanField(default=False)
+    withdrawn = models.DateField(null=True, blank=True)
 
     class Meta:
         db_table = "dividend_notice"

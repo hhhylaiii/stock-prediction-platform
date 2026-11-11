@@ -17,6 +17,7 @@ class Migration(migrations.Migration):
                 ("first_seen", models.DateField()),
                 ("last_seen", models.DateField()),
                 ("created_event", models.BooleanField(default=False)),
+                ("withdrawn", models.DateField(blank=True, null=True)),
             ],
             options={
                 "db_table": "dividend_notice",
