@@ -54,7 +54,7 @@ h2{margin:0;font-size:15px;font-weight:500}
 .ghost[disabled]{color:var(--ink-4);border-color:var(--line);cursor:default}
 .ghost[aria-pressed="true"]{background:var(--raised);border-color:var(--raised)}
 .scroll{overflow-x:auto}
-.table{min-width:1180px;border-top:1px solid var(--line)}
+.table{min-width:1232px;border-top:1px solid var(--line)}
 .table.auto{min-width:0}
 .thead,.trow{display:grid;gap:16px;align-items:center;padding:0 8px}
 .thead{align-items:end;padding-top:14px;padding-bottom:10px;border-bottom:1px solid var(--line);color:var(--ink-3);font-size:12px}
