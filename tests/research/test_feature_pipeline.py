@@ -28,6 +28,7 @@ from apps.market.models import (
     TradingCalendar,
     WeeklyHolding,
 )
+from apps.research.baseline_runs import fold_inputs
 from apps.research.features import store
 from apps.research.features.build import (
     CHECKED,
@@ -54,8 +55,10 @@ from apps.research.features.store import (
     write_features,
 )
 from apps.research.inference import day_rows
+from apps.research.lgbm_runs import rank_fold_inputs
 from apps.research.models import FeatureDaily
 from apps.research.universe import load_universe_panel
+from apps.research.walkforward import Fold
 from tests.research.conftest import weekday_calendar
 
 pytestmark = pytest.mark.django_db
@@ -198,21 +201,43 @@ def test_fits_and_predictions_read_dormant_features_empty_from_a_stale_partition
 ) -> None:
     calendar_rows()
     listed("2330", "2015-06-01", "2016-04-29")
+    listed("1101", "2015-06-01", "2016-04-29", step=0.2)
     inputs("2330")
+    WeeklyHolding.objects.bulk_create(
+        WeeklyHolding(
+            stock_id="1101",
+            data_date=d(week),
+            level=level,
+            holders=900,
+            shares=1,
+            pct=big if level == 12 else 100.0 - big,
+            publish_date=d(week) + timedelta(days=3),
+        )
+        for week, big in [("2016-02-19", 30.0), ("2016-02-26", 40.0)]
+        for level in (1, 12)
+    )
     days = (d("2016-03-01"), d("2016-03-04"))
     store.write_features(build_feature_frame(CALENDAR, *days, masked={}, dormant=()), *days)
+    FeatureDaily.objects.update(in_universe=True)
     export_year(2016, tmp_path)
-    names = [*DORMANT, "chip_fi_net_1d"]
-    assert read_columns(*days, tmp_path, names).notna().all().all()
+    names = [*DORMANT, "tech_ret_5d"]
+    kept = read_columns(*days, tmp_path, names)
+    assert kept.notna().all().all()
+    assert kept.groupby("date")[DORMANT[0]].nunique().eq(2).all()
+    fold = Fold(0, days[0], days[0], days[0], days[0], days[1], days[1], days[1], False, False)
 
-    read = read_partitions(*days, tmp_path, ["stock_id", "date", "in_universe", *names])
-    scored = day_rows(days[1], tmp_path, names)
+    frames = {
+        "read": read_partitions(*days, tmp_path, ["stock_id", "date", "in_universe", *names]),
+        "predicted": day_rows(days[1], tmp_path, names),
+        "raw": fold_inputs(fold, *days, tmp_path, names).raw,
+        "ranked": rank_fold_inputs(fold, tmp_path, names).raw,
+    }
 
-    for frame in (read, scored):
+    for frame in frames.values():
         assert frame[list(DORMANT)].isna().all().all()
-        assert frame[list(DORMANT)].dtypes.eq("float64").all()
-        assert frame["chip_fi_net_1d"].notna().all()
-    assert list(read.columns) == ["stock_id", "date", "in_universe", *names]
+        assert frame["tech_ret_5d"].notna().all()
+    assert frames["read"][list(DORMANT)].dtypes.eq("float64").all()
+    assert list(frames["read"].columns) == ["stock_id", "date", "in_universe", *names]
 
 
 def test_the_frame_has_one_row_per_listed_stock_and_trading_day_in_range() -> None:
