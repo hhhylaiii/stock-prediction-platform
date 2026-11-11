@@ -6,8 +6,11 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+from django.conf import settings
+
 from apps.market.calendar import TradingDays
 from apps.research import baseline_runs, lgbm_runs, production
+from apps.research.gbdt import bag_seeds
 from apps.research.holdout import (
     HoldoutError,
     HoldoutTicket,
@@ -15,13 +18,15 @@ from apps.research.holdout import (
     is_holdout,
     latest_ticket,
 )
+from apps.research.labels import latest_price_date
+from apps.research.models import LabelDaily, ModelRun
 from apps.research.prediction_cache import (
     fold_cached,
     fold_path,
     save_fold_predictions,
     save_holdout_fold,
 )
-from apps.research.production import BAGS, DESIGN, Design, design_note
+from apps.research.production import DESIGN, Design, design_note
 from apps.research.runs import FittedFold, record_run, refuse_production_key
 from apps.research.walkforward import Fold, generate_folds
 
@@ -98,12 +103,44 @@ def _record(
             record_run(run, model, fold=fold, ticket=ticket)
 
 
-def _ticket(scope: str, run_key: str, last: date, force: bool, reason: str) -> HoldoutTicket:
-    """Resume the latest claim made under run_key, or make a new one."""
-    latest = latest_ticket(scope)
-    if latest is not None and latest.run_key == run_key and not force:
-        return latest
-    return claim_holdout(scope, run_key, last, force=force, reason=reason)
+def _unlabelled(scope: str, folds: list[Fold]) -> list[str]:
+    """Fold and horizon pairs without a settled label in test_start..eval_end."""
+    return [
+        f"fold {fold.index} at {horizon} days"
+        for fold in folds
+        for horizon in lgbm_runs.SCOPE_HORIZONS[scope]
+        if not LabelDaily.objects.filter(
+            date__range=(fold.test_start, fold.eval_end),
+            horizon=horizon,
+            fwd_ret_open__isnull=False,
+        ).exists()
+    ]
+
+
+def _check_claim(scope: str, run_key: str, last: date, calendar: TradingDays) -> None:
+    """Refuse a claim the holdout could not finish: no data, no folds, no labels, a used key."""
+    price = latest_price_date()
+    if price is None or last > price:
+        raise HoldoutError(f"{last} is past the latest price day {price}")
+    folds = holdout_folds(scope, last, calendar)
+    if not folds:
+        raise HoldoutError(f"the {scope} design has no holdout fold through {last}")
+    missing = _unlabelled(scope, folds)
+    if missing:
+        raise HoldoutError(f"no settled label yet for {', '.join(missing)}; claim once it is built")
+    cached = Path(settings.RESEARCH_CACHE_DIR) / run_key
+    if ModelRun.objects.filter(run_key=run_key).exists() or cached.exists():
+        raise HoldoutError(f"{run_key} already holds runs or caches; the holdout needs a new key")
+
+
+def _check_resume(run_key: str, seed: int, bags: int) -> None:
+    """Refuse resuming a claim with another seed or bag count than its written folds used."""
+    runs = ModelRun.objects.filter(run_key=run_key, model_type=lgbm_runs.MODEL)
+    used = {(run.seed, run.params.get("bags")) for run in runs}
+    if used and used != {(seed, bags)}:
+        raise HoldoutError(
+            f"{run_key} was fit with (seed, bags) {sorted(used)}; resume it with the same"
+        )
 
 
 def run_holdout(
@@ -113,24 +150,34 @@ def run_holdout(
     directory: Path,
     *,
     seed: int = 0,
-    bags: int = BAGS,
+    bags: int | None = None,
     force: bool = False,
     reason: str = "",
 ) -> HoldoutOutcome:
-    """Claim the scope's holdout, then fit and write every holdout fold not yet written.
+    """Claim the scope's holdout once it can finish, then fit and write every unwritten fold.
 
     A second call with the latest claim's run_key resumes it on that claim's last date.
     """
     _check_key(scope, run_key, rehearsal=False)
-    frozen_design(scope)
-    ticket = _ticket(scope, run_key, last, force, reason)
-    folds = holdout_folds(scope, ticket.last_date, TradingDays.from_db())
+    design = frozen_design(scope)
+    lgbm_runs.check_design(scope, design.variant, design.target)
+    bagged = production.BAGS if bags is None else bags
+    bag_seeds(seed, bagged)
+    calendar = TradingDays.from_db()
+    latest = latest_ticket(scope)
+    if latest is not None and latest.run_key == run_key and not force:
+        _check_resume(run_key, seed, bagged)
+        ticket = latest
+    else:
+        _check_claim(scope, run_key, last, calendar)
+        ticket = claim_holdout(scope, run_key, last, force=force, reason=reason)
+    folds = holdout_folds(scope, ticket.last_date, calendar)
     kept = [fold.index for fold in folds if fold_cached(run_key, fold.index)]
     ran = []
     for fold in folds:
         if fold.index in kept:
             continue
-        fitted = _fit(scope, fold, run_key, directory, seed, bags)
+        fitted = _fit(scope, fold, run_key, directory, seed, bagged)
         _record(scope, fold, fitted, ticket)
         predictions = {model: part.predictions for model, part in fitted.items()}
         notes = {model: part.notes for model, part in fitted.items()}

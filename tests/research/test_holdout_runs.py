@@ -8,7 +8,14 @@ from django.core.management import call_command
 from django.core.management.base import CommandError
 
 from apps.market.models import IndexDaily
-from apps.research import holdout, holdout_runs, lgbm_runs, prediction_cache, production
+from apps.research import (
+    baseline_runs,
+    holdout,
+    holdout_runs,
+    lgbm_runs,
+    prediction_cache,
+    production,
+)
 from apps.research.baseline_runs import BASELINE
 from apps.research.holdout import HoldoutError, claim_holdout
 from apps.research.holdout_runs import (
@@ -18,7 +25,8 @@ from apps.research.holdout_runs import (
     run_holdout,
 )
 from apps.research.lgbm_runs import MODEL
-from apps.research.models import HoldoutRun, ModelRun
+from apps.research.management.commands import holdout as holdout_command
+from apps.research.models import HoldoutRun, LabelDaily, ModelRun
 from apps.research.prediction_cache import fold_cached, fold_path, load_fold_predictions
 from apps.research.production import DESIGN, Design
 from apps.research.runs import RunError
@@ -27,6 +35,7 @@ from apps.research.walkforward import Fold
 from tests.research.run_panels import CONFIG, folds, use_designs, weekdays
 
 LAST = weekdays()[-1]
+PLAIN = TargetVariant(market=False)
 DAY = LAST.isoformat()
 RELATIVE = TargetVariant(market=False, relative_up=True)
 
@@ -45,6 +54,9 @@ def frozen(run_panel: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         "interval": Design(CONFIG, target=plain, research_run_key="interval-wf1"),
     }
     monkeypatch.setattr(production, "DESIGNS", frozen)
+    monkeypatch.setattr(production, "BAGS", 1)
+    monkeypatch.setattr(holdout_runs, "latest_price_date", lambda: LAST)
+    monkeypatch.setattr(holdout_command, "latest_price_date", lambda: LAST)
     return run_panel
 
 
@@ -246,12 +258,8 @@ def test_rehearsing_a_relative_design_uses_its_up_label(
 def test_the_command_runs_the_holdout_once_and_names_the_folds(frozen: Path) -> None:
     out = StringIO()
 
-    call_command(
-        "holdout", scope="return", run_key="return-final", bags=1, last_date=DAY, stdout=out
-    )
-    call_command(
-        "holdout", scope="return", run_key="return-final", bags=1, last_date=DAY, stdout=out
-    )
+    call_command("holdout", scope="return", run_key="return-final", stdout=out)
+    call_command("holdout", scope="return", run_key="return-final", stdout=out)
 
     index = held()[0].index
     lines = out.getvalue().splitlines()
@@ -261,7 +269,7 @@ def test_the_command_runs_the_holdout_once_and_names_the_folds(frozen: Path) -> 
     )
     assert lines[1].endswith(f"fitted folds [], already written [{index}]")
     with pytest.raises(CommandError, match="rerun only with force and a reason"):
-        call_command("holdout", scope="return", run_key="return-other", bags=1, last_date=DAY)
+        call_command("holdout", scope="return", run_key="return-other")
 
 
 @pytest.mark.django_db
@@ -291,8 +299,10 @@ def test_the_command_rehearses_a_research_fold_without_a_claim(frozen: Path) -> 
     [
         ({"rehearse": True, "force": True}, "a rehearsal claims none"),
         ({"rehearse": True, "reason": "why"}, "a rehearsal claims none"),
-        ({"fold": 3}, "add --rehearse"),
-        ({"bags": 0}, "at least 1"),
+        ({"fold": 3}, "--fold apply to a rehearsal"),
+        ({"last_date": DAY}, "--last-date apply to a rehearsal"),
+        ({"bags": 5, "seed": 1}, "--bags, --seed apply to a rehearsal"),
+        ({"rehearse": True, "bags": 0}, "at least 1"),
     ],
 )
 def test_the_command_refuses_options_that_do_not_go_together(
@@ -302,3 +312,107 @@ def test_the_command_refuses_options_that_do_not_go_together(
         call_command("holdout", scope="return", run_key="return-final", **options)
 
     assert not HoldoutRun.objects.exists()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("last", "message"),
+    [
+        (date(2017, 1, 6), "past the latest price day"),
+        (date(2016, 11, 15), "no holdout fold through 2016-11-15"),
+    ],
+)
+def test_a_claim_the_holdout_could_not_finish_is_never_written(
+    frozen: Path, last: date, message: str
+) -> None:
+    with pytest.raises(HoldoutError, match=message):
+        run_holdout("return", "return-final", last, frozen)
+
+    assert not HoldoutRun.objects.exists()
+
+
+@pytest.mark.django_db
+def test_a_claim_waits_for_every_holdout_fold_to_have_a_settled_label(frozen: Path) -> None:
+    fold = held()[0]
+    LabelDaily.objects.filter(date__gte=fold.test_start, horizon=5).update(fwd_ret_open=None)
+
+    with pytest.raises(HoldoutError, match=f"no settled label yet for fold {fold.index} at 5 days"):
+        run_holdout("return", "return-final", LAST, frozen)
+
+    assert not HoldoutRun.objects.exists()
+
+
+@pytest.mark.django_db
+def test_a_claim_needs_a_fresh_key_and_a_design_the_runners_accept(
+    frozen: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fold = next(f for f in folds() if f.research)
+    baseline_runs.run_folds("return", [fold], "return-used", frozen, target=PLAIN)
+    with pytest.raises(HoldoutError, match="already holds runs or caches"):
+        run_holdout("return", "return-used", LAST, frozen)
+    target = Design(CONFIG, target=PLAIN, research_run_key="rank-wf1")
+    monkeypatch.setitem(production.DESIGNS, "rank", target)
+    with pytest.raises(ValueError, match="target variants apply"):
+        run_holdout("rank", "rank-final", LAST, frozen)
+
+    assert not HoldoutRun.objects.exists()
+
+
+@pytest.mark.django_db
+def test_a_resume_with_other_bags_or_seed_is_refused(
+    frozen: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(*args: Any, **kwargs: Any) -> list[Path]:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(holdout_runs, "save_holdout_fold", broken)
+    with pytest.raises(OSError, match="disk full"):
+        run_holdout("return", "return-final", LAST, frozen, bags=2)
+
+    with pytest.raises(HoldoutError, match=r"fit with \(seed, bags\) \[\(0, 2\)\]"):
+        run_holdout("return", "return-final", LAST, frozen, bags=1)
+    with pytest.raises(HoldoutError, match="resume it with the same"):
+        run_holdout("return", "return-final", LAST, frozen, seed=7, bags=2)
+
+
+@pytest.mark.django_db
+def test_a_resume_after_one_of_two_folds_fits_only_the_unwritten_one(
+    frozen: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(holdout, "SPEC_HOLDOUT_START", date(2016, 11, 1))
+    monkeypatch.setattr(prediction_cache, "SPEC_HOLDOUT_START", date(2016, 11, 1))
+    november, december = (f.index for f in folds() if f.test_end >= date(2016, 11, 1))
+    save = prediction_cache.save_holdout_fold
+
+    def second_fails(run_key: str, fold: Fold, *args: Any, **kwargs: Any) -> list[Path]:
+        if fold.index == december:
+            raise OSError("disk full")
+        return save(run_key, fold, *args, **kwargs)
+
+    monkeypatch.setattr(holdout_runs, "save_holdout_fold", second_fails)
+    with pytest.raises(OSError, match="disk full"):
+        run_holdout("return", "return-final", LAST, frozen)
+    monkeypatch.setattr(holdout_runs, "save_holdout_fold", save)
+
+    again = run_holdout("return", "return-final", LAST, frozen)
+
+    assert (again.ran, again.kept) == ([december], [november])
+
+
+@pytest.mark.django_db
+def test_a_rehearsal_refuses_a_fold_that_is_not_research(frozen: Path) -> None:
+    tuning = next(f for f in folds() if f.tuning)
+
+    with pytest.raises(ValueError, match="runs on a research fold"):
+        rehearse("return", "return-rehearsal", tuning, frozen)
+
+
+@pytest.mark.django_db
+def test_research_fits_refuse_a_claimed_holdout_key(frozen: Path) -> None:
+    run_holdout("return", "return-final", LAST, frozen)
+    research = [f for f in folds() if f.research]
+
+    with pytest.raises(RunError, match="holds a holdout claim"):
+        baseline_runs.run_folds("return", research, "return-final", frozen, target=PLAIN)
+    with pytest.raises(RunError, match="holds a holdout claim"):
+        lgbm_runs.run_folds("return", research, "return-final", frozen, target=PLAIN)

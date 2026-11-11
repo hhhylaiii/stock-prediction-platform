@@ -188,6 +188,12 @@ def record_run(
     return run
 
 
+def refuse_holdout_key(run_key: str) -> None:
+    """Refuse research fits under a run_key that holds a holdout claim."""
+    if HoldoutRun.objects.filter(run_key=run_key).exists():
+        raise RunError(f"{run_key} holds a holdout claim; the holdout command fits it")
+
+
 def refuse_production_key(run_key: str) -> None:
     """Refuse research fits under a run_key that holds a production build."""
     if ModelRun.objects.filter(run_key=run_key, params__has_key=PRODUCTION).exists():
