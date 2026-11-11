@@ -56,8 +56,10 @@ def built(monkeypatch: pytest.MonkeyPatch) -> list[tuple[date, date, Any]]:
     monkeypatch.setattr(residual_coverage, "MASKED_MONTHS", {})
     calls: list[tuple[date, date, Any]] = []
 
-    def build(calendar: TradingDays, start: date, end: date, masked: Any) -> pd.DataFrame:
-        calls.append((start, end, masked))
+    def build(
+        calendar: TradingDays, start: date, end: date, masked: Any, dormant: Any
+    ) -> pd.DataFrame:
+        calls.append((start, end, (masked, dormant)))
         return synthetic(calendar, start, end)
 
     monkeypatch.setattr(residual_coverage, "build_feature_frame", build)
@@ -88,8 +90,8 @@ def test_coverage_builds_each_year_unmasked_and_names_the_affected_months(
     )
 
     assert built == [
-        (date(2016, 1, 1), date(2016, 12, 31), {}),
-        (date(2017, 1, 1), date(2017, 12, 31), {}),
+        (date(2016, 1, 1), date(2016, 12, 31), ({}, ())),
+        (date(2017, 1, 1), date(2017, 12, 31), ({}, ())),
     ]
     text = out.getvalue()
     assert "fund_rev_mom: 1 of 24 months affected (4%)" in text
@@ -195,7 +197,9 @@ def test_coverage_counts_gaps_read_across_report_bases_and_warns_when_they_lean_
         columns = ["stock_id", "date", crossed_name("fund_rev_yoy_q")]
         return pd.DataFrame(rows, columns=columns).assign(**UNSOURCED)
 
-    def build(calendar: TradingDays, start: date, end: date, masked: Any) -> pd.DataFrame:
+    def build(
+        calendar: TradingDays, start: date, end: date, masked: Any, dormant: Any
+    ) -> pd.DataFrame:
         return synthetic(calendar, start, end).assign(fund_rev_yoy_q=float("nan"))
 
     monkeypatch.setattr(residual_coverage, "observable_frame", crossed)
