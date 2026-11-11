@@ -144,6 +144,40 @@ pooled 9: mean -0.0049 sd 0.0254 t -0.58
       153.56 real       213.61 user        55.13 sys
 ```
 
+## 60 個特徵的排名設計：警訊摺的打亂 label 檢查
+
+`rank-cand60` 的洩漏警訊摺和 55 個特徵的設計相同。用它的 60 個特徵（取自 `model_run.feature_list`）在這五組上各跑 3 個 seed 的 LightGBM 打亂，重訓輪數照凍結設計。Ridge 沒有重跑：它固定用第一批特徵，不涵蓋新加的 5 個。在 `eba50db` 跑（2026-11-11 14:44–14:48）：
+
+```
+rank-cand60: 60 features; variant Variant(every=1, half_life=None, objective='regression', min_rounds=200, fixed_rounds=(), masked=(), features=())
+fold 24 h5 seed 0: lightgbm 0.0117 (200 rounds)
+fold 24 h5 seed 1: lightgbm -0.0571 (200 rounds)
+fold 24 h5 seed 2: lightgbm -0.0339 (200 rounds)
+fold 24 h5 2020-01-02..2020-03-31: lightgbm mean -0.0264 max|IC| 0.0571 43s
+fold 25 h5 seed 0: lightgbm -0.0287 (200 rounds)
+fold 25 h5 seed 1: lightgbm -0.0093 (200 rounds)
+fold 25 h5 seed 2: lightgbm 0.0021 (200 rounds)
+fold 25 h5 2020-04-01..2020-06-30: lightgbm mean -0.0120 max|IC| 0.0287 49s
+fold 19 h20 seed 0: lightgbm 0.0383 (200 rounds)
+fold 19 h20 seed 1: lightgbm -0.0143 (200 rounds)
+fold 19 h20 seed 2: lightgbm -0.0311 (261 rounds)
+fold 19 h20 2018-10-01..2018-12-28: lightgbm mean -0.0024 max|IC| 0.0383 47s
+fold 25 h20 seed 0: lightgbm -0.0033 (200 rounds)
+fold 25 h20 seed 1: lightgbm -0.0237 (200 rounds)
+fold 25 h20 seed 2: lightgbm -0.0240 (200 rounds)
+fold 25 h20 2020-04-01..2020-06-30: lightgbm mean -0.0170 max|IC| 0.0240 42s
+fold 29 h20 seed 0: lightgbm -0.0105 (200 rounds)
+fold 29 h20 seed 1: lightgbm -0.0348 (341 rounds)
+fold 29 h20 seed 2: lightgbm 0.0396 (200 rounds)
+fold 29 h20 2021-04-01..2021-06-30: lightgbm mean -0.0019 max|IC| 0.0396 46s
+pooled 15: mean -0.0119 sd 0.0267 t -1.73 max|IC| 0.0571 (null max 0.0611)
+verdict: no sign of leakage (|t| < 2 and max|IC| <= 0.0611)
+```
+
+- 判定規則是協調 2026-11-11 在結果出來前寫死的：合併平均的 |t| < 2，且單一 seed 最大 |IC| 不超過 0.0611。兩條都成立。
+- 印出的 variant 沒有 `features`，是因為腳本直接把 60 個特徵傳給擬合函式；輪數下限與其他設定和凍結設計相同。
+- 三批打亂檢查（上一節的 12 次與 9 次，加這 15 次）用的 seed 都是 0、1、2，摺也重疊，不是獨立樣本。合併平均偏負的事記在 `phase4-experiments.md` 的「已知但未解釋」。
+
 ## 4.8b 區間覆蓋率：波動率 baseline 與漏接方向
 
 從 `interval-std1109` 的快取算，不重訓（`eba50db`）。列是 universe 內 t+1 可交易、模型與波動率區間 baseline 都有值的列；覆蓋率與漏接比例都是逐日平均再逐摺平均。欄位：`model_*` 是分位數模型的覆蓋率，`volband_shared` 是 baseline 的覆蓋率，`below_q10`、`above_q90` 是模型漏接在下、上的比例，`band_*` 是 baseline 的，`label_mean`、`q50_mean` 是 20 日報酬與 q50 的平均。
