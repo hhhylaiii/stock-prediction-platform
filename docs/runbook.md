@@ -539,9 +539,9 @@ uv run python manage.py rebuild_market_history
 
 - 時段：最後幾個 holdout 摺讀的 label、`TAIEX_TR` 與特徵每晚都會重寫，擬合期間碰上就會報「changed while fitting」或「feature partitions changed」。避開 15:30 的價格批次、23:00 到 02:30 的研究 chain、06:00 到 08:00 的早上 chain，或先關 `RESEARCH_SCHEDULE_ENABLED`（見「研究排程」）。報了這兩種錯就用同一個指令再跑一次，會從沒寫入的摺續跑。
 - 演練：`holdout --scope S --run-key S-rehearsal --rehearse [--fold N] [--bags B] [--seed K]`。在一個研究摺（預設最後一個）上用同一支擬合與 model_run 記錄函式，但快取寫成一般研究快取（`save_fold_predictions`），不 claim，也不走 holdout 的寫入保護（ticket、只寫一次的 marker）。bags 預設 1；要量正式跑的時間與記憶體時用 `--bags 5`。run_key 一律以 `<scope>-rehearsal` 開頭，正式 holdout 不收這種 key。用完 `drop_run S-rehearsal` 清掉。
-- 正式：`holdout --scope S --run-key S-holdout-YYYYMMDD`。不收 `--last-date`、`--bags`、`--seed`：last_date 是最新的價格日，bags 是 `production.BAGS`（5），seed 0。claim 之前先擋掉跑不完的情況：日期晚於最新價格日、沒有 holdout 摺、某個 holdout 摺在某個 horizon 還沒有已到期的 label（季初約 21 個交易日內的最後一摺）、run_key 底下已有 model_run 或快取、設計不合法。之後逐摺擬合 baseline 與 LightGBM，每摺兩個模型一起寫入一次；每個 model_run 的 `params["design"]` 記下跑的設計。
-- 中斷（重開機、記憶體不足）：用同一個 run_key 再跑一次，會沿用最新那次 claim 與它的 last_date，只補還沒寫入的摺；seed 或 bags 和已寫入的摺不同會被拒。換 run_key 會被拒（要 `--force --reason`，那是重跑 holdout，SPEC 不允許只因結果不好而重跑）。claim 之後，研究的 `train` 也不能寫進這個 run_key。
-- claim 之後才能 `build_run`，而且要 holdout 跑完：那次 claim 的每個 holdout 摺都已寫入、每個 run 都記下和 `production.DESIGNS[scope]` 相同的設計、LightGBM 的特徵清單和現在的設計相同，`build_run` 才建；任何一條不符就拒建並寫出哪一條。
+- 正式：`holdout --scope S --run-key S-holdout-YYYYMMDD`。不收 `--last-date`、`--bags`、`--seed`：last_date 是最新的價格日，bags 是 `production.BAGS`（5），seed 0。claim 之前先擋掉跑不完的情況：日期晚於最新價格日、沒有 holdout 摺、某個 holdout 摺在某個 horizon 還沒有已到期的 label（季初約 21 個交易日內的最後一摺）、run_key 底下已有 model_run 或快取、設計不合法、沒有特徵篩選紀錄。之後逐摺擬合 baseline 與 LightGBM，每摺兩個模型一起寫入一次；每個 model_run 的 `params["design"]` 記下跑的設計。
+- 中斷（重開機、記憶體不足）：用同一個指令再跑一次（強制重跑的那次連同 `--force --reason` 照打），會沿用最新那次 claim 與它的 last_date，只補還沒寫入的摺；seed、bags、設計或 LightGBM 的特徵清單和這次 claim 已記下的 run 不同會被拒，改回開跑時的設計再續跑。續跑報「were taken but not fully written」表示某摺在佔位之後、兩個模型的檔案寫完之前被殺掉（視窗不到 1 毫秒）：這一摺沒有完整的預測、也沒有被讀過。先確認沒有別的 `holdout` 行程在跑，再刪掉 `RESEARCH_CACHE_DIR/<run_key>/` 底下那一摺的 `fold-NNN.holdout` 與 `baseline/`、`lightgbm/` 裡同號的 parquet（有幾個刪幾個），然後用同一個指令續跑；別的摺不要動。換 run_key 會被拒（要 `--force --reason`，那是重跑 holdout，SPEC 不允許只因結果不好而重跑）。claim 之後，研究的 `train` 也不能寫進這個 run_key。
+- claim 之後才能 `build_run`，而且要 holdout 跑完：那次 claim 的每個 holdout 摺都已寫入（marker 與兩個模型的檔案都在）、每個 run 都記下和 `production.DESIGNS[scope]` 相同的設計、LightGBM 的特徵清單和現在的設計相同，`build_run` 才建；任何一條不符就拒建並寫出哪一條。
 
 ## 模型監控與換模
 
