@@ -10,6 +10,7 @@ from pathlib import Path
 from django.conf import settings
 from django.db import IntegrityError, transaction
 from django.db.models import Max
+from django.utils import timezone
 
 from apps.research.models import (
     HoldoutRelease,
@@ -182,7 +183,16 @@ def reported(run_key: str) -> Reported | None:
     marker = report_marker(run_key)
     if not marker.exists():
         return None
-    return Reported(**json.loads(marker.read_text(encoding="utf-8")))
+    try:
+        return Reported(**json.loads(marker.read_text(encoding="utf-8")))
+    except (ValueError, TypeError) as error:
+        raise HoldoutError(f"{marker} is not a holdout report marker: {error}") from error
+
+
+def _verdict(scope: str, key: str) -> Reported | None:
+    """The report marked for the scope's holdout; one of another scope is none."""
+    marked = reported(key)
+    return marked if marked is not None and marked.scope == scope else None
 
 
 def release_holdout(scope: str, status: str, reason: str) -> HoldoutRelease:
@@ -190,8 +200,10 @@ def release_holdout(scope: str, status: str, reason: str) -> HoldoutRelease:
     note = reason.strip()
     if not note:
         raise HoldoutError("a holdout release needs the user's reason")
+    if status not in (FAILED, DEGRADED):
+        raise HoldoutError(f"a release names {FAILED} or {DEGRADED}, not {status!r}")
     key = production_pass(scope).frozen_by
-    marked = reported(key)
+    marked = _verdict(scope, key)
     if marked is None:
         raise HoldoutError(f"holdout {key} has no report yet; there is no verdict to release")
     if marked.status == PASSED:
@@ -212,8 +224,8 @@ def release_holdout(scope: str, status: str, reason: str) -> HoldoutRelease:
 def released_verdict(granted: ProductionPass) -> dict[str, str] | None:
     """Leave to build on the scope's holdout: None when it passed, else its recorded release."""
     key = granted.frozen_by
-    marked = reported(key)
-    if marked is None or marked.scope != granted.scope:
+    marked = _verdict(granted.scope, key)
+    if marked is None:
         raise HoldoutError(f"holdout {key} has no report; a build waits for its verdict")
     if marked.status == PASSED:
         return None
@@ -226,6 +238,6 @@ def released_verdict(granted: ProductionPass) -> dict[str, str] | None:
     return {
         "status": release.status,
         "reason": release.reason,
-        "released_at": release.released_at.isoformat(),
+        "released_at": timezone.localtime(release.released_at).isoformat(),
         "report": marked.path,
     }

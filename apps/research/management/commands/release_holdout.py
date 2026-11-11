@@ -4,6 +4,7 @@ from argparse import ArgumentParser
 from typing import Any
 
 from django.core.management.base import BaseCommand, CommandError
+from django.utils import timezone
 
 from apps.research.holdout import DEGRADED, FAILED, HoldoutError, release_holdout
 from apps.research.models import HoldoutScope
@@ -33,5 +34,5 @@ class Command(BaseCommand):
             raise CommandError(str(error)) from error
         self.stdout.write(
             f"{release.holdout.run_key}: released {release.status} "
-            f"at {release.released_at.isoformat()}"
+            f"at {timezone.localtime(release.released_at).isoformat()}"
         )

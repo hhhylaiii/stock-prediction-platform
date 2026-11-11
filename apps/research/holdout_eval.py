@@ -535,12 +535,16 @@ def _shortest(days: pd.DataFrame) -> str:
     )
 
 
+RELEASE_NOTE = "上線與否由使用者決定，同意後才用 `release_holdout` 記下原因放行。"
 HANDLING = {
     PASSED: "門檻 (3) 全部達標、沒有明顯退化旗標：可以進上線流程。",
-    FAILED: f"有門檻未達標：這個目標不上線，報協調；照 {cite('record')} 只記錄、不改設計重跑。",
+    FAILED: (
+        "有門檻未達標：這個目標預設不上線，報協調；`build_run` 會拒建，"
+        f"{RELEASE_NOTE}照 {cite('record')} 只記錄、不改設計重跑。"
+    ),
     DEGRADED: (
-        "門檻 (3) 全部達標，但有明顯退化旗標：停下，上線與否由使用者決定；"
-        f"照 {cite('record')} 只記錄、不改設計重跑。"
+        "門檻 (3) 全部達標，但有明顯退化旗標：停下，預設不上線；`build_run` 會拒建，"
+        f"{RELEASE_NOTE}照 {cite('record')} 只記錄、不改設計重跑。"
     ),
 }
 REHEARSAL_NOTE = "演練跑在研究摺上，只驗證程式路徑與資料形狀，數字不作任何判定。"

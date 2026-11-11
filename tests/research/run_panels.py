@@ -166,32 +166,36 @@ def write_holdout_report(scope: str, key: str, status: str = PASSED, path: str =
     marker.write_text(json.dumps(stored), encoding="utf-8")
 
 
+def finish_holdout(scope: str, key: str, reported: str | None = PASSED) -> None:
+    """A claimed holdout as its runner leaves it: folds written, a run of its design, a report."""
+    write_holdout_markers(scope, key)
+    if reported is not None:
+        write_holdout_report(scope, key, reported)
+    design = production.DESIGNS[scope]
+    note = json.loads(json.dumps(production.design_note(design)))
+    features = lgbm_runs.design_features(scope, design.variant, design.target)
+    ModelRun.objects.create(
+        run_id=f"{key}.lightgbm.h20.f099",
+        run_key=key,
+        model_type="lightgbm",
+        objective=HOLDOUT_OBJECTIVES[scope],
+        version="4",
+        train_start=START,
+        train_end=END,
+        params={production.DESIGN: note},
+        feature_list=features,
+        lib_versions={},
+        feature_hash="0" * 64,
+    )
+
+
 def claim_all(finished: bool = True, reported: str | None = PASSED) -> None:
     """Claim every scope's holdout; by default finished on its design and reported as passed."""
-    for scope, objective in HOLDOUT_OBJECTIVES.items():
+    for scope in HOLDOUT_OBJECTIVES:
         key = f"{scope}-final"
         claim_holdout(scope, key, weekdays()[-1])
-        if not finished:
-            continue
-        write_holdout_markers(scope, key)
-        if reported is not None:
-            write_holdout_report(scope, key, reported)
-        design = production.DESIGNS[scope]
-        note = json.loads(json.dumps(production.design_note(design)))
-        features = lgbm_runs.design_features(scope, design.variant, design.target)
-        ModelRun.objects.create(
-            run_id=f"{key}.lightgbm.h20.f099",
-            run_key=key,
-            model_type="lightgbm",
-            objective=objective,
-            version="4",
-            train_start=START,
-            train_end=END,
-            params={production.DESIGN: note},
-            feature_list=features,
-            lib_versions={},
-            feature_hash="0" * 64,
-        )
+        if finished:
+            finish_holdout(scope, key, reported)
 
 
 def use_designs(

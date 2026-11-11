@@ -1,11 +1,13 @@
 """build_run reads the holdout's verdict; a verdict short of the criteria needs a release (§7)."""
 
+import json
 from io import StringIO
 from pathlib import Path
 
 import pytest
 from django.core.management import call_command
 from django.core.management.base import CommandError
+from django.utils import timezone
 
 from apps.etl.models import DataQualityLog
 from apps.research import production
@@ -14,6 +16,7 @@ from apps.research.holdout import (
     FAILED,
     PASSED,
     HoldoutError,
+    claim_holdout,
     release_holdout,
     report_marker,
 )
@@ -21,7 +24,7 @@ from apps.research.management.commands.release_holdout import Command as Release
 from apps.research.models import HoldoutRelease, ModelRun
 from apps.research.production import HOLDOUT_RELEASE, RELEASE_CHECK, build_run
 from apps.research.runs import PRODUCTION
-from tests.research.run_panels import claim_all, weekdays, write_holdout_report
+from tests.research.run_panels import claim_all, finish_holdout, weekdays, write_holdout_report
 
 LAST = weekdays()[-1]
 REPORT = "/reports/rank-final.md"
@@ -65,8 +68,10 @@ def test_build_run_builds_on_a_holdout_that_met_its_criteria(researched: Path) -
 @pytest.mark.django_db
 @pytest.mark.parametrize("status", [FAILED, DEGRADED])
 def test_a_verdict_short_of_the_criteria_builds_only_after_its_release(
-    researched: Path, status: str
+    researched: Path, status: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    sent: list[list[DataQualityLog]] = []
+    monkeypatch.setattr(production, "dispatch", lambda rows: sent.append(list(rows)))
     claim_all(reported=status)
     write_holdout_report("rank", "rank-final", status, REPORT)
 
@@ -81,9 +86,10 @@ def test_a_verdict_short_of_the_criteria_builds_only_after_its_release(
     assert note == {
         "status": status,
         "reason": "the user accepts the 5-day MAE gap",
-        "released_at": released.released_at.isoformat(),
+        "released_at": timezone.localtime(released.released_at).isoformat(),
         "report": REPORT,
     }
+    assert str(note["released_at"]).endswith("+08:00")
     assert HOLDOUT_RELEASE not in production_note("rank-prod-shadow")
     alert = DataQualityLog.objects.get(check_name=RELEASE_CHECK)
     assert (alert.date, alert.severity) == (LAST, DataQualityLog.Severity.WARNING)
@@ -93,6 +99,7 @@ def test_a_verdict_short_of_the_criteria_builds_only_after_its_release(
         "holdout": "rank-final",
         **note,
     }
+    assert sent == [[alert]]
 
 
 @pytest.mark.django_db
@@ -120,6 +127,73 @@ def test_a_release_of_one_verdict_does_not_cover_another(researched: Path) -> No
 
     with pytest.raises(HoldoutError, match=f"was judged {FAILED}"):
         build(researched)
+
+
+@pytest.mark.django_db
+def test_a_release_covers_only_the_claim_it_was_recorded_for(researched: Path) -> None:
+    claim_all(reported=FAILED)
+    release_holdout("rank", FAILED, "the user accepts it")
+    claim_holdout("rank", "rank-again", LAST, force=True, reason="labels rebuilt")
+    finish_holdout("rank", "rank-again", FAILED)
+
+    with pytest.raises(HoldoutError, match="holdout rank-again was judged"):
+        build(researched)
+    report_marker("rank-again").unlink()
+    with pytest.raises(HoldoutError, match="holdout rank-again has no report"):
+        build(researched)
+    with pytest.raises(HoldoutError, match="rank-again has no report yet"):
+        release_holdout("rank", FAILED, "again")
+
+    assert not ModelRun.objects.filter(run_key="rank-prod").exists()
+
+
+@pytest.mark.django_db
+def test_a_release_of_one_scope_leaves_the_others_refused(researched: Path) -> None:
+    claim_all(reported=FAILED)
+    release_holdout("rank", FAILED, "the user accepts it")
+
+    with pytest.raises(HoldoutError, match="holdout interval-final was judged"):
+        build_run("interval", "interval-prod", "interval-wf1", LAST, researched)
+
+
+@pytest.mark.django_db
+def test_a_marker_of_another_scope_neither_builds_nor_releases(researched: Path) -> None:
+    claim_all(reported=FAILED)
+    write_holdout_report("return", "rank-final", FAILED)
+
+    with pytest.raises(HoldoutError, match="holdout rank-final has no report"):
+        build(researched)
+    with pytest.raises(HoldoutError, match="rank-final has no report yet"):
+        release_holdout("rank", FAILED, "the user accepts it")
+
+    assert not HoldoutRelease.objects.exists()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("stored", [json.dumps({"scope": "rank", "status": FAILED}), "{not json"])
+def test_a_marker_that_cannot_be_read_is_named_in_the_refusal(
+    researched: Path, stored: str
+) -> None:
+    claim_all(reported=FAILED)
+    report_marker("rank-final").write_text(stored, encoding="utf-8")
+    named = "rank-final/holdout.report is not a holdout report marker"
+
+    with pytest.raises(HoldoutError, match=named):
+        build(researched)
+    with pytest.raises(CommandError, match=named):
+        call_command("release_holdout", scope="rank", status=FAILED, reason="accepted")
+
+
+@pytest.mark.django_db
+def test_a_release_names_one_of_the_two_short_verdicts(researched: Path) -> None:
+    claim_all(reported="通過")
+
+    with pytest.raises(HoldoutError, match="holdout rank-final was judged 通過"):
+        build(researched)
+    with pytest.raises(HoldoutError, match=f"a release names {FAILED} or {DEGRADED}"):
+        release_holdout("rank", "通過", "the user accepts it")
+
+    assert not HoldoutRelease.objects.exists()
 
 
 @pytest.mark.django_db
