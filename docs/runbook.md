@@ -414,6 +414,7 @@ done
 `index_daily` 的 `TAIEX_TR` 是證交所的發行量加權股價報酬指數（MFI94U）：成分股的現金股利再投入，除息不會讓它下跌。`TAIEX` 是價格指數，除息時照樣扣掉股息，7、8 月除息旺季 20 日內約差 1 個百分點。研究層的 label 用還原價，要比大盤時用 `TAIEX_TR` 才同一個口徑。
 
 - 每日 15:30 的 prices 批抓一次，一個月一個請求；不擋研究閘門。品質檢查的指數新鮮度（`index_freshness`）含它，門檻和 `TAIEX` 一樣是當天要有收盤，沒有就記 warning，`detail.stale` 列出 `TAIEX_TR`。當天沒抓到時，22:50 的 `etl_runs` 檢查記 warning 並告警；隔天 15:10 的 catchup 補上後，會對那天重跑品質檢查，把那天的告警再送一次。
+- 相對大盤版的機率模型在監控時要用預測日與到期日的 `TAIEX_TR` 收盤；到期日 D 沒抓到時，隔天 06:00 的監控把這個 run 記進 `monitor_unscored`（頁面「到期預測缺 label」），catchup 不會自動補評分。等 15:10 的 catchup 補上 D 的收盤後，手動跑 `monitor --date D`。
 - 回補從 2010 年起，一個月一個請求，約 203 個、12 分鐘。先跑 `migrate`（`market.0003`），回補要在 worker 換成新程式後的第一次 15:10 之前做完；否則 `prepare_day` 的 catchup 會一天一個請求補回看期內的日子，並對那些日子重跑品質檢查、把舊告警再送一次：
 
   ```bash
@@ -539,7 +540,7 @@ uv run python manage.py rebuild_market_history
 - `model_alert` 每筆帶 `mode`：`judged` 會把 active 的 run 降級（`reason` 是 `missing_reference` 時只告警）；`grace`（上線日之前補寫的日子，以及換模後 5 個交易日）與 `reset`（`restore_run` 之後、該 slot（目標 × horizon）的窗口還沒累積滿 60 列，之後換上的 run 沿用；h20 約要 80 個交易日、h5 約 65 個）只告警。被判 run 自己的恢復日晚於告警日時（恢復後補跑之前的日子），`reset_rows` 是 0。`mostly_predecessors` 為 true 表示窗口多為前任 run 的列，人工恢復前先看這個。
 - `monitor`、`predict`、`promote`、`restore_run` 共用研究鎖，一次只跑一個（見「研究排程」）；手動指令拿不到鎖會報錯並寫出持有者，等它跑完再重跑。
 - 換模日落在交易日曆最後 4 個交易日內時，寬限結束日算不出來（log 會有 warning）；12 月換模前先照「交易日曆延伸」延伸日曆。
-- 換模：`promote --run-key K`，門檻沒過時舊模型續用並寫 `model_promotion` 告警；要強制換模用 `--force --reason "<原因>"`。門檻判斷後正常結束的 promote（換上或被擋）都寫一列 `model_promotion`；在那之前或之後任何一步報錯（例如非交易日、claim 不符、寫預測失敗），整筆回復、不寫。`detail.scope` 是 rank／return／interval（一次 promote 只處理一個 scope），`detail.promoted` 表示換了沒有：門檻全過是 info（不告警），沒過與強制換模是 warning。同一個 scope 依 id（寫入順序）最新的那一列，就是最後一次換模嘗試的結果；`promoted` 是 false 時服務中的仍是前一個 build，restore 與降級不寫這一列。`data_quality` 門檻的 reason 只寫摘要（幾天有 error、最近一天是哪些檢查），完整清單在 N 的 `params["gates"]` 那一項的 `errors`（新到舊，最多 200 筆）與 `errors_total`。晚幾天才換模時，`--date` 預設會取 slot 已有列的最後一天。換上之後，promote 會重算那天的 `output_width_ratio` 與 `output_odds_vs_q50`（換模重寫了那天的預測），超標照樣告警；重算失敗只寫 error log，換模不回復，等下一次 `monitor --date D` 再算。
+- 換模：`promote --run-key K`，門檻沒過時舊模型續用並寫 `model_promotion` 告警；要強制換模用 `--force --reason "<原因>"`。門檻判斷後正常結束的 promote（換上或被擋）都寫一列 `model_promotion`；在那之前或之後任何一步報錯（例如非交易日、claim 不符、寫預測失敗），整筆回復、不寫。`detail.scope` 是 rank／return／interval（一次 promote 只處理一個 scope），`detail.promoted` 表示換了沒有：門檻全過是 info（不告警），沒過與強制換模是 warning。同一個 scope 依 id（寫入順序）最新的那一列，就是最後一次換模嘗試的結果；`promoted` 是 false 時服務中的仍是前一個 build，restore 與降級不寫這一列。`data_quality` 門檻的 reason 只寫摘要（幾天有 error、最近一天是哪些檢查），完整清單在 N 的 `params["gates"]` 那一項的 `errors`（新到舊，最多 200 筆）與 `errors_total`。晚幾天才換模時，`--date` 預設會取 slot 已有列的最後一天。換上之後，promote 會重算那天的 `output_width_ratio` 與 `output_odds_vs_q50`（換模重寫了那天的預測），寬度比超標照樣告警，機率矛盾只記 info、不告警；重算失敗只寫 error log，換模不回復，等下一次 `monitor --date D` 再算。
 - 恢復：`restore_run --run-id R --date D --reason "<原因>"`，只接受 degraded 的 run，D 不早於它最後一個預測日、不晚於今天。
 
 ## 告警
