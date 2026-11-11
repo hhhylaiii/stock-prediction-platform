@@ -7,7 +7,7 @@ from datetime import date
 from pathlib import Path
 
 from apps.market.calendar import TradingDays
-from apps.research.experiments import Arm, Experiment, experiments, window_arms
+from apps.research.experiments import GROUP, Arm, Experiment, experiments, window_arms
 from apps.research.features.store import columns_for, read_partitions
 from apps.research.features.transforms import STOCK_LEVEL
 from apps.research.labels import HORIZONS
@@ -133,10 +133,10 @@ def group_experiment(
     group: str,
     group_kept: Sequence[str],
 ) -> Experiment:
-    """The design with the accepted groups against it with the next group; better wins."""
+    """The design with the accepted groups against it with the next group, judged on §6 step 7."""
     first = start if not accepted else with_features(start, accepted, accepted_kept or ())
     return Experiment(
-        f"group-{group}", "better", (first, with_features(start, [*accepted, group], group_kept))
+        f"group-{group}", GROUP, (first, with_features(start, [*accepted, group], group_kept))
     )
 
 
