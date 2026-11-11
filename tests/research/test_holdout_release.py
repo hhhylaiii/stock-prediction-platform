@@ -232,17 +232,25 @@ def test_a_marker_of_another_scope_neither_builds_nor_releases(researched: Path)
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize("stored", [json.dumps({"scope": "rank", "status": FAILED}), "{not json"])
+@pytest.mark.parametrize(
+    "stored",
+    [
+        json.dumps({"scope": "rank", "status": FAILED}).encode(),
+        b"{not json",
+        b'{"path": "/abs/report.md"\xff',
+    ],
+)
 def test_a_marker_that_cannot_be_read_is_named_in_the_refusal(
-    researched: Path, stored: str
+    researched: Path, stored: bytes
 ) -> None:
     claim_all(reported=FAILED)
-    report_marker("rank-final").write_text(stored, encoding="utf-8")
+    report_marker("rank-final").write_bytes(stored)
     named = "rank-final/holdout.report is not a holdout report marker"
 
     with pytest.raises(HoldoutError, match=named) as refused:
         build(researched)
     assert str(refused.value).startswith(named)
+    assert "/abs" not in str(refused.value)
     with pytest.raises(CommandError, match=named):
         call_command("release_holdout", scope="rank", status=FAILED, reason="accepted")
 

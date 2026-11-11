@@ -193,7 +193,9 @@ def reported(run_key: str) -> Reported | None:
         return Reported(**{field.name: stored[field.name] for field in fields(Reported)})
     except (ValueError, TypeError, KeyError) as error:
         named = f"{run_key}/{marker.name}"
-        raise HoldoutError(f"{named} is not a holdout report marker: {error!r}") from error
+        raise HoldoutError(
+            f"{named} is not a holdout report marker: {type(error).__name__}: {error}"
+        ) from error
 
 
 def _verdict(scope: str, key: str) -> Reported | None:
