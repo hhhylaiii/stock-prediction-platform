@@ -13,7 +13,7 @@ from apps.research.models import (
     PredictionContrib,
 )
 from tests.api.conftest import add_predictions
-from tests.e2e.conftest import Seed
+from tests.e2e.conftest import BAND_NOTE, PROB_HEAD, PROB_TIP, Seed
 
 pytestmark = pytest.mark.e2e
 
@@ -112,6 +112,24 @@ def test_the_header_ranks_the_stock_and_the_table_lists_both_horizons(
     expect(page.locator("#forecasts .sub")).to_contain_text(
         f"以 {explained.last_session.isoformat()} 收盤 1,138 換算"
     )
+    head = page.locator("#forecasts .thead .prob-head")
+    expect(head).to_have_text(PROB_HEAD)
+    expect(head).to_have_attribute("title", PROB_TIP)
+    expect(page.locator("#forecasts .band-note")).to_have_text(BAND_NOTE)
+
+
+def test_a_volatility_band_leaves_out_the_quantile_coverage_note(
+    page: Page, live_server: LiveServer, explained: Seed
+) -> None:
+    ModelRun.objects.filter(pk="quantile-h20").update(
+        status="degraded", params={"degraded_on": explained.sessions[0].isoformat()}
+    )
+    page.goto(f"{live_server.url}/#stock-2330")
+
+    rows = page.locator("#forecasts .trow")
+    expect(rows.nth(1).locator(".band-text")).to_contain_text("（波動率區間）")
+    expect(page.locator("#forecasts .note")).to_have_text("有模型降級中，結果僅供參考。")
+    expect(page.locator("#forecasts .band-note")).to_have_count(0)
 
 
 def test_the_horizon_switch_reranks_and_redraws(

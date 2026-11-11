@@ -131,7 +131,7 @@ def test_the_serving_models_are_listed_with_their_scores(
     expect(rules).to_contain_text("近 6 個月")
     expect(rules).to_contain_text("換版後接著累積")
     expect(rules).to_contain_text("報酬區間模型 20 日覆蓋率不在 70%–90%")
-    expect(rules).to_contain_text("上漲機率模型 20 日 Brier 高於 baseline")
+    expect(rules).to_contain_text("跑贏大盤機率模型 20 日 Brier 高於 baseline")
     expect(rules).to_contain_text("降級不會自動恢復，要人工 restore")
     expect(rules).to_contain_text("換模後的寬限期與 restore 後的重設期只告警、不降級")
     expect(rules).to_contain_text(
