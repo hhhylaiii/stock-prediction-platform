@@ -15,6 +15,8 @@ from apps.research.holdout import (
     PRODUCTION_FOLD,
     ProductionPass,
     authorize_production,
+    is_holdout,
+    latest_ticket,
     production_pass,
 )
 from apps.research.lgbm_runs import (
@@ -34,6 +36,7 @@ from apps.research.models import (
 )
 from apps.research.monitor import BRIER_BASELINE, IC_THRESHOLD, WINDOW
 from apps.research.monitor_refs import research_brier, research_ic_thresholds
+from apps.research.prediction_cache import fold_written
 from apps.research.rank_model import SPEC_RECIPE, Variant
 from apps.research.runs import PRODUCTION, RunError
 from apps.research.target_models import TARGET_RECIPE, TargetVariant
@@ -118,6 +121,7 @@ DESIGNS: dict[str, Design] = {
     ),
 }
 FROZEN, SPEC = "frozen", "spec"
+DESIGN = "design"
 DESIGN_NAMES = (FROZEN, SPEC)
 
 
@@ -129,6 +133,7 @@ def design_for(scope: str, name: str = FROZEN) -> Design:
 
 
 BAGS = 5
+HOLDOUT_MODELS = (baseline_runs.BASELINE, MODEL)
 SHADOW = "shadow"
 GATES = "gates"
 BASELINED = (HoldoutScope.RETURN, HoldoutScope.INTERVAL)
@@ -185,6 +190,55 @@ def _annotation(
         return {**note, **{key: value for key, value in references.items() if key == wanted}}
 
     return annotate
+
+
+def _canonical(note: Any) -> str:
+    return json.dumps(note, sort_keys=True)
+
+
+def _unwritten(granted: ProductionPass, design: Design, calendar: TradingDays) -> list[int]:
+    """Holdout folds of the scope's latest claim that its holdout has not written yet."""
+    ticket = latest_ticket(granted.scope)
+    if ticket is None:
+        return []
+    folds = generate_folds(calendar, ticket.last_date, design.config)
+    key = granted.frozen_by
+    return [
+        fold.index
+        for fold in folds
+        if is_holdout(fold) and not fold_written(key, fold.index, HOLDOUT_MODELS)
+    ]
+
+
+def holdout_mismatch(scope: str, key: str, design: Design, features: list[str]) -> str | None:
+    """Why the runs a holdout key recorded are not of this design and features, or None."""
+    runs = list(
+        ModelRun.objects.filter(run_key=key).values_list("model_type", "params", "feature_list")
+    )
+    bare = sum(1 for _, params, _ in runs if DESIGN not in params)
+    if bare:
+        return f"{bare} runs under holdout {key} recorded no design; it is not a holdout run"
+    expected = _canonical(json.loads(json.dumps(design_note(design))))
+    if {_canonical(params[DESIGN]) for _, params, _ in runs} - {expected}:
+        return f"the {scope} design is not the one holdout {key} ran"
+    if any(model == MODEL and listed != features for model, _, listed in runs):
+        return f"holdout {key} fit other features than the {scope} design reads now"
+    return None
+
+
+def check_holdout_design(
+    scope: str, granted: ProductionPass, design: Design, features: list[str], calendar: TradingDays
+) -> None:
+    """Refuse a build unless the scope's freezing holdout finished on this design and features."""
+    key = granted.frozen_by
+    if not ModelRun.objects.filter(run_key=key).exists():
+        raise RunError(f"holdout {key} recorded no run; run the {scope} holdout before building")
+    mismatch = holdout_mismatch(scope, key, design, features)
+    if mismatch:
+        raise RunError(f"{mismatch}; production builds only the design its holdout ran")
+    unwritten = _unwritten(granted, design, calendar)
+    if unwritten:
+        raise RunError(f"holdout {key} has not written folds {unwritten}; finish it first")
 
 
 def _check_keys(scope: str, run_key: str, research_run_key: str, granted: ProductionPass) -> None:
@@ -277,12 +331,13 @@ def build_run(
     calendar = TradingDays.from_db()
     research = [fold for fold in generate_folds(calendar, as_of, design.config) if fold.research]
     features = design_features(scope, design.variant, design.target)
+    check_holdout_design(scope, granted, design, features, calendar)
     _check_research(scope, research_run_key, design, features)
     references = _references(scope, research_run_key, research, design.target.relative_up)
     shared = {
         "as_of": as_of.isoformat(),
         "frozen_by": granted.frozen_by,
-        "design": design_note(design),
+        DESIGN: design_note(design),
     }
     roles = {
         "shadow": {**shared, "role": SHADOW, "shadow_of": run_key},

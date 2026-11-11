@@ -8,12 +8,13 @@ from datetime import date
 from django.db import IntegrityError, transaction
 from django.db.models import Max
 
-from apps.research.models import HoldoutRun, HoldoutScope
+from apps.research.models import HoldoutRun, HoldoutScope, ModelRun
 from apps.research.walkforward import Fold, WalkForwardConfig
 
 KEY_PATTERN = re.compile(r"[a-z0-9][a-z0-9_.-]{0,63}", re.ASCII)
 SPEC_HOLDOUT_START = WalkForwardConfig().holdout_start
 PRODUCTION_FOLD = 0
+PRODUCTION = "production"
 
 
 class HoldoutError(RuntimeError):
@@ -63,6 +64,8 @@ def claim_holdout(
         raise HoldoutError("a forced holdout rerun needs a reason")
     if HoldoutRun.objects.filter(run_key=run_key).exists():
         raise HoldoutError(f"{run_key} already holds a holdout run; a rerun needs a new run_key")
+    if ModelRun.objects.filter(run_key=run_key, params__has_key=PRODUCTION).exists():
+        raise HoldoutError(f"{run_key} holds a production build; the holdout needs its own run_key")
     attempt = _last_attempt(scope) + 1 if force else 1
     try:
         with transaction.atomic(durable=True):

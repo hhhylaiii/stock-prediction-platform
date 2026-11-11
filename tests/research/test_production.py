@@ -14,6 +14,7 @@ from apps.market.calendar import TradingDays
 from apps.research import (
     baseline_runs,
     holdout,
+    holdout_runs,
     lgbm_runs,
     monitor_refs,
     production,
@@ -54,6 +55,7 @@ from tests.research.run_panels import (
     panel_calendar,
     research,
     weekdays,
+    write_holdout_markers,
 )
 
 AS_OF = date(2026, 10, 30)
@@ -422,20 +424,24 @@ def test_build_run_fits_the_return_scope_without_references(researched: Path) ->
     assert "brier_baseline" not in model.params
 
 
+def model_fields(run_key: str) -> dict[str, Any]:
+    return {
+        "run_id": f"{run_key}.lightgbm.h20.f000",
+        "run_key": run_key,
+        "model_type": "lightgbm",
+        "objective": "rank",
+        "version": "4",
+        "train_start": date(2016, 1, 4),
+        "train_end": date(2016, 6, 1),
+        "params": {},
+        "feature_list": [],
+        "lib_versions": {},
+        "feature_hash": "0" * 64,
+    }
+
+
 def research_row(run_key: str, **params: Any) -> ModelRun:
-    return ModelRun.objects.create(
-        run_id=f"{run_key}.lightgbm.h20.f000",
-        run_key=run_key,
-        model_type="lightgbm",
-        objective="rank",
-        version="4",
-        train_start=date(2016, 1, 4),
-        train_end=date(2016, 6, 1),
-        params=params,
-        feature_list=[],
-        lib_versions={},
-        feature_hash="0" * 64,
-    )
+    return ModelRun.objects.create(**{**model_fields(run_key), "params": params})
 
 
 @pytest.mark.django_db
@@ -505,8 +511,8 @@ def test_build_run_leaves_a_settled_build_and_its_shadow_alone(researched: Path)
 def test_build_run_takes_rank_thresholds_only_from_the_frozen_design(
     researched: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    claim_all()
     monkeypatch.setitem(production.DESIGNS, "rank", Design(CONFIG))
+    claim_all()
 
     with pytest.raises(RunError, match="rank-wf1 was not fit on the frozen rank design"):
         build_run("rank", "rank-prod", "rank-wf1", weekdays()[-1], researched)
@@ -546,10 +552,62 @@ def test_build_run_refuses_missing_references_before_fitting(
 
 
 @pytest.mark.django_db
+def test_build_run_waits_for_a_holdout_that_ran_the_frozen_design(researched: Path) -> None:
+    claim_holdout("rank", "rank-final", weekdays()[-1])
+    design = production.DESIGNS["rank"]
+    note = json.loads(json.dumps(production.design_note(design)))
+    features = lgbm_runs.design_features("rank", design.variant, design.target)
+
+    def refused(message: str) -> None:
+        with pytest.raises(RunError, match=message):
+            build_run("rank", "rank-prod", "rank-wf1", weekdays()[-1], researched)
+
+    refused("holdout rank-final recorded no run")
+    bare = research_row("rank-final")
+    refused("1 runs under holdout rank-final recorded no design")
+    bare.delete()
+    other = research_row("rank-final", design={"config": {}, "variant": {}, "target": {}})
+    refused("not the one holdout rank-final ran")
+    other.delete()
+    ModelRun.objects.create(
+        **{**model_fields("rank-final"), "params": {production.DESIGN: note}, "feature_list": KEPT}
+    )
+    refused("holdout rank-final fit other features")
+    ModelRun.objects.filter(run_key="rank-final").update(feature_list=features)
+    refused(r"holdout rank-final has not written folds \[\d+\]")
+    write_holdout_markers("rank", "rank-final", models=(BASELINE,))
+    refused(r"holdout rank-final has not written folds \[\d+\]")
+    write_holdout_markers("rank", "rank-final")
+
+    build_run("rank", "rank-prod", "rank-wf1", weekdays()[-1], researched)
+
+    assert ModelRun.objects.filter(run_key="rank-prod").exists()
+
+
+@pytest.mark.django_db
+def test_build_run_accepts_the_holdout_the_runner_really_wrote(
+    researched: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    last = weekdays()[-1]
+    frozen = replace(production.DESIGNS["rank"], research_run_key="rank-wf1")
+    monkeypatch.setitem(production.DESIGNS, "rank", frozen)
+    monkeypatch.setattr(holdout_runs, "latest_price_date", lambda: last)
+
+    outcome = holdout_runs.run_holdout("rank", "rank-final", last, researched)
+
+    built = build_run("rank", "rank-prod", "rank-wf1", last, researched)
+    assert outcome.ran
+    assert built.model
+    assert ModelRun.objects.filter(run_key="rank-prod").exists()
+
+
+@pytest.mark.django_db
 @pytest.mark.parametrize("relative", [False, True])
 def test_build_run_takes_the_baseline_brier_on_the_design_s_up_label(
     researched: Path, monkeypatch: pytest.MonkeyPatch, relative: bool
 ) -> None:
+    target = TargetVariant(market=False, relative_up=relative)
+    monkeypatch.setitem(production.DESIGNS, "interval", Design(CONFIG, target=target))
     claim_all()
     asked: list[tuple[str, bool]] = []
 
@@ -558,8 +616,6 @@ def test_build_run_takes_the_baseline_brier_on_the_design_s_up_label(
         return math.nan
 
     monkeypatch.setattr(production, "research_brier", brier)
-    target = TargetVariant(market=False, relative_up=relative)
-    monkeypatch.setitem(production.DESIGNS, "interval", Design(CONFIG, target=target))
 
     with pytest.raises(RunError, match="no logistic baseline Brier"):
         build_run("interval", "interval-prod", "interval-wf1", weekdays()[-1], researched)

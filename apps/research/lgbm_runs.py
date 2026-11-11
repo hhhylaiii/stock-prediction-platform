@@ -64,11 +64,13 @@ from apps.research.rank_model import (
 )
 from apps.research.relative_up import RELATIVE_LABEL, market_digest, relative_up
 from apps.research.runs import (
+    FittedFold,
     RunError,
     feature_hash,
     label_hash,
     lib_versions,
     record_run,
+    refuse_holdout_key,
     refuse_other_layout,
     refuse_production_key,
     screened_features,
@@ -558,6 +560,28 @@ def run_fold(
         raise HoldoutError(f"fold {fold.index} is holdout; it runs once with the frozen design")
     require_candidates(run_key, fold)
     fold_path(run_key, MODEL, fold.index).unlink(missing_ok=True)
+    fitted = fit_fold(scope, fold, run_key, directory, features, seed, bags, variant, target)
+    for run, model in fitted.trained:
+        if annotate is not None:
+            run.params = {**run.params, **annotate(run)}
+        record_run(run, model, fold=fold, production=production)
+    return save_fold_predictions(
+        run_key, MODEL, fold, fitted.predictions, notes=fitted.notes, production=production
+    )
+
+
+def fit_fold(
+    scope: str,
+    fold: Fold,
+    run_key: str,
+    directory: Path,
+    features: list[str],
+    seed: int,
+    bags: int = 1,
+    variant: Variant = SPEC_RECIPE,
+    target: TargetVariant = TARGET_RECIPE,
+) -> FittedFold:
+    """Fit one fold of a scope's boosters without writing; labels may not change meanwhile."""
     labels_digest = label_digest(scope, fold, target)
     if scope == HoldoutScope.RANK:
         read = rank_fold_inputs(fold, directory, features)
@@ -567,19 +591,13 @@ def run_fold(
     if label_digest(scope, fold, target) != labels_digest:
         changed = "label_daily or TAIEX_TR" if target.relative_up else "label_daily"
         raise RuntimeError(f"{changed} changed while fitting fold {fold.index}; run it again")
-    for run, model in fitted.trained:
-        if annotate is not None:
-            run.params = {**run.params, **annotate(run)}
-        record_run(run, model, fold=fold, production=production)
     rows = read.raw.loc[read.test, ROW_KEYS].reset_index(drop=True)
     notes = {
         "feature_hash": read.feature_hash,
         "label_hash": labels_digest,
         "recipe": recipe(scope, features, seed, bags, variant, target),
     }
-    return save_fold_predictions(
-        run_key, MODEL, fold, rows.assign(**fitted.columns), notes=notes, production=production
-    )
+    return FittedFold(fitted.trained, rows.assign(**fitted.columns), notes)
 
 
 def _stale(
@@ -631,6 +649,7 @@ def run_folds(
     """Run a scope's folds without a current cache, or all with rerun; holdout is refused."""
     check_run_key(scope, run_key)
     refuse_production_key(run_key)
+    refuse_holdout_key(run_key)
     check_design(scope, variant, target)
     chosen = list(folds)
     held = [fold.index for fold in chosen if is_holdout(fold)]
