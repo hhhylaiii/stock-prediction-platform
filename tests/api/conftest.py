@@ -145,6 +145,24 @@ def add_model_run(
     )
 
 
+RELEASE_REASON = "kept for the model page"
+RELEASE_REPORT = "/srv/host/reports/rank-holdout.md"
+
+
+def release_params(status: object) -> dict[str, Any]:
+    """Production params as build_run records a release, with the given verdict in it."""
+    release = {
+        "status": status,
+        "failed": ["排名 20 日 IC"],
+        "flagged": [],
+        "reason": RELEASE_REASON,
+        "released_at": "2026-11-12T10:03:00+08:00",
+        "report": RELEASE_REPORT,
+        "sha256": "ab" * 32,
+    }
+    return {"production": {"role": "model", "holdout_release": release}}
+
+
 def add_predictions(
     run: ModelRun, day: date, horizon: int, rows: dict[str, dict[str, Any]]
 ) -> list[Prediction]:
