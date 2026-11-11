@@ -99,6 +99,51 @@ lambdarank: best 1 valid 0.4177 test IC 0.3906
 lambdarank-notrunc: best 1 valid 0.4177 test IC 0.3906
 ```
 
+## 4.8b 排名警訊摺：打亂 label 檢查
+
+凍結設計（60 個月窗、重訓輪數 max(最佳輪數, 200)）的標準摺上，`rank-std1109` 報告的洩漏警訊摺。Ridge 用規格的線性特徵，LightGBM 用凍結設計各跑 3 個 seed。第一段在 `4e69871` 跑（2026-11-09）：
+
+```
+fold 25 h5 seed 0: lightgbm -0.0174 (200 rounds)
+fold 25 h5 seed 1: lightgbm -0.0065 (200 rounds)
+fold 25 h5 seed 2: lightgbm -0.0128 (200 rounds)
+fold 25 h5 2020-04-01..2020-06-30: shuffled ridge 0.0039 lightgbm mean -0.0123 max|IC| 0.0174 60s
+fold 19 h20 seed 0: lightgbm 0.0333 (200 rounds)
+fold 19 h20 seed 1: lightgbm -0.0092 (200 rounds)
+fold 19 h20 seed 2: lightgbm -0.0333 (200 rounds)
+fold 19 h20 2018-10-01..2018-12-28: shuffled ridge 0.0127 lightgbm mean -0.0031 max|IC| 0.0333 71s
+fold 25 h20 seed 0: lightgbm -0.0015 (200 rounds)
+fold 25 h20 seed 1: lightgbm -0.0125 (200 rounds)
+fold 25 h20 seed 2: lightgbm -0.0161 (200 rounds)
+fold 25 h20 2020-04-01..2020-06-30: shuffled ridge 0.0027 lightgbm mean -0.0100 max|IC| 0.0161 70s
+fold 29 h20 seed 0: lightgbm 0.0007 (200 rounds)
+fold 29 h20 seed 1: lightgbm -0.0421 (200 rounds)
+fold 29 h20 seed 2: lightgbm 0.0379 (200 rounds)
+fold 29 h20 2021-04-01..2021-06-30: shuffled ridge 0.0025 lightgbm mean -0.0012 max|IC| 0.0421 67s
+pooled 12: mean -0.0066 sd 0.0232 t -0.99
+      269.80 real       305.23 user        61.65 sys
+```
+
+第二段在 `eba50db` 跑（2026-11-11）：補摺 24 的 5 日，並用第二批後的 60 個特徵在摺 8 跑 LightGBM（Ridge 固定用第一批特徵，不涵蓋新特徵，所以印 nan）：
+
+```
+frozen 55 features; rank-f2-w60-floor-chip-exdt 60; added ['chip_day_trade_ratio_5d', 'chip_fi_buy_streak', 'chip_fi_holding_chg_20d', 'chip_it_net_20d', 'fund_days_to_ex_date']; dropped []
+frozen fold 24 h5 seed 0: lightgbm 0.0210 (200 rounds)
+frozen fold 24 h5 seed 1: lightgbm -0.0462 (200 rounds)
+frozen fold 24 h5 seed 2: lightgbm -0.0316 (200 rounds)
+frozen fold 24 h5 2020-01-02..2020-03-31 (55 features): shuffled ridge -0.0039 lightgbm mean -0.0189 max|IC| 0.0462 73s
+f2 fold 8 h5 seed 0: lightgbm -0.0203 (391 rounds)
+f2 fold 8 h5 seed 1: lightgbm 0.0303 (200 rounds)
+f2 fold 8 h5 seed 2: lightgbm 0.0186 (200 rounds)
+f2 fold 8 h5 2016-01-04..2016-03-31 (60 features): shuffled ridge nan lightgbm mean 0.0095 max|IC| 0.0303 43s
+f2 fold 8 h20 seed 0: lightgbm -0.0011 (200 rounds)
+f2 fold 8 h20 seed 1: lightgbm -0.0038 (200 rounds)
+f2 fold 8 h20 seed 2: lightgbm -0.0110 (200 rounds)
+f2 fold 8 h20 2016-01-04..2016-03-31 (60 features): shuffled ridge nan lightgbm mean -0.0053 max|IC| 0.0110 36s
+pooled 9: mean -0.0049 sd 0.0254 t -0.58
+      153.56 real       213.61 user        55.13 sys
+```
+
 ## 耗時與峰值記憶體
 
 每一步用 `/usr/bin/time -l` 跑，取 real 與 maximum resident set size：
@@ -134,3 +179,4 @@ lambdarank-notrunc: best 1 valid 0.4177 test IC 0.3906
 | 4.8b interval 評估 | 2.0 分 | 6.98 GB |
 | 季底天數 return（seed 0） | 12.8 分 | 7.72 GB |
 | 季底天數 interval（seed 0） | 45.5 分 | 8.44 GB |
+| 4.8b 打亂（摺 24 h5；60 個特徵摺 8） | 2.6 分 | 7.45 GB |
