@@ -263,7 +263,7 @@ uv run python manage.py reapply_dividend_dates --stock 2884 --stock 2885
 | 證交所 | `/rwd/zh/exRight/TWT48U` | 不收日期參數，帶了也回當下的名單 |
 | 櫃買 | `/www/zh-tw/bulletin/prePost` | 同上；會留著本月已除權息的列 |
 
-- dataset 是 `dividend_notice`，排在 21:30 的 night 批次。不擋研究閘門；沒抓到會出現在 22:50 `etl_runs` 的 missing（warning）。名單沒有歷史，漏掉的那天沒辦法補抓，所以 catchup 不跑它，之後任何一次成功就算補上。手動抓一次（一次只能給一天，給區間會被拒絕；日期只是 `etl_run` 的標籤，內容一律是當下的名單）：
+- dataset 是 `dividend_notice`，排在 21:30 的 night 批次。不擋研究閘門；沒抓到會出現在 22:50 `etl_runs` 的 missing（warning）。名單沒有歷史，漏掉的那天沒辦法補抓，所以 catchup 不跑它，之後任何一次成功就算補上。手動抓一次（一次只能給一天，給區間會被拒絕；日期只是 `etl_run` 的標籤，內容一律是當下的名單）。22:40 之後手動抓的名單算下一個交易日的，和當晚 21:30 那份合起來就是「連續兩個交易日」，可能當場觸發刪除；沒有必要不要在 22:40 之後手動抓：
 
   ```bash
   uv run python manage.py fetch --source twse --dataset dividend_notice --date <今天>
@@ -283,12 +283,13 @@ uv run python manage.py reapply_dividend_dates --stock 2884 --stock 2885
 - 預告表新增的列在除權息日之前，金額跟著名單更新；除權息日當天結果表寫入因子後就不再跟。
 - 預告表新增的列沒有因子，不會改到任何一天的還原價（`daily_price.adj_factor` 只算有因子的事件）；除權息日當天結果表寫入後，金額、因子、還原價都和沒有預告表先寫時相同，只差多了公告日。
 - 每個來源每一列第一次、最後一次看到的交易日記在 `dividend_notice` 表：`created_event` 表示那列事件是預告表新增的，`withdrawn` 是判定它已從名單撤下的交易日（之後又列出來就清掉）。
-- 每次執行在 `data_quality_log` 留一列 `dividend_notice`（每個交易日、每個來源一列）：`listed` 名單上未到的列數、`created`／`dated`／`revised` 新增、補日期、改金額的列數、`gone` 之前列過、該還在卻不在這份名單上的列、`sound` 名單是否正常、`removed` 刪掉的列、`unsettled` 除權息日已到卻沒有因子的列。`sound` 是 false、或 `removed`、`unsettled` 不是空的時是 warning。
+- 每次執行在 `data_quality_log` 留一列 `dividend_notice`（每個交易日、每個來源一列）：`listed` 名單上未到的列數、`created`／`dated`／`revised` 新增、補日期、改金額的列數、`gone` 之前列過、該還在卻不在這份名單上的列、`sound` 名單是否正常、`removed` 刪掉的列、`unsettled` 預告表新增、除權息日已到（30 天內）卻沒有因子的列。`sound` 是 false、或 `removed`、`unsettled` 不是空的時是 warning。
 
 ### 改期或取消
 
 - 刪除的條件要全部成立：那列是預告表新增的、還沒除權息、`adj_factor` 是空的、連續兩個不同交易日的名單都沒有它、這兩次名單都正常。只缺一次不刪。
-- 名單正常：上面還有未到的除權息日，而且之前列過、該還在（除權息日還沒到、還沒判定撤下）卻不在這份名單上的列數不超過 3 列。超過就不正常，那次不刪任何列，並記 warning。
+- 名單正常：上面還有未到的除權息日，而且之前列過、該還在（除權息日還沒到、還沒判定撤下）卻不在這份名單上的列數不超過 3 列（`DIVIDEND_NOTICE_MAX_GONE`）。超過就不正常，那次不刪任何列，並記 warning。這個額度是整份名單共用的，ETF 也算在內。
+- 要暫時停掉自動刪除：把 `DIVIDEND_NOTICE_MAX_GONE` 設成 0，之後只要有列不見就只記 warning、不刪；公告日照常寫入。
 - 不見的列在判定撤下之前每天都算進去。所以名單連續幾天都缺一大段時，每天都是不正常，不會因為「和昨天一樣」就開始刪；要等名單恢復、或人工處理後才會再刪。
 - 改期時舊日期那列照上面的規則刪掉，新日期是一列新事件，`announce_date` 是改期後第一次看到的交易日。
 - 刪掉的事件之後又出現在名單上，會自動加回來，`announce_date` 沿用原本第一次看到的交易日。
@@ -380,7 +381,8 @@ uv run python manage.py reapply_dividend_dates --stock 2884 --stock 2885
 ### 重套
 
 - `reprocess` 不收 `dividend_notice`：raw 沒有日期可以對。改用 `reapply_dividend_notices`（可加 `--source twse`），它照抓取時間的先後把存過的名單逐份重套，每份算在它抓取時刻所屬的交易日。raw 每個交易日各存一份，內容和前一天完全相同也存；同一個交易日內重抓到相同內容的只存第一份。
-- 重套不會把已經判定撤下的事件加回來，也不會替除權息日已到的事件新增列（那些由結果表負責）。對每日執行跑過的資料庫重套，不會改任何列。
+- 重套不會把已經判定撤下的事件加回來，不會替除權息日已到的事件新增列（那些由結果表負責），金額只跟最新一份名單、舊名單不會把它改回去，回應的 `stat` 不正常的那幾份會跳過。對每日執行跑過的資料庫重套，`dividend_event` 與 `dividend_notice` 兩張表不會變。
+- 重套不發告警。每個交易日那列 `dividend_notice` log 會照重套當下的狀態重寫（`removed` 會保留，`created` 之類的列數會變成 0）。
 - 沒有 `--stock`：一律重套全部名單。清掉某幾檔的 `announce_date` 之後跑它，其他股票不受影響。
 
 ## 財報每日掃描
