@@ -74,6 +74,8 @@ def test_the_frozen_rank_design_reads_the_second_batch_features_that_passed() ->
     added = [name for name in features if name in SECOND_STOCK_LEVEL]
 
     assert len(features) == len(set(features)) == 60
+    assert [name for name in STOCK_LEVEL if name not in features] == ["tech_vol_60d", "fund_bp"]
+    assert list(features[:55]) == [name for name in STOCK_LEVEL if name in features]
     assert added == [
         "chip_day_trade_ratio_5d",
         "chip_fi_holding_chg_20d",
