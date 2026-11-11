@@ -11,7 +11,16 @@ from apps.market.calendar import TradingDays
 from apps.market.models import TradingCalendar
 from apps.research.models import FeatureDaily, ModelMonitor, ModelRun, Prediction
 from tests.api.conftest import add_predictions
-from tests.e2e.conftest import EXTRA_STOCKS, TPEX_EXTRAS, XSS_NAME, Seed, at
+from tests.e2e.conftest import (
+    BAND_NOTE,
+    EXTRA_STOCKS,
+    PROB_HEAD,
+    PROB_TIP,
+    TPEX_EXTRAS,
+    XSS_NAME,
+    Seed,
+    at,
+)
 
 pytestmark = pytest.mark.e2e
 
@@ -44,6 +53,22 @@ def test_today_lists_the_ranking_with_prices_and_bands(
     expect(page.locator("#today-meta")).to_contain_text("LightGBM 2026-10")
     expect(page.locator("#status")).not_to_contain_text("預測尚未產出")
     assert page.evaluate("window.__xss") is None
+
+
+def test_today_says_what_the_probability_and_the_band_mean(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    page.goto(live_server.url)
+    expect(page.locator("#rows .trow")).to_have_count(20)
+
+    expect(page.locator("#view-today .lead")).to_contain_text(
+        "20 日的 80% 價格區間與報酬跑贏大盤（加權股價報酬指數，含息）5 個百分點以上的機率"
+    )
+    head = page.locator("#prob-head")
+    expect(head).to_have_text(PROB_HEAD)
+    expect(head).to_have_attribute("title", PROB_TIP)
+    expect(page.locator("#band-note")).to_have_text(BAND_NOTE)
+    expect(page.locator("#band-note")).to_be_visible()
 
 
 def test_five_days_reads_the_five_day_models(

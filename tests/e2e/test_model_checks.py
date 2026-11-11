@@ -109,7 +109,9 @@ def test_model_output_checks_have_their_own_block(
     expect(lines.nth(1)).to_have_text(
         "quantile-h20（報酬區間 20 日）：覆蓋率超出範圍，近 60 日 65.2%，門檻 70.0%–90.0%"
     )
-    expect(lines.nth(2)).to_have_text("prob-h20（上漲機率 20 日）：Brier 缺參考值，近 60 日 0.231")
+    expect(lines.nth(2)).to_have_text(
+        "prob-h20（跑贏大盤機率 20 日）：Brier 缺參考值，近 60 日 0.231"
+    )
     expect(page.locator("#model-checks img")).to_have_count(0)
     expect(page.locator("#model-checks-sub")).to_contain_text(checked.last_session.isoformat())
 

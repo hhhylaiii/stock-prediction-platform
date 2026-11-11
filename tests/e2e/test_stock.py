@@ -13,7 +13,7 @@ from apps.research.models import (
     PredictionContrib,
 )
 from tests.api.conftest import add_predictions
-from tests.e2e.conftest import Seed
+from tests.e2e.conftest import BAND_NOTE, PROB_HEAD, PROB_TIP, Seed
 
 pytestmark = pytest.mark.e2e
 
@@ -112,6 +112,10 @@ def test_the_header_ranks_the_stock_and_the_table_lists_both_horizons(
     expect(page.locator("#forecasts .sub")).to_contain_text(
         f"以 {explained.last_session.isoformat()} 收盤 1,138 換算"
     )
+    head = page.locator("#forecasts .thead .prob-head")
+    expect(head).to_have_text(PROB_HEAD)
+    expect(head).to_have_attribute("title", PROB_TIP)
+    expect(page.locator("#forecasts .band-note")).to_have_text(BAND_NOTE)
 
 
 def test_the_horizon_switch_reranks_and_redraws(

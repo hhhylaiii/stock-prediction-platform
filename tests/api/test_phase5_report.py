@@ -28,7 +28,7 @@ CHECKS = [
     "20 日排名",
     "20 日預測價格",
     "20 日價格區間",
-    "20 日上漲機率",
+    "20 日跑贏大盤機率",
     "5 日排名、預測價格與區間",
     "2330 個股頁兩個期間",
     "2330 的特徵",
@@ -122,9 +122,9 @@ def test_a_missing_probability_fails_only_its_check(complete: Runs, tmp_path: Pa
 
     error, text = failing(tmp_path)
 
-    assert failed(text) == {"20 日上漲機率"}
-    assert checks_of(text)["20 日上漲機率"][1] == "缺 1 檔"
-    assert str(error) == "未通過：20 日上漲機率"
+    assert failed(text) == {"20 日跑贏大盤機率"}
+    assert checks_of(text)["20 日跑贏大盤機率"][1] == "缺 1 檔"
+    assert str(error) == "未通過：20 日跑贏大盤機率"
 
 
 def test_a_five_day_row_without_a_band_fails(complete: Runs, tmp_path: Path) -> None:
@@ -175,7 +175,7 @@ def test_a_page_that_fails_mid_scan_leaves_no_table(
 
     _, text = failing(tmp_path)
 
-    lacking = {"20 日排名", "20 日預測價格", "20 日價格區間", "20 日上漲機率"}
+    lacking = {"20 日排名", "20 日預測價格", "20 日價格區間", "20 日跑贏大盤機率"}
     assert failed(text) == lacking | {"5 日排名、預測價格與區間"}
     assert {checks_of(text)[name][1].split("；")[0] for name in lacking} == {"沒有最新交易日的表"}
 
@@ -187,7 +187,7 @@ def test_a_stock_missing_its_twenty_day_odds_lacks_that_horizon(
 
     _, text = failing(tmp_path)
 
-    assert failed(text) == {"20 日上漲機率", "2330 個股頁兩個期間"}
+    assert failed(text) == {"20 日跑贏大盤機率", "2330 個股頁兩個期間"}
     assert checks_of(text)["2330 個股頁兩個期間"][1] == "齊全的期間 5"
 
 
