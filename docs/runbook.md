@@ -538,8 +538,9 @@ uv run python manage.py rebuild_market_history
 2025 年起的摺是 holdout（SPEC 第 7 節 walk-forward 第 2 條），每個 scope 用凍結設計（`production.DESIGNS[scope]` 的 `research_run_key` 有值）跑一次。跑之前先問使用者。
 
 - 演練：`holdout --scope S --run-key S-rehearsal --rehearse [--fold N] --bags 1`。走同一條訓練與寫入路徑，但跑在研究摺上（預設最後一個研究摺），不 claim、不碰 holdout 摺；run_key 一律以 `<scope>-rehearsal` 開頭，正式 holdout 不收這種 key。演練寫的是一般研究快取，用完 `drop_run --run-key S-rehearsal` 清掉。
-- 正式：`holdout --scope S --run-key S-holdout-YYYYMMDD [--bags 5]`。先 `claim_holdout` 寫 `holdout_run`（last_date 是當天最新的價格日），再逐摺擬合 baseline 與 LightGBM，每摺兩個模型一起寫入一次；每個 model_run 的 `params["design"]` 記下跑的設計。
-- 中斷（重開機、記憶體不足）：用同一個 run_key 再跑一次，會沿用最新那次 claim 與它的 last_date，只補還沒寫入的摺；換 run_key 會被拒（要 `--force --reason`，那是重跑 holdout，SPEC 不允許只因結果不好而重跑）。
+- 正式：`holdout --scope S --run-key S-holdout-YYYYMMDD --output docs/reports/phase4/S-holdout-YYYYMMDD.md [--bags 5]`。先 `claim_holdout` 寫 `holdout_run`（last_date 是當天最新的價格日），再逐摺擬合 baseline 與 LightGBM，每摺兩個模型一起寫入一次；每個 model_run 的 `params["design"]` 記下跑的設計。擬合完立刻評估：判定、明顯退化旗標、參考關卡照 SPEC 第 7 節 walk-forward 第 2 條寫死，報告只寫一次（`--output` 已存在就拒跑）；排名的指標寫進 `backtest_metric`，run_key 是這次 holdout 的。評估要讀凍結設計的研究 run（`DESIGNS[S].research_run_key`）的快取來算旗標的界線，跑之前先確認它還在。
+- 演練也會照同一個模板印出報告（標「演練不作判定」），不寫 `backtest_metric`；正式跑之前看一次它的數字是否合理（天數、覆蓋率、界線來自哪幾摺）。
+- 中斷（重開機、記憶體不足）：用同一個 run_key 再跑一次，會沿用最新那次 claim 與它的 last_date，只補還沒寫入的摺，再評估寫報告（報告已寫過就拒跑）；換 run_key 會被拒（要 `--force --reason`，那是重跑 holdout，SPEC 不允許只因結果不好而重跑）。
 - claim 之後才能 `build_run`：正式 run 只建在 holdout 跑過的設計上，`production.DESIGNS[scope]` 和 holdout run 記下的設計不同、或那次 claim 還沒有任何 run，`build_run` 都拒建。
 
 ## 模型監控與換模
