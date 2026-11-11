@@ -140,7 +140,7 @@ docker compose logs -f worker
 
 - info：沒有特徵被標。`unjudged` 是這個月無法判的特徵與原因，這些特徵當天沒有這道保護：`masked_month`（當天的月份被 mask）、`short_reference`（參考不到 40 個交易日）、`empty_reference`（參考整段全空）、`zero_low`（參考的第 5 百分位是 0，那個月份本來就常常全空）。`appeared` 是參考期整段全空、線上卻有值的特徵，代表訓練窗沒看過這一欄的值，回報給負責模型的人。
 - warning：`flagged` 列出低於門檻的特徵（`share` 是線上比例、`count` 是有值的檔數、`median` 與 `low` 是參考的中位數與第 5 百分位、`bound` 是門檻）。預測照常產出。先查那個特徵的來源當天有沒有抓到（`etl_run`、來源表的當日列數）；補好來源後照下面「解除」的步驟做。告警只在被標的名單和前一個交易日不同時才發，所以同一個缺口持續時只有第一天有告警，列還是每天寫。
-- error：平常大多有值的特徵（`low` ≥ 0.5）掉到 `low` 的一半以下，那筆的 `collapsed` 是 true。當天的 `predict` 會被研究閘門擋下（`research_morning` 記 `failed: predict`、`PredictionGateError`），之後的 `monitor` 也不跑；每天都會告警。這一列留著的期間，訓練窗涵蓋 D 的正式 run 過不了每月重訓的上線門檻 (4)（訓練窗內 `data_quality_log` 無 error）。例外是讀當沖、集保、注意股的 4 個特徵（`chip_day_trade_ratio_5d`、`chip_big_holder_pct_chg_1w`、`chip_holder_count_chg_1w`、`tech_attention_t`）：這些來源研究閘門不擋，缺一天特徵就沒有值，所以崩落只給 warning（`collapsed` 是 false），預測照出。判準與每個特徵的來源見 SPEC 第 5 節與 `feature_coverage.SOURCES`。
+- error：平常大多有值的特徵（`low` ≥ 0.5）掉到 `low` 的一半以下，那筆的 `collapsed` 是 true。當天的 `predict` 會被研究閘門擋下（`research_morning` 記 `failed: predict`、`PredictionGateError`），之後的 `monitor` 也不跑；每天都會告警。同一個 D 之後的早上不會再啟動 chain（`research_morning` 改記 `research gate shut`），所以不會自己解除，要照下面「解除」手動做。這一列留著的期間，訓練窗涵蓋 D 的正式 run 過不了每月重訓的上線門檻 (4)（訓練窗內 `data_quality_log` 無 error）。例外是讀當沖、集保的 3 個特徵（`chip_day_trade_ratio_5d`、`chip_big_holder_pct_chg_1w`、`chip_holder_count_chg_1w`）：這兩項來源研究閘門不擋，缺一天特徵就沒有值，所以崩落只給 warning（`collapsed` 是 false），預測照出。判準與每個特徵的來源見 SPEC 第 5 節與 `feature_coverage.SOURCES`。
 - 解除（warning 與 error 相同，error 另外要補預測）：
   1. 修好來源，補抓缺的那幾天。
   2. `build_features --date D`。
@@ -157,7 +157,7 @@ docker compose logs -f worker
 - 檢查自己跑不起來時（例如某一年的分區不在），這一列是 warning，`detail.error` 寫原因（不含主機路徑；沒有預期到的例外只寫例外類別，完整訊息在 worker 的 log），預測照常產出。排除原因後重跑 `feature_coverage --date D`，把這一列換成真正的結果。當天已經有 error 列時不會被這種失敗蓋掉；當天先前被標的名單也會留在這一列的 `flagged`。
 - 手動跑：`feature_coverage --date D`，或 `--start S --end E`（範圍內每個交易日各寫一列）；不給日期時跑今天之前最後一個交易日。這個指令取研究鎖，排程的步驟在跑時會報錯，等它跑完再跑。
 - 缺口期間的列要留著，不要刪；缺口那幾天後來補好了，就照「解除」重跑那幾天，讓它們回到參考裡。
-- 限制：只看有沒有值，看不到值是否過期（例如新一季財報沒抓到時特徵照樣有值）；`unjudged` 裡的特徵不判（參考的下緣是 0 或參考不到 40 個交易日）。
+- 限制：只看有沒有值，看不到值是否過期（例如新一季財報沒抓到時特徵照樣有值）；0／1 旗標型的特徵（`tech_attention_t`、漲跌停的幾欄）永遠有值，來源漏抓時讀成 0，這個檢查看不到；`unjudged` 裡的特徵不判（參考的下緣是 0 或參考不到 40 個交易日）。
 
 ## 重試與失敗
 
