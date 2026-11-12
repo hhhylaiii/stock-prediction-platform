@@ -7,7 +7,8 @@ import numpy as np
 import pandas as pd
 
 from apps.market.calendar import TradingDays
-from apps.market.models import DividendEvent
+from apps.market.common_stock import COMMON_STOCK_PATTERN, DEPOSITARY_INDUSTRY, DEPOSITARY_PREFIX
+from apps.market.models import DividendEvent, StockMaster
 
 EVENT_COLUMNS = ["stock_id", "announce_date", "ex_date"]
 
@@ -23,10 +24,18 @@ def load_ex_dates(start: date, end: date, stock_ids: Sequence[str] | None = None
 
 
 def past_calendar(end: date, calendar: TradingDays) -> list[date]:
-    """Ex-dates of cash dividends announced by end that come after the calendar's last session."""
+    """Common stocks' cash ex-dates announced by end that come after the calendar's last session."""
     last = calendar.latest_on_or_before(calendar.end)
-    rows = DividendEvent.objects.filter(
-        cash_dividend__gt=0, announce_date__lte=end, ex_date__gt=last
+    depositary = StockMaster.objects.filter(industry=DEPOSITARY_INDUSTRY).values("stock_id")
+    rows = (
+        DividendEvent.objects.filter(
+            cash_dividend__gt=0,
+            announce_date__lte=end,
+            ex_date__gt=last,
+            stock_id__regex=COMMON_STOCK_PATTERN,
+        )
+        .exclude(stock_id__startswith=DEPOSITARY_PREFIX.removesuffix("%"))
+        .exclude(stock_id__in=depositary)
     )
     return sorted(rows.values_list("ex_date", flat=True))
 

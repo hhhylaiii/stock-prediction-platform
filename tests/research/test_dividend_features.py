@@ -8,7 +8,8 @@ import pytest
 from django.core.management import call_command
 
 from apps.etl.models import DataQualityLog
-from apps.market.models import DividendEvent, TradingCalendar
+from apps.market.common_stock import DEPOSITARY_INDUSTRY
+from apps.market.models import DividendEvent, StockMaster, TradingCalendar
 from apps.research.features.dividend import days_to_ex_date, load_ex_dates, past_calendar
 from apps.research.management.commands import build_features
 from apps.research.management.commands.build_features import EX_DATE_CHECK, flag_ex_dates
@@ -137,7 +138,14 @@ def test_the_ex_dates_listed_as_past_the_calendar_are_the_ones_the_feature_drops
             cash_event("2454", "2017-01-06", "2016-12-20", cash="0"),
             cash_event("2412", "2017-01-09", None),
             cash_event("3008", "2017-01-10", "2016-12-29"),
+            cash_event("0050", "2017-01-11", "2016-12-20"),
+            cash_event("00878", "2017-01-12", "2016-12-20"),
+            cash_event("9105", "2017-01-13", "2016-12-20"),
+            cash_event("1262", "2017-01-16", "2016-12-20"),
         ]
+    )
+    StockMaster.objects.create(
+        stock_id="1262", name="存託憑證", market="TWSE", industry=DEPOSITARY_INDUSTRY
     )
     day = "2016-12-28"
 
@@ -167,6 +175,43 @@ def test_ex_dates_past_the_calendar_make_one_warning_a_day_and_alert_only_when_i
     assert (row.date, row.check_name, row.severity) == (day, EX_DATE_CHECK, Severity.WARNING)
     assert row.detail == second
     assert alerts == [first, second]
+
+
+@pytest.mark.django_db
+def test_the_next_session_writes_its_own_row_and_alerts_only_on_news(
+    alerts: list[dict[str, object]],
+) -> None:
+    DividendEvent.objects.bulk_create([cash_event("2330", "2017-01-05", "2016-12-20")])
+    first = {"count": 1, "latest_ex_date": "2017-01-05", "calendar_end": "2016-12-31"}
+    second = {"count": 2, "latest_ex_date": "2017-01-12", "calendar_end": "2016-12-31"}
+
+    flag_ex_dates(d("2016-12-26"), CALENDAR)
+    flag_ex_dates(d("2016-12-27"), CALENDAR)
+    assert alerts == [first]
+    DividendEvent.objects.bulk_create([cash_event("1101", "2017-01-12", "2016-12-28")])
+    flag_ex_dates(d("2016-12-28"), CALENDAR)
+
+    assert alerts == [first, second]
+    rows = DataQualityLog.objects.order_by("date").values_list("date", "detail")
+    assert list(rows) == [
+        (d("2016-12-26"), first),
+        (d("2016-12-27"), first),
+        (d("2016-12-28"), second),
+    ]
+
+
+@pytest.mark.django_db
+def test_the_same_warning_alerts_again_after_a_session_without_a_row(
+    alerts: list[dict[str, object]],
+) -> None:
+    DividendEvent.objects.bulk_create([cash_event("2330", "2017-01-05", "2016-12-20")])
+    first = {"count": 1, "latest_ex_date": "2017-01-05", "calendar_end": "2016-12-31"}
+
+    flag_ex_dates(d("2016-12-23"), CALENDAR)
+    flag_ex_dates(d("2016-12-26"), CALENDAR)
+    flag_ex_dates(d("2016-12-28"), CALENDAR)
+
+    assert alerts == [first, first]
 
 
 @pytest.mark.django_db

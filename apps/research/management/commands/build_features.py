@@ -1,7 +1,7 @@
 """Rebuild feature_daily and its Parquet for a range, a day, or the recent days (SPEC §6)."""
 
 from argparse import ArgumentParser
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 
 from django.conf import settings
@@ -10,7 +10,7 @@ from django.db import transaction
 
 from apps.etl.alerts import dispatch
 from apps.etl.models import DataQualityLog
-from apps.market.calendar import TradingDays
+from apps.market.calendar import OutsideCalendarError, TradingDays
 from apps.research.features.build import build_feature_frame
 from apps.research.features.dividend import past_calendar
 from apps.research.features.store import export_year, write_features
@@ -21,11 +21,21 @@ RECENT_DAYS = 60
 EX_DATE_CHECK = "monitor_ex_date_calendar"
 
 
+def _reported(end: date, calendar: TradingDays) -> list[Any]:
+    """What end's row and the row of the session before end already said."""
+    try:
+        before = calendar.latest_on_or_before(end - timedelta(days=1))
+    except OutsideCalendarError:
+        before = end
+    rows = DataQualityLog.objects.filter(check_name=EX_DATE_CHECK, date__in=[before, end])
+    return [row.detail for row in rows]
+
+
 def flag_ex_dates(end: date, calendar: TradingDays) -> dict[str, Any] | None:
-    """Replace end's warning about announced ex-dates past the calendar; alert when it changed."""
+    """Replace end's warning about announced ex-dates past the calendar; alert when it is news."""
     beyond = past_calendar(end, calendar)
     rows = DataQualityLog.objects.filter(date=end, check_name=EX_DATE_CHECK)
-    earlier = [row.detail for row in rows]
+    earlier = _reported(end, calendar)
     if not beyond:
         rows.delete()
         return None
