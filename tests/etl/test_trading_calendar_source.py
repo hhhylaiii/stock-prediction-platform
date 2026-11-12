@@ -215,7 +215,11 @@ def test_an_empty_schedule_for_a_covered_year_is_a_schema_change(
 
 PUBLISHED_2027 = "twse/reference/holiday_schedule_2027_published.json"
 SETTLEMENT_ONLY = "市場無交易，僅辦理結算交割作業"
-SESSIONS_2023 = 240
+SCHEDULED_SESSIONS_2023 = 240
+
+
+def _last_day_row(detail: str) -> list[list[str]]:
+    return [["2027-02-01", "農曆春節前最後交易日", detail]]
 
 
 def test_a_last_trading_day_naming_the_closures_after_it_stays_open(
@@ -257,8 +261,8 @@ def test_a_no_trading_clause_without_a_date_is_about_its_own_row(
     load_fixture: Callable[[str], Any],
 ) -> None:
     payload = load_fixture(PUBLISHED_2027)
-    rows = [["2027-03-02", "臨時休市", "颱風來襲。市場無交易。"]]
-    assert schedule_days({**payload, "data": rows}) == {date(2027, 3, 2): (False, "市場無交易")}
+    rows = _last_day_row("颱風來襲。市場無交易。")
+    assert schedule_days({**payload, "data": rows}) == {date(2027, 2, 1): (False, "市場無交易")}
 
 
 def test_a_no_trading_clause_naming_an_impossible_day_is_a_schema_change(
@@ -288,4 +292,81 @@ def test_the_2023_wording_reads_the_same_way(load_fixture: Callable[[str], Any])
     assert days[date(2023, 1, 30)] == (True, "")
     calendar, _ = build_calendar((), date(2022, 12, 31), [payload], start=date(2023, 1, 1))
     assert calendar.is_trading_day(date(2023, 1, 17))
-    assert len(calendar.between(date(2023, 1, 1), date(2023, 12, 31))) == SESSIONS_2023
+    assert len(calendar.between(date(2023, 1, 1), date(2023, 12, 31))) == SCHEDULED_SESSIONS_2023
+
+
+def test_a_no_trading_clause_naming_a_range_closes_every_day_of_it(
+    load_fixture: Callable[[str], Any],
+) -> None:
+    payload = load_fixture(PUBLISHED_2027)
+    rows = _last_day_row("農曆春節前最後交易。2月2日至2月4日市場無交易，僅辦理結算交割作業。")
+    assert schedule_days({**payload, "data": rows}) == {
+        date(2027, 2, 1): (True, ""),
+        date(2027, 2, 2): (False, SETTLEMENT_ONLY),
+        date(2027, 2, 3): (False, SETTLEMENT_ONLY),
+        date(2027, 2, 4): (False, SETTLEMENT_ONLY),
+    }
+
+
+def test_weekdays_in_brackets_do_not_stay_in_the_note(load_fixture: Callable[[str], Any]) -> None:
+    payload = load_fixture(PUBLISHED_2027)
+    rows = _last_day_row("2月2日（星期二）及2月3日（星期三）市場無交易，僅辦理結算交割作業。")
+    assert schedule_days({**payload, "data": rows}) == {
+        date(2027, 2, 1): (True, ""),
+        date(2027, 2, 2): (False, SETTLEMENT_ONLY),
+        date(2027, 2, 3): (False, SETTLEMENT_ONLY),
+    }
+
+
+def test_a_december_row_naming_a_january_day_means_the_next_year(
+    load_fixture: Callable[[str], Any],
+) -> None:
+    payload = load_fixture(PUBLISHED_2027)
+    rows = [["2027-12-30", "國曆新年前最後交易日", "12月31日至1月3日市場無交易。"]]
+    days = schedule_days({**payload, "data": rows})
+    assert days[date(2027, 12, 30)] == (True, "")
+    assert sorted(day for day, (is_open, _) in days.items() if not is_open) == [
+        date(2027, 12, 31),
+        date(2028, 1, 1),
+        date(2028, 1, 2),
+        date(2028, 1, 3),
+    ]
+
+
+def test_a_range_that_runs_backwards_is_a_schema_change(load_fixture: Callable[[str], Any]) -> None:
+    payload = load_fixture(PUBLISHED_2027)
+    rows = _last_day_row("2月4日至2月2日市場無交易。")
+    with pytest.raises(SchemaChangedError, match="2月4日至2月2日"):
+        schedule_days({**payload, "data": rows})
+
+
+def test_a_day_named_after_the_no_trading_words_is_not_closed(
+    load_fixture: Callable[[str], Any],
+) -> None:
+    payload = load_fixture(PUBLISHED_2027)
+    rows = _last_day_row("2月2日市場無交易，僅辦理結算交割作業，2月4日恢復交易。")
+    assert schedule_days({**payload, "data": rows}) == {
+        date(2027, 2, 1): (True, ""),
+        date(2027, 2, 2): (False, "市場無交易，僅辦理結算交割作業，2月4日恢復交易"),
+    }
+
+
+def test_a_written_year_places_the_named_day(load_fixture: Callable[[str], Any]) -> None:
+    payload = load_fixture(PUBLISHED_2027)
+    rows = [["2027-06-08", "端午節前最後交易日", "117年1月3日市場無交易。"]]
+    assert schedule_days({**payload, "data": rows}) == {
+        date(2027, 6, 8): (True, ""),
+        date(2028, 1, 3): (False, "市場無交易"),
+    }
+
+
+def test_a_trading_day_another_row_closes_is_a_schema_change(
+    load_fixture: Callable[[str], Any],
+) -> None:
+    payload = load_fixture(PUBLISHED_2027)
+    rows = [
+        *_last_day_row("2月2日及2月11日市場無交易。"),
+        ["2027-02-11", "農曆春節後開始交易日", "農曆春節後開始交易。"],
+    ]
+    with pytest.raises(SchemaChangedError, match="2027-02-11 a trading day"):
+        schedule_days({**payload, "data": rows})
