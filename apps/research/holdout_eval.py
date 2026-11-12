@@ -42,16 +42,17 @@ from apps.research.walkforward import Fold
 
 MODEL, RIDGE = lgbm_runs.MODEL, rank_eval.RIDGE
 WINDOW = 8
-SPEC_LINES: dict[str, tuple[int, str]] = {
-    "record": (313, "2. 研究期與最終 holdout"),
-    "rank": (323, "- 排名："),
-    "return": (328, "- 絕對報酬（5 日）"),
-    "interval": (329, "- 區間："),
-    "probability": (331, "- 機率："),
-    "gate": (337, "- 每月重訓"),
-    "bagging": (281, "| LightGBM seed bagging"),
-    "acceptance": (392, "| Phase 4 主模型"),
+SPEC_CLAUSES: dict[str, tuple[int, str]] = {
+    "record": (7, "2. 研究期與最終 holdout"),
+    "rank": (7, "- 排名："),
+    "return": (7, "- 絕對報酬（5 日）"),
+    "interval": (7, "- 區間："),
+    "probability": (7, "- 機率："),
+    "gate": (7, "- 每月重訓"),
+    "bagging": (7, "| LightGBM seed bagging"),
+    "acceptance": (9, "| Phase 4 主模型"),
 }
+CLAUSE_MARKERS = "-|0123456789. "
 GATE_SHARE = rank_eval.GATE_SHARE
 HIGHER, LOWER, INSIDE = "higher", "lower", "inside"
 IC_FLAG = "排名 {horizon} 日 IC"
@@ -64,8 +65,9 @@ BRIER_GATE, QLIKE_GATE = "機率 Brier", "波動率 QLIKE"
 
 
 def cite(name: str) -> str:
-    """The SPEC line a criterion comes from, as docs/SPEC.md:N."""
-    return f"docs/SPEC.md:{SPEC_LINES[name][0]}"
+    """The SPEC clause a criterion comes from, by section and opening words, not by line."""
+    section, opening = SPEC_CLAUSES[name]
+    return f"docs/SPEC.md 第 {section} 節「{opening.lstrip(CLAUSE_MARKERS).rstrip('：')}」"
 
 
 @dataclass(frozen=True)

@@ -36,7 +36,7 @@ from apps.research.holdout_eval import (
     INSIDE,
     LOWER,
     PASSED,
-    SPEC_LINES,
+    SPEC_CLAUSES,
     Check,
     Flag,
     Header,
@@ -168,11 +168,24 @@ def test_a_short_verdict_is_reported_as_refused_until_the_user_releases_it() -> 
     assert "不上線" not in HANDLING[PASSED]
 
 
-def test_every_cited_spec_line_still_holds_its_clause() -> None:
+def test_every_cited_spec_clause_opens_one_line_of_its_section() -> None:
     lines = (Path(settings.BASE_DIR) / "docs" / "SPEC.md").read_text().splitlines()
 
-    for number, anchor in SPEC_LINES.values():
-        assert lines[number - 1].startswith(anchor), (number, lines[number - 1][:40])
+    for section, opening in SPEC_CLAUSES.values():
+        found = [index for index, line in enumerate(lines) if line.startswith(opening)]
+        assert len(found) == 1, (opening, found)
+        headings = [line for line in lines[: found[0]] if line.startswith("## ")]
+        assert headings[-1].startswith(f"## {section}. "), (opening, headings[-1])
+
+
+def test_a_citation_names_the_section_and_clause_without_a_line_number() -> None:
+    assert holdout_eval.cite("record") == "docs/SPEC.md 第 7 節「研究期與最終 holdout」"
+    assert holdout_eval.cite("rank") == "docs/SPEC.md 第 7 節「排名」"
+    assert holdout_eval.cite("return") == "docs/SPEC.md 第 7 節「絕對報酬（5 日）」"
+    assert holdout_eval.cite("bagging") == "docs/SPEC.md 第 7 節「LightGBM seed bagging」"
+    assert holdout_eval.cite("acceptance") == "docs/SPEC.md 第 9 節「Phase 4 主模型」"
+    for name in SPEC_CLAUSES:
+        assert ":" not in holdout_eval.cite(name), name
 
 
 @pytest.fixture
@@ -262,14 +275,15 @@ def test_the_return_holdout_report_applies_the_fixed_criteria(frozen: Path, tmp_
     later = evaluate_return(loaded, holdout_eval.scored(held)).mae["zero"]
     assert pooled.model != later.model
     assert (
-        f"| 5 日 MAE | {pooled.model:.5f} | <= 零預測 {pooled.baseline:.5f} | docs/SPEC.md:337 |"
-        in text
+        f"| 5 日 MAE | {pooled.model:.5f} | <= 零預測 {pooled.baseline:.5f} | "
+        "docs/SPEC.md 第 7 節「每月重訓」 |" in text
     )
     assert f"研究摺 {research[0]}–{research[1]}" in text
     assert text.splitlines()[4] in {f"## 結論：{status}" for status in (PASSED, FAILED, DEGRADED)}
     status = text.splitlines()[4].removeprefix("## 結論：")
     assert HANDLING[status] in text
-    assert "docs/SPEC.md:313" in text
+    assert "docs/SPEC.md 第 7 節「研究期與最終 holdout」" in text
+    assert "docs/SPEC.md:" not in text
     assert "MAE 逐摺差 NW t" in text
     assert "MAE 對過去 60 日平均的逐摺差 NW t" in text
     assert "## 每摺覆蓋率" not in text
@@ -357,14 +371,17 @@ def test_the_interval_holdout_judges_three_gates_and_lists_waived_folds(
     text = (tmp_path / "interval.md").read_text()
     for name in ("20 日總覆蓋率", "機率 Brier", "波動率 QLIKE"):
         assert f"| {name} |" in text
-    assert "## 每摺覆蓋率 70%–90%（docs/SPEC.md:313）：使用者 2026-11-11 豁免一次，不作判定" in text
+    waived = "## 每摺覆蓋率 70%–90%（docs/SPEC.md 第 7 節「研究期與最終 holdout」）"
+    assert f"{waived}：使用者 2026-11-11 豁免一次，不作判定" in text
     held = held_folds()
     research = [fold for fold in folds() if fold.research]
     assert f"| 摺 {held[0].index} 覆蓋率 |" in text
     assert "| 20 日覆蓋率 |" in text
     assert "Brier 差（模型減 logistic）" in text
     assert "pinball 對歷史分位數" in text
-    assert re.search(r"\| 分位數交叉列數 \| \d+ \| = 0 \| docs/SPEC.md:392 \|", text)
+    assert re.search(
+        r"\| 分位數交叉列數 \| \d+ \| = 0 \| docs/SPEC.md 第 9 節「Phase 4 主模型」 \|", text
+    )
     loaded = target_frame("interval-final", held, frozen, True, holdout=True)
     now = evaluate_interval(settled(loaded, 20), holdout_eval.scored(held))
     past = evaluate_interval(target_frame("interval-wf1", research, frozen, True), research)
