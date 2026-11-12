@@ -59,7 +59,7 @@ docker compose logs -f worker
 
 | 時間 | 工作 | 內容 | 備註 |
 | --- | --- | --- | --- |
-| 15:10 | `etl.prepare_day` | `refresh_calendar` 更正交易日曆（失敗寫 log，當晚 22:50 的 `etl_runs` 列出），再 `catch_up` 補抓前 14 天到前一交易日漏掉的日子；排程開始後沒跑過品質檢查的交易日（至少前一交易日）補跑，跑過但還有告警的重新判斷 | 先補抓再跑當日 |
+| 15:10 | `etl.prepare_day` | 先做日曆維護（延伸嘗試與 `calendar_reach`，見下方「交易日曆延伸」；失敗只寫 log）；`refresh_calendar` 更正交易日曆（失敗寫 log，當晚 22:50 的 `etl_runs` 列出），再 `catch_up` 補抓前 14 天到前一交易日漏掉的日子；排程開始後沒跑過品質檢查的交易日（至少前一交易日）補跑，跑過但還有告警的重新判斷 | 先補抓再跑當日 |
 | 15:30 | `etl.run_batch prices` | 證交所、櫃買日價量與指數；證交所加權股價報酬指數，見下方「加權股價報酬指數」；當天的除權息、減資、面額變更，見下方「每日除權息、減資、面額變更」 | 除權息、恢復買賣的結果表在當天開盤前就公布 |
 | 16:00 | `etl.refresh_master` | 用當天行情更新 `stock_master` 與 `market_history`（見下方「市場歷史」） | — |
 | 16:30 | `etl.run_batch afternoon` | 三大法人、本益比與淨值比、注意、處置、全額交割 | 借券、當沖、證交所外資持股與發行股數在 21:30；櫃買外資持股與發行股數在 18:30 |
@@ -753,13 +753,78 @@ warning 與 error 一律寫 log；`.env` 設了 `ALERT_WEBHOOK_URL` 就另外 PO
 
 Slack 類的 incoming webhook 會顯示頂層的 `text`；完整內容在 `alerts`。webhook 失敗只寫 log，不影響 ETL。
 
+info 的列不送，唯一例外是 `calendar_reach` 的級別變好（延伸成功）那一次。
+
 ## 交易日曆延伸
 
-`trading_calendar` 只到證交所已公布開休市表的年底。每年 12 月證交所公布隔年的表之後要重跑一次，否則 1 月 1 日起每個排程工作都會因為日期在日曆範圍外而失敗：
+`trading_calendar` 只到證交所已公布開休市表的年底。日期一超出日曆，每個排程工作都會在讀日曆時失敗，所以隔年的表要在年底前接上。
+
+### 自動延伸
+
+`etl.prepare_day`（15:10）最前面先做日曆維護，在交易日跑；日曆用完之後則每天跑。
+
+- 已確認（非暫定）且在今天之後的交易日少於 `CALENDAR_EXTEND_BELOW`（預設 90）時，問一次證交所隔年的開休市表。
+- 還沒公布：什麼都不寫。
+- 已公布：新增隔年每一天，寫一筆 `etl_run`（`trading_calendar`／`trading_calendar_extend`）。既有的已確認日不動。
+- 算出來的交易日數不在 235 到 255 天、或 1 月 1 日是交易日，就不寫日曆，`etl_run` 記成 failed：開休市表若只先公布一部分，會算出將近 260 天的假日曆。這時 `calendar_reach` 會是 warning 並告警，要人看過表再手動處理。
+- 這筆 run 不在 22:50 `etl_runs` 的期望清單裡，沒公布或被擋下都不影響研究閘門。
+
+### `calendar_reach`
+
+每次維護寫一列 `data_quality_log`（date 是當天）：
+
+| `detail` | 意思 |
+| --- | --- |
+| `sessions_left` | 今天之後已確認的交易日數，暫定日不算 |
+| `ends` | 已確認的最後一天 |
+| `provisional_to` | 暫定日的最後一天，沒有就是空 |
+| `level` | 0：超過 60 天；1、2、3：剩 60、40、25 天以內 |
+| `extension` | 這次延伸嘗試的結果：`not_needed`、`unpublished`、`extended`、`refused`、`failed`、`no_year_end` |
+
+- 級別 0 是 info，其他是 warning；永遠不寫 error，不擋研究閘門與換模門檻。
+- 告警：級別和上一列不同時發一次（延伸成功、級別變好那次也發）；級別 3 每天發；`refused` 每天發。同一天重跑不重發。
+- `no_year_end` 表示已確認的最後一天不是 12 月 31 日，自動延伸不處理，用下面的手動方式補到年底。
+
+### 手動延伸
 
 ```bash
 uv run python manage.py load_calendar --from 2026-12-01
 ```
+
+隔年還沒公布時會多印一行 `trading_calendar: TWSE has not published the 2027 schedule; confirmed days end 2026-12-31`。
+
+### 暫定日曆
+
+證交所遲遲不公布時，用檔案先載一份暫定的，讓排程繼續跑。檔案多帶 `"provisional": true`，檔內每一天都標成暫定（`trading_calendar.is_provisional`）：
+
+```json
+{"start": "2027-01-01", "end": "2027-12-31", "trading_days": ["2027-01-04"], "notes": {"2027-01-01": "中華民國開國紀念日"}, "provisional": true}
+```
+
+```bash
+uv run python manage.py load_calendar --file <暫定檔>
+```
+
+- 暫定檔只能接在已確認的最後一天之後，蓋到已確認日會被拒絕。
+- 暫定日不算進 `calendar_reach`，自動延伸照樣每天問；正式的表公布後，今天起的暫定日依表改寫並取消暫定，已經過去的暫定日只取消暫定（過去的日子由 `refresh_calendar` 依實際交易日更正）。
+- `load_calendar --from` 與不帶 `provisional` 的檔案寫到的日子一律變成已確認。
+
+### 日曆更正後要重建什麼
+
+`load_calendar`、`refresh_calendar`、自動延伸只要把既有某一天的開休市翻過來，就寫一列 `calendar_changed`（date 是執行當天、warning，會告警）：`detail.days` 是每個被翻的日子原本與現在的狀態，`detail.earliest` 是最早的一天 D。只改說明、取消暫定、新增日子都不寫。重建不會自動觸發：
+
+- D 還沒到：只影響往後數交易日的特徵（例如距離除息日的天數）；每晚的研究鏈會重算最近 60 個交易日的特徵，不用動手。
+- D 已經過去：
+
+```bash
+uv run python manage.py build_features --start <D>
+uv run python manage.py build_labels --start <D 往前 21 個交易日>
+uv run python manage.py monitor --date <受影響的到期日，逐日>
+```
+
+D 離今天不超過 60 個交易日時，每晚的鏈會自己改正特徵（label 是 81 個交易日），仍建議手動跑一次並確認筆數。
+
+### 日曆不夠長時研究層留下的紀錄
 
 日曆不夠長時，研究層會留下兩種 warning（都會告警，都不是 error）：
 
