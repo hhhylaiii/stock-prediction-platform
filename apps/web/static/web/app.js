@@ -42,6 +42,7 @@
     output_odds_vs_q50: '機率與中位數矛盾',
     monitor_unscored: '到期預測缺 label',
     monitor_feature_coverage: '線上特徵覆蓋率',
+    monitor_ex_date_calendar: '除息日超出交易日曆',
     model_alert: '模型告警',
     model_promotion: '換模',
     model_holdout_release: 'holdout 放行後建模',
@@ -1117,6 +1118,7 @@
       case 'output_odds_vs_q50': return ['', [d.flagged ? '參考，' + stocks : '沒有標記']];
       case 'monitor_unscored': return ['warn', [fmtInt(sizeOf(d.runs)) + ' 筆']];
       case 'monitor_feature_coverage': return [check.severity === 'info' ? '' : 'warn', coverageLines(d)];
+      case 'monitor_ex_date_calendar': return ['warn', [fmtInt(d.count || 0) + ' 筆，最晚 ' + (d.latest_ex_date || '—') + '；交易日曆只到 ' + (d.calendar_end || '—')]];
       case 'model_alert': return ['warn', (d.runs || []).map(run => alertLine(run, date))];
       case 'model_promotion': return [check.severity === 'info' ? '' : 'warn', promotionLines(d)];
       case 'model_holdout_release': return ['warn', releaseLines(d)];

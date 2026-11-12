@@ -10,6 +10,7 @@ from apps.market.adjust import ADJ_CHECK, _merged
 from apps.market.calendar import TradingDays
 from apps.research import production, tasks
 from apps.research.gates import SAMPLE_UNITS, Gate, SlotGates
+from apps.research.management.commands.build_features import EX_DATE_CHECK
 from apps.research.monitor import MODE_FIELDS, MODES, alert_problems
 from apps.research.predict import Slot
 from apps.research.promotion import Promoted, _failed, _note
@@ -216,6 +217,19 @@ def test_a_coverage_row_reads_as_low_in_range_or_not_run(
         expect(row.locator("i")).not_to_have_class("warn")
     else:
         expect(row.locator("i")).to_have_class("warn")
+
+
+def test_ex_dates_past_the_calendar_read_their_count_the_latest_and_the_calendar_s_end(
+    page: Page, live_server: LiveServer, seeded: Seed
+) -> None:
+    detail = {"count": 1234, "latest_ex_date": "2027-01-12", "calendar_end": "2026-12-31"}
+    log(seeded, EX_DATE_CHECK, "warning", detail)
+
+    page.goto(f"{live_server.url}/#models")
+
+    row = page.locator("#model-checks .check").filter(has_text="除息日超出交易日曆")
+    expect(row).to_contain_text("1,234 筆，最晚 2027-01-12；交易日曆只到 2026-12-31")
+    expect(row.locator("i")).to_have_class("warn")
 
 
 ALERT = {
