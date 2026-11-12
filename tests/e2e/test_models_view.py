@@ -356,7 +356,7 @@ def test_holdout_months_are_not_called_the_research_period(
     expect(page.locator("#ic-chart rect.bar-model")).to_have_count(24)
     sub = page.locator("#ic-sub")
     expect(sub).to_contain_text(
-        f"holdout（設計定案後只跑一次的驗證期）的月平均，近 24 個月（{XSS_KEY}）。"
+        f"holdout（設計定案後才跑的驗證期）的月平均，近 24 個月（{XSS_KEY}）。"
     )
     expect(sub).to_contain_text("LightGBM 有 21 個月高於 Ridge")
     expect(sub).not_to_contain_text("研究期")
@@ -384,6 +384,30 @@ def test_a_rank_score_read_from_the_holdout_says_so(
     expect(rows.nth(1)).to_contain_text("holdout rank IC 0.033，ICIR 0.51；Ridge 0.021，ICIR 0.37")
     expect(rows.nth(1)).not_to_contain_text("研究期")
     expect(page.locator("#ic-sub")).to_contain_text("walk-forward 研究期的月平均")
+
+
+def test_a_research_run_named_by_the_serving_model_is_called_research(
+    page: Page, live_server: LiveServer, scored: Seed
+) -> None:
+    ModelRun.objects.filter(pk="rank-h20").update(params={"research_run_key": "rank-research"})
+    BacktestMetric.objects.bulk_create(
+        [
+            metric("lightgbm", "rank_ic", 0.055, run_key="rank-research"),
+            metric("lightgbm", "rank_icir", 0.71, run_key="rank-research"),
+            metric("ridge", "rank_ic", 0.031, run_key="rank-research"),
+            metric("ridge", "rank_icir", 0.44, run_key="rank-research"),
+            *month_rows("rank-research"),
+        ]
+    )
+
+    page.goto(f"{live_server.url}/#models")
+
+    rows = page.locator("#model-table .trow")
+    expect(rows.nth(0)).to_contain_text("研究期 rank IC 0.055，ICIR 0.71；Ridge 0.031，ICIR 0.44")
+    expect(rows.nth(0)).not_to_contain_text("holdout rank IC")
+    expect(page.locator("#ic-sub")).to_contain_text(
+        "walk-forward 研究期的月平均，近 24 個月（上線模型指定的研究，rank-research）。"
+    )
 
 
 def test_nothing_served_or_researched_yet(

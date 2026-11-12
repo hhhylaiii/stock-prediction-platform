@@ -912,7 +912,7 @@
       }
       const model = modelName(meta.model_type), baseline = modelName(meta.baseline);
       legend.innerHTML = '<span><i class="sw-sq" style="background:var(--model)"></i>' + esc(model) + '</span><span><i class="sw-sq" style="background:var(--ink-4)"></i>' + esc(baseline) + '</span>';
-      sub.textContent = (meta.source === 'holdout' ? 'holdout（設計定案後只跑一次的驗證期）的月平均，近 ' + data.length + ' 個月（' : 'walk-forward 研究期的月平均，近 ' + data.length + ' 個月（' + (IC_SOURCES[meta.source] || meta.source) + '，') + meta.run_key + '）。' +
+      sub.textContent = (meta.source === 'holdout' ? 'holdout（設計定案後才跑的驗證期）的月平均，近 ' + data.length + ' 個月（' : 'walk-forward 研究期的月平均，近 ' + data.length + ' 個月（' + (IC_SOURCES[meta.source] || meta.source) + '，') + meta.run_key + '）。' +
         model + ' 有 ' + meta.above_baseline + ' 個月高於 ' + baseline + '，負值月份 ' + meta.negative + ' 個；天數少於 ' + meta.min_days + ' 天的月份不計，以淡色表示。';
       drawIcChart(host, data, meta);
     } catch (err) {
