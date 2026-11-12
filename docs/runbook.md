@@ -801,6 +801,8 @@ info 的列不送，唯一例外是 `calendar_reach` 在延伸成功、或級別
 uv run python manage.py load_calendar --from 2026-12-01
 ```
 
+`--from` 要早於今天，否則指令直接報錯（上面是 2026-12-02 以後跑的寫法，更早跑就換成已經過去的日子）：那天到昨天照 FMTQIK 的實際交易日重寫，今天起照開休市表。
+
 跑之前先記下證交所公告的隔年交易日數，跑完用「自動延伸」那段的查詢對一次；手動與自動用的是同一套解析。
 
 隔年還沒公布時會多印一行 `trading_calendar: TWSE has not published the 2027 schedule; confirmed days end 2026-12-31`。今年與隔年的表同樣要過上面三項檢查，不過就整個指令失敗、什麼都不寫；確認證交所的表沒問題而檢查太嚴時，改用 `--file` 載入人工整理的檔案。
