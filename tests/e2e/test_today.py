@@ -232,6 +232,18 @@ def test_five_days_without_the_return_model_says_so(
     expect(page.locator("#model-note")).to_be_hidden()
 
 
+def test_a_day_without_the_volatility_model_says_nothing_on_the_list(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    Prediction.objects.filter(run_id="vol-h20").delete()
+
+    page.goto(live_server.url)
+
+    expect(page.locator("#rows .trow")).to_have_count(20)
+    expect(page.locator("#band-note")).to_be_visible()
+    expect(page.locator("#model-note")).to_be_hidden()
+
+
 def test_a_request_that_fails_after_a_good_one_clears_both_notes(
     page: Page, live_server: LiveServer, predicted: Seed
 ) -> None:

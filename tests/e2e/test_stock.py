@@ -184,21 +184,23 @@ def test_a_model_serving_both_horizons_on_different_days_is_named_once(
 def test_the_forecasts_say_which_models_have_no_prediction_per_horizon(
     page: Page, live_server: LiveServer, explained: Seed
 ) -> None:
-    Prediction.objects.filter(run_id__in=["reg-h5", "quantile-h20", "prob-h20"]).delete()
+    Prediction.objects.filter(run_id__in=["reg-h5", "quantile-h20", "vol-h20", "prob-h20"]).delete()
 
     page.goto(f"{live_server.url}/#stock-2330")
 
     rows = page.locator("#forecasts .trow")
-    expect(rows.nth(1).locator(".band-text")).to_contain_text("（波動率區間）")
+    expect(rows.nth(1).locator(".band-text")).to_contain_text("（近 20 日波動估計）")
     note = page.locator("#forecasts .model-note")
     expect(note).to_have_text(
         "5 日沒有絕對報酬模型的預測：預測報酬、預測價留空。"
-        "20 日沒有報酬區間、跑贏大盤機率模型的預測：預測報酬、預測價、跑贏大盤機率留空，"
+        "20 日沒有報酬區間、波動率、跑贏大盤機率模型的預測："
+        "預測報酬、預測價、預測 20 日波動、跑贏大盤機率留空，"
         f"價格區間改用波動估計。{ONLINE}"
     )
     expect(note.locator("a")).to_have_text("上線中的模型列在模型頁")
     expect(note.locator("a")).to_have_attribute("href", "#models")
     expect(page.locator("#forecasts .band-note")).to_have_count(0)
+    expect(page.locator("#forecasts .list + .model-note + .pair")).to_have_count(1)
 
 
 def test_only_the_horizon_that_lacks_a_model_is_named(
@@ -212,6 +214,64 @@ def test_only_the_horizon_that_lacks_a_model_is_named(
         f"20 日沒有跑贏大盤機率模型的預測：跑贏大盤機率留空。{ONLINE}"
     )
     expect(page.locator("#forecasts .band-note")).to_have_text(BAND_NOTE)
+    expect(page.locator("#forecasts .band-note + .model-note + .pair")).to_have_count(1)
+
+
+def test_five_days_lacking_alone_names_five_days(
+    page: Page, live_server: LiveServer, explained: Seed
+) -> None:
+    Prediction.objects.filter(run_id="reg-h5").delete()
+
+    page.goto(f"{live_server.url}/#stock-2330")
+
+    expect(page.locator("#forecasts .model-note")).to_have_text(
+        f"5 日沒有絕對報酬模型的預測：預測報酬、預測價留空。{ONLINE}"
+    )
+
+
+def test_a_missing_volatility_model_alone_is_named(
+    page: Page, live_server: LiveServer, explained: Seed
+) -> None:
+    Prediction.objects.filter(run_id="vol-h20").delete()
+
+    page.goto(f"{live_server.url}/#stock-2330")
+
+    expect(page.locator("#forecasts .pair")).to_contain_text("預測 20 日波動（年化）—")
+    expect(page.locator("#forecasts .model-note")).to_have_text(
+        f"20 日沒有波動率模型的預測：預測 20 日波動留空。{ONLINE}"
+    )
+    expect(page.locator("#forecasts .band-note")).to_have_text(BAND_NOTE)
+
+
+def test_a_band_from_the_volatility_model_counts_as_an_estimate(
+    page: Page, live_server: LiveServer, explained: Seed
+) -> None:
+    Prediction.objects.filter(run_id__in=["quantile-h20", "prob-h20"]).delete()
+
+    page.goto(f"{live_server.url}/#stock-2330")
+
+    rows = page.locator("#forecasts .trow")
+    expect(rows.nth(1).locator(".band-text")).to_contain_text("（波動率區間）")
+    expect(page.locator("#forecasts .model-note")).to_have_text(
+        "20 日沒有報酬區間、跑贏大盤機率模型的預測：預測報酬、預測價、跑贏大盤機率留空，"
+        f"價格區間改用波動估計。{ONLINE}"
+    )
+
+
+def test_a_stock_without_any_band_is_not_told_one_was_estimated(
+    page: Page, live_server: LiveServer, explained: Seed
+) -> None:
+    Prediction.objects.filter(run_id__in=["quantile-h20", "vol-h20", "prob-h20"]).delete()
+    FeatureDaily.objects.filter(stock_id="2330").update(tech_vol_20d=None)
+
+    page.goto(f"{live_server.url}/#stock-2330")
+
+    rows = page.locator("#forecasts .trow")
+    expect(rows.nth(1).locator(".band-text")).to_have_text("—")
+    expect(page.locator("#forecasts .model-note")).to_have_text(
+        "20 日沒有報酬區間、波動率、跑贏大盤機率模型的預測："
+        f"預測報酬、預測價、80% 區間、預測 20 日波動、跑贏大盤機率留空。{ONLINE}"
+    )
 
 
 def test_a_horizon_without_a_prediction_for_the_stock_is_not_explained(
@@ -311,6 +371,7 @@ def test_a_stock_without_predictions_says_so(
 
     expect(page.locator(".stockhead .kpi .v")).to_contain_text("尚未產出")
     expect(page.locator("#forecasts")).to_contain_text("預測資料尚未產出。")
+    expect(page.locator("#forecasts .model-note")).to_have_count(0)
     expect(page.locator("#features")).to_contain_text("預測資料尚未產出。")
     expect(page.locator("#history")).to_contain_text("還沒有到期的預測。")
     expect(page.locator("#chart-title")).to_have_text("過去 60 個交易日")

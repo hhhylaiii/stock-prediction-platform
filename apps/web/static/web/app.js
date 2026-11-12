@@ -253,14 +253,17 @@
     return '<div class="empty">沒有符合條件的股票。</div>';
   }
 
-  function lackingText(models, horizon) {
+  function lackingText(models, horizon, own) {
     const twenty = horizon === 20;
     const serving = new Set((models || []).map(model => model.role));
+    const estimated = twenty && !serving.has('interval') && (!own || Boolean(own.interval));
     const lacking = [], blank = [];
     if (!serving.has('return')) { lacking.push(OBJECTIVES[twenty ? 'quantile' : 'regression']); blank.push('預測報酬', '預測價'); }
+    if (twenty && own && !serving.has('interval') && !own.interval) blank.push('80% 區間');
+    if (twenty && own && !serving.has('volatility')) { lacking.push(OBJECTIVES.volatility); blank.push('預測 20 日波動'); }
     if (twenty && !serving.has('probability')) { lacking.push(OBJECTIVES.classification); blank.push('跑贏大盤機率'); }
     if (!lacking.length) return '';
-    return '沒有' + lacking.join('、') + '模型的預測：' + blank.join('、') + '留空' + (twenty && !serving.has('interval') ? '，價格區間改用波動估計' : '') + '。';
+    return '沒有' + lacking.join('、') + '模型的預測：' + blank.join('、') + '留空' + (estimated ? '，價格區間改用波動估計' : '') + '。';
   }
 
   function modelNoteText(meta, shown) {
@@ -495,7 +498,7 @@
     const rank = (twenty.models || []).find(model => model.role === 'rank') || (entries.flatMap(entry => entry.models || []).find(model => model.role === 'rank'));
     const degraded = entries.some(entry => (entry.degraded || []).length);
     const caveats = caveatText(entries.flatMap(entry => shownModels(entry.models, entry.horizon)));
-    const lacking = entries.filter(entry => entry.prediction).map(entry => [entry.horizon, lackingText(entry.models, entry.horizon)])
+    const lacking = entries.filter(entry => entry.prediction).map(entry => [entry.horizon, lackingText(entry.models, entry.horizon, entry.prediction)])
       .filter(([, text]) => text).map(([horizon, text]) => horizon + ' 日' + text).join('');
     return '<p class="sub">排名、報酬與區間機率各由自己的模型產出；排名模型多用了幾個籌碼與除息日特徵，其餘特徵相同。價格以 ' + basis + ' 換算。</p><div class="list">' +
       '<div class="thead h-cols" style="padding-top:10px"><div>期間</div><div class="right">預測報酬</div><div class="right">預測價</div><div class="right">80% 區間</div><div class="right prob-head" title="' + esc(PROB_TIP) + '">' + PROB_HEAD + '</div></div>' +
