@@ -166,6 +166,23 @@ def test_the_threshold_comes_from_settings(settings: Any) -> None:
 
 
 @responses.activate
+def test_a_threshold_of_zero_never_asks_yet_still_records_and_announces_the_reach(
+    settings: Any, sent: list[list[tuple[date, str, str]]]
+) -> None:
+    settings.CALENDAR_EXTEND_BELOW = 0
+    _calendar(date(2026, 10, 1), date(2026, 12, 31))
+    before = _stored()
+    today = date(2026, 12, 30)
+    assert keep_up(today) == Extension.NOT_NEEDED
+    assert len(responses.calls) == 0
+    assert _stored() == before
+    assert not EtlRun.objects.exists()
+    detail = _reach(today).detail
+    assert (detail["extension"], detail["sessions_left"], detail["level"]) == ("not_needed", 1, 3)
+    assert sent == [[(today, REACH, "warning")]]
+
+
+@responses.activate
 def test_a_published_year_replaces_provisional_days_and_records_the_flips(
     load_fixture: Callable[[str], Any], sent: list[list[tuple[date, str, str]]]
 ) -> None:
