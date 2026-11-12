@@ -370,3 +370,56 @@ def test_a_trading_day_another_row_closes_is_a_schema_change(
     ]
     with pytest.raises(SchemaChangedError, match="2027-02-11 a trading day"):
         schedule_days({**payload, "data": rows})
+
+
+@pytest.mark.parametrize(
+    "detail",
+    [
+        "2月2、3日市場無交易。",
+        "2/2及2/3市場無交易。",
+        "2 月 2 日市場無交易。",
+        "2月2日至3日市場無交易。",
+        "2月2日~2月4日市場無交易。",
+        "2月2日起至2月4日止市場無交易。",
+        "2027年2月2日市場無交易。",
+        "二月二日市場無交易。",
+        "2月1日為農曆春節前最後交易日，2月2日及2月3日市場無交易。",
+        "2月2日市場無交易，2月3日亦無交易。",
+    ],
+)
+def test_a_no_trading_clause_read_only_in_part_is_a_schema_change(
+    load_fixture: Callable[[str], Any], detail: str
+) -> None:
+    payload = load_fixture(PUBLISHED_2027)
+    with pytest.raises(SchemaChangedError, match="cannot be read"):
+        schedule_days({**payload, "data": _last_day_row(detail)})
+
+
+@pytest.mark.parametrize(
+    ("detail", "closed"),
+    [
+        ("2月2日（星期二）至2月4日（星期四）市場無交易，僅辦理結算交割作業。", [2, 3, 4]),
+        ("2月2日(星期二)及2月3日(星期三)市場無交易，僅辦理結算交割作業。", [2, 3]),
+        ("2月2日、2月3日市場無交易，僅辦理結算交割作業。", [2, 3]),
+        ("2月2日與2月3日市場無交易，僅辦理結算交割作業。", [2, 3]),
+        ("2月2日和2月3日市場無交易，僅辦理結算交割作業。", [2, 3]),
+    ],
+)
+def test_the_ways_of_joining_named_days_all_read_and_leave_a_clean_note(
+    load_fixture: Callable[[str], Any], detail: str, closed: list[int]
+) -> None:
+    payload = load_fixture(PUBLISHED_2027)
+    expected: dict[date, tuple[bool, str]] = {date(2027, 2, 1): (True, "")}
+    expected.update({date(2027, 2, of_month): (False, SETTLEMENT_ONLY) for of_month in closed})
+    assert schedule_days({**payload, "data": _last_day_row(detail)}) == expected
+
+
+def test_a_january_row_naming_a_december_day_means_the_year_before(
+    load_fixture: Callable[[str], Any],
+) -> None:
+    payload = load_fixture(PUBLISHED_2027)
+    rows = [["2027-01-04", "國曆新年開始交易日", "12月31日市場無交易。"]]
+    assert schedule_days({**payload, "data": rows}) == {
+        date(2027, 1, 4): (True, ""),
+        date(2026, 12, 31): (False, "市場無交易"),
+    }

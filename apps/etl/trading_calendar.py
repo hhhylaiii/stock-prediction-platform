@@ -24,12 +24,14 @@ TRADING_REMINDER = "交易日"
 NOTE_LIMIT = 64
 ROC_YEAR = r"(?:(\d{2,3})年)?"
 ROC_OFFSET = 1911
-WEEKDAY = r"(?:[（(][^）)]*[）)])?"
+BRACKETED = r"[（(][^）)]*[）)]"
+WEEKDAY = rf"(?:{BRACKETED})?"
 ONE_DAY = rf"{ROC_YEAR}(\d{{1,2}})月(\d{{1,2}})日"
 NAMED_DAY = re.compile(ONE_DAY)
 DAY_RANGE = re.compile(rf"{ONE_DAY}{WEEKDAY}至{ONE_DAY}")
 LEADING_DAYS = re.compile(rf"^(?:(?:\d{{2,3}}年)?\d{{1,2}}月\d{{1,2}}日{WEEKDAY}[及、與和至]?)+")
 HALF_YEAR = timedelta(days=183)
+SUBJECT_FILLER = re.compile(rf"[及、與和至\s]|市場|{BRACKETED}")
 ScheduledDay = tuple[bool, str]
 
 
@@ -58,13 +60,18 @@ def _no_trading(day: date, name: str, detail: str) -> dict[date, str]:
 
     A clause naming days before 無交易 is about those days: the last trading day before a holiday
     lists the settlement-only days after it. A clause naming none is about the row's own day.
+    Anything else before 無交易 than days, their joiners and 市場 is refused, not guessed at.
     """
     closed: dict[date, str] = {}
     for text in (name, *detail.split("。")):
         if NO_TRADING not in text:
             continue
         note = LEADING_DAYS.sub("", text.strip()).strip().rstrip("。")
-        subject = text.split(NO_TRADING, 1)[0]
+        subject, rest = text.split(NO_TRADING, 1)
+        if NO_TRADING in rest or SUBJECT_FILLER.sub("", NAMED_DAY.sub("", subject)):
+            raise SchemaChangedError(
+                f"TWSE holiday schedule has a no-trading clause that cannot be read: {text.strip()}"
+            )
         for target in _named_days(day, subject) or [day]:
             closed.setdefault(target, note)
     return closed
@@ -93,8 +100,9 @@ def _named(day: date, roc_year: str, month: str, of_month: str) -> date:
         if abs(found - day) > HALF_YEAR:
             found = found.replace(year=day.year + (1 if found < day else -1))
     except ValueError:
+        written = f"{roc_year}年" if roc_year else ""
         raise SchemaChangedError(
-            f"TWSE holiday schedule names {roc_year}{month}月{of_month}日, which does not exist"
+            f"TWSE holiday schedule names {written}{month}月{of_month}日, which does not exist"
         ) from None
     return found
 
