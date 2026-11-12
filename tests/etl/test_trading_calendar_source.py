@@ -211,3 +211,81 @@ def test_an_empty_schedule_for_a_covered_year_is_a_schema_change(
     empty = {**load_fixture("twse/reference/holiday_schedule_2027.json"), "queryYear": 2026}
     with pytest.raises(SchemaChangedError, match="2026"):
         build_calendar({date(2026, 10, 30)}, date(2026, 10, 31), [empty], start=date(2026, 10, 30))
+
+
+PUBLISHED_2027 = "twse/reference/holiday_schedule_2027_published.json"
+SETTLEMENT_ONLY = "市場無交易，僅辦理結算交割作業"
+SESSIONS_2023 = 240
+
+
+def test_a_last_trading_day_naming_the_closures_after_it_stays_open(
+    load_fixture: Callable[[str], Any],
+) -> None:
+    days = schedule_days(load_fixture(PUBLISHED_2027))
+    assert days[date(2027, 2, 1)] == (True, "")
+    assert days[date(2027, 2, 2)] == (False, SETTLEMENT_ONLY)
+    assert days[date(2027, 2, 3)] == (False, SETTLEMENT_ONLY)
+    assert days[date(2027, 2, 4)] == (False, "農曆除夕及春節")
+    assert days[date(2027, 2, 11)] == (True, "")
+
+
+def test_the_published_2027_schedule_trades_on_242_days(load_fixture: Callable[[str], Any]) -> None:
+    payload = load_fixture(PUBLISHED_2027)
+    calendar, notes = build_calendar((), date(2026, 12, 31), [payload], start=date(2027, 1, 1))
+    sessions = calendar.between(date(2027, 1, 1), date(2027, 12, 31))
+    assert len(sessions) == 242
+    assert (sessions[0], sessions[-1]) == (date(2027, 1, 4), date(2027, 12, 30))
+    assert calendar.is_trading_day(date(2027, 2, 1))
+    closed = [date(2027, 2, 2), date(2027, 3, 1), date(2027, 4, 30), date(2027, 12, 24)]
+    assert not [day for day in closed if calendar.is_trading_day(day)]
+    assert notes["2027-12-31"] == "117年中華民國開國紀念日"
+    assert "2027-02-01" not in notes
+
+
+def test_days_named_in_a_no_trading_clause_close_without_rows_of_their_own(
+    load_fixture: Callable[[str], Any],
+) -> None:
+    payload = load_fixture(PUBLISHED_2027)
+    rows = [row for row in payload["data"] if row[0] not in ("2027-02-02", "2027-02-03")]
+    days = schedule_days({**payload, "data": rows})
+    assert days[date(2027, 2, 1)] == (True, "")
+    assert days[date(2027, 2, 2)] == (False, SETTLEMENT_ONLY)
+    assert days[date(2027, 2, 3)] == (False, SETTLEMENT_ONLY)
+
+
+def test_a_no_trading_clause_without_a_date_is_about_its_own_row(
+    load_fixture: Callable[[str], Any],
+) -> None:
+    payload = load_fixture(PUBLISHED_2027)
+    rows = [["2027-03-02", "臨時休市", "颱風來襲。市場無交易。"]]
+    assert schedule_days({**payload, "data": rows}) == {date(2027, 3, 2): (False, "市場無交易")}
+
+
+def test_a_no_trading_clause_naming_an_impossible_day_is_a_schema_change(
+    load_fixture: Callable[[str], Any],
+) -> None:
+    payload = load_fixture(PUBLISHED_2027)
+    rows = [["2027-02-01", "農曆春節前最後交易日", "2月30日市場無交易。"]]
+    with pytest.raises(SchemaChangedError, match="2月30日"):
+        schedule_days({**payload, "data": rows})
+
+
+def test_a_settlement_only_row_of_its_own_drops_the_full_stop(
+    load_fixture: Callable[[str], Any],
+) -> None:
+    payload = load_fixture(PUBLISHED_2027)
+    rows = [row for row in payload["data"] if row[0] == "2027-02-02"]
+    assert rows[0][1].endswith("。")
+    assert schedule_days({**payload, "data": rows}) == {date(2027, 2, 2): (False, SETTLEMENT_ONLY)}
+
+
+def test_the_2023_wording_reads_the_same_way(load_fixture: Callable[[str], Any]) -> None:
+    payload = load_fixture("twse/reference/holiday_schedule_2023.json")
+    days = schedule_days(payload)
+    assert days[date(2023, 1, 17)] == (True, "")
+    assert days[date(2023, 1, 18)] == (False, SETTLEMENT_ONLY)
+    assert days[date(2023, 1, 19)] == (False, SETTLEMENT_ONLY)
+    assert days[date(2023, 1, 30)] == (True, "")
+    calendar, _ = build_calendar((), date(2022, 12, 31), [payload], start=date(2023, 1, 1))
+    assert calendar.is_trading_day(date(2023, 1, 17))
+    assert len(calendar.between(date(2023, 1, 1), date(2023, 12, 31))) == SESSIONS_2023

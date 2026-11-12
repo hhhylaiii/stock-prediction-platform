@@ -22,7 +22,8 @@ REFRESH_SOURCE = "trading_calendar"
 REFRESH_DATASET = "trading_calendar_refresh"
 TRADING_REMINDER = "交易日"
 NOTE_LIMIT = 64
-LEADING_DATE = re.compile(r"^\d{1,2}月\d{1,2}日")
+NAMED_DAY = re.compile(r"(\d{1,2})月(\d{1,2})日")
+LEADING_DAYS = re.compile(r"^(?:\d{1,2}月\d{1,2}日[及、與和]?)+")
 ScheduledDay = tuple[bool, str]
 
 
@@ -46,33 +47,56 @@ def schedule_years(start: date, today: date) -> range:
     return range(first, today.year + SCHEDULE_YEARS_AHEAD + 1)
 
 
-def _no_trading_note(name: str, detail: str) -> str:
-    """The clause saying the market does not trade, without a leading date like '2月8日'."""
+def _no_trading(day: date, name: str, detail: str) -> dict[date, str]:
+    """Days a row says do not trade, each with the clause saying so, less its leading dates.
+
+    A clause naming days is about those days: the last trading day before a holiday lists the
+    settlement-only days after it. A clause naming none is about the row's own day.
+    """
+    closed: dict[date, str] = {}
     for text in (name, *detail.split("。")):
-        if NO_TRADING in text:
-            return LEADING_DATE.sub("", text).strip()
-    return ""
+        if NO_TRADING not in text:
+            continue
+        note = LEADING_DAYS.sub("", text.strip()).strip().rstrip("。")
+        named = [_named(day.year, month, of_month) for month, of_month in NAMED_DAY.findall(text)]
+        for target in named or [day]:
+            closed.setdefault(target, note)
+    return closed
+
+
+def _named(year: int, month: str, of_month: str) -> date:
+    try:
+        return date(year, int(month), int(of_month))
+    except ValueError:
+        raise SchemaChangedError(
+            f"TWSE holiday schedule names {month}月{of_month}日, which {year} does not have"
+        ) from None
 
 
 def schedule_days(payload: Mapping[str, Any]) -> dict[date, ScheduledDay]:
-    """Each listed date as (is_trading_day, note); 無交易 anywhere in a row means closed."""
+    """Each listed date as (is_trading_day, note); a day a 無交易 clause is about is closed."""
     if payload.get("stat") != "ok":
         raise SchemaChangedError(f"TWSE holiday schedule stat is {payload.get('stat')!r}")
     if payload.get("fields") != SCHEDULE_FIELDS:
         raise SchemaChangedError(f"TWSE holiday schedule fields changed: {payload.get('fields')}")
-    grouped: dict[date, list[tuple[str, str]]] = {}
+    grouped: dict[date, list[str]] = {}
+    closed: dict[date, str] = {}
     for row in payload.get("data") or []:
         day = _iso_date(row[0], "TWSE holiday schedule")
-        grouped.setdefault(day, []).append((str(row[1]).strip(), " ".join(str(row[2]).split())))
-    days: dict[date, ScheduledDay] = {}
-    for day, rows in grouped.items():
-        no_trading = [_no_trading_note(name, detail) for name, detail in rows]
-        if any(no_trading):
-            days[day] = (False, next(note for note in no_trading if note)[:NOTE_LIMIT])
-        elif any(TRADING_REMINDER in name for name, _ in rows):
+        name, detail = str(row[1]).strip(), " ".join(str(row[2]).split())
+        grouped.setdefault(day, []).append(name)
+        for target, note in _no_trading(day, name, detail).items():
+            closed.setdefault(target, note)
+    days: dict[date, ScheduledDay] = {
+        day: (False, note[:NOTE_LIMIT]) for day, note in closed.items()
+    }
+    for day, names in grouped.items():
+        if day in closed:
+            continue
+        if any(TRADING_REMINDER in name for name in names):
             days[day] = (True, "")
         else:
-            days[day] = (False, rows[0][0][:NOTE_LIMIT])
+            days[day] = (False, names[0][:NOTE_LIMIT])
     return days
 
 
