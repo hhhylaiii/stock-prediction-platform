@@ -21,6 +21,13 @@ from apps.etl.models import DataQualityLog
 from apps.etl.tasks import US_CLOSE_CHECK, ready_for_research
 from apps.market.adjust import ADJ_CHECK
 from apps.market.calendar import OutsideCalendarError, TradingDays
+from apps.research.feature_coverage import CHECK as COVERAGE_CHECK
+from apps.research.feature_coverage import (
+    FLAGGED,
+    CoverageError,
+    coverage_summary,
+    run_coverage,
+)
 from apps.research.labels import HORIZONS
 from apps.research.lock import ResearchBusyError, research_lock
 from apps.research.models import HoldoutScope, LabelDaily, ModelRun
@@ -52,7 +59,7 @@ SKIPPED = (
 GATE_SHUT = "research gate shut"
 US_CLOSE_MISSING = "missing"
 EVENING_STEPS = ("recent_features", "labels")
-MORNING_STEPS = ("features", "predict", "monitor")
+MORNING_STEPS = ("features", "coverage", "predict", "monitor")
 Severity = DataQualityLog.Severity
 Done = dict[str, str]
 
@@ -74,6 +81,24 @@ def _recent_features(day: date) -> str:
 def _labels(day: date) -> str:
     """Labels far enough back to reach every one a change in the feature window moved."""
     return _command("build_labels", end=day, recent=RECENT_SESSIONS + max(HORIZONS) + 1)
+
+
+def _coverage(day: date) -> str:
+    """The day's coverage row; a check that cannot run warns, keeping an earlier error or flags."""
+    try:
+        row = run_coverage(day, TradingDays.from_db(), settings.FEATURE_PARQUET_DIR)
+    except Exception as error:
+        logger.error("research coverage %s failed: %s", day, error)
+        shown = str(error) if isinstance(error, CoverageError) else type(error).__name__
+        rows = DataQualityLog.objects.filter(date=day, check_name=COVERAGE_CHECK)
+        earlier = rows.order_by("-pk").first()
+        if earlier is not None and earlier.severity == Severity.ERROR:
+            return f"coverage check failed ({shown}); the day's earlier error stands"
+        flagged = [] if earlier is None else earlier.detail.get(FLAGGED, [])
+        kept = {FLAGGED: flagged} if flagged else {}
+        _record(day, COVERAGE_CHECK, Severity.WARNING, {"error": shown, **kept})
+        return f"coverage check failed, see {COVERAGE_CHECK}"
+    return coverage_summary(row)
 
 
 def _predict(day: date) -> str:
@@ -245,6 +270,7 @@ STEPS: dict[str, Callable[[date], str]] = {
     "labels": _labels,
     "features": _features,
     "recent_features": _recent_features,
+    "coverage": _coverage,
     "predict": _predict,
     "monitor": _monitor,
     "promote": _promote,

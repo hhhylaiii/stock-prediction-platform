@@ -21,7 +21,7 @@ from apps.research.features.build import (
     FRAME_COLUMNS,
     FRAME_TYPES,
 )
-from apps.research.features.registry import feature_names
+from apps.research.features.registry import DORMANT, feature_names
 from apps.research.features.residual import RULES_KEY, rules_signature
 from apps.research.models import FeatureDaily
 from apps.research.ranges import months, years
@@ -122,10 +122,14 @@ def columns_for(features: Sequence[str]) -> list[str]:
 def read_partitions(
     start: date, end: date, directory: Path, columns: Sequence[str] = FIRST_BATCH_COLUMNS
 ) -> pd.DataFrame:
-    """Rows dated in [start, end] from the yearly partitions; the first batch unless asked."""
+    """Rows dated in [start, end] from the yearly partitions; the first batch unless asked.
+
+    Dormant features read empty, also where a partition still holds values written earlier.
+    """
     wanted = list(columns)
     parts = [_read_partition(directory, low, high, wanted) for low, high in years(start, end)]
-    return _typed(parts, wanted)
+    asleep = [name for name in wanted if name in DORMANT]
+    return _typed(parts, wanted).assign(**dict.fromkeys(asleep, np.nan))
 
 
 def read_columns(start: date, end: date, directory: Path, columns: Sequence[str]) -> pd.DataFrame:

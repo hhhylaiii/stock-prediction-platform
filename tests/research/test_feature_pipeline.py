@@ -30,6 +30,7 @@ from apps.market.models import (
     TradingCalendar,
     WeeklyHolding,
 )
+from apps.research.baseline_runs import fold_inputs
 from apps.research.features import store
 from apps.research.features.build import (
     CHECKED,
@@ -41,7 +42,7 @@ from apps.research.features.build import (
 )
 from apps.research.features.chip import SOURCED_CHIPS
 from apps.research.features.fundamental import sourced_name
-from apps.research.features.registry import FEATURES, feature_names
+from apps.research.features.registry import DORMANT, FEATURES, feature_names
 from apps.research.features.residual import (
     FALLBACKS,
     fallback_filled,
@@ -55,8 +56,11 @@ from apps.research.features.store import (
     read_partitions,
     write_features,
 )
+from apps.research.inference import day_rows
+from apps.research.lgbm_runs import rank_fold_inputs
 from apps.research.models import FeatureDaily
 from apps.research.universe import load_universe_panel
+from apps.research.walkforward import Fold
 from tests.research.conftest import weekday_calendar
 
 pytestmark = pytest.mark.django_db
@@ -156,6 +160,88 @@ def test_feature_daily_holds_the_raw_values_of_both_batches() -> None:
     ]
 
 
+def test_dormant_features_stay_empty_and_leave_every_other_value_alone() -> None:
+    listed("2330", "2015-06-01", "2016-04-29")
+    inputs("2330")
+    days = (d("2016-03-01"), d("2016-03-15"))
+
+    frame = build_feature_frame(CALENDAR, *days, masked={})
+    computed = build_feature_frame(CALENDAR, *days, masked={}, dormant=())
+
+    assert sorted(DORMANT) == ["chip_big_holder_pct_chg_1w", "chip_holder_count_chg_1w"]
+    assert computed[list(DORMANT)].notna().any().all()
+    assert frame[list(DORMANT)].isna().all().all()
+    assert list(frame.columns) == FRAME_COLUMNS
+    assert frame.dtypes.equals(computed.dtypes)
+    others = [name for name in FRAME_COLUMNS if name not in DORMANT]
+    pd.testing.assert_frame_equal(frame[others], computed[others])
+
+
+def test_a_rebuild_empties_dormant_values_written_earlier(tmp_path: Path, settings: Any) -> None:
+    settings.FEATURE_PARQUET_DIR = tmp_path
+    calendar_rows()
+    listed("2330", "2015-06-01", "2016-04-29")
+    inputs("2330")
+    days = (d("2016-03-01"), d("2016-03-04"))
+    written = build_feature_frame(CALENDAR, *days, masked={}, dormant=())
+    store.write_features(written, *days)
+    assert stored()[list(DORMANT)].notna().any().all()
+
+    call_command("build_features", start=days[0], end=days[1])
+
+    rows = stored()
+    assert len(rows) == len(written)
+    assert rows[list(DORMANT)].isna().all().all()
+    assert rows["chip_fi_net_1d"].notna().all()
+    exported = read_columns(*days, tmp_path, [*DORMANT, "chip_fi_net_1d"])
+    assert exported[list(DORMANT)].isna().all().all()
+    assert exported["chip_fi_net_1d"].notna().all()
+
+
+def test_fits_and_predictions_read_dormant_features_empty_from_a_stale_partition(
+    tmp_path: Path,
+) -> None:
+    calendar_rows()
+    listed("2330", "2015-06-01", "2016-04-29")
+    listed("1101", "2015-06-01", "2016-04-29", step=0.2)
+    inputs("2330")
+    WeeklyHolding.objects.bulk_create(
+        WeeklyHolding(
+            stock_id="1101",
+            data_date=d(week),
+            level=level,
+            holders=900,
+            shares=1,
+            pct=big if level == 12 else 100.0 - big,
+            publish_date=d(week) + timedelta(days=3),
+        )
+        for week, big in [("2016-02-19", 30.0), ("2016-02-26", 40.0)]
+        for level in (1, 12)
+    )
+    days = (d("2016-03-01"), d("2016-03-04"))
+    store.write_features(build_feature_frame(CALENDAR, *days, masked={}, dormant=()), *days)
+    FeatureDaily.objects.update(in_universe=True)
+    export_year(2016, tmp_path)
+    names = [*DORMANT, "tech_ret_5d"]
+    kept = read_columns(*days, tmp_path, names)
+    assert kept.notna().all().all()
+    assert kept.groupby("date")[DORMANT[0]].nunique().eq(2).all()
+    fold = Fold(0, days[0], days[0], days[0], days[0], days[1], days[1], days[1], False, False)
+
+    frames = {
+        "read": read_partitions(*days, tmp_path, ["stock_id", "date", "in_universe", *names]),
+        "predicted": day_rows(days[1], tmp_path, names),
+        "raw": fold_inputs(fold, *days, tmp_path, names).raw,
+        "ranked": rank_fold_inputs(fold, tmp_path, names).raw,
+    }
+
+    for frame in frames.values():
+        assert frame[list(DORMANT)].isna().all().all()
+        assert frame["tech_ret_5d"].notna().all()
+    assert frames["read"][list(DORMANT)].dtypes.eq("float64").all()
+    assert list(frames["read"].columns) == ["stock_id", "date", "in_universe", *names]
+
+
 def test_the_frame_has_one_row_per_listed_stock_and_trading_day_in_range() -> None:
     listed("2330", "2015-06-01", "2016-03-31")
     listed("1101", "2015-06-01", "2016-02-26", step=0.2)
@@ -189,7 +275,7 @@ def test_every_input_group_reaches_the_frame() -> None:
         announce_date=d("2016-02-24"),
     )
 
-    frame = build_feature_frame(CALENDAR, d("2016-03-01"), d("2016-04-15"), masked={})
+    frame = build_feature_frame(CALENDAR, d("2016-03-01"), d("2016-04-15"), masked={}, dormant=())
 
     row = frame[frame["date"] == d("2016-03-02")].iloc[0]
     assert row["chip_fi_net_1d"] == pytest.approx(2_000 / 1_000_000)

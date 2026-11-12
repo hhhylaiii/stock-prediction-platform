@@ -13,6 +13,7 @@ from apps.market.adjust import ADJ_CHECK, _merged
 from apps.market.models import TradingCalendar
 from apps.research import tasks
 from apps.research.evaluation import ALERT_SHARE
+from apps.research.feature_coverage import CHECK as COVERAGE_CHECK
 from apps.research.gates import Gate, SlotGates
 from apps.research.predict import Slot
 from apps.research.promotion import _failed, _note
@@ -112,6 +113,32 @@ def test_model_output_checks_are_listed_apart(client: Client) -> None:
     assert not {"model_alert", "monitor_unscored"} & {
         check["check_name"] for check in day["checks"]
     }
+
+
+@time_machine.travel(FRIDAY_NIGHT, tick=False)
+@pytest.mark.parametrize(
+    ("severity", "passed"), [(Severity.WARNING, True), (Severity.ERROR, False)]
+)
+def test_the_feature_coverage_row_is_a_model_check_whose_error_fails_the_day(
+    client: Client, severity: str, passed: bool
+) -> None:
+    log_all(OCT_30)
+    entry = {"feature": "tech_ret_5d", "share": 0.1, "collapsed": severity == Severity.ERROR}
+    log(OCT_30, COVERAGE_CHECK, severity, features=60, judged=58, flagged=[entry])
+
+    day = envelope_of(client.get("/api/data-quality", {"days": 1}))["data"][0]
+
+    assert (day["passed"], day["worst"]) == (passed, "info")
+    assert COVERAGE_CHECK not in [check["check_name"] for check in day["checks"]]
+    assert day["model_checks"] == [
+        {
+            "id": DataQualityLog.objects.get(check_name=COVERAGE_CHECK).pk,
+            "check_name": "monitor_feature_coverage",
+            "severity": severity,
+            "detail": {"features": 60, "judged": 58, "flagged": [entry]},
+        }
+    ]
+    assert should_run_prediction(OCT_30) is passed
 
 
 @time_machine.travel(FRIDAY_NIGHT, tick=False)

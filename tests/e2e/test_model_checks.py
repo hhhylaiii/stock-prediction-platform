@@ -116,6 +116,108 @@ def test_model_output_checks_have_their_own_block(
     expect(page.locator("#model-checks-sub")).to_contain_text(checked.last_session.isoformat())
 
 
+COVERAGE = "monitor_feature_coverage"
+SPARSE_LOW = {
+    "feature": "fund_days_to_ex_date",
+    "share": 0.0,
+    "count": 0,
+    "median": 0.0054,
+    "low": 0.001,
+    "bound": 0.0005,
+    "days": 85,
+    "collapsed": False,
+}
+COLLAPSED = {
+    "feature": XSS_NAME,
+    "share": 0.31,
+    "count": 303,
+    "median": 1.0,
+    "low": 0.998,
+    "bound": 0.948,
+    "days": 107,
+    "collapsed": True,
+}
+SPARSE_LINE = (
+    "偏低：fund_days_to_ex_date 線上有值 0.00%（0 檔），參考中位數 0.54%、下緣 0.10%、門檻 0.05%"
+)
+
+
+def coverage(flagged: list[dict[str, object]], appeared: list[str]) -> dict[str, object]:
+    return {
+        "universe": 979,
+        "features": 60,
+        "judged": 58,
+        "flagged": flagged,
+        "unjudged": dict.fromkeys(["chip_a", "chip_b"], "empty_reference"),
+        "appeared": appeared,
+        "reference": {"month": 11, "years": 5, "days": 107},
+    }
+
+
+def test_a_coverage_error_lists_the_collapsed_features_before_the_low_ones(
+    page: Page, live_server: LiveServer, seeded: Seed
+) -> None:
+    log(seeded, COVERAGE, "error", coverage([SPARSE_LOW, COLLAPSED], []))
+
+    page.goto(f"{live_server.url}/#models")
+
+    row = page.locator("#model-checks .check").filter(has_text="線上特徵覆蓋率")
+    expect(row.locator("i")).to_have_class("warn")
+    lines = row.locator(".run")
+    expect(lines).to_have_count(3)
+    expect(lines.nth(0)).to_have_text(
+        "錯誤，1 個特徵崩落，當天不產出預測；另有 1 個偏低（判 58／60 個特徵）"
+    )
+    expect(lines.nth(1)).to_have_text(
+        f"崩落：{XSS_NAME} 線上有值 31.00%（303 檔），參考中位數 100.00%、下緣 99.80%、門檻 94.80%"
+    )
+    expect(lines.nth(2)).to_have_text(SPARSE_LINE)
+    expect(page.locator("#model-checks img")).to_have_count(0)
+
+
+@pytest.mark.parametrize(
+    ("severity", "detail", "lines"),
+    [
+        (
+            "warning",
+            coverage([SPARSE_LOW], []),
+            ["1 個特徵偏低（判 58／60 個特徵）", SPARSE_LINE],
+        ),
+        (
+            "info",
+            coverage([], ["chip_a", "chip_b"]),
+            ["都在參考範圍內（判 58／60 個特徵）", "參考期全空、線上有值：chip_a、chip_b"],
+        ),
+        (
+            "warning",
+            {"error": "the feature partition of 2023 is missing", "flagged": [SPARSE_LOW]},
+            [
+                "檢查沒有跑成：the feature partition of 2023 is missing",
+                "當天先前標記：fund_days_to_ex_date",
+            ],
+        ),
+    ],
+)
+def test_a_coverage_row_reads_as_low_in_range_or_not_run(
+    page: Page,
+    live_server: LiveServer,
+    seeded: Seed,
+    severity: str,
+    detail: dict[str, object],
+    lines: list[str],
+) -> None:
+    log(seeded, COVERAGE, severity, detail)
+
+    page.goto(f"{live_server.url}/#models")
+
+    row = page.locator("#model-checks .check").filter(has_text="線上特徵覆蓋率")
+    expect(row.locator(".run")).to_have_text(lines)
+    if severity == "info":
+        expect(row.locator("i")).not_to_have_class("warn")
+    else:
+        expect(row.locator("i")).to_have_class("warn")
+
+
 ALERT = {
     "objective": "rank",
     "horizon": 20,

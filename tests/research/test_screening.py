@@ -423,7 +423,7 @@ def test_ic_report_records_the_kept_list_and_writes_the_report(stored: Path) -> 
 
 @pytest.mark.django_db
 def test_ic_report_keeps_a_signal_feature_without_an_ic(stored: Path) -> None:
-    name = "chip_big_holder_pct_chg_1w"
+    name = "chip_fi_net_5d"
     FeatureDaily.objects.update(**{name: None})
     export_year(2016, stored / "features")
     output = stored / "report.md"
