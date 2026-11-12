@@ -57,6 +57,7 @@ SKIPPED = (
     f"no morning chain finished before the cutoff in the month's first {RETRAIN_WINDOW} sessions"
 )
 GATE_SHUT = "research gate shut"
+OUTSIDE_CALENDAR = "the trading calendar does not cover the day"
 US_CLOSE_MISSING = "missing"
 EVENING_STEPS = ("recent_features", "labels")
 MORNING_STEPS = ("features", "coverage", "predict", "monitor")
@@ -488,6 +489,13 @@ def _flag_missed(calendar: TradingDays, day: date) -> None:
     _record(before, MORNING_CHECK, Severity.WARNING, {"reason": MISSED})
 
 
+def _uncovered(check: str, day: date, calendar: TradingDays) -> str:
+    """Warn that the calendar does not reach day, the only trace such a run leaves."""
+    detail = {"reason": OUTSIDE_CALENDAR, "calendar_end": calendar.end.isoformat()}
+    _record(day, check, Severity.WARNING, detail)
+    return "outside calendar"
+
+
 @shared_task(bind=True, max_retries=None, name="research.evening")
 def evening(self: Task[Any, Any], day: str | None = None) -> str:
     """The last sixty sessions' features and their labels, once the research gate passes."""
@@ -496,7 +504,12 @@ def evening(self: Task[Any, Any], day: str | None = None) -> str:
     if day is None and _early("EVENING"):
         return "early"
     session = timezone.localtime().date() if day is None else date.fromisoformat(day)
-    if not TradingDays.from_db().is_trading_day(session):
+    calendar = TradingDays.from_db()
+    try:
+        trading = calendar.is_trading_day(session)
+    except OutsideCalendarError:
+        return _uncovered(EVENING_CHECK, session, calendar)
+    if not trading:
         return "closed"
     if _finished(session, EVENING_CHECK):
         return "done"
@@ -525,7 +538,11 @@ def morning(self: Task[Any, Any], day: str | None = None) -> str:
         return "early"
     if day is None:
         calendar = TradingDays.from_db()
-        session = calendar.latest_on_or_before(timezone.localtime().date() - timedelta(days=1))
+        asked = timezone.localtime().date() - timedelta(days=1)
+        try:
+            session = calendar.latest_on_or_before(asked)
+        except OutsideCalendarError:
+            return _uncovered(MORNING_CHECK, asked, calendar)
         _flag_missed(calendar, session)
     else:
         session = date.fromisoformat(day)
