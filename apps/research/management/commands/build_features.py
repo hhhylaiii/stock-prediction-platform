@@ -6,14 +6,45 @@ from typing import Any
 
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
+from django.db import transaction
 
+from apps.etl.alerts import dispatch
+from apps.etl.models import DataQualityLog
 from apps.market.calendar import TradingDays
 from apps.research.features.build import build_feature_frame
+from apps.research.features.dividend import past_calendar
 from apps.research.features.store import export_year, write_features
 from apps.research.labels import latest_price_date
 from apps.research.ranges import years
 
 RECENT_DAYS = 60
+EX_DATE_CHECK = "monitor_ex_date_calendar"
+
+
+def flag_ex_dates(end: date, calendar: TradingDays) -> dict[str, Any] | None:
+    """Replace end's warning about announced ex-dates past the calendar; alert when it changed."""
+    beyond = past_calendar(end, calendar)
+    rows = DataQualityLog.objects.filter(date=end, check_name=EX_DATE_CHECK)
+    earlier = [row.detail for row in rows]
+    if not beyond:
+        rows.delete()
+        return None
+    detail = {
+        "count": len(beyond),
+        "latest_ex_date": beyond[-1].isoformat(),
+        "calendar_end": calendar.end.isoformat(),
+    }
+    with transaction.atomic():
+        rows.delete()
+        row = DataQualityLog.objects.create(
+            date=end,
+            check_name=EX_DATE_CHECK,
+            severity=DataQualityLog.Severity.WARNING,
+            detail=detail,
+        )
+    if detail not in earlier:
+        dispatch([row])
+    return detail
 
 
 class Command(BaseCommand):
@@ -57,4 +88,11 @@ class Command(BaseCommand):
         for low, high in years(start, end):
             rows += write_features(build_feature_frame(calendar, low, high), low, high)
             export_year(low.year, settings.FEATURE_PARQUET_DIR, rebuilt=(low, high))
-        self.stdout.write(f"feature_daily: {rows} rows for {start}..{end}")
+        flagged = flag_ex_dates(end, calendar)
+        beyond = (
+            ""
+            if flagged is None
+            else f"; {flagged['count']} announced ex-date(s) after the trading calendar, "
+            f"see {EX_DATE_CHECK}"
+        )
+        self.stdout.write(f"feature_daily: {rows} rows for {start}..{end}{beyond}")

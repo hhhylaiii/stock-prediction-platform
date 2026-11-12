@@ -22,6 +22,15 @@ def load_ex_dates(start: date, end: date, stock_ids: Sequence[str] | None = None
     return pd.DataFrame(list(rows.values_list(*EVENT_COLUMNS)), columns=EVENT_COLUMNS)
 
 
+def past_calendar(end: date, calendar: TradingDays) -> list[date]:
+    """Ex-dates of cash dividends announced by end that come after the calendar's last session."""
+    last = calendar.latest_on_or_before(calendar.end)
+    rows = DividendEvent.objects.filter(
+        cash_dividend__gt=0, announce_date__lte=end, ex_date__gt=last
+    )
+    return sorted(rows.values_list("ex_date", flat=True))
+
+
 def _active_days(events: pd.DataFrame, calendar: TradingDays) -> pd.DataFrame:
     """One row per event and trading day from its announcement to the day before it goes ex.
 
