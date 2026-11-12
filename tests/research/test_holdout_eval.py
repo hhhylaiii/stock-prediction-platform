@@ -170,22 +170,33 @@ def test_a_short_verdict_is_reported_as_refused_until_the_user_releases_it() -> 
 
 def test_every_cited_spec_clause_opens_one_line_of_its_section() -> None:
     lines = (Path(settings.BASE_DIR) / "docs" / "SPEC.md").read_text().splitlines()
+    headings = [index for index, line in enumerate(lines) if line.startswith("## ")]
 
-    for section, opening in SPEC_CLAUSES.values():
-        found = [index for index, line in enumerate(lines) if line.startswith(opening)]
-        assert len(found) == 1, (opening, found)
-        headings = [line for line in lines[: found[0]] if line.startswith("## ")]
-        assert headings[-1].startswith(f"## {section}. "), (opening, headings[-1])
+    for section, label in SPEC_CLAUSES.values():
+        first = next(index for index in headings if lines[index].startswith(f"## {section}. "))
+        last = min((index for index in headings if index > first), default=len(lines))
+        opened = [
+            index
+            for index in range(first, last)
+            if re.sub(r"^(?:[-|]|\d+\.) ", "", lines[index]).startswith(label)
+        ]
+        assert len(opened) == 1, (label, opened)
 
 
-def test_a_citation_names_the_section_and_clause_without_a_line_number() -> None:
-    assert holdout_eval.cite("record") == "docs/SPEC.md 第 7 節「研究期與最終 holdout」"
-    assert holdout_eval.cite("rank") == "docs/SPEC.md 第 7 節「排名」"
-    assert holdout_eval.cite("return") == "docs/SPEC.md 第 7 節「絕對報酬（5 日）」"
-    assert holdout_eval.cite("bagging") == "docs/SPEC.md 第 7 節「LightGBM seed bagging」"
-    assert holdout_eval.cite("acceptance") == "docs/SPEC.md 第 9 節「Phase 4 主模型」"
-    for name in SPEC_CLAUSES:
-        assert ":" not in holdout_eval.cite(name), name
+def test_a_citation_names_the_section_and_the_words_its_clause_opens_with() -> None:
+    cited = {name: holdout_eval.cite(name) for name in SPEC_CLAUSES}
+
+    assert cited == {
+        "record": "docs/SPEC.md 第 7 節「研究期與最終 holdout」",
+        "rank": "docs/SPEC.md 第 7 節「排名：日頻 rank IC」",
+        "return": "docs/SPEC.md 第 7 節「絕對報酬（5 日）」",
+        "interval": "docs/SPEC.md 第 7 節「區間：主指標是 pinball loss」",
+        "probability": "docs/SPEC.md 第 7 節「機率：每日 AUC 的平均」",
+        "gate": "docs/SPEC.md 第 7 節「每月重訓」",
+        "bagging": "docs/SPEC.md 第 7 節「LightGBM seed bagging」",
+        "acceptance": "docs/SPEC.md 第 9 節「Phase 4 主模型」",
+    }
+    assert all(":" not in text for text in cited.values())
 
 
 @pytest.fixture
