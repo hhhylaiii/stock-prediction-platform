@@ -3,7 +3,14 @@ import sys
 
 import pytest
 
-MODULES = ["apps.etl.client", "apps.etl.raw", "apps.etl.errors", "apps.etl.stock_master"]
+MODULES = [
+    "apps.etl.client",
+    "apps.etl.raw",
+    "apps.etl.errors",
+    "apps.etl.stock_master",
+    "apps.etl.dividend_notices",
+    "apps.etl.adapters.exchange_notices",
+]
 
 
 @pytest.mark.parametrize("module", MODULES)
