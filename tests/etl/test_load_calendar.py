@@ -1,6 +1,6 @@
 import json
 from collections.abc import Callable
-from datetime import date
+from datetime import date, timedelta
 from io import StringIO
 from pathlib import Path
 from typing import Any
@@ -11,7 +11,8 @@ from django.core.management import call_command
 from django.core.management.base import CommandError
 from responses import matchers
 
-from apps.etl.models import EtlRun, RawTwse
+from apps.etl.calendar_upkeep import CHANGED
+from apps.etl.models import DataQualityLog, EtlRun, RawTwse
 from apps.market.calendar import TradingDays
 from apps.market.models import TradingCalendar
 
@@ -202,3 +203,104 @@ def test_an_empty_past_month_is_refused(load_fixture: Callable[[str], Any]) -> N
     with pytest.raises(CommandError, match="SchemaChangedError"):
         call_command("load_calendar", "--from", "2026-10-01")
     assert TradingCalendar.objects.count() == 0
+
+
+@pytest.mark.django_db
+def test_a_reload_that_flips_a_day_logs_the_change(
+    fixture_path: Callable[[str], Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "apps.etl.management.commands.load_calendar.timezone.localdate", lambda: TODAY
+    )
+    source = fixture_path("calendar/twse_2026_10.json")
+    call_command("load_calendar", file=str(source))
+    assert not DataQualityLog.objects.exists()
+    data = json.loads(source.read_text(encoding="utf-8"))
+    data["notes"]["2026-10-29"] = "只改說明"
+    renamed = tmp_path / "renamed.json"
+    renamed.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    call_command("load_calendar", file=str(renamed))
+    assert not DataQualityLog.objects.exists()
+    data["trading_days"].remove("2026-10-30")
+    edited = tmp_path / "edited.json"
+    edited.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    call_command("load_calendar", file=str(edited))
+    row = DataQualityLog.objects.get(check_name=CHANGED)
+    assert (row.date, row.severity) == (TODAY, "warning")
+    assert row.detail == {
+        "by": ["load_calendar"],
+        "days": {"2026-10-30": {"was": True, "now": False}},
+        "earliest": "2026-10-30",
+    }
+
+
+def _provisional_file(tmp_path: Path, start: str, end: str, trading_days: list[str]) -> Path:
+    path = tmp_path / f"provisional-{start}.json"
+    payload = {"start": start, "end": end, "trading_days": trading_days, "provisional": True}
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+@pytest.mark.django_db
+def test_a_provisional_file_marks_its_days_and_only_adds_after_confirmed_ones(
+    fixture_path: Callable[[str], Path], tmp_path: Path
+) -> None:
+    call_command("load_calendar", file=str(fixture_path("calendar/twse_2026_10.json")))
+    overlapping = _provisional_file(tmp_path, "2026-10-30", "2026-11-02", ["2026-10-30"])
+    with pytest.raises(CommandError, match="provisional days must come after 2026-10-31"):
+        call_command("load_calendar", file=str(overlapping))
+    assert not TradingCalendar.objects.filter(is_provisional=True).exists()
+    later = _provisional_file(tmp_path, "2026-11-01", "2026-11-03", ["2026-11-02", "2026-11-03"])
+    out = StringIO()
+    call_command("load_calendar", file=str(later), stdout=out)
+    flagged = TradingCalendar.objects.filter(is_provisional=True)
+    assert set(flagged.values_list("date", flat=True)) == {
+        date(2026, 11, 1),
+        date(2026, 11, 2),
+        date(2026, 11, 3),
+    }
+    assert "provisional" in out.getvalue()
+    again = _provisional_file(tmp_path, "2026-11-02", "2026-11-04", ["2026-11-02", "2026-11-04"])
+    call_command("load_calendar", file=str(again))
+    assert flagged.count() == 4
+    assert not TradingCalendar.objects.get(date=date(2026, 11, 3)).is_trading_day
+
+
+@pytest.mark.django_db
+def test_a_confirmed_file_over_provisional_days_confirms_them(
+    fixture_path: Callable[[str], Path], tmp_path: Path
+) -> None:
+    call_command("load_calendar", file=str(fixture_path("calendar/twse_2026_10.json")))
+    guess = _provisional_file(tmp_path, "2026-11-01", "2026-11-03", ["2026-11-02", "2026-11-03"])
+    call_command("load_calendar", file=str(guess))
+    confirmed = _calendar_file(tmp_path, "2026-11-01", "2026-11-03", ["2026-11-03"])
+    call_command("load_calendar", file=str(confirmed))
+    assert not TradingCalendar.objects.filter(is_provisional=True).exists()
+    assert DataQualityLog.objects.get(check_name=CHANGED).detail["days"] == {
+        "2026-11-02": {"was": True, "now": False}
+    }
+
+
+@responses.activate
+@pytest.mark.django_db
+@pytest.mark.usefixtures("frozen_today", "october_sources")
+def test_from_confirms_provisional_days_and_says_next_year_is_unpublished() -> None:
+    first = date(2026, 10, 1)
+    TradingCalendar.objects.bulk_create(
+        TradingCalendar(
+            date=first + timedelta(days=n),
+            is_trading_day=(first + timedelta(days=n)).weekday() < 5,
+            is_provisional=True,
+        )
+        for n in range(92)
+    )
+    out = StringIO()
+    call_command("load_calendar", "--from", "2026-10-01", stdout=out)
+    assert not TradingCalendar.objects.filter(is_provisional=True).exists()
+    days = DataQualityLog.objects.get(check_name=CHANGED).detail["days"]
+    assert days["2026-12-25"] == {"was": True, "now": False}
+    assert days["2026-10-23"] == {"was": True, "now": False}
+    assert (
+        "trading_calendar: TWSE has not published the 2027 schedule; "
+        "confirmed days end 2026-12-31" in out.getvalue()
+    )

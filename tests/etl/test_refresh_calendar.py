@@ -8,7 +8,8 @@ from django.core.management import call_command
 from django.core.management.base import CommandError
 from responses import matchers
 
-from apps.etl.models import EtlRun
+from apps.etl.calendar_upkeep import CHANGED
+from apps.etl.models import DataQualityLog, EtlRun
 from apps.etl.trading_calendar import UNLABELLED_CLOSURE, WEEKEND_TRADING, corrections
 from apps.market.models import DailyPrice, TradingCalendar
 
@@ -172,3 +173,38 @@ def test_a_day_with_prices_is_not_closed(
     call_command("refresh_calendar")
     assert _flags()[date(2026, 10, 28)] == (True, "")
     assert _flags()[date(2026, 10, 27)] == (False, UNLABELLED_CLOSURE)
+
+
+@responses.activate
+def test_a_correction_is_logged_for_the_rebuild(
+    monkeypatch: pytest.MonkeyPatch, load_fixture: Callable[[str], Any]
+) -> None:
+    sent: list[list[str]] = []
+    monkeypatch.setattr(
+        "apps.etl.management.commands.refresh_calendar.announce",
+        lambda rows: sent.append([row.check_name for row in rows]),
+    )
+    _today(monkeypatch, date(2026, 10, 31))
+    _serve("202610", _with(_without(load_fixture(OCTOBER), "115/10/28"), "115/10/24"))
+    call_command("refresh_calendar")
+    row = DataQualityLog.objects.get(check_name=CHANGED)
+    assert (row.date, row.severity) == (date(2026, 10, 31), "warning")
+    assert row.detail == {
+        "by": ["refresh_calendar"],
+        "days": {
+            "2026-10-24": {"was": False, "now": True},
+            "2026-10-28": {"was": True, "now": False},
+        },
+        "earliest": "2026-10-24",
+    }
+    assert sent == [[CHANGED]]
+
+
+@responses.activate
+def test_a_refresh_without_corrections_logs_no_change(
+    monkeypatch: pytest.MonkeyPatch, load_fixture: Callable[[str], Any]
+) -> None:
+    _today(monkeypatch, date(2026, 10, 31))
+    _serve("202610", load_fixture(OCTOBER))
+    call_command("refresh_calendar")
+    assert not DataQualityLog.objects.exists()
