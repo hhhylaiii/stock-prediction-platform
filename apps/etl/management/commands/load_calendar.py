@@ -105,7 +105,7 @@ class Command(BaseCommand):
             schedules.append(twse.holiday_schedule(year))
             if not schedules[-1].get("data"):
                 break
-            if year > today.year:
+            if year >= today.year:
                 require_whole_year(schedules[-1])
         return build_calendar(traded, yesterday, schedules, start)
 

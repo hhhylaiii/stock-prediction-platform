@@ -17,7 +17,12 @@ from apps.etl.errors import SchemaChangedError, SourceError
 from apps.etl.models import DataQualityLog
 from apps.etl.ratelimit import RetryableError
 from apps.etl.runs import tracked_run
-from apps.etl.trading_calendar import build_calendar, require_whole_year, schedule_days
+from apps.etl.trading_calendar import (
+    build_calendar,
+    require_whole_year,
+    schedule_days,
+    schedule_year,
+)
 from apps.market.calendar import CalendarError, TradingDays
 from apps.market.models import TradingCalendar
 
@@ -86,6 +91,8 @@ def extend(today: date) -> Attempt:
         return Attempt(Extension.NOT_NEEDED)
     year = end.year + 1
     payload = TwseClient.build(limiter_for("twse")).holiday_schedule(year)
+    if schedule_year(payload) != year:
+        raise SchemaChangedError(f"TWSE answered another year when asked for the {year} schedule")
     if not any(day.year == year for day in schedule_days(payload)):
         return Attempt(Extension.UNPUBLISHED)
     start = end + timedelta(days=1)
@@ -94,6 +101,7 @@ def extend(today: date) -> Attempt:
             require_whole_year(payload)
             calendar, notes = build_calendar((), end, [payload], start)
             run.rows = _write_year(calendar, notes, today)
+        logger.info("trading_calendar extended through %s", calendar.end)
     except (SchemaChangedError, CalendarError) as exc:
         logger.error("trading_calendar extension refused: %s", exc)
         return Attempt(Extension.REFUSED, str(exc))
@@ -192,7 +200,7 @@ def record_reach(today: date, attempt: Attempt) -> DataQualityLog:
         row = DataQualityLog.objects.create(
             date=today, check_name=REACH, severity=severity, detail=detail
         )
-    if _is_news(level, refused, previous, today):
+    if attempt.outcome == Extension.EXTENDED or _is_news(level, refused, previous, today):
         announce([row])
     return row
 

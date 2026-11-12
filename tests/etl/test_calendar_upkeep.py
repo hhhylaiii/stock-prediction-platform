@@ -443,6 +443,8 @@ def test_the_upkeep_never_moves_the_research_gate(
         {"data": [["2027-01-01"]]},
         {"stat": "很抱歉，沒有符合條件的資料!", "data": []},
         {"fields": ["日期", "名稱"]},
+        {"queryYear": "2027", "data": [["2027-01-01", "中華民國開國紀念日", "依規定放假1日。"]]},
+        {"queryYear": 2026, "data": [["2027-01-01", "中華民國開國紀念日", "依規定放假1日。"]]},
     ],
 )
 def test_an_answer_that_cannot_be_read_still_records_the_reach(
@@ -475,3 +477,25 @@ def test_a_rerun_the_same_day_repeats_no_announcement(
     assert keep_up(today) == Extension.UNPUBLISHED
     assert _reach(today).detail["level"] == 3
     assert sent == [[(today, REACH, "warning")]]
+
+
+@responses.activate
+def test_an_extension_is_announced_even_while_the_calendar_still_reached_far(
+    load_fixture: Callable[[str], Any],
+    sent: list[list[tuple[date, str, str]]],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _calendar(date(2025, 8, 1), date(2025, 12, 31))
+    _serve(2026, load_fixture(SCHEDULE_2027) | {"queryYear": 2026})
+    assert keep_up(date(2025, 9, 30)) == Extension.UNPUBLISHED
+    assert sent == []
+    responses.reset()
+    _serve(2026, load_fixture(SCHEDULE_2026))
+    today = date(2025, 10, 1)
+    with caplog.at_level("INFO", logger="apps.etl.calendar_upkeep"):
+        assert keep_up(today) == Extension.EXTENDED
+    assert (_reach(today).severity, _reach(today).detail["level"]) == ("info", 0)
+    assert sent == [[(today, REACH, "info")]]
+    assert "trading_calendar extended through 2026-12-31" in caplog.text
+    assert keep_up(today) == Extension.NOT_NEEDED
+    assert len(sent) == 1

@@ -345,3 +345,23 @@ def test_from_refuses_a_next_year_published_in_part(load_fixture: Callable[[str]
         call_command("load_calendar", "--from", "2026-10-01")
     assert not TradingCalendar.objects.exists()
     assert EtlRun.objects.get().status == "failed"
+
+
+@responses.activate
+@pytest.mark.django_db
+@pytest.mark.usefixtures("frozen_today")
+def test_from_refuses_this_years_schedule_published_in_part(
+    load_fixture: Callable[[str], Any],
+) -> None:
+    _month(load_fixture, "202610")
+    _month(load_fixture, "202611")
+    current = load_fixture("twse/reference/holiday_schedule_2026.json")
+    responses.get(
+        SCHEDULE_URL,
+        json=current | {"data": current["data"][:1]},
+        match=[matchers.query_param_matcher({"date": "20260101", "response": "json"})],
+    )
+    with pytest.raises(CommandError, match=r"SchemaChangedError: .*2026 gives 260 sessions"):
+        call_command("load_calendar", "--from", "2026-10-01")
+    assert not TradingCalendar.objects.exists()
+    assert EtlRun.objects.get().status == "failed"
