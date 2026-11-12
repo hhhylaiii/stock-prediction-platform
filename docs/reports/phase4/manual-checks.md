@@ -326,16 +326,30 @@ return-holdout-20261112: holdout attempt 1 of return through 2026-11-11; fitted 
       740.16 real      2403.60 user       279.15 sys
 ```
 
-跑完後的核對（報告檔與報告標記的 sha256、寫入的摺、label 的列數與指紋）：
+跑完後的核對（報告檔與報告標記的 sha256、寫入的摺、label 的列數與最大日期）：
 
 ```
 rank status 明顯退化 failed [] flagged ['排名 5 日 IC'] report file matches marker True sha256 e19230e33abb5257 folds written [44, 45, 46, 47, 48, 49, 50, 51] model_run rows 32
 interval status 明顯退化 failed [] flagged ['20 日覆蓋率'] report file matches marker True sha256 2e327d95d2049bf1 folds written [44, 45, 46, 47, 48, 49, 50, 51] model_run rows 40
 return status 達標 failed [] flagged [] report file matches marker True sha256 371232b625638ea1 folds written [44, 45, 46, 47, 48, 49, 50, 51] model_run rows 8
-label_daily rows, max date (13489076, datetime.date(2026, 11, 11))    開跑前與跑完後相同
+label_daily rows, max date (13489076, datetime.date(2026, 11, 11))
+label digest since 2021 (5180568, Decimal('2986485676490873462376704'))
 ```
 
-演練（研究摺 43，整支指令的時間）：bags 1 是 rank 254 秒、return 100 秒、interval 249 秒；bags 5 是 rank 306 秒、return 135 秒、interval 337 秒。
+label 的列數、最大日期與 2021 年以後的指紋（列數與逐列 md5 的加總）在開跑前（11:44）與跑完後（13:33）各查一次，三個值都相同。
+
+2026 年特徵分區檔的 sha256，每個目標開跑前與跑完後各記一次（檔案修改時間都是 2026-11-09 04:23:17）：
+
+```
+rank: features before f2b07d36703eeabea8a1de258d2816055085fd0fd2174d71d19bb00b0c04fbef
+rank: exit 0, features after f2b07d36703eeabea8a1de258d2816055085fd0fd2174d71d19bb00b0c04fbef
+interval: features before f2b07d36703eeabea8a1de258d2816055085fd0fd2174d71d19bb00b0c04fbef
+interval: exit 0, features after f2b07d36703eeabea8a1de258d2816055085fd0fd2174d71d19bb00b0c04fbef
+return: features before f2b07d36703eeabea8a1de258d2816055085fd0fd2174d71d19bb00b0c04fbef
+return: exit 0, features after f2b07d36703eeabea8a1de258d2816055085fd0fd2174d71d19bb00b0c04fbef
+```
+
+演練（研究摺 43，整支指令的時間）：bags 1 是 rank 254 秒、return 100 秒、interval 249 秒；bags 5 是 rank 306 秒、return 135 秒、interval 337 秒。排名 bags 5 那次的報告是 `rank-rehearsal-b5-11120230.md`（5 日 IC 0.14096、20 日 0.16888；bags 5 不和研究 run 對帳）。return 與 interval 的 bags 5 報告沒有收進來。
 
 ## Holdout（2026-11-12）：排名的對照數字（讀 `backtest_metric`）
 
