@@ -767,7 +767,14 @@ info 的列不送，唯一例外是 `calendar_reach` 在延伸成功、或級別
 - 還沒公布：什麼都不寫。
 - 已公布：新增隔年每一天，寫一筆 `etl_run`（`trading_calendar`／`trading_calendar_extend`）。既有的已確認日不動。
 - 表要通過三項檢查才寫：算出來的交易日數在 235 到 255 天、1 月 1 日休市、表上最後一個日期不早於 10 月 1 日（2021 到 2026 年的表都列到國慶日或更晚）。不過就不寫日曆，`etl_run` 記成 failed，`calendar_reach` 是 warning 並告警，要人看過表再手動處理。
-- 這三項擋的是只先公布一部分的表：只列到年初會算出將近 260 天，列到春節之後天數就落在正常範圍，要靠最後一個日期才擋得住。擋不住的只剩「列到 10 月之後、漏掉 12 月 25 日」這種表，延伸成功那天的告警出來後，請對一次證交所的公告。
+- 這三項擋的是只先公布一部分的表：只列到年初會算出將近 260 天，列到春節之後天數就落在正常範圍，要靠最後一個日期才擋得住。擋不住的有兩種：「列到 10 月之後、漏掉 12 月 25 日」這種表；以及休市日換了寫法、不再出現「無交易」三個字的表（2023 與 2027 年春節前的「2 月 2 日及 2 月 3 日市場無交易」寫在最後交易日那一列，是靠這三個字讀出來的；讀不懂的句子會擋下，完全沒這三個字的句子不會）。
+- 所以延伸成功那天的告警出來後，一定要有人拿證交所公告的全年交易日數與休市日對一次，不符就照「手動延伸」用 `--file` 蓋掉：
+
+  ```sql
+  select count(*) filter (where is_trading_day) as sessions,
+         array_agg(date order by date) filter (where not is_trading_day and extract(isodow from date) < 6) as weekday_closures
+  from trading_calendar where date between '2027-01-01' and '2027-12-31';
+  ```
 - 這筆 run 不在 22:50 `etl_runs` 的期望清單裡，沒公布或被擋下都不影響研究閘門。
 
 ### `calendar_reach`
@@ -793,6 +800,8 @@ info 的列不送，唯一例外是 `calendar_reach` 在延伸成功、或級別
 ```bash
 uv run python manage.py load_calendar --from 2026-12-01
 ```
+
+跑之前先記下證交所公告的隔年交易日數，跑完用「自動延伸」那段的查詢對一次；手動與自動用的是同一套解析。
 
 隔年還沒公布時會多印一行 `trading_calendar: TWSE has not published the 2027 schedule; confirmed days end 2026-12-31`。今年與隔年的表同樣要過上面三項檢查，不過就整個指令失敗、什麼都不寫；確認證交所的表沒問題而檢查太嚴時，改用 `--file` 載入人工整理的檔案。
 
