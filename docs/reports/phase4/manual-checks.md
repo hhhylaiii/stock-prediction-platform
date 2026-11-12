@@ -349,7 +349,7 @@ return: features before f2b07d36703eeabea8a1de258d2816055085fd0fd2174d71d19bb00b
 return: exit 0, features after f2b07d36703eeabea8a1de258d2816055085fd0fd2174d71d19bb00b0c04fbef
 ```
 
-演練（研究摺 43，整支指令的時間）：bags 1 是 rank 254 秒、return 100 秒、interval 249 秒；bags 5 是 rank 306 秒、return 135 秒、interval 337 秒。排名 bags 5 那次的報告是 `rank-rehearsal-b5-11120230.md`（5 日 IC 0.14096、20 日 0.16888；bags 5 不和研究 run 對帳）。return 與 interval 的 bags 5 報告沒有收進來。
+演練（研究摺 43，整支指令的時間）：bags 1 是 rank 254 秒、return 100 秒、interval 249 秒；bags 5 是 rank 306 秒、return 135 秒、interval 337 秒。bags 5 三次的報告是 `rank-rehearsal-b5-11120230.md`、`interval-rehearsal-b5-11120230.md`、`return-rehearsal-b5-11120230.md`（bags 5 不和研究 run 對帳）。
 
 ## Holdout（2026-11-12）：排名的對照數字（讀 `backtest_metric`）
 
@@ -471,4 +471,106 @@ coverage: days 429 mean 0.74990; rolling 60-day windows 370, min 0.61008 on 2025
 Brier model: days 429 mean 0.16491; rolling windows 370, min 0.12817, max 0.22112, above the research baseline: 118 (31.9%), latest window 0.18070
 Brier logistic in holdout: days 429 mean 0.16493; rolling windows 370, min 0.12605, max 0.22297, above the research baseline: 116 (31.4%), latest window 0.18187
 share of rows with the up label true, holdout mean of daily 0.2122
+```
+
+## Holdout（2026-11-12）：絕對報酬各摺 MAE 差的未四捨五入值
+
+用報告同一條評估路徑（`_frame`、`_settled`、`evaluate_return`、`fold_gap`）重算；每列是摺、MAE 差、模型的 MAE、零預測的 MAE：
+
+```
+44 -0.00019709157778124986 model 0.04750882809724165 zero 0.0477059196750229
+45 -0.001758740170557882 model 0.04239749032227938 zero 0.04415623049283726
+46 -0.0003463411693883159 model 0.03932989012417342 zero 0.03967623129356174
+47 -0.00017504449667247318 model 0.041138600761618356 zero 0.04131364525829083
+48 -0.0001221000879866735 model 0.051062822324564036 zero 0.05118492241255071
+49 3.7840083728785112e-06 model 0.06057873891590465 zero 0.06057495490753177
+50 -0.0003833587037966671 model 0.05312567538805395 zero 0.053509034091850614
+51 -0.0017755612833179543 model 0.05852898822568541 zero 0.060304549509003366
+mean of folds -0.0005943066851410422 pooled model 0.048298608451424835 pooled zero 0.048796776804773116
+```
+
+## Holdout（2026-11-12）：門檻 (3) 的合併值，8 摺與不計摺 51
+
+用報告同一條評估路徑重算；「all 8 folds」那一段和三份報告相同。最後一行是波動率區間（頁面的備援）的覆蓋率。
+
+```
+== all 8 folds (must match the reports)
+  rank h5 pooled IC: 0.10580 (NW t 6.81); ridge 0.09677
+  rank h20 pooled IC: 0.10282 (NW t 3.70); ridge 0.09797
+  return pooled MAE: 0.048299 vs zero 0.048797 (gap -0.000498, fold-gap NW t -2.55)
+  interval pooled coverage: 0.74990
+  Brier: 0.164910 vs logistic 0.164928 (gap -0.000017, fold-gap NW t -0.90)
+  QLIKE: 0.46734 vs tech_vol 0.65396 (fold-gap NW t -3.35)
+  pinball: 0.102653 vs vol band 0.105213 (fold-gap NW t -2.31); folds where the model is better 5 of 8
+  AUC (mean of daily): 0.61061 vs logistic 0.60287 (fold-gap NW t 1.25)
+  vol-band coverage (mean of daily): 0.78694 over 429 days
+== without fold 51
+  rank h5 pooled IC: 0.10024 (NW t 6.34); ridge 0.08863
+  rank h20 pooled IC: 0.09786 (NW t 3.52); ridge 0.09230
+  return pooled MAE: 0.047765 vs zero 0.048197 (gap -0.000432, fold-gap NW t -2.10)
+  interval pooled coverage: 0.75564
+  Brier: 0.163547 vs logistic 0.163419 (gap +0.000128, fold-gap NW t 0.32)
+  QLIKE: 0.46981 vs tech_vol 0.65208 (fold-gap NW t -2.73)
+  pinball: 0.101895 vs vol band 0.104339 (fold-gap NW t -1.85); folds where the model is better 4 of 7
+  AUC (mean of daily): 0.61478 vs logistic 0.60839 (fold-gap NW t 0.70)
+  vol-band coverage (mean of daily): 0.79279 over 422 days
+```
+
+## Holdout（2026-11-12）：label 重建多出來的三檔在特徵分區裡沒有列
+
+2026 年的特徵分區（建到 2026-11-06）裡，4207、5355、8176 沒有任何列（同一查法 2330 有 203 列），所以三個目標的預測快取都沒有這三檔，label 是接在預測列上的，不會進評估：
+
+```
+stock_id type string date type date32[day]
+2330 rows 203 first 2026-01-02 last 2026-11-06 in_universe days 203
+4207 rows 0 first None last None in_universe days 0
+5355 rows 0 first None last None in_universe days 0
+8176 rows 0 first None last None in_universe days 0
+partition rows 397489 stocks 1989 last day 2026-11-06 rows on last day 1981 share in_universe 0.5111
+```
+
+## 集保兩欄填值後模型輸出變不變（2026-11-12）
+
+讀三支 holdout 與三支研究 run 已 fit 的模型檔；LightGBM 看每個 booster 的分裂次數與 gain 並把兩欄填成亂數直接比，線性模型看係數並把兩個缺值旗標由 1 改成 0 直接比：
+
+```
+feature rows on 2026-11-04 1981 | stored values in the two columns: {'chip_big_holder_pct_chg_1w': 0, 'chip_holder_count_chg_1w': 0}
+interval-holdout-20261112:histq:no model file 8
+interval-holdout-20261112:lightgbm:boosters 200
+interval-holdout-20261112:lightgbm:checked 24
+interval-holdout-20261112:lightgbm:predicted both ways 3
+interval-holdout-20261112:logistic:checked 8
+interval-std1109:histq:no model file 39
+interval-std1109:lightgbm:boosters 195
+interval-std1109:lightgbm:checked 117
+interval-std1109:lightgbm:predicted both ways 3
+interval-std1109:logistic:checked 39
+rank-cand60:lightgbm:boosters 78
+rank-cand60:lightgbm:checked 78
+rank-cand60:lightgbm:predicted both ways 2
+rank-cand60:ridge:checked 78
+rank-holdout-20261112:lightgbm:boosters 80
+rank-holdout-20261112:lightgbm:checked 16
+rank-holdout-20261112:lightgbm:predicted both ways 2
+rank-holdout-20261112:ridge:checked 16
+return-holdout-20261112:lightgbm:boosters 40
+return-holdout-20261112:lightgbm:checked 8
+return-holdout-20261112:lightgbm:predicted both ways 1
+return-std1109:lightgbm:boosters 39
+return-std1109:lightgbm:checked 39
+return-std1109:lightgbm:predicted both ways 1
+worst over every model: {'gain': 0.0, 'split': 0, 'coef_ridge': 0.0, 'coef_logistic': 0.5142943355447955, 'lgbm_diff': 0.0, 'linear_diff': 0.19740894390315236}
+```
+
+logistic 的兩個缺值旗標的係數（47 個模型裡的前後各三個），以及旗標由 1 變 0 時機率的變化（其他輸入都在 0）：
+
+```
+interval-holdout-20261112.logistic.h20.f044 {'chip_big_holder_pct_chg_1w': 0.0, 'chip_holder_count_chg_1w': 0.0, 'chip_big_holder_pct_chg_1w_missing': -0.42761, 'chip_holder_count_chg_1w_missing': -0.42761} intercept -0.4335 prob shift 0.17722
+interval-holdout-20261112.logistic.h20.f045 {'chip_big_holder_pct_chg_1w': 0.0, 'chip_holder_count_chg_1w': 0.0, 'chip_big_holder_pct_chg_1w_missing': -0.41727, 'chip_holder_count_chg_1w_missing': -0.41727} intercept -0.4229 prob shift 0.1744
+interval-holdout-20261112.logistic.h20.f046 {'chip_big_holder_pct_chg_1w': 0.0, 'chip_holder_count_chg_1w': 0.0, 'chip_big_holder_pct_chg_1w_missing': -0.43283, 'chip_holder_count_chg_1w_missing': -0.43283} intercept -0.4384 prob shift 0.17864
+interval-std1109.logistic.h20.f041 {'chip_big_holder_pct_chg_1w': 0.0, 'chip_holder_count_chg_1w': 0.0, 'chip_big_holder_pct_chg_1w_missing': -0.42822, 'chip_holder_count_chg_1w_missing': -0.42822} intercept -0.4346 prob shift 0.17735
+interval-std1109.logistic.h20.f042 {'chip_big_holder_pct_chg_1w': 0.0, 'chip_holder_count_chg_1w': 0.0, 'chip_big_holder_pct_chg_1w_missing': -0.42955, 'chip_holder_count_chg_1w_missing': -0.42955} intercept -0.4361 prob shift 0.1777
+interval-std1109.logistic.h20.f043 {'chip_big_holder_pct_chg_1w': 0.0, 'chip_holder_count_chg_1w': 0.0, 'chip_big_holder_pct_chg_1w_missing': -0.42908, 'chip_holder_count_chg_1w_missing': -0.42908} intercept -0.4312 prob shift 0.17788
+models 47 max |coef| per name: 兩欄本身 0.0；兩個缺值旗標各 0.51429
+prob shift when both flags flip (all other inputs at 0): min 0.11698 max 0.19741 mean abs 0.18197
 ```
