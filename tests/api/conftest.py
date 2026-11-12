@@ -9,7 +9,11 @@ import pytest
 from django.core.cache import cache
 
 from apps.market.models import DailyPrice, Market, StockMaster, TradingCalendar
+from apps.research.gates import Gate, SlotGates
 from apps.research.models import ModelRun, Prediction
+from apps.research.monitor import PROMOTED_ON
+from apps.research.predict import Slot
+from apps.research.promotion import PROMOTION, _failed
 
 TAIPEI = ZoneInfo("Asia/Taipei")
 CALENDAR_START = date(2026, 7, 1)
@@ -143,6 +147,41 @@ def add_model_run(
         status=status,
         created_at=created_at or taipei(2026, 10, 1),
     )
+
+
+RELEASE_REASON = "kept for the model page"
+RELEASE_REPORT = "/srv/host/reports/rank-holdout.md"
+
+
+def release_params(status: object) -> dict[str, Any]:
+    """Production params as build_run records a release, with the given verdict in it."""
+    release = {
+        "status": status,
+        "failed": ["排名 20 日 IC"],
+        "flagged": [],
+        "reason": RELEASE_REASON,
+        "released_at": "2026-11-12T10:03:00+08:00",
+        "report": RELEASE_REPORT,
+        "sha256": "ab" * 32,
+    }
+    return {"production": {"role": "model", "holdout_release": release}}
+
+
+FORCED_REASON = "kept with the forced swap"
+FORCED_GATES = (
+    Gate("agreement", False, 0.412, ">= 0.5", 1842, ""),
+    Gate("gain_overlap", True, 8.0, "前 10 名重疊 >= 6", 10, ""),
+    Gate("shadow_oos", False, -0.004, "> 0", 120, "no shadow rows"),
+)
+
+
+def forced_params(
+    run_id: str, objective: str = "rank", horizon: int = 20, reason: str = FORCED_REASON
+) -> dict[str, Any]:
+    """Params as promote --force leaves them on a run whose own gates failed."""
+    checked = SlotGates(Slot(objective, horizon), run_id, "serving-old", list(FORCED_GATES))
+    note = {"forced": True, "reason": reason, "failed": _failed([checked])}
+    return {PROMOTED_ON: "2026-10-30", PROMOTION: note}
 
 
 def add_predictions(

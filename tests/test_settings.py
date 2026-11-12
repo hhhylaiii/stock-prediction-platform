@@ -156,6 +156,17 @@ def test_filings_must_stop_counting_before_the_evening_check(
 
 
 @pytest.mark.usefixtures("isolated_env")
+def test_the_day_the_exchanges_lead_dividends_must_be_a_date(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("DIVIDEND_EXCHANGE_PRIMARY_FROM", raising=False)
+    assert _fresh_import("config.settings.dev").DIVIDEND_EXCHANGE_PRIMARY_FROM == "2026-10-31"
+    monkeypatch.setenv("DIVIDEND_EXCHANGE_PRIMARY_FROM", "2026/10/31")
+    with pytest.raises(ImproperlyConfigured, match="DIVIDEND_EXCHANGE_PRIMARY_FROM"):
+        _fresh_import("config.settings.dev")
+
+
+@pytest.mark.usefixtures("isolated_env")
 def test_the_statement_scan_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in ("MOPS_BASE_URL", "STATEMENT_SCAN_DAYS_AFTER", "ETL_AT_STATEMENTS"):
         monkeypatch.delenv(name, raising=False)

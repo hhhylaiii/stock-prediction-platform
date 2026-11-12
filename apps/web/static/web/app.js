@@ -34,11 +34,14 @@
     revenue_source_mismatch: '月營收兩來源數字不同',
     statement_history_mismatch: '財報由 MOPS 歷史彙總頁補缺',
     dividend_source_mismatch: '股利兩來源不同',
+    dividend_notice: '除權除息預告表',
+    ex_date_unannounced: '除息日沒有公告日',
     exchange_fill: '交易所逐日表補缺',
     industry_fill: '交易所產業補缺',
     output_width_ratio: '區間寬度比異常',
     output_odds_vs_q50: '機率與中位數矛盾',
     monitor_unscored: '到期預測缺 label',
+    monitor_feature_coverage: '線上特徵覆蓋率',
     model_alert: '模型告警',
     model_promotion: '換模',
     model_holdout_release: 'holdout 放行後建模',
@@ -183,6 +186,26 @@
       '<div class="right faint small">' + (row.prev_rank === null ? '—' : '昨 ' + row.prev_rank) + '</div></a>';
   }
 
+  const shownModels = (models, horizon) => (models || []).filter(model => horizon === 20 || ['rank', 'return'].includes(model.role));
+
+  function caveatText(models) {
+    const order = Object.keys(OBJECTIVES);
+    const sorted = [...models].sort((a, b) => order.indexOf(a.objective) - order.indexOf(b.objective) || b.horizon - a.horizon);
+    const grouped = (keyOf, clause) => {
+      const groups = new Map();
+      sorted.forEach(model => {
+        const key = keyOf(model), name = (OBJECTIVES[model.objective] || model.objective) + ' ' + model.horizon + ' 日';
+        const names = groups.get(key) || [];
+        if (key && !names.includes(name)) groups.set(key, [...names, name]);
+      });
+      return [...groups].map(([key, names]) => names.join('、') + clause(key));
+    };
+    return [
+      ...grouped(model => model.released_verdict, verdict => '模型的 holdout 判定' + verdict + '，經使用者放行上線'),
+      ...grouped(model => (model.forced_gates || []).map(gate => GATES[gate] || gate).join('、'), gates => '模型的換模門檻沒過（' + gates + '），經使用者強制換上')
+    ].join('；');
+  }
+
   function todayMetaText(meta) {
     if (!meta.date) return '';
     const [y, m, d] = meta.date.split('-').map(Number);
@@ -195,7 +218,8 @@
     const degraded = meta.degraded || [];
     const degradedRuns = new Set((meta.models || []).filter(model => degraded.includes(model.role)).map(model => model.run_id)).size;
     if (degraded.length) parts.push(degradedRuns + ' 個模型降級中，結果僅供參考' + (meta.interval_alert ? '，區間改用波動率區間' : ''));
-    return parts.join('，') + '。';
+    const caveats = caveatText(shownModels(meta.models, state.h));
+    return parts.join('，') + '。' + (caveats ? caveats + '。原因見模型頁。' : '');
   }
 
   function watchedStocks() {
@@ -465,6 +489,7 @@
     const realised = data.realized_vol && data.realized_vol.tech_vol_60d !== null ? data.realized_vol.tech_vol_60d : null;
     const rank = (twenty.models || []).find(model => model.role === 'rank') || (entries.flatMap(entry => entry.models || []).find(model => model.role === 'rank'));
     const degraded = entries.some(entry => (entry.degraded || []).length);
+    const caveats = caveatText(entries.flatMap(entry => shownModels(entry.models, entry.horizon)));
     return '<p class="sub">排名、報酬與區間機率各由自己的模型產出；排名模型多用了幾個籌碼與除息日特徵，其餘特徵相同。價格以 ' + basis + ' 換算。</p><div class="list">' +
       '<div class="thead h-cols" style="padding-top:10px"><div>期間</div><div class="right">預測報酬</div><div class="right">預測價</div><div class="right">80% 區間</div><div class="right prob-head" title="' + esc(PROB_TIP) + '">' + PROB_HEAD + '</div></div>' +
       entries.map(forecastRowHtml).join('') + '</div>' + (quantileBand ? '<p class="note band-note">' + BAND_NOTE + '</p>' : '') +
@@ -472,7 +497,8 @@
       (realised === null ? '' : '<div class="muted tiny">過去 60 日實際為 ' + (realised * 100).toFixed(1) + '%</div>') + '</div>' +
       '<div><div class="faint tiny">排名模型版本</div><div style="font-size:15px;font-weight:500;line-height:1.6">' + (rank ? esc((MODEL_NAMES[rank.model_type] || rank.model_type) + ' ' + rank.version) : '—') + '</div>' +
       (rank ? '<div class="muted tiny">訓練資料到 ' + esc(rank.train_end) + '，<a href="#models">成績在模型頁</a></div>' : '') + '</div></div>' +
-      (degraded ? '<p class="note">有模型降級中，結果僅供參考。</p>' : '');
+      (degraded ? '<p class="note">有模型降級中，結果僅供參考。</p>' : '') +
+      (caveats ? '<p class="note caveat-note">' + esc(caveats) + '。<a href="#models">原因在模型頁</a></p>' : '');
   }
 
   function featuresHtml(data, meta) {
@@ -780,34 +806,54 @@
     return [row.degraded_on ? row.degraded_on + ' 起' : '', w ? windowText(w.own_rows, w.days, w.mostly_predecessors) : ''].filter(Boolean).join('；');
   }
 
-  function releasedHtml(row) {
+  const releaseKey = row => row && row.holdout_release ? JSON.stringify(row.holdout_release) : '';
+
+  function releaseSpans(rows) {
+    return rows.map((row, i) => {
+      const key = releaseKey(row);
+      if (!key || releaseKey(rows[i + 1]) === key) return 0;
+      let span = 1;
+      while (releaseKey(rows[i - span]) === key) span += 1;
+      return span;
+    });
+  }
+
+  function releasedHtml(row, span) {
     const r = row.holdout_release;
-    if (!r) return '';
+    if (!span) return '';
     const short = [r.failed.length ? '未達的門檻：' + r.failed.join('、') : '', r.flagged.length ? '退化旗標：' + r.flagged.join('、') : ''].filter(Boolean).join('；');
-    const lines = ['holdout 判定「' + r.status + '」' + (short ? '，' + short : ''), r.released_at.slice(0, 10) + ' 經使用者放行：' + r.reason];
+    const lines = [(span > 1 ? '以上 ' + span + ' 個模型：' : '') + 'holdout 判定「' + r.status + '」' + (short ? '，' + short : ''), r.released_at.slice(0, 10) + ' 經使用者放行：' + r.reason];
     return '<div class="released">' + lines.map(line => '<div>' + esc(line) + '</div>').join('') + '</div>';
   }
 
-  function modelRowHtml(row) {
+  function forcedHtml(row) {
+    const f = row.forced_promotion;
+    if (!f) return '';
+    const lines = ['換模門檻沒過：' + f.gates.map(gateText).join('、'), [f.promoted_on, '經使用者強制換上：' + (f.reason || '沒有寫原因')].filter(Boolean).join(' ')];
+    return '<div class="forced">' + lines.map(line => '<div>' + esc(line) + '</div>').join('') + '</div>';
+  }
+
+  function modelRowHtml(row, span) {
     const degraded = row.status === 'degraded' ? '<span class="faint small">　降級中</span>' : '';
     const detail = row.status === 'degraded' ? degradedText(row) : '';
-    const released = releasedHtml(row);
-    return '<div class="trow model-cols' + (released ? ' has-release' : '') + '"><div class="num">' + esc(OBJECTIVES[row.objective] || row.objective) + '<span class="faint small">　' + row.horizon + ' 日</span></div>' +
+    const notes = forcedHtml(row) + releasedHtml(row, span);
+    return '<div class="trow model-cols' + (notes ? ' has-release' : '') + '"><div class="num">' + esc(OBJECTIVES[row.objective] || row.objective) + '<span class="faint small">　' + row.horizon + ' 日</span></div>' +
       '<div>' + esc(modelName(row.model_type)) + degraded + (detail ? '<div class="faint small degraded">' + esc(detail) + '</div>' : '') + '</div>' +
       '<div class="muted version">' + esc(row.version) + '</div>' +
       '<div class="muted">' + esc(monthOf(row.train_start)) + ' 到 ' + esc(monthOf(row.train_end)) + '</div>' +
       '<div>' + esc(recentText(row)) + '</div>' +
-      '<div class="muted">' + esc(researchText(row)) + '</div></div>' + released;
+      '<div class="muted">' + esc(researchText(row)) + '</div></div>' + notes;
   }
 
   async function renderModelTable() {
     const host = document.getElementById('model-table');
     try {
       const { data } = await api.get('models');
+      const spans = releaseSpans(data);
       host.innerHTML = !data.length ? '<p class="placeholder">模型尚未上線。</p>' :
         '<div class="scroll" style="margin-top:14px"><div class="table" style="min-width:1100px">' +
         '<div class="thead model-cols"><div>目標</div><div>模型</div><div>版本</div><div>訓練區間</div><div>近 6 個月成績</div><div>研究期成績與 baseline</div></div>' +
-        data.map(modelRowHtml).join('') + '</div></div>';
+        data.map((row, i) => modelRowHtml(row, spans[i])).join('') + '</div></div>';
     } catch (err) {
       host.innerHTML = errorBox(err);
     }
@@ -1011,6 +1057,28 @@
 
   const namesOf = v => Array.isArray(v) ? v : [];
 
+  const share2 = v => typeof v === 'number' ? (v * 100).toFixed(2) + '%' : '—';
+
+  function coverageLine(entry) {
+    const stocks = Number.isInteger(entry.count) ? '（' + fmtInt(entry.count) + ' 檔）' : '';
+    return (entry.collapsed ? '崩落：' : '偏低：') + entry.feature + ' 線上有值 ' + share2(entry.share) + stocks +
+      '，參考中位數 ' + share2(entry.median) + '、下緣 ' + share2(entry.low) + '、門檻 ' + share2(entry.bound);
+  }
+
+  function coverageLines(d) {
+    const flagged = namesOf(d.flagged), appeared = namesOf(d.appeared);
+    if (d.error) return ['檢查沒有跑成：' + d.error, flagged.length ? '當天先前標記：' + flagged.map(entry => entry.feature).join('、') : ''].filter(Boolean);
+    const collapsed = flagged.filter(entry => entry.collapsed), low = flagged.filter(entry => !entry.collapsed);
+    const head = collapsed.length ? collapsed.length + ' 個特徵崩落，當天不產出預測' + (low.length ? '；另有 ' + low.length + ' 個偏低' : '') :
+      low.length ? low.length + ' 個特徵偏低' : '都在參考範圍內';
+    return [
+      head + '（判 ' + fmtInt(d.judged || 0) + '／' + fmtInt(d.features || 0) + ' 個特徵）',
+      ...collapsed.map(coverageLine),
+      ...low.map(coverageLine),
+      appeared.length ? '參考期全空、線上有值：' + appeared.join('、') : ''
+    ].filter(Boolean);
+  }
+
   function releaseLines(d) {
     const failed = namesOf(d.failed), flagged = namesOf(d.flagged);
     const at = d.released_at ? d.released_at.slice(0, 10) + ' ' + hhmm(d.released_at) + ' 放行' : '';
@@ -1048,6 +1116,7 @@
         return ['', [d.flagged ? '少量標記，' + stocks : '沒有標記']];
       case 'output_odds_vs_q50': return ['', [d.flagged ? '參考，' + stocks : '沒有標記']];
       case 'monitor_unscored': return ['warn', [fmtInt(sizeOf(d.runs)) + ' 筆']];
+      case 'monitor_feature_coverage': return [check.severity === 'info' ? '' : 'warn', coverageLines(d)];
       case 'model_alert': return ['warn', (d.runs || []).map(run => alertLine(run, date))];
       case 'model_promotion': return [check.severity === 'info' ? '' : 'warn', promotionLines(d)];
       case 'model_holdout_release': return ['warn', releaseLines(d)];
@@ -1063,7 +1132,7 @@
     const failed = check.severity === 'error';
     const cls = failed ? 'warn' : state;
     const shown = failed ? ['錯誤，' + (lines[0] || ''), ...lines.slice(1)] : lines;
-    const runClass = ['model_alert', 'model_promotion', 'model_holdout_release'].includes(check.check_name) ? ' run' : '';
+    const runClass = ['model_alert', 'model_promotion', 'model_holdout_release', 'monitor_feature_coverage'].includes(check.check_name) ? ' run' : '';
     return '<div class="check"><i class="' + cls + '"></i><div><div>' + esc(CHECKS[check.check_name] || check.check_name) + (note ? '　<span class="faint small pinned">' + esc(note) + '</span>' : '') + '</div>' +
       shown.map(line => '<div class="muted small' + runClass + '">' + esc(line) + '</div>').join('') + '</div></div>';
   }

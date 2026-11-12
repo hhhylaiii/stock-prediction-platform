@@ -12,6 +12,8 @@ import pytest
 from django.core.management import call_command
 from django.core.management.base import CommandError
 
+from apps.etl.adapters.exchange_notices import Notice
+from apps.etl.dividend_notices import apply_notices
 from apps.etl.models import EtlRun
 from apps.market.calendar import TradingDays
 from apps.market.models import (
@@ -288,6 +290,28 @@ def test_every_input_group_reaches_the_frame() -> None:
     assert row["mkt_days_to_quarter_end"] == len(CALENDAR.between(d("2016-03-03"), d("2016-03-31")))
     k = len(CALENDAR.between(d("2015-12-01"), d("2016-03-02"))) - 1
     assert row["mkt_taiex_ret_5d"] == pytest.approx(taiex_close(k) / taiex_close(k - 5) - 1)
+
+
+def test_an_event_a_notice_wrote_ahead_changes_no_feature_but_the_days_to_its_ex_date() -> None:
+    listed("2330", "2015-06-01", "2016-04-29")
+    inputs("2330")
+    before = build_feature_frame(CALENDAR, d("2016-03-01"), d("2016-04-15"), masked={})
+
+    coming = Notice("2330", d("2016-03-07"), Decimal(1), Decimal(0))
+    assert apply_notices("twse", [coming], d("2016-02-24")).rows == 1
+    after = build_feature_frame(CALENDAR, d("2016-03-01"), d("2016-04-15"), masked={})
+
+    others = [name for name in FRAME_COLUMNS if name != "fund_days_to_ex_date"]
+    pd.testing.assert_frame_equal(after[others], before[others])
+    assert before["fund_days_to_ex_date"].isna().all()
+    counted = after.dropna(subset=["fund_days_to_ex_date"])
+    assert dict(zip(counted["date"], counted["fund_days_to_ex_date"], strict=True)) == {
+        d("2016-03-01"): 4.0,
+        d("2016-03-02"): 3.0,
+        d("2016-03-03"): 2.0,
+        d("2016-03-04"): 1.0,
+    }
+    assert DividendEvent.objects.get().adj_factor is None
 
 
 def test_industry_neutral_features_reach_the_frame() -> None:

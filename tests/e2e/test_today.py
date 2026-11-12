@@ -10,16 +10,18 @@ from apps.etl.models import EtlRun
 from apps.market.calendar import TradingDays
 from apps.market.models import TradingCalendar
 from apps.research.models import FeatureDaily, ModelMonitor, ModelRun, Prediction
-from tests.api.conftest import add_predictions
+from tests.api.conftest import FORCED_REASON, add_predictions, forced_params
 from tests.e2e.conftest import (
     BAND_NOTE,
     EXTRA_STOCKS,
     PROB_HEAD,
     PROB_TIP,
+    RELEASE_REASON,
     TPEX_EXTRAS,
     XSS_NAME,
     Seed,
     at,
+    released_on,
 )
 
 pytestmark = pytest.mark.e2e
@@ -52,7 +54,89 @@ def test_today_lists_the_ranking_with_prices_and_bands(
     expect(page.locator("#today-meta")).to_contain_text("涵蓋 25 檔")
     expect(page.locator("#today-meta")).to_contain_text("LightGBM 2026-10")
     expect(page.locator("#status")).not_to_contain_text("預測尚未產出")
+    expect(page.locator("#today-meta")).not_to_contain_text("放行")
     assert page.evaluate("window.__xss") is None
+
+
+def test_today_names_the_models_that_went_live_on_a_released_holdout(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    ModelRun.objects.filter(pk="rank-h20").update(params=released_on("未達標"))
+    ModelRun.objects.filter(pk__in=["quantile-h20", "vol-h20", "prob-h20"]).update(
+        params=released_on("明顯退化")
+    )
+
+    page.goto(live_server.url)
+
+    meta = page.locator("#today-meta")
+    expect(meta).to_contain_text(
+        "排名 20 日模型的 holdout 判定未達標，經使用者放行上線；"
+        "報酬區間 20 日、波動率 20 日、跑贏大盤機率 20 日模型的 holdout 判定明顯退化，"
+        "經使用者放行上線。原因見模型頁。"
+    )
+    expect(meta).not_to_contain_text(RELEASE_REASON)
+
+    page.get_by_role("button", name="5 日").click()
+
+    expect(page.locator("#rows .trow").nth(0)).to_contain_text("9999")
+    expect(meta).to_contain_text("涵蓋 25 檔")
+    expect(meta).not_to_contain_text("放行")
+
+
+FORCED_GATES_TEXT = "與現役模型的預測相關、影子模型最近 6 個月 OOS"
+
+
+def test_today_names_the_models_swapped_in_by_force_after_the_released_ones(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    ModelRun.objects.filter(pk="rank-h20").update(
+        params={**released_on("未達標"), **forced_params("rank-h20")}
+    )
+    ModelRun.objects.filter(pk="prob-h20").update(
+        params=forced_params("prob-h20", "classification")
+    )
+
+    page.goto(live_server.url)
+
+    meta = page.locator("#today-meta")
+    expect(meta).to_contain_text(
+        "排名 20 日模型的 holdout 判定未達標，經使用者放行上線；"
+        f"排名 20 日、跑贏大盤機率 20 日模型的換模門檻沒過（{FORCED_GATES_TEXT}），"
+        "經使用者強制換上。原因見模型頁。"
+    )
+    expect(meta).not_to_contain_text(FORCED_REASON)
+
+
+def test_five_days_names_only_the_released_models_it_shows(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    ModelRun.objects.filter(pk__in=["rank-h5", "reg-h5"]).update(params=released_on("未達標"))
+    ModelRun.objects.filter(pk="vol-h20").update(params=released_on("明顯退化"))
+    page.goto(live_server.url)
+    expect(page.locator("#rows .trow")).to_have_count(20)
+
+    page.get_by_role("button", name="5 日").click()
+
+    meta = page.locator("#today-meta")
+    expect(meta).to_contain_text(
+        "排名 5 日、絕對報酬 5 日模型的 holdout 判定未達標，經使用者放行上線。原因見模型頁。"
+    )
+    expect(meta).not_to_contain_text("波動率")
+
+
+def test_watch_only_names_the_released_models_too(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    ModelRun.objects.filter(pk="rank-h20").update(params=released_on("未達標"))
+    page.add_init_script("localStorage.setItem('twp-watch', JSON.stringify(['2330']))")
+    page.goto(live_server.url)
+
+    page.locator("#watch-only").click()
+
+    expect(page.locator("#count")).to_have_text("追蹤中的 1 檔")
+    expect(page.locator("#today-meta")).to_contain_text(
+        "排名 20 日模型的 holdout 判定未達標，經使用者放行上線。原因見模型頁。"
+    )
 
 
 def test_today_says_what_the_probability_and_the_band_mean(

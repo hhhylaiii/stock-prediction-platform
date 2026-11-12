@@ -14,15 +14,20 @@ from rest_framework.response import Response
 from apps.api.envelope import envelope
 from apps.api.params import MonthlyIcQuery, parse
 from apps.api.serving import (
+    HOLDOUT_RELEASE,
     MONITOR_FIELDS,
+    PROMOTION,
     SERVING_FIELDS,
     ServingRun,
     Slot,
     best_runs,
+    day_of,
     eligible,
+    forced_gates,
     latest_days,
     latest_served_date,
     months_before,
+    release_of,
     runs_on,
     served_monitor,
     serving_run,
@@ -39,7 +44,7 @@ from apps.research.models import (
     ModelRun,
     ModelStatus,
 )
-from apps.research.monitor import DEGRADED_WINDOW
+from apps.research.monitor import DEGRADED_WINDOW, PROMOTED_ON
 
 PAGE_ORDER = (
     Slot(ModelObjective.RANK, 20),
@@ -57,9 +62,6 @@ MONTH_IC, MONTH_DAYS = RANK_METRICS[0], RANK_METRICS[-1]
 ENTRY_FIELDS = ("run_id", "run_key", "model_type", "version", "status", "train_start", "train_end")
 TOTAL_FIELDS = ("run_key", "model_type", "metric", "segment", "value", "period_start", "period_end")
 WINDOW_FIELDS = {"own_rows": int, "days": int, "mostly_predecessors": bool}
-HOLDOUT_RELEASE = "holdout_release"
-RELEASE_TEXTS = ("status", "reason", "released_at")
-RELEASE_LISTS = ("failed", "flagged")
 
 
 def serving_models() -> list[tuple[ServingRun, date]]:
@@ -204,20 +206,24 @@ def degraded_window(params: dict[str, Any]) -> dict[str, Any] | None:
     return {name: window[name] for name in WINDOW_FIELDS}
 
 
-def is_names(value: object) -> bool:
-    return isinstance(value, list) and all(isinstance(name, str) for name in value)
-
-
 def holdout_release(params: dict[str, Any]) -> dict[str, Any] | None:
-    """The released verdict a production run was built on, without its report path or hash."""
+    """The released verdict a production run was built on, as the prediction endpoints read it."""
     production = params.get(PRODUCTION)
-    release = production.get(HOLDOUT_RELEASE) if isinstance(production, dict) else None
-    if not isinstance(release, dict):
+    return release_of(production.get(HOLDOUT_RELEASE)) if isinstance(production, dict) else None
+
+
+def forced_promotion(params: dict[str, Any]) -> dict[str, Any] | None:
+    """The forced swap a serving run came in by: its day, the reason and the gates overridden."""
+    note = params.get(PROMOTION)
+    gates = forced_gates(note)
+    if gates is None or not isinstance(note, dict):
         return None
-    shown = {name: release.get(name) for name in (*RELEASE_TEXTS, *RELEASE_LISTS)}
-    texts = all(isinstance(shown[name], str) for name in RELEASE_TEXTS)
-    lists = all(is_names(shown[name]) for name in RELEASE_LISTS)
-    return shown if texts and lists else None
+    reason = note.get("reason")
+    return {
+        "promoted_on": day_of(params.get(PROMOTED_ON)),
+        "reason": reason if isinstance(reason, str) else None,
+        "gates": gates,
+    }
 
 
 class ModelListView(ReadOnlyView):
@@ -247,6 +253,7 @@ class ModelListView(ReadOnlyView):
                         else None
                     ),
                     "holdout_release": holdout_release(params.get(run.run_id) or {}),
+                    "forced_promotion": forced_promotion(params.get(run.run_id) or {}),
                     "recent": recent[Slot(run.objective, run.horizon)],
                     **research,
                 }

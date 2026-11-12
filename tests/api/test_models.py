@@ -7,8 +7,10 @@ import pytest
 from django.test import Client
 from pytest_django import DjangoAssertNumQueries
 
-from apps.api.model_runs import HOLDOUT_RELEASE, MONTH_DAYS, MONTH_IC
-from apps.research import production
+from apps.api import serving
+from apps.api.model_runs import MONTH_DAYS, MONTH_IC
+from apps.api.serving import HOLDOUT_RELEASE
+from apps.research import production, promotion
 from apps.research.eval_report import RANK_METRICS
 from apps.research.holdout import (
     FAILED,
@@ -20,12 +22,14 @@ from apps.research.holdout import (
 from apps.research.models import BacktestMetric, HoldoutRun, ModelMonitor, ModelRun, Prediction
 from tests.api.conftest import (
     EARLY_CALENDAR_START,
+    FORCED_REASON,
     OCT_29,
     OCT_30,
     Runs,
     add_model_run,
     add_predictions,
     envelope_of,
+    forced_params,
     sessions_until,
     taipei,
     trained_until,
@@ -497,6 +501,8 @@ def test_the_release_a_build_records_reaches_the_endpoint_with_its_reason(
     assert shown["failed"]
     assert shown["flagged"]
     assert REPORT_PATH not in response.content.decode()
+    served = envelope_of(client.get("/api/predictions"))["meta"]["models"]
+    assert [model["released_verdict"] for model in served if model["role"] == "rank"] == [FAILED]
 
 
 @pytest.mark.parametrize(
@@ -505,6 +511,7 @@ def test_the_release_a_build_records_reaches_the_endpoint_with_its_reason(
         "未達標",
         {name: value for name, value in RELEASE.items() if name != "reason"},
         {**RELEASE, "status": None},
+        {**RELEASE, "status": "達標"},
         {**RELEASE, "released_at": 20261112},
         {**RELEASE, "failed": "排名 20 日 IC"},
         {**RELEASE, "flagged": [1]},
@@ -528,6 +535,59 @@ def test_production_params_that_are_not_a_mapping_carry_no_release(
     rows = by_slot(envelope_of(client.get("/api/models")))
 
     assert rows[("rank", 20)]["holdout_release"] is None
+
+
+def test_the_promotion_key_is_the_one_promote_records() -> None:
+    assert serving.PROMOTION == promotion.PROMOTION
+
+
+def test_a_model_swapped_in_by_force_carries_the_day_the_reason_and_the_failed_gates(
+    client: Client, runs: Runs
+) -> None:
+    ModelRun.objects.filter(pk="rank-h20").update(params=forced_params("rank-h20"))
+
+    rows = by_slot(envelope_of(client.get("/api/models")))
+
+    assert rows[("rank", 20)]["forced_promotion"] == {
+        "promoted_on": "2026-10-30",
+        "reason": FORCED_REASON,
+        "gates": [
+            {
+                "name": "agreement",
+                "reason": "",
+                "value": 0.412,
+                "threshold": ">= 0.5",
+                "sample": 1842,
+                "sample_unit": "stocks",
+            },
+            {
+                "name": "shadow_oos",
+                "reason": "no shadow rows",
+                "value": -0.004,
+                "threshold": "> 0",
+                "sample": 120,
+                "sample_unit": "days",
+            },
+        ],
+    }
+    assert rows[("quantile", 20)]["forced_promotion"] is None
+
+
+def test_a_forced_promotion_serves_only_the_listed_gate_fields_and_a_text_reason(
+    client: Client, runs: Runs
+) -> None:
+    params = forced_params("rank-h20")
+    params[promotion.PROMOTION]["reason"] = ["not", "text"]
+    stored = params[promotion.PROMOTION]["failed"][0]["gates"][0]
+    stored["errors"] = [{"date": "2026-10-01", "check": "/srv/host/errors.log"}]
+    ModelRun.objects.filter(pk="rank-h20").update(params=params)
+
+    response = client.get("/api/models")
+
+    forced = by_slot(envelope_of(response))[("rank", 20)]["forced_promotion"]
+    assert forced["reason"] is None
+    assert [sorted(gate) for gate in forced["gates"]] == [sorted(serving.GATE_FIELDS)] * 2
+    assert "/srv/host/errors.log" not in response.content.decode()
 
 
 def test_no_models_served_yet(client: Client, db: None) -> None:

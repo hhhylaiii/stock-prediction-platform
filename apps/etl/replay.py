@@ -15,6 +15,7 @@ from django.utils import timezone
 
 from apps.etl.adapters import ADAPTERS
 from apps.etl.adapters.base import BaseAdapter
+from apps.etl.adapters.exchange_notices import DIVIDEND_NOTICE
 from apps.etl.adapters.tpex_tables import TABLES as TPEX_TABLES
 from apps.etl.adapters.twse_tables import TABLES as TWSE_TABLES
 from apps.etl.errors import SourceError, SourceNotReadyError
@@ -107,6 +108,8 @@ def replay_range(
     source: str, dataset: str, start: date, end: date, calendar: TradingDays
 ) -> EtlRun:
     """Span by span in date order; rows that only exist on change are cleared before rebuilding."""
+    if dataset == DIVIDEND_NOTICE:
+        raise ValueError(f"{dataset} raw has no date to replay by; run reapply_dividend_notices")
     adapter = replay_adapter(source, dataset, calendar)
     adapter.require_dataset(dataset)
     spans = list(adapter.units(dataset, start, end))
