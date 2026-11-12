@@ -6,7 +6,8 @@ import responses
 from django.core.management import call_command
 from django.test import override_settings
 
-from apps.etl.alerts import dispatch
+from apps.etl.alerts import announce, dispatch
+from apps.etl.models import DataQualityLog
 from apps.etl.quality import run_checks
 from apps.market.calendar import TradingDays
 from apps.market.models import DailyPrice
@@ -83,3 +84,29 @@ def test_check_quality_command_sends_the_alerts() -> None:
     DailyPrice.objects.filter(date=DAY).delete()
     call_command("check_quality", date="2026-10-28")
     assert len(responses.calls) == 1
+
+
+@responses.activate
+@override_settings(ALERT_WEBHOOK_URL=WEBHOOK)
+def test_an_info_row_is_posted_only_when_announced(caplog: pytest.LogCaptureFixture) -> None:
+    responses.post(WEBHOOK, status=200)
+    row = DataQualityLog(
+        date=DAY, check_name="calendar_reach", severity="info", detail={"level": 0}
+    )
+    dispatch([row])
+    assert len(responses.calls) == 0
+    with caplog.at_level(logging.INFO, logger="apps.etl.alerts"):
+        announce([row])
+    (call,) = responses.calls
+    raw = call.request.body
+    body = json.loads(raw.decode() if isinstance(raw, bytes) else str(raw))
+    assert body["alerts"] == [
+        {
+            "date": "2026-10-28",
+            "check": "calendar_reach",
+            "severity": "info",
+            "detail": {"level": 0},
+        }
+    ]
+    assert "calendar_reach" in caplog.text
+    assert "ERROR" not in caplog.text
