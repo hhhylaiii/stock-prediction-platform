@@ -574,3 +574,23 @@ interval-std1109.logistic.h20.f043 {'chip_big_holder_pct_chg_1w': 0.0, 'chip_hol
 models 47 max |coef| per name: 兩欄本身 0.0；兩個缺值旗標各 0.51429
 prob shift when both flags flip (all other inputs at 0): min 0.11698 max 0.19741 mean abs 0.18197
 ```
+
+## Holdout（2026-11-12）：波動率區間（頁面備援）的覆蓋率與缺波動率的列
+
+和模型的覆蓋率同一個算法（每天 universe 內可交易列落在區間內的比例，再對天數取平均）；另印把所有列合起來算的值，以及缺 `tech_vol_20d` 的列數：
+
+```
+
+== all 8 folds | tradable rows with a label 404544 | tech_vol_20d missing 0 (0.0000%) | zero-width vol band 0 | both 0 | days 429
+   vol band, every row: mean of daily 0.78694 over 429 days; pooled rows 0.78696
+   vol band, rows with tech_vol_20d: mean of daily 0.78694 over 429 days; pooled rows 0.78696
+   model, every row: mean of daily 0.74990 over 429 days; pooled rows 0.74744
+   model, rows with tech_vol_20d: mean of daily 0.74990 over 429 days; pooled rows 0.74744
+   missing rows per day: mean 0.0 max 0 days with any 0
+== without fold 51 | tradable rows with a label 398174 | tech_vol_20d missing 0 (0.0000%) | zero-width vol band 0 | both 0 | days 422
+   vol band, every row: mean of daily 0.79279 over 422 days; pooled rows 0.79261
+   vol band, rows with tech_vol_20d: mean of daily 0.79279 over 422 days; pooled rows 0.79261
+   model, every row: mean of daily 0.75564 over 422 days; pooled rows 0.75294
+   model, rows with tech_vol_20d: mean of daily 0.75564 over 422 days; pooled rows 0.75294
+   missing rows per day: mean 0.0 max 0 days with any 0
+```
