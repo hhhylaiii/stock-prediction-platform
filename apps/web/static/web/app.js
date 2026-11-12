@@ -41,6 +41,7 @@
     output_width_ratio: '區間寬度比異常',
     output_odds_vs_q50: '機率與中位數矛盾',
     monitor_unscored: '到期預測缺 label',
+    monitor_feature_coverage: '線上特徵覆蓋率',
     model_alert: '模型告警',
     model_promotion: '換模',
     model_holdout_release: 'holdout 放行後建模',
@@ -1057,6 +1058,28 @@
 
   const namesOf = v => Array.isArray(v) ? v : [];
 
+  const share2 = v => typeof v === 'number' ? (v * 100).toFixed(2) + '%' : '—';
+
+  function coverageLine(entry) {
+    const stocks = Number.isInteger(entry.count) ? '（' + fmtInt(entry.count) + ' 檔）' : '';
+    return (entry.collapsed ? '崩落：' : '偏低：') + entry.feature + ' 線上有值 ' + share2(entry.share) + stocks +
+      '，參考中位數 ' + share2(entry.median) + '、下緣 ' + share2(entry.low) + '、門檻 ' + share2(entry.bound);
+  }
+
+  function coverageLines(d) {
+    const flagged = namesOf(d.flagged), appeared = namesOf(d.appeared);
+    if (d.error) return ['檢查沒有跑成：' + d.error, flagged.length ? '當天先前標記：' + flagged.map(entry => entry.feature).join('、') : ''].filter(Boolean);
+    const collapsed = flagged.filter(entry => entry.collapsed), low = flagged.filter(entry => !entry.collapsed);
+    const head = collapsed.length ? collapsed.length + ' 個特徵崩落，當天不產出預測' + (low.length ? '；另有 ' + low.length + ' 個偏低' : '') :
+      low.length ? low.length + ' 個特徵偏低' : '都在參考範圍內';
+    return [
+      head + '（判 ' + fmtInt(d.judged || 0) + '／' + fmtInt(d.features || 0) + ' 個特徵）',
+      ...collapsed.map(coverageLine),
+      ...low.map(coverageLine),
+      appeared.length ? '參考期全空、線上有值：' + appeared.join('、') : ''
+    ].filter(Boolean);
+  }
+
   function releaseLines(d) {
     const failed = namesOf(d.failed), flagged = namesOf(d.flagged);
     const at = d.released_at ? d.released_at.slice(0, 10) + ' ' + hhmm(d.released_at) + ' 放行' : '';
@@ -1094,6 +1117,7 @@
         return ['', [d.flagged ? '少量標記，' + stocks : '沒有標記']];
       case 'output_odds_vs_q50': return ['', [d.flagged ? '參考，' + stocks : '沒有標記']];
       case 'monitor_unscored': return ['warn', [fmtInt(sizeOf(d.runs)) + ' 筆']];
+      case 'monitor_feature_coverage': return [check.severity === 'info' ? '' : 'warn', coverageLines(d)];
       case 'model_alert': return ['warn', (d.runs || []).map(run => alertLine(run, date))];
       case 'model_promotion': return [check.severity === 'info' ? '' : 'warn', promotionLines(d)];
       case 'model_holdout_release': return ['warn', releaseLines(d)];
@@ -1109,7 +1133,7 @@
     const failed = check.severity === 'error';
     const cls = failed ? 'warn' : state;
     const shown = failed ? ['錯誤，' + (lines[0] || ''), ...lines.slice(1)] : lines;
-    const runClass = ['model_alert', 'model_promotion', 'model_holdout_release'].includes(check.check_name) ? ' run' : '';
+    const runClass = ['model_alert', 'model_promotion', 'model_holdout_release', 'monitor_feature_coverage'].includes(check.check_name) ? ' run' : '';
     return '<div class="check"><i class="' + cls + '"></i><div><div>' + esc(CHECKS[check.check_name] || check.check_name) + (note ? '　<span class="faint small pinned">' + esc(note) + '</span>' : '') + '</div>' +
       shown.map(line => '<div class="muted small' + runClass + '">' + esc(line) + '</div>').join('') + '</div></div>';
   }
