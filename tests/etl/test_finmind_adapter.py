@@ -140,6 +140,25 @@ def test_prices_then_dividends_set_the_adjusted_factor(mock: Callable[..., None]
 
 
 @responses.activate
+def test_events_from_the_day_the_exchanges_lead_only_get_a_blank_date_filled(
+    mock: Callable[..., None], settings: Any
+) -> None:
+    settings.DIVIDEND_EXCHANGE_PRIMARY_FROM = "2013-08-15"
+    _mock_dividends(mock)
+    _backfill("dividend_event", "2884", AUGUST)
+    assert not DividendEvent.objects.exists()
+    DividendEvent.objects.create(
+        stock_id="2884", ex_date=date(2013, 8, 15), cash_dividend=Decimal("9"), adj_factor=0.5
+    )
+
+    _backfill("dividend_event", "2884", AUGUST)
+
+    event = DividendEvent.objects.get()
+    assert (event.cash_dividend, event.adj_factor) == (Decimal("9"), 0.5)
+    assert event.announce_date == date(2013, 7, 31)
+
+
+@responses.activate
 def test_dividends_first_give_the_same_factors(mock: Callable[..., None]) -> None:
     _mock_dividends(mock)
     _backfill("dividend_event", "2884", AUGUST)

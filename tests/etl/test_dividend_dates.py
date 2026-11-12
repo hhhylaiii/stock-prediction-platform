@@ -190,3 +190,94 @@ def test_the_command_loads_in_a_fresh_process() -> None:
     command = [sys.executable, "manage.py", "reapply_dividend_dates", "--help"]
     result = subprocess.run(command, cwd=root, capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stderr[-400:]
+
+
+@pytest.fixture
+def exchanges_lead(settings: Any) -> None:
+    settings.DIVIDEND_EXCHANGE_PRIMARY_FROM = "2013-01-01"
+
+
+@pytest.mark.django_db
+def test_an_earlier_announcement_never_moves_an_event_from_the_finmind_years() -> None:
+    DividendEvent.objects.create(
+        stock_id="2884", ex_date=date(2013, 8, 15), announce_date=date(2013, 8, 5)
+    )
+    announced = {date(2013, 8, 15): date(2013, 7, 31)}
+
+    assert fill_announce_dates("2884", announced, earlier=True) == 0
+
+    assert DividendEvent.objects.get().announce_date == date(2013, 8, 5)
+
+
+@pytest.mark.usefixtures("exchanges_lead")
+@pytest.mark.django_db
+def test_an_earlier_announcement_replaces_a_stored_date_only_when_asked() -> None:
+    DividendEvent.objects.create(
+        stock_id="2884", ex_date=date(2013, 8, 15), announce_date=date(2013, 8, 5)
+    )
+    DividendEvent.objects.create(
+        stock_id="2884", ex_date=date(2014, 8, 14), announce_date=date(2014, 7, 1)
+    )
+    announced = {date(2013, 8, 15): date(2013, 7, 31), date(2014, 8, 14): date(2014, 7, 30)}
+
+    assert fill_announce_dates("2884", announced) == 0
+    assert fill_announce_dates("2884", announced, earlier=True) == 1
+
+    dates = dict(DividendEvent.objects.values_list("ex_date", "announce_date"))
+    assert dates == {date(2013, 8, 15): date(2013, 7, 31), date(2014, 8, 14): date(2014, 7, 1)}
+
+
+def _stored_answer(esun: Rows, stored: date | None) -> None:
+    DividendEvent.objects.create(stock_id="2884", ex_date=date(2013, 8, 15), announce_date=stored)
+    RawFinmind.objects.create(
+        dataset="dividend_policy",
+        source_hash="a",
+        request_params={"dataset": "TaiwanStockDividend", "data_id": "2884"},
+        payload={"data": policy(esun)},
+    )
+
+
+@pytest.mark.usefixtures("exchanges_lead")
+@pytest.mark.django_db
+def test_the_command_moves_a_first_sight_back_to_the_announcement(
+    esun: Rows, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stored_answer(esun, date(2013, 8, 5))
+    monkeypatch.setattr(TradingDays, "from_db", classmethod(lambda cls: CALENDAR))
+
+    call_command("reapply_dividend_dates")
+    assert DividendEvent.objects.get().announce_date == date(2013, 8, 5)
+    call_command("reapply_dividend_dates", "--earlier")
+
+    assert DividendEvent.objects.get().announce_date == date(2013, 7, 31)
+    assert "1 events dated across 1 stocks" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("stored", "line", "gaps"),
+    [
+        (date(2013, 8, 5), "2884 2013-08-15: 2013-08-05 -> 2013-07-31", "{3: 1}"),
+        (date(2013, 7, 31), "", "{0: 1}"),
+        (date(2013, 7, 30), "", "{-1: 1}"),
+    ],
+)
+@pytest.mark.usefixtures("exchanges_lead")
+@pytest.mark.django_db
+def test_a_dry_run_only_reports_how_far_stored_dates_trail_the_announcements(
+    esun: Rows,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    stored: date,
+    line: str,
+    gaps: str,
+) -> None:
+    _stored_answer(esun, stored)
+    monkeypatch.setattr(TradingDays, "from_db", classmethod(lambda cls: CALENDAR))
+
+    call_command("reapply_dividend_dates", "--earlier", "--dry-run")
+
+    out = capsys.readouterr().out
+    assert DividendEvent.objects.get().announce_date == stored
+    assert f"{1 if line else 0} events would be dated across 1 stocks" in out
+    assert line in out
+    assert f"sessions the stored date trails the announcement: {gaps}" in out

@@ -1,5 +1,6 @@
 from collections.abc import Callable, Iterator
 from datetime import date, datetime, time, timedelta
+from decimal import Decimal
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -17,7 +18,7 @@ from apps.etl.quality import CHECKS
 from apps.etl.ratelimit import RetryableError, ThrottledError
 from apps.etl.trading_calendar import REFRESH_DATASET, REFRESH_SOURCE
 from apps.market.calendar import TradingDays
-from apps.market.models import IndexDaily, TradingCalendar
+from apps.market.models import DividendEvent, IndexDaily, TradingCalendar
 from config.celery import app
 
 DAY = date(2026, 10, 28)
@@ -172,6 +173,8 @@ def test_the_batches_place_each_dataset_after_its_publication() -> None:
     assert twse_qfii <= keys("night")
     assert [batch for batch in tasks.BATCHES if twse_qfii & keys(batch)] == ["night"]
     assert keys("qfii") == {"tpex/foreign_holding", "tpex/shares_outstanding"}
+    assert {"twse/dividend_notice", "tpex/dividend_notice"} <= keys("night")
+    assert "dividend_notice" not in tasks.GATE_DATASETS
     assert keys("notices") == {
         "twse/attention",
         "tpex/attention",
@@ -455,7 +458,11 @@ def test_quality_is_checked_on_trading_days_only(
 
 @pytest.mark.parametrize(
     ("absent", "severity"),
-    [(set(), "info"), ({("tpex", "full_delivery"), ("twse", "day_trade")}, "warning")],
+    [
+        (set(), "info"),
+        ({("tpex", "full_delivery"), ("twse", "day_trade")}, "warning"),
+        ({("twse", "dividend_notice"), ("tpex", "dividend_notice")}, "warning"),
+    ],
 )
 def test_only_a_missing_gate_dataset_makes_the_landed_row_an_error(
     today: Callable[..., None],
@@ -717,6 +724,24 @@ def test_a_later_master_refresh_clears_a_missed_one_but_a_later_week_does_not(
     assert (row.severity, row.detail["missing"]) == ("warning", ["tdcc/weekly_holding"])
 
 
+@pytest.mark.parametrize("source", ["twse", "tpex"])
+@pytest.mark.usefixtures("catch_ups", "sent")
+def test_any_later_notice_list_clears_a_missed_one(
+    today: Callable[..., None], monkeypatch: pytest.MonkeyPatch, source: str
+) -> None:
+    monkeypatch.setattr("apps.etl.tasks.call_command", lambda name, **kwargs: None)
+    session = date(2026, 10, 27)
+    notice = (source, "dividend_notice")
+    landed(session, (DAILY_JOBS | SCANS | {MASTER}) - {notice})
+    refreshed(session)
+    assert missing_on(session, today) == ["tdcc/weekly_holding", f"{source}/dividend_notice"]
+    landed(date(2026, 10, 28), {notice})
+    today(date(2026, 10, 29), time(15, 10))
+    tasks.prepare_day()
+    row = DataQualityLog.objects.get(date=session, check_name="etl_runs")
+    assert row.detail["missing"] == ["tdcc/weekly_holding"]
+
+
 def test_a_week_without_sessions_owes_no_holding_file() -> None:
     TradingCalendar.objects.filter(date__range=(date(2026, 10, 19), date(2026, 10, 22))).update(
         is_trading_day=False
@@ -838,10 +863,33 @@ def test_an_unreachable_revenue_scan_is_retried(
     assert len(fake.runs) == 2
 
 
+@pytest.mark.usefixtures("sent")
+def test_the_evening_audit_warns_of_undated_ex_dates_until_a_notice_dates_them(
+    today: Callable[..., None], adapter: Callable[..., FakeAdapter]
+) -> None:
+    DividendEvent.objects.create(
+        stock_id="2330", ex_date=date(2026, 10, 30), cash_dividend=Decimal("4.5")
+    )
+    landed(DAY, DAILY_JOBS | SCANS | {MASTER})
+    refreshed(DAY)
+    today(DAY)
+    tasks.check_quality()
+    row = DataQualityLog.objects.get(date=DAY, check_name="ex_date_unannounced")
+    assert (row.severity, row.detail["events"]) == ("warning", ["2330@2026-10-30"])
+    DividendEvent.objects.update(announce_date=DAY)
+    adapter()
+
+    tasks.fetch_day.apply(args=("twse", "dividend_notice", DAY.isoformat())).get()
+
+    row = DataQualityLog.objects.get(date=DAY, check_name="ex_date_unannounced")
+    assert (row.severity, row.detail["count"]) == ("info", 0)
+
+
 def test_research_waits_for_the_gate_datasets_and_the_quality_gate() -> None:
     assert not tasks.ready_for_research(DAY)
     gate = {job for job in DAILY_JOBS if job[1] in tasks.GATE_DATASETS}
     assert {dataset for _, dataset in DAILY_JOBS - gate} == {
+        "dividend_notice",
         "attention",
         "disposition",
         "full_delivery",
