@@ -351,7 +351,8 @@ def test_the_day_starts_with_the_calendar_then_missed_days(
 
     def refresh(name: str, *args: Any, **kwargs: Any) -> None:
         calls.append(name)
-        raise CommandError("SchemaChangedError: FMTQIK fields changed")
+        cause = SchemaChangedError("FMTQIK fields changed")
+        raise CommandError(f"SchemaChangedError: {cause}") from cause
 
     monkeypatch.setattr("apps.etl.tasks.call_command", refresh)
     today(DAY, time(15, 10))
