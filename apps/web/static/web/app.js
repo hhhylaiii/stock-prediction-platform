@@ -136,6 +136,7 @@
   const countEl = document.getElementById('count');
   const todayMetaEl = document.getElementById('today-meta');
   const bandNoteEl = document.getElementById('band-note');
+  const fallbackNoteEl = document.getElementById('fallback-note');
   const modelNoteEl = document.getElementById('model-note');
   const prevBtn = document.getElementById('prev-page');
   const nextBtn = document.getElementById('next-page');
@@ -145,10 +146,13 @@
   const PROB_TIP = '20 日報酬跑贏大盤（加權股價報酬指數，含息）超過 5 個百分點的機率';
   const BAND_NOTE = '20 日價格區間是 80% 區間。設計定案後只跑一次的 holdout（2025 年起，到 2026-11-11 已到期的預測）裡，實際報酬落在區間內的比例是 75.0%；7 個完整的季度在 59% 到 84% 之間，偏低的是 2025 年第 1 季 59.4%、2026 年第 2 季 69.6%，最後一段只有 2026 年 10 月 1 日至 12 日的 7 個交易日（樣本很少）、40.4%。' +
     '定案前的研究期 2016–2024 年是 77.7%，大盤急跌的季度曾明顯偏低：2020 年第 1 季 49%、2022 年第 2 季 66%、第 3 季 68%。';
+  const FALLBACK_NOTE = '20 日價格區間目前不是模型的預測：報酬區間模型沒有上線，區間是用近 20 日的波動估的，以最新收盤價為中心、上下各 1.28 個標準差（換算成 20 日）。' +
+    '這個估法的 80% 區間在 holdout（2025 年起，到 2026-11-11 已到期的預測）裡，實際報酬落在區間內的比例是 78.7%。';
   const MODEL_NAMES = { lightgbm: 'LightGBM', ridge: 'Ridge', xgboost: 'XGBoost' };
   const SEARCH_MAX = 32;
   const pctOf = (x, digits) => x === null || x === undefined ? '—' : sgn(x * 100, digits);
   const priceOf = x => x === null || x === undefined ? '—' : fmtPrice(x);
+  const onFallbackBand = row => Boolean(row) && row.interval_source === 'tech_vol_20d';
 
   function controls() {
     document.querySelectorAll('[data-h]').forEach(b => b.setAttribute('aria-pressed', String(Number(b.dataset.h) === state.h)));
@@ -273,10 +277,11 @@
     return lacking ? '這一期' + lacking + MODEL_REQUIRES + '；上線中的模型列在模型頁。' : '';
   }
 
-  function showNotes(meta, shown) {
-    const quantile = (meta.models || []).some(model => model.role === 'interval');
-    bandNoteEl.hidden = !quantile || Boolean(meta.interval_alert);
-    modelNoteEl.textContent = modelNoteText(meta, shown);
+  function showNotes(meta, rows) {
+    const serving = new Set((meta.models || []).map(model => model.role));
+    bandNoteEl.hidden = !serving.has('interval') || Boolean(meta.interval_alert);
+    fallbackNoteEl.hidden = state.h !== 20 || serving.has('interval') || serving.has('volatility') || !rows.some(onFallbackBand);
+    modelNoteEl.textContent = modelNoteText(meta, rows.length);
     modelNoteEl.hidden = !modelNoteEl.textContent;
   }
 
@@ -330,14 +335,14 @@
       if (token !== state.todayToken) return;
       rowsEl.innerHTML = errorBox(err);
       countEl.textContent = todayMetaEl.textContent = '';
-      showNotes({}, 0);
+      showNotes({}, []);
       return;
     }
     if (token !== state.todayToken) return;
     const { rows, meta } = result;
     rowsEl.innerHTML = rows.map(todayRowHtml).join('') || emptyHtml(meta);
     todayMetaEl.textContent = todayMetaText(meta);
-    showNotes(meta, rows.length);
+    showNotes(meta, rows);
     if (watchingOnly()) {
       countEl.textContent = '追蹤中的 ' + rows.length + ' 檔';
       return;
@@ -495,6 +500,7 @@
     const basis = sameClose ? closeText(based[0].prediction) : based.map(entry => entry.horizon + ' 日以 ' + closeText(entry.prediction)).join('、');
     const vol = twenty.prediction ? twenty.prediction.vol_pred : null;
     const quantileBand = Boolean(twenty.prediction && twenty.prediction.interval && twenty.prediction.interval_source === 'quantile');
+    const fallbackBand = onFallbackBand(twenty.prediction) && !(twenty.models || []).some(model => model.role === 'interval');
     const realised = data.realized_vol && data.realized_vol.tech_vol_60d !== null ? data.realized_vol.tech_vol_60d : null;
     const rank = (twenty.models || []).find(model => model.role === 'rank') || (entries.flatMap(entry => entry.models || []).find(model => model.role === 'rank'));
     const degraded = entries.some(entry => (entry.degraded || []).length);
@@ -504,6 +510,7 @@
     return '<p class="sub">排名、報酬與區間機率各由自己的模型產出；排名模型多用了幾個籌碼與除息日特徵，其餘特徵相同。價格以 ' + basis + ' 換算。</p><div class="list">' +
       '<div class="thead h-cols" style="padding-top:10px"><div>期間</div><div class="right">預測報酬</div><div class="right">預測價</div><div class="right">80% 區間</div><div class="right prob-head" title="' + esc(PROB_TIP) + '">' + PROB_HEAD + '</div></div>' +
       entries.map(forecastRowHtml).join('') + '</div>' + (quantileBand ? '<p class="note band-note">' + BAND_NOTE + '</p>' : '') +
+      (fallbackBand ? '<p class="note fallback-note">' + FALLBACK_NOTE + '</p>' : '') +
       (lacking ? '<p class="note model-note">' + lacking + MODEL_REQUIRES + '；<a href="#models">上線中的模型列在模型頁</a>。</p>' : '') +
       '<div class="pair"><div><div class="faint tiny">預測 20 日波動（年化）</div><div class="v">' + (vol === null || vol === undefined ? '—' : (vol * 100).toFixed(1) + '%') + '</div>' +
       (realised === null ? '' : '<div class="muted tiny">過去 60 日實際為 ' + (realised * 100).toFixed(1) + '%</div>') + '</div>' +
@@ -1241,6 +1248,7 @@
   }
   document.getElementById('prob-head').title = PROB_TIP;
   bandNoteEl.textContent = BAND_NOTE;
+  fallbackNoteEl.textContent = FALLBACK_NOTE;
   window.addEventListener('hashchange', route);
   route();
 })();
