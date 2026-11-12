@@ -131,7 +131,7 @@ class Command(BaseCommand):
         crossed = [column for column in columns if column in BASIS_SIGNALS]
         bases = dict.fromkeys(crossed, pd.Series(0, index=["current", "delisted"]))
         for low, high in years(start, end):
-            built = build_feature_frame(calendar, low, high, masked={})
+            built = build_feature_frame(calendar, low, high, masked={}, dormant=())
             gaps = observable_frame(calendar, low, high)
             frame = built.merge(gaps, on=["stock_id", "date"], how="left")
             for column in columns:
