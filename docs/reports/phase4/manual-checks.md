@@ -272,3 +272,189 @@ fold 34 2022-07-01..2022-09-30: TAIEX_TR -0.0700
 | 季底天數 return（seed 0） | 12.8 分 | 7.72 GB |
 | 季底天數 interval（seed 0） | 45.5 分 | 8.44 GB |
 | 4.8b 打亂（摺 24 h5；60 個特徵摺 8） | 2.6 分 | 7.45 GB |
+
+## Holdout（2026-11-12）：label 重建的比對
+
+`build_labels --end 2026-11-11 --recent 81` 印出 `label_daily: 319496 rows for 2026-07-15..2026-11-11`（15.01 秒）。重建前先在記憶體裡算一次、不寫入，重建後逐格比對寫入的結果與那次預演（容差 1e-9，實際最大差都是 0）：
+
+```
+
+fwd_ret cells differing 0 max abs gap 0.0
+fwd_ret_open cells differing 0 max abs gap 0.0
+fwd_rank_pct cells differing 0 max abs gap 0.0
+fwd_vol_20d cells differing 0 max abs gap 0.0
+fwd_up_5pct cells differing 0
+untradable_t1 cells differing 0
+h 5 last row day 2026-11-11 last settled day 2026-11-04 ranked per day {datetime.date(2026, 10, 30): 959, datetime.date(2026, 11, 2): 953, datetime.date(2026, 11, 3): 955, datetime.date(2026, 11, 4): 962}
+h 20 last row day 2026-11-11 last settled day 2026-10-12 ranked per day {datetime.date(2026, 10, 6): 915, datetime.date(2026, 10, 7): 916, datetime.date(2026, 10, 8): 908, datetime.date(2026, 10, 12): 913}
+rows per day, last 6: {datetime.date(2026, 11, 4): 3968, datetime.date(2026, 11, 5): 3968, datetime.date(2026, 11, 6): 3968, datetime.date(2026, 11, 9): 3968, datetime.date(2026, 11, 10): 3968, datetime.date(2026, 11, 11): 3968}
+unbuilt rank []
+unbuilt return []
+unbuilt interval []
+MATCH
+```
+
+重建後對重建前的備份（307,532 列，逐位元比較，不給容差）：
+
+```
+backup rows 307532 stored rows 319496 both 307532 only backup 0 only stored 11964
+fwd_ret had 254711 lost value 0 bitwise changed 58 max abs gap 2.220446049250313e-16 over 1e-12: 0
+  stocks {'8390': 58} days 2026-07-16 .. 2026-10-30
+fwd_ret_open had 254682 lost value 0 bitwise changed 40 max abs gap 2.220446049250313e-16 over 1e-12: 0
+  stocks {'8390': 40} days 2026-07-16 .. 2026-10-30
+fwd_rank_pct had 127087 lost value 0 bitwise changed 0
+fwd_vol_20d had 112750 lost value 0 bitwise changed 86876 max abs gap 8.847089727481716e-15 over 1e-12: 0
+fwd_up_5pct had 112740 changed 0
+untradable_t1 had 303570 changed 0
+new rows 11964 of which before 11-09: 60
+  4207 20 rows 2026-10-22 .. 2026-11-06 ranked 0 with fwd_ret_open 2
+  5355 20 rows 2026-10-22 .. 2026-11-06 ranked 0 with fwd_ret_open 2
+  8176 20 rows 2026-10-22 .. 2026-11-06 ranked 0 with fwd_ret_open 2
+```
+
+新增的 11,964 列是 2026-11-09 到 11-11 各 3,968 列，加上 4207、5355、8176 三檔各 20 列；這三檔在 2026 年的特徵分區裡沒有列，不會進評估。
+
+## Holdout（2026-11-12）：執行紀錄
+
+```
+rank-holdout-20261112: holdout attempt 1 of rank through 2026-11-11; fitted folds [44, 45, 46, 47, 48, 49, 50, 51], already written []
+rank-holdout-20261112: 316 backtest_metric rows
+     2002.71 real      6479.62 user       546.57 sys
+interval-holdout-20261112: holdout attempt 1 of interval through 2026-11-11; fitted folds [44, 45, 46, 47, 48, 49, 50, 51], already written []
+     3365.90 real     12382.21 user      1300.32 sys
+return-holdout-20261112: holdout attempt 1 of return through 2026-11-11; fitted folds [44, 45, 46, 47, 48, 49, 50, 51], already written []
+      740.16 real      2403.60 user       279.15 sys
+```
+
+跑完後的核對（報告檔與報告標記的 sha256、寫入的摺、label 的列數與指紋）：
+
+```
+rank status 明顯退化 failed [] flagged ['排名 5 日 IC'] report file matches marker True sha256 e19230e33abb5257 folds written [44, 45, 46, 47, 48, 49, 50, 51] model_run rows 32
+interval status 明顯退化 failed [] flagged ['20 日覆蓋率'] report file matches marker True sha256 2e327d95d2049bf1 folds written [44, 45, 46, 47, 48, 49, 50, 51] model_run rows 40
+return status 達標 failed [] flagged [] report file matches marker True sha256 371232b625638ea1 folds written [44, 45, 46, 47, 48, 49, 50, 51] model_run rows 8
+label_daily rows, max date (13489076, datetime.date(2026, 11, 11))    開跑前與跑完後相同
+```
+
+演練（研究摺 43，整支指令的時間）：bags 1 是 rank 254 秒、return 100 秒、interval 249 秒；bags 5 是 rank 306 秒、return 135 秒、interval 337 秒。
+
+## Holdout（2026-11-12）：排名的對照數字（讀 `backtest_metric`）
+
+```
+
+research folds 8 .. 43 n 36
+research per-fold lightgbm 5d: [0.1349, 0.1503, 0.1682, 0.1505, 0.1394, 0.212, 0.129, 0.1684, 0.1728, 0.1601, 0.1963, 0.1203, 0.0995, 0.1632, 0.1084, 0.161, 0.1518, 0.1143, 0.1472, 0.1219, 0.1229, 0.1473, 0.1911, 0.1136, 0.1591, 0.129, 0.0932, 0.1029, 0.098, 0.1125, 0.1416, 0.1385, 0.1132, 0.1278, 0.155, 0.1418]
+research per-fold lightgbm 20d: [0.127, 0.1346, 0.1887, 0.0709, 0.1211, 0.204, 0.0662, 0.1533, 0.1836, 0.1538, 0.289, 0.1234, -0.0002, 0.1741, 0.069, 0.1472, 0.1384, 0.0608, 0.0971, 0.1102, 0.0858, 0.2094, 0.2065, 0.0941, 0.1715, 0.169, 0.1891, 0.028, 0.0752, 0.1398, 0.1882, 0.109, 0.1535, 0.0851, 0.1451, 0.168]
+research mean of 36 folds: 5d 0.14047 20d 0.13415 | ridge 5d 0.11889 20d 0.11915
+window 34-41 5d 0.11598 20d 0.12098
+window 20-27 5d 0.13342 20d 0.09959
+window 36-43 (latest) 5d 0.12856 20d 0.13299
+5d 8-fold windows n 29 min 0.11598 at folds ending 41 second 0.11613 median 0.13876 max 0.16605 sd of fold values 0.02843
+   lowest five windows: [(34, 41, 0.11598), (33, 40, 0.11613), (31, 38, 0.11874), (32, 39, 0.12187), (35, 42, 0.12371)]
+20d 8-fold windows n 29 min 0.09959 at folds ending 27 second 0.10124 median 0.13371 max 0.1618 sd of fold values 0.05811
+   lowest five windows: [(20, 27, 0.09959), (19, 26, 0.10124), (21, 28, 0.11034), (22, 29, 0.11475), (35, 42, 0.11549)]
+holdout 5d lightgbm: [0.1658, 0.16179, 0.08999, 0.07923, 0.10037, 0.08038, 0.0338, 0.21235] days [55, 61, 65, 62, 55, 61, 63, 22]
+holdout 5d ridge:    [0.14943, 0.1106, 0.08426, 0.06815, 0.08313, 0.05276, 0.0785, 0.25278]
+   lightgbm mean8 0.11546 mean without 51 0.10162 days-weighted 0.10580
+   ridge    mean8 0.10995 mean without 51 0.08955 days-weighted 0.09677
+   lightgbm minus ridge per fold [0.01637, 0.05119, 0.00573, 0.01108, 0.01724, 0.02761, -0.0447, -0.04043] folds won 6
+holdout 20d lightgbm: [0.22307, 0.15348, 0.06973, 0.03056, 0.16906, 0.02015, 0.04304, 0.40191] days [55, 61, 65, 62, 55, 61, 63, 7]
+holdout 20d ridge:    [0.1947, 0.08889, 0.07423, 0.03361, 0.07266, 0.10861, 0.08397, 0.43956]
+   lightgbm mean8 0.13888 mean without 51 0.10130 days-weighted 0.10282
+   ridge    mean8 0.13703 mean without 51 0.09381 days-weighted 0.09797
+   lightgbm minus ridge per fold [0.02837, 0.06459, -0.0045, -0.00305, 0.0964, -0.08846, -0.04093, -0.03765] folds won 3
+total lightgbm 5 beat_baseline_folds 8.0
+total lightgbm 5 beat_baseline_share 0.75
+total lightgbm 5 neutral_rank_ic 0.05674
+total lightgbm 5 neutral_rank_ic_nw_t 10.28374
+total lightgbm 5 positive_fold_share 1.0
+total lightgbm 5 rank_ic 0.1058
+total lightgbm 5 rank_icir 0.55816
+total lightgbm 5 rank_ic_nw_t 6.80823
+total lightgbm 20 beat_baseline_folds 8.0
+total lightgbm 20 beat_baseline_share 0.375
+total lightgbm 20 neutral_rank_ic 0.06254
+total lightgbm 20 neutral_rank_ic_nw_t 5.76073
+total lightgbm 20 positive_fold_share 1.0
+total lightgbm 20 rank_ic 0.10282
+total lightgbm 20 rank_icir 0.59437
+total lightgbm 20 rank_ic_nw_t 3.69924
+total ridge 5 beat_baseline_folds None
+total ridge 5 beat_baseline_share None
+total ridge 5 neutral_rank_ic 0.04282
+total ridge 5 neutral_rank_ic_nw_t 8.58118
+total ridge 5 positive_fold_share 1.0
+total ridge 5 rank_ic 0.09677
+total ridge 5 rank_icir 0.52715
+total ridge 5 rank_ic_nw_t 5.94502
+total ridge 20 beat_baseline_folds None
+total ridge 20 beat_baseline_share None
+total ridge 20 neutral_rank_ic 0.05418
+total ridge 20 neutral_rank_ic_nw_t 5.56284
+total ridge 20 positive_fold_share 1.0
+total ridge 20 rank_ic 0.09797
+total ridge 20 rank_icir 0.64525
+total ridge 20 rank_ic_nw_t 3.91537
+```
+
+## Holdout（2026-11-12）：區間與絕對報酬的研究期對照（讀研究 run 的預測快取）
+
+```
+
+== interval research run interval-std1109 folds 8 .. 43
+pinball 差（模型減波動率區間）
+  per fold: [0.00372, 1e-05, -0.00047, -0.00322, -0.00157, -0.00274, -0.0004, -0.00059, -0.00234, -0.00077, -0.00103, -0.0002, 0.00445, -0.00132, -0.00135, -0.00175, 0.00656, 0.00191, -0.0014, -0.00253, -0.00621, -0.00305, -0.00286, -0.00089, -0.00117, -6e-05, -0.00275, -0.00062, -0.00043, -0.00182, -0.00058, -0.00237, -0.00447, -0.00209, -0.00374, -0.00147]
+  mean of 36 folds -0.0011 sd of fold values 0.00237
+  8-fold windows: n 29 min -0.00244 ending 34 max 0.00091 ending 25 median -0.00121 latest (36-43) -0.00212
+  lowest three: [(27, 34, -0.00244), (26, 33, -0.00227), (28, 35, -0.0022)] highest three: [(17, 24, 0.00057), (19, 26, 0.00086), (18, 25, 0.00091)]
+Brier 差（模型減 logistic）
+  per fold: [0.00039, -0.01859, -0.0134, -0.00378, -0.00073, -0.00398, -0.0005, -0.00111, -0.00138, -0.00266, 0.00329, -0.01309, 0.00037, 0.00102, 0.00109, -0.00215, -0.02621, -0.00721, -0.00117, -0.00099, -0.01092, -0.00391, 0.00421, -0.00227, -0.00521, 0.00041, -0.00203, 0.00027, 0.00436, -0.00134, 0.00117, -0.00288, 0.00123, -0.00062, -0.00181, -0.00159]
+  mean of 36 folds -0.0031 sd of fold values 0.00627
+  8-fold windows: n 29 min -0.00643 ending 29 max 0.00015 ending 40 median -0.00248 latest (36-43) -0.00019
+  lowest three: [(22, 29, -0.00643), (24, 31, -0.00606), (23, 30, -0.00604)] highest three: [(34, 41, 2e-05), (35, 42, 5e-05), (33, 40, 0.00015)]
+20 日覆蓋率
+  per fold: [0.75659, 0.83089, 0.85596, 0.80867, 0.79467, 0.84506, 0.78714, 0.82065, 0.79938, 0.79985, 0.7015, 0.78775, 0.75493, 0.75767, 0.83188, 0.83683, 0.49065, 0.72143, 0.82837, 0.79897, 0.74376, 0.70391, 0.75771, 0.82756, 0.81239, 0.66302, 0.68072, 0.76133, 0.79436, 0.81463, 0.76813, 0.8672, 0.78388, 0.81414, 0.7528, 0.78405]
+  mean of 36 folds 0.77607 sd of fold values 0.06868
+  8-fold windows: n 29 min 0.73404 ending 31 max 0.8178 ending 16 median 0.76696 latest (36-43) 0.7974
+  lowest three: [(24, 31, 0.73404), (23, 30, 0.7352), (18, 25, 0.73533)] highest three: [(8, 15, 0.81245), (10, 17, 0.81392), (9, 16, 0.8178)]
+== return research run return-std1109 folds 8 .. 43
+MAE 差（模型減零預測）
+  per fold: [0.00027, -0.0001, 0.00024, -0.0003, 4e-05, -0.00042, 8e-05, -0.00019, -0.00034, -0.00069, -0.00054, -0.00075, 0.00128, -7e-05, -8e-05, -0.00016, -0.0002, 0.00064, -0.00049, -6e-05, 0.0001, -0.00221, -0.00112, 0.00046, -0.0008, -0.0009, -0.00037, -0.00036, 0.00146, -0.00022, -0.0002, -0.00092, -0.00038, 0.00015, -0.00109, -0.0005]
+  mean of 36 folds -0.00024 sd of fold values 0.00065
+  8-fold windows: n 29 min -0.00065 ending 35 max 0.00011 ending 27 median -0.0002 latest (36-43) -0.00021
+  lowest three: [(28, 35, -0.00065), (26, 33, -0.00063), (27, 34, -0.00061)] highest three: [(18, 25, 1e-05), (19, 26, 2e-05), (20, 27, 0.00011)]
+```
+
+## Holdout（2026-11-12）：區間覆蓋率在影子模型評估期那幾個月的粗估
+
+```
+
+claim last_date 2026-11-11 settled cutoff 2026-10-12
+days in window 104 first 2026-05-13 last 2026-10-12
+coverage in window (mean of daily) 0.744722
+             min         max  nunique
+fold                                 
+49    2026-05-13  2026-06-30       34
+50    2026-07-01  2026-09-30       63
+51    2026-10-01  2026-10-12        7
+           mean  size
+2026-05  0.7143    13
+2026-06  0.6994    21
+2026-07  0.7361    22
+2026-08  0.8668    21
+2026-09  0.8127    20
+2026-10  0.4039     7
+whole holdout (mean of daily) 0.749898 days 429
+```
+
+## Holdout（2026-11-12）：用 holdout 的預測照監控的 60 日窗算
+
+```
+monitor window 60 thresholds from rank-cand60 {5: 0.09233, 20: 0.03824}
+h5: IC days 444 mean 0.10580; rolling 60-day windows 385, min 0.02918 on 2026-05-18, below threshold 217 (56.4%) first below 2025-08-13 last below 2026-10-12 latest window 0.10277
+h20: IC days 429 mean 0.10282; rolling 60-day windows 370, min -0.03427 on 2026-07-15, below threshold 116 (31.4%) first below 2025-08-05 last below 2026-09-23 latest window 0.12016
+monitor window 60 research logistic Brier (the monitor's baseline) 0.16504
+coverage: days 429 mean 0.74990; rolling 60-day windows 370, min 0.61008 on 2025-04-09, max 0.84821, outside 70-90%: 56 (15.1%), below 70%: 56, latest window 0.78721
+Brier model: days 429 mean 0.16491; rolling windows 370, min 0.12817, max 0.22112, above the research baseline: 118 (31.9%), latest window 0.18070
+Brier logistic in holdout: days 429 mean 0.16493; rolling windows 370, min 0.12605, max 0.22297, above the research baseline: 116 (31.4%), latest window 0.18187
+share of rows with the up label true, holdout mean of daily 0.2122
+```
