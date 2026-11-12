@@ -766,7 +766,8 @@ info 的列不送，唯一例外是 `calendar_reach` 的級別變好（延伸成
 - 已確認（非暫定）且在今天之後的交易日少於 `CALENDAR_EXTEND_BELOW`（預設 90）時，問一次證交所隔年的開休市表。
 - 還沒公布：什麼都不寫。
 - 已公布：新增隔年每一天，寫一筆 `etl_run`（`trading_calendar`／`trading_calendar_extend`）。既有的已確認日不動。
-- 算出來的交易日數不在 235 到 255 天、或 1 月 1 日是交易日，就不寫日曆，`etl_run` 記成 failed：開休市表若只先公布一部分，會算出將近 260 天的假日曆。這時 `calendar_reach` 會是 warning 並告警，要人看過表再手動處理。
+- 表要通過三項檢查才寫：算出來的交易日數在 235 到 255 天、1 月 1 日休市、表上最後一個日期不早於 10 月 1 日（2021 到 2026 年的表都列到國慶日或更晚）。不過就不寫日曆，`etl_run` 記成 failed，`calendar_reach` 是 warning 並告警，要人看過表再手動處理。
+- 這三項擋的是只先公布一部分的表：只列到年初會算出將近 260 天，列到春節之後天數就落在正常範圍，要靠最後一個日期才擋得住。擋不住的只剩「列到 10 月之後、漏掉 12 月 25 日」這種表，延伸成功那天的告警出來後，請對一次證交所的公告。
 - 這筆 run 不在 22:50 `etl_runs` 的期望清單裡，沒公布或被擋下都不影響研究閘門。
 
 ### `calendar_reach`
@@ -780,8 +781,10 @@ info 的列不送，唯一例外是 `calendar_reach` 的級別變好（延伸成
 | `provisional_to` | 暫定日的最後一天，沒有就是空 |
 | `level` | 0：超過 60 天；1、2、3：剩 60、40、25 天以內 |
 | `extension` | 這次延伸嘗試的結果：`not_needed`、`unpublished`、`extended`、`refused`、`failed`、`no_year_end` |
+| `reason` | `refused`、`failed` 的原因，最多 200 字；非預期的錯誤只留例外類別，細節在 worker 的 log |
 
-- 級別 0 是 info，其他是 warning；永遠不寫 error，不擋研究閘門與換模門檻。
+- 級別 0 是 info，其他是 warning；延伸被擋下（`refused`）那天不論級別都是 warning。永遠不寫 error，不擋研究閘門與換模門檻。
+- `refused` 是表公布了但被上面的合理性檢查擋下，一定伴隨一筆 failed 的 `etl_run`；`failed` 是連不上證交所或回應讀不懂，只寫 log，隔天再試。
 - 告警：級別和上一列不同時發一次（延伸成功、級別變好那次也發）；級別 3 每天發；`refused` 每天發。同一天重跑不重發。
 - `no_year_end` 表示已確認的最後一天不是 12 月 31 日，自動延伸不處理，用下面的手動方式補到年底。
 
@@ -791,7 +794,7 @@ info 的列不送，唯一例外是 `calendar_reach` 的級別變好（延伸成
 uv run python manage.py load_calendar --from 2026-12-01
 ```
 
-隔年還沒公布時會多印一行 `trading_calendar: TWSE has not published the 2027 schedule; confirmed days end 2026-12-31`。
+隔年還沒公布時會多印一行 `trading_calendar: TWSE has not published the 2027 schedule; confirmed days end 2026-12-31`。隔年的表同樣要過上面三項檢查，不過就整個指令失敗、什麼都不寫；確認證交所的表沒問題而檢查太嚴時，改用 `--file` 載入人工整理的檔案。
 
 ### 暫定日曆
 
