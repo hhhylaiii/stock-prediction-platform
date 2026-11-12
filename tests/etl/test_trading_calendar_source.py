@@ -426,8 +426,8 @@ def test_a_january_row_naming_a_december_day_means_the_year_before(
     }
 
 
-@pytest.mark.parametrize("year", [2021, 2026])
-def test_a_recorded_schedule_is_a_whole_year(load_fixture: Callable[[str], Any], year: int) -> None:
+@pytest.mark.parametrize("year", ["2021", "2023", "2026", "2027_published"])
+def test_a_recorded_schedule_is_a_whole_year(load_fixture: Callable[[str], Any], year: str) -> None:
     require_whole_year(load_fixture(f"twse/reference/holiday_schedule_{year}.json"))
 
 
