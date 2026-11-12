@@ -14,6 +14,7 @@ from tests.api.conftest import FORCED_REASON, add_predictions, forced_params
 from tests.e2e.conftest import (
     BAND_NOTE,
     EXTRA_STOCKS,
+    FALLBACK_NOTE,
     MODEL_REQUIRES,
     ONLINE,
     PROB_HEAD,
@@ -187,6 +188,7 @@ def test_no_predictions_yet_says_what_puts_a_model_online(
         f"預測資料尚未產出。排名{MODEL_REQUIRES}；上線後，這裡會列出全市場的排名。"
     )
     expect(page.locator("#band-note")).to_be_hidden()
+    expect(page.locator("#fallback-note")).to_be_hidden()
     expect(page.locator("#model-note")).to_be_hidden()
 
 
@@ -206,11 +208,127 @@ def test_a_day_without_the_band_and_odds_models_says_which_columns_wait(
         f"價格區間改用波動估計。{ONLINE}"
     )
     expect(page.locator("#band-note")).to_be_hidden()
+    expect(page.locator("#fallback-note")).to_be_hidden()
 
     page.get_by_role("button", name="5 日").click()
 
     expect(page.locator("#rows .trow").nth(0)).to_contain_text("9999")
     expect(page.locator("#model-note")).to_be_hidden()
+
+
+def test_a_day_on_the_fallback_band_says_how_often_it_held_in_the_holdout(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    Prediction.objects.filter(run_id__in=["quantile-h20", "vol-h20", "prob-h20", "reg-h5"]).delete()
+    FeatureDaily.objects.create(
+        stock_id="2330", date=predicted.last_session, in_universe=True, tech_vol_20d=0.22
+    )
+
+    page.goto(live_server.url)
+
+    rows = page.locator("#rows .trow")
+    expect(rows).to_have_count(20)
+    expect(rows.nth(0)).to_contain_text("（近 20 日波動估計）")
+    expect(page.locator("#fallback-note")).to_have_text(FALLBACK_NOTE)
+    expect(page.locator("#band-note")).to_be_hidden()
+    expect(page.locator("#model-note")).to_be_visible()
+    expect(page.locator("#band-note + #fallback-note + #model-note")).to_have_count(1)
+
+    page.get_by_role("button", name="5 日").click()
+
+    expect(page.locator("#rows .trow").nth(0)).to_contain_text("9999")
+    expect(page.locator("#model-note")).to_contain_text("這一期沒有絕對報酬模型的預測")
+    expect(page.locator("#fallback-note")).to_be_hidden()
+
+    page.get_by_role("button", name="20 日").click()
+
+    expect(page.locator("#fallback-note")).to_have_text(FALLBACK_NOTE)
+
+    page.locator("#q").fill("zzz")
+
+    expect(page.locator("#rows .empty")).to_contain_text("今日預測裡沒有符合「zzz」的股票")
+    expect(page.locator("#fallback-note")).to_be_hidden()
+
+
+def test_a_fallback_band_no_row_draws_is_not_explained(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    Prediction.objects.filter(run_id__in=["quantile-h20", "vol-h20", "prob-h20"]).delete()
+
+    page.goto(live_server.url)
+
+    expect(page.locator("#rows .trow")).to_have_count(20)
+    expect(page.locator("#model-note")).to_be_visible()
+    expect(page.locator("#fallback-note")).to_be_hidden()
+
+
+def test_one_stock_on_the_fallback_band_while_the_band_model_serves_is_not_explained(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    Prediction.objects.filter(run_id="vol-h20").delete()
+    FeatureDaily.objects.create(
+        stock_id=EXTRA_STOCKS[0], date=predicted.last_session, in_universe=True, tech_vol_20d=0.3
+    )
+
+    page.goto(live_server.url)
+
+    expect(page.locator(f"a[href='#stock-{EXTRA_STOCKS[0]}']")).to_contain_text(
+        "（近 20 日波動估計）"
+    )
+    expect(page.locator("#band-note")).to_be_visible()
+    expect(page.locator("#fallback-note")).to_be_hidden()
+
+
+def test_one_stock_on_the_fallback_band_while_the_volatility_model_serves_is_not_explained(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    Prediction.objects.filter(run_id__in=["quantile-h20", "prob-h20"]).delete()
+    Prediction.objects.filter(run_id="vol-h20", stock_id=EXTRA_STOCKS[0]).delete()
+    FeatureDaily.objects.create(
+        stock_id=EXTRA_STOCKS[0], date=predicted.last_session, in_universe=True, tech_vol_20d=0.3
+    )
+
+    page.goto(live_server.url)
+
+    expect(page.locator("#rows .trow").nth(0)).to_contain_text("（波動率區間）")
+    expect(page.locator(f"a[href='#stock-{EXTRA_STOCKS[0]}']")).to_contain_text(
+        "（近 20 日波動估計）"
+    )
+    expect(page.locator("#fallback-note")).to_be_hidden()
+
+
+def test_a_failed_request_clears_the_fallback_note(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    Prediction.objects.filter(run_id__in=["quantile-h20", "vol-h20", "prob-h20"]).delete()
+    FeatureDaily.objects.create(
+        stock_id="2330", date=predicted.last_session, in_universe=True, tech_vol_20d=0.22
+    )
+    page.goto(live_server.url)
+    expect(page.locator("#fallback-note")).to_be_visible()
+    page.route("**/api/predictions?**", lambda route: route.abort())
+
+    page.get_by_role("button", name="上市").click()
+
+    expect(page.locator("#rows .error")).to_have_text("無法連線到伺服器。")
+    expect(page.locator("#fallback-note")).to_be_hidden()
+
+
+def test_watch_only_explains_the_fallback_band_too(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    Prediction.objects.filter(run_id__in=["quantile-h20", "vol-h20", "prob-h20"]).delete()
+    FeatureDaily.objects.create(
+        stock_id="2330", date=predicted.last_session, in_universe=True, tech_vol_20d=0.22
+    )
+    page.add_init_script("localStorage.setItem('twp-watch', JSON.stringify(['2330']))")
+    page.goto(live_server.url)
+
+    page.locator("#watch-only").click()
+
+    expect(page.locator("#count")).to_have_text("追蹤中的 1 檔")
+    expect(page.locator("#rows .trow").first).to_contain_text("（近 20 日波動估計）")
+    expect(page.locator("#fallback-note")).to_have_text(FALLBACK_NOTE)
 
 
 def test_five_days_without_the_return_model_says_so(
