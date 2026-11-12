@@ -753,7 +753,7 @@ warning 與 error 一律寫 log；`.env` 設了 `ALERT_WEBHOOK_URL` 就另外 PO
 
 Slack 類的 incoming webhook 會顯示頂層的 `text`；完整內容在 `alerts`。webhook 失敗只寫 log，不影響 ETL。
 
-info 的列不送，唯一例外是 `calendar_reach` 的級別變好（延伸成功）那一次。
+info 的列不送，唯一例外是 `calendar_reach` 在延伸成功、或級別變好的那一次。
 
 ## 交易日曆延伸
 
@@ -785,7 +785,7 @@ info 的列不送，唯一例外是 `calendar_reach` 的級別變好（延伸成
 
 - 級別 0 是 info，其他是 warning；延伸被擋下（`refused`）那天不論級別都是 warning。永遠不寫 error，不擋研究閘門與換模門檻。
 - `refused` 是表公布了但被上面的合理性檢查擋下，一定伴隨一筆 failed 的 `etl_run`；`failed` 是連不上證交所或回應讀不懂，只寫 log，隔天再試。
-- 告警：級別和上一列不同時發一次（延伸成功、級別變好那次也發）；級別 3 每天發；`refused` 每天發。同一天重跑不重發。
+- 告警：延伸成功那次一律發（info）；級別和上一列不同時發一次；級別 3 每天發；`refused` 每天發。同一天重跑不重發。
 - `no_year_end` 表示已確認的最後一天不是 12 月 31 日，自動延伸不處理，用下面的手動方式補到年底。
 
 ### 手動延伸
@@ -794,7 +794,7 @@ info 的列不送，唯一例外是 `calendar_reach` 的級別變好（延伸成
 uv run python manage.py load_calendar --from 2026-12-01
 ```
 
-隔年還沒公布時會多印一行 `trading_calendar: TWSE has not published the 2027 schedule; confirmed days end 2026-12-31`。隔年的表同樣要過上面三項檢查，不過就整個指令失敗、什麼都不寫；確認證交所的表沒問題而檢查太嚴時，改用 `--file` 載入人工整理的檔案。
+隔年還沒公布時會多印一行 `trading_calendar: TWSE has not published the 2027 schedule; confirmed days end 2026-12-31`。今年與隔年的表同樣要過上面三項檢查，不過就整個指令失敗、什麼都不寫；確認證交所的表沒問題而檢查太嚴時，改用 `--file` 載入人工整理的檔案。
 
 ### 暫定日曆
 
