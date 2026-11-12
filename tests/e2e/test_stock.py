@@ -294,6 +294,19 @@ def test_one_stock_on_the_fallback_band_while_the_band_model_serves_is_not_expla
     expect(page.locator("#forecasts .fallback-note")).to_have_count(0)
 
 
+def test_a_stock_on_the_fallback_band_is_told_so_even_while_the_volatility_model_serves(
+    page: Page, live_server: LiveServer, explained: Seed
+) -> None:
+    Prediction.objects.filter(run_id__in=["quantile-h20", "prob-h20"]).delete()
+    Prediction.objects.filter(run_id="vol-h20", stock_id="2330").delete()
+
+    page.goto(f"{live_server.url}/#stock-2330")
+
+    rows = page.locator("#forecasts .trow")
+    expect(rows.nth(1).locator(".band-text")).to_contain_text("（近 20 日波動估計）")
+    expect(page.locator("#forecasts .fallback-note")).to_have_text(FALLBACK_NOTE)
+
+
 def test_a_fallback_band_around_the_models_own_forecast_is_not_given_the_holdout_figure(
     page: Page, live_server: LiveServer, explained: Seed
 ) -> None:

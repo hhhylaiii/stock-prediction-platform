@@ -230,6 +230,7 @@ def test_a_day_on_the_fallback_band_says_how_often_it_held_in_the_holdout(
     expect(rows).to_have_count(20)
     expect(rows.nth(0)).to_contain_text("（近 20 日波動估計）")
     expect(page.locator("#fallback-note")).to_have_text(FALLBACK_NOTE)
+    expect(page.locator("#fallback-note")).to_be_visible()
     expect(page.locator("#band-note")).to_be_hidden()
     expect(page.locator("#model-note")).to_be_visible()
     expect(page.locator("#band-note + #fallback-note + #model-note")).to_have_count(1)
@@ -243,6 +244,7 @@ def test_a_day_on_the_fallback_band_says_how_often_it_held_in_the_holdout(
     page.get_by_role("button", name="20 日").click()
 
     expect(page.locator("#fallback-note")).to_have_text(FALLBACK_NOTE)
+    expect(page.locator("#fallback-note")).to_be_visible()
 
     page.locator("#q").fill("zzz")
 
@@ -329,6 +331,7 @@ def test_watch_only_explains_the_fallback_band_too(
     expect(page.locator("#count")).to_have_text("追蹤中的 1 檔")
     expect(page.locator("#rows .trow").first).to_contain_text("（近 20 日波動估計）")
     expect(page.locator("#fallback-note")).to_have_text(FALLBACK_NOTE)
+    expect(page.locator("#fallback-note")).to_be_visible()
 
 
 def test_five_days_without_the_return_model_says_so(
