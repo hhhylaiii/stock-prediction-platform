@@ -4,7 +4,7 @@ import logging
 from collections.abc import Mapping
 from datetime import date, timedelta
 from enum import StrEnum
-from typing import Any
+from typing import Any, NamedTuple
 
 from django.conf import settings
 from django.db import transaction
@@ -17,7 +17,7 @@ from apps.etl.errors import SchemaChangedError, SourceError
 from apps.etl.models import DataQualityLog
 from apps.etl.ratelimit import RetryableError
 from apps.etl.runs import tracked_run
-from apps.etl.trading_calendar import build_calendar, schedule_days
+from apps.etl.trading_calendar import build_calendar, require_whole_year, schedule_days
 from apps.market.calendar import CalendarError, TradingDays
 from apps.market.models import TradingCalendar
 
@@ -28,7 +28,7 @@ EXTEND_DATASET = "trading_calendar_extend"
 REACH = "calendar_reach"
 CHANGED = "calendar_changed"
 REACH_BOUNDS = (60, 40, 25)
-YEAR_SESSIONS = (235, 255)
+REASON_LIMIT = 200
 Flips = Mapping[date, tuple[bool, bool]]
 
 
@@ -43,6 +43,13 @@ class Extension(StrEnum):
     FAILED = "failed"
 
 
+class Attempt(NamedTuple):
+    """An extension outcome and, when it was refused or failed, why."""
+
+    outcome: Extension
+    reason: str = ""
+
+
 def keep_up(today: date) -> Extension | None:
     """Try to extend, then record the reach: on sessions, and daily once the calendar ran out."""
     last = TradingCalendar.objects.aggregate(last=Max("date"))["last"]
@@ -52,15 +59,13 @@ def keep_up(today: date) -> Extension | None:
     if today <= last and not session:
         return None
     try:
-        outcome = extend(today)
-    except (SchemaChangedError, CalendarError) as exc:
-        logger.error("trading_calendar extension refused: %s", exc)
-        outcome = Extension.REFUSED
-    except (SourceError, RetryableError) as exc:
-        logger.error("trading_calendar extension failed: %s", exc)
-        outcome = Extension.FAILED
-    record_reach(today, outcome)
-    return outcome
+        attempt = extend(today)
+    except Exception as exc:
+        expected = isinstance(exc, (SourceError, RetryableError))
+        logger.error("trading_calendar extension failed: %s", exc, exc_info=not expected)
+        attempt = Attempt(Extension.FAILED, str(exc) if expected else type(exc).__name__)
+    record_reach(today, attempt)
+    return attempt.outcome
 
 
 def confirmed_ahead(today: date) -> int:
@@ -69,42 +74,36 @@ def confirmed_ahead(today: date) -> int:
     return days.count()
 
 
-def extend(today: date) -> Extension:
-    """Append the year after the last confirmed day once TWSE publishes its schedule."""
+def extend(today: date) -> Attempt:
+    """Append the year after the last confirmed day once TWSE publishes its schedule.
+
+    A published schedule that cannot be a whole year is refused and leaves a failed run.
+    """
     end = _confirmed_end()
     if end is None or (end.month, end.day) != (12, 31):
-        return Extension.NO_YEAR_END
+        return Attempt(Extension.NO_YEAR_END)
     if confirmed_ahead(today) >= settings.CALENDAR_EXTEND_BELOW:
-        return Extension.NOT_NEEDED
+        return Attempt(Extension.NOT_NEEDED)
     year = end.year + 1
     payload = TwseClient.build(limiter_for("twse")).holiday_schedule(year)
     if not any(day.year == year for day in schedule_days(payload)):
-        return Extension.UNPUBLISHED
+        return Attempt(Extension.UNPUBLISHED)
     start = end + timedelta(days=1)
-    with tracked_run(SOURCE, EXTEND_DATASET, start, date(year, 12, 31)) as run:
-        calendar, notes = build_calendar((), end, [payload], start)
-        _require_whole_year(calendar, year)
-        run.rows = _write_year(calendar, notes, today)
-    return Extension.EXTENDED
+    try:
+        with tracked_run(SOURCE, EXTEND_DATASET, start, date(year, 12, 31)) as run:
+            require_whole_year(payload)
+            calendar, notes = build_calendar((), end, [payload], start)
+            run.rows = _write_year(calendar, notes, today)
+    except (SchemaChangedError, CalendarError) as exc:
+        logger.error("trading_calendar extension refused: %s", exc)
+        return Attempt(Extension.REFUSED, str(exc))
+    return Attempt(Extension.EXTENDED)
 
 
 def _confirmed_end() -> date | None:
     confirmed = TradingCalendar.objects.filter(is_provisional=False)
     last: date | None = confirmed.aggregate(last=Max("date"))["last"]
     return last
-
-
-def _require_whole_year(calendar: TradingDays, year: int) -> None:
-    """A schedule published in part reads as a year of weekdays, so odd totals are refused."""
-    first = date(year, 1, 1)
-    sessions = len(calendar.between(first, date(year, 12, 31)))
-    low, high = YEAR_SESSIONS
-    if not low <= sessions <= high:
-        raise SchemaChangedError(
-            f"TWSE holiday schedule for {year} gives {sessions} sessions, outside {low}-{high}"
-        )
-    if calendar.is_trading_day(first):
-        raise SchemaChangedError(f"TWSE holiday schedule for {year} trades on {first}")
 
 
 def _write_year(calendar: TradingDays, notes: Mapping[str, str], today: date) -> int:
@@ -142,12 +141,6 @@ def flips(stored: Mapping[date, bool], new: Mapping[date, bool]) -> dict[date, t
     }
 
 
-def record_changes(by: str, today: date, changed: Flips) -> None:
-    changed_row = log_changes(by, today, changed)
-    if changed_row is not None:
-        announce([changed_row])
-
-
 def log_changes(by: str, today: date, changed: Flips) -> DataQualityLog | None:
     """Flips of existing days go into the day's one calendar_changed row, merged with earlier."""
     if not changed:
@@ -176,11 +169,11 @@ def reach_level(left: int) -> int:
     return sum(left <= bound for bound in REACH_BOUNDS)
 
 
-def record_reach(today: date, extension: Extension) -> DataQualityLog:
+def record_reach(today: date, attempt: Attempt) -> DataQualityLog:
     """Today's calendar_reach row, never an error: the research gate counts every error."""
     left = confirmed_ahead(today)
     level = reach_level(left)
-    refused = extension == Extension.REFUSED
+    refused = attempt.outcome == Extension.REFUSED
     end = _confirmed_end()
     provisional = TradingCalendar.objects.filter(is_provisional=True).aggregate(last=Max("date"))
     detail = {
@@ -188,7 +181,8 @@ def record_reach(today: date, extension: Extension) -> DataQualityLog:
         "ends": end.isoformat() if end is not None else None,
         "provisional_to": provisional["last"].isoformat() if provisional["last"] else None,
         "level": level,
-        "extension": str(extension),
+        "extension": str(attempt.outcome),
+        "reason": attempt.reason[:REASON_LIMIT] or None,
     }
     severity = Severity.WARNING if level or refused else Severity.INFO
     with transaction.atomic():
@@ -204,10 +198,11 @@ def record_reach(today: date, extension: Extension) -> DataQualityLog:
 
 
 def _is_news(level: int, refused: bool, previous: DataQualityLog | None, today: date) -> bool:
-    """A new level, a refused schedule, or any day at the last level; once per day."""
-    known = (0, False)
+    """A new level, a refused schedule, or any day at the last level; a rerun adds only news."""
+    known, was_refused = 0, False
     if previous is not None:
-        known = (int(previous.detail["level"]), previous.detail["extension"] == Extension.REFUSED)
-    if previous is not None and previous.date == today and known == (level, refused):
-        return False
-    return refused or level == len(REACH_BOUNDS) or level != known[0]
+        known = int(previous.detail["level"])
+        was_refused = previous.detail["extension"] == Extension.REFUSED
+    if previous is not None and previous.date == today:
+        return level != known or (refused and not was_refused)
+    return refused or level == len(REACH_BOUNDS) or level != known

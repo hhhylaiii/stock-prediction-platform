@@ -21,7 +21,12 @@ from apps.etl.errors import SourceError
 from apps.etl.management.options import required_date
 from apps.etl.ratelimit import RetryableError
 from apps.etl.runs import tracked_run
-from apps.etl.trading_calendar import build_calendar, schedule_years, traded_days
+from apps.etl.trading_calendar import (
+    build_calendar,
+    require_whole_year,
+    schedule_years,
+    traded_days,
+)
 from apps.etl.upsert import upsert
 from apps.market.calendar import CalendarError, TradingDays
 from apps.market.models import TradingCalendar
@@ -100,6 +105,8 @@ class Command(BaseCommand):
             schedules.append(twse.holiday_schedule(year))
             if not schedules[-1].get("data"):
                 break
+            if year > today.year:
+                require_whole_year(schedules[-1])
         return build_calendar(traded, yesterday, schedules, start)
 
     def _write(

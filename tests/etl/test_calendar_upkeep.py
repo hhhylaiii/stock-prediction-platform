@@ -14,10 +14,9 @@ from apps.etl.calendar_upkeep import (
     Extension,
     extend,
     keep_up,
+    log_changes,
     reach_level,
-    record_changes,
 )
-from apps.etl.errors import SchemaChangedError
 from apps.etl.models import DataQualityLog, EtlRun
 from apps.etl.quality import CHECKS, should_run_prediction
 from apps.etl.tasks import AUDITED
@@ -93,7 +92,7 @@ def test_a_published_year_is_appended_without_touching_loaded_days(
     TradingCalendar.objects.filter(date=date(2025, 12, 24)).update(note="臨時休市")
     before = _stored()
     _serve(2026, load_fixture(SCHEDULE_2026))
-    assert extend(date(2025, 12, 1)) == Extension.EXTENDED
+    assert extend(date(2025, 12, 1)).outcome == Extension.EXTENDED
     after = _stored()
     assert {day: row for day, row in after.items() if day.year == 2025} == before
     assert max(after) == date(2026, 12, 31)
@@ -113,25 +112,31 @@ def test_an_unpublished_year_writes_nothing(load_fixture: Callable[[str], Any]) 
     _calendar(date(2026, 10, 1), date(2026, 12, 31))
     before = _stored()
     _serve(2027, load_fixture(SCHEDULE_2027))
-    assert extend(date(2026, 11, 12)) == Extension.UNPUBLISHED
+    assert extend(date(2026, 11, 12)).outcome == Extension.UNPUBLISHED
     assert _stored() == before
     assert not EtlRun.objects.exists()
 
 
 @responses.activate
 @pytest.mark.parametrize(
-    ("rows", "message"),
-    [(slice(0, 1), "260 sessions"), (slice(1, None), "trades on 2026-01-01")],
+    ("kept", "message"),
+    [
+        (lambda day: day == "2026-01-01", "260 sessions"),
+        (lambda day: day != "2026-01-01", "trades on 2026-01-01"),
+        (lambda day: day <= "2026-02-23", "stops at 2026-02-2"),
+        (lambda day: day <= "2026-06-19", "stops at 2026-06-19"),
+    ],
 )
 def test_a_schedule_that_cannot_be_a_whole_year_is_refused(
-    load_fixture: Callable[[str], Any], rows: slice, message: str
+    load_fixture: Callable[[str], Any], kept: Callable[[str], bool], message: str
 ) -> None:
     _calendar(date(2025, 10, 1), date(2025, 12, 31))
     before = _stored()
     payload = load_fixture(SCHEDULE_2026)
-    _serve(2026, {**payload, "data": payload["data"][rows]})
-    with pytest.raises(SchemaChangedError, match=message):
-        extend(date(2025, 12, 1))
+    _serve(2026, {**payload, "data": [row for row in payload["data"] if kept(row[0])]})
+    attempt = extend(date(2025, 12, 1))
+    assert attempt.outcome == Extension.REFUSED
+    assert message in attempt.reason
     assert _stored() == before
     run = EtlRun.objects.get(dataset=EXTEND_DATASET)
     assert run.status == "failed"
@@ -141,14 +146,14 @@ def test_a_schedule_that_cannot_be_a_whole_year_is_refused(
 @responses.activate
 def test_nothing_is_asked_while_enough_sessions_remain() -> None:
     _calendar(date(2025, 6, 1), date(2025, 12, 31))
-    assert extend(date(2025, 6, 2)) == Extension.NOT_NEEDED
+    assert extend(date(2025, 6, 2)).outcome == Extension.NOT_NEEDED
     assert len(responses.calls) == 0
 
 
 @responses.activate
 def test_a_calendar_ending_inside_a_year_is_left_alone() -> None:
     _calendar(date(2026, 10, 1), date(2026, 10, 31))
-    assert extend(date(2026, 10, 28)) == Extension.NO_YEAR_END
+    assert extend(date(2026, 10, 28)).outcome == Extension.NO_YEAR_END
     assert len(responses.calls) == 0
 
 
@@ -156,7 +161,7 @@ def test_a_calendar_ending_inside_a_year_is_left_alone() -> None:
 def test_the_threshold_comes_from_settings(settings: Any) -> None:
     settings.CALENDAR_EXTEND_BELOW = 10
     _calendar(date(2026, 10, 1), date(2026, 12, 31))
-    assert extend(date(2026, 11, 12)) == Extension.NOT_NEEDED
+    assert extend(date(2026, 11, 12)).outcome == Extension.NOT_NEEDED
     assert len(responses.calls) == 0
 
 
@@ -167,7 +172,7 @@ def test_a_published_year_replaces_provisional_days_and_records_the_flips(
     _calendar(date(2025, 10, 1), date(2026, 12, 31), provisional_from=date(2026, 1, 1))
     _serve(2026, load_fixture(SCHEDULE_2026))
     today = date(2025, 12, 15)
-    assert extend(today) == Extension.EXTENDED
+    assert extend(today).outcome == Extension.EXTENDED
     after = _stored()
     assert not any(provisional for _, _, provisional in after.values())
     assert _sessions(2026) == SESSIONS_2026
@@ -186,7 +191,7 @@ def test_provisional_days_already_passed_keep_their_flag_of_trading(
 ) -> None:
     _calendar(date(2025, 10, 1), date(2026, 12, 31), provisional_from=date(2026, 1, 1))
     _serve(2026, load_fixture(SCHEDULE_2026))
-    assert extend(date(2026, 2, 16)) == Extension.EXTENDED
+    assert extend(date(2026, 2, 16)).outcome == Extension.EXTENDED
     after = _stored()
     assert after[date(2026, 1, 1)] == (True, "", False)
     assert after[date(2026, 2, 13)] == (True, "", False)
@@ -203,7 +208,7 @@ def test_a_provisional_year_is_asked_for_even_with_many_days_ahead(
     _calendar(date(2026, 10, 1), date(2027, 12, 31), provisional_from=date(2027, 1, 1))
     before = _stored()
     _serve(2027, load_fixture(SCHEDULE_2027))
-    assert extend(date(2026, 11, 12)) == Extension.UNPUBLISHED
+    assert extend(date(2026, 11, 12)).outcome == Extension.UNPUBLISHED
     assert len(responses.calls) == 1
     assert _stored() == before
 
@@ -232,6 +237,7 @@ def test_the_reach_row_counts_confirmed_sessions_ahead(
         "provisional_to": "2027-12-31",
         "level": 2,
         "extension": "unpublished",
+        "reason": None,
     }
     assert sent == [[(today, REACH, "warning")]]
 
@@ -271,6 +277,7 @@ def test_reaching_far_again_is_announced_as_info(
         "provisional_to": None,
         "level": 0,
         "extension": "extended",
+        "reason": None,
     }
     assert sent == [[(date(2025, 12, 1), REACH, "warning")], [(today, REACH, "info")]]
 
@@ -300,9 +307,15 @@ def test_a_refused_schedule_is_announced_whatever_the_level(
         _serve(2027, {**payload, "data": [["2027-01-01", *payload["data"][0][1:]]]})
         assert keep_up(today) == Extension.REFUSED
         responses.reset()
-    assert (_reach(today).severity, _reach(today).detail["extension"]) == ("warning", "refused")
+    row = _reach(today)
+    assert (row.severity, row.detail["extension"]) == ("warning", "refused")
+    assert "260 sessions" in row.detail["reason"]
     assert sent == [[(today, REACH, "warning")]]
     assert set(EtlRun.objects.values_list("dataset", "status")) == {(EXTEND_DATASET, "failed")}
+    later = date(2026, 10, 2)
+    _serve(2027, {**payload, "data": [["2027-01-01", *payload["data"][0][1:]]]})
+    assert keep_up(later) == Extension.REFUSED
+    assert sent[1:] == [[(later, REACH, "warning")]]
 
 
 @responses.activate
@@ -313,8 +326,26 @@ def test_a_source_failure_still_records_the_reach(
     responses.get(SCHEDULE_URL, status=403)
     today = date(2026, 11, 12)
     assert keep_up(today) == Extension.FAILED
-    assert _reach(today).detail["extension"] == "failed"
+    row = _reach(today)
+    assert row.detail["extension"] == "failed"
+    assert "403" in row.detail["reason"]
     assert not EtlRun.objects.exists()
+
+
+def test_an_unexpected_error_still_records_the_reach_without_its_message(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _calendar(date(2026, 10, 1), date(2026, 12, 31))
+
+    def broken(today: date) -> None:
+        raise RuntimeError("/srv/app/secret/path went missing")
+
+    monkeypatch.setattr("apps.etl.calendar_upkeep.extend", broken)
+    today = date(2026, 11, 12)
+    assert keep_up(today) == Extension.FAILED
+    row = _reach(today)
+    assert (row.detail["extension"], row.detail["reason"]) == ("failed", "RuntimeError")
+    assert "trading_calendar extension failed" in caplog.text
 
 
 @responses.activate
@@ -344,12 +375,13 @@ def test_a_closed_day_inside_the_calendar_is_skipped() -> None:
     assert len(responses.calls) == 0
 
 
-def test_flips_of_one_day_merge_into_one_row(sent: list[list[tuple[date, str, str]]]) -> None:
+def test_flips_of_one_day_merge_into_one_row() -> None:
     today = date(2026, 11, 12)
-    record_changes("refresh_calendar", today, {date(2026, 11, 10): (True, False)})
-    record_changes("load_calendar", today, {date(2026, 12, 25): (False, True)})
-    record_changes("load_calendar", today, {})
+    log_changes("refresh_calendar", today, {date(2026, 11, 10): (True, False)})
+    log_changes("load_calendar", today, {date(2026, 12, 25): (False, True)})
+    assert log_changes("load_calendar", today, {}) is None
     row = DataQualityLog.objects.get(check_name=CHANGED)
+    assert (row.date, row.severity) == (today, "warning")
     assert row.detail == {
         "by": ["load_calendar", "refresh_calendar"],
         "days": {
@@ -358,15 +390,12 @@ def test_flips_of_one_day_merge_into_one_row(sent: list[list[tuple[date, str, st
         },
         "earliest": "2026-11-10",
     }
-    assert len(sent) == 2
 
 
-def test_a_day_flipped_back_the_same_day_leaves_the_row(
-    sent: list[list[tuple[date, str, str]]],
-) -> None:
+def test_a_day_flipped_back_the_same_day_leaves_the_row() -> None:
     today = date(2026, 11, 12)
-    record_changes("load_calendar", today, {date(2026, 11, 10): (True, False)})
-    record_changes("load_calendar", today, {date(2026, 11, 10): (False, True)})
+    log_changes("load_calendar", today, {date(2026, 11, 10): (True, False)})
+    log_changes("load_calendar", today, {date(2026, 11, 10): (False, True)})
     row = DataQualityLog.objects.get(check_name=CHANGED)
     assert row.detail["days"] == {"2026-11-10": {"was": True, "now": True}}
 
@@ -405,3 +434,44 @@ def test_the_upkeep_never_moves_the_research_gate(
     assert keep_up(day) == extension
     assert _reach(day).severity == "warning"
     assert gate() == before == ("info", True, True, True)
+
+
+@responses.activate
+@pytest.mark.parametrize(
+    "answer",
+    [
+        {"data": [["2027-01-01"]]},
+        {"stat": "很抱歉，沒有符合條件的資料!", "data": []},
+        {"fields": ["日期", "名稱"]},
+    ],
+)
+def test_an_answer_that_cannot_be_read_still_records_the_reach(
+    load_fixture: Callable[[str], Any],
+    sent: list[list[tuple[date, str, str]]],
+    answer: dict[str, Any],
+) -> None:
+    _calendar(date(2026, 10, 1), date(2026, 12, 31))
+    before = _stored()
+    _serve(2027, load_fixture(SCHEDULE_2027) | answer)
+    today = date(2026, 11, 12)
+    assert keep_up(today) == Extension.FAILED
+    assert _reach(today).detail["extension"] == "failed"
+    assert sent == [[(today, REACH, "warning")]]
+    assert _stored() == before
+    assert not EtlRun.objects.exists()
+
+
+@responses.activate
+def test_a_rerun_the_same_day_repeats_no_announcement(
+    load_fixture: Callable[[str], Any], sent: list[list[tuple[date, str, str]]]
+) -> None:
+    _calendar(date(2026, 10, 1), date(2026, 12, 31))
+    payload = load_fixture(SCHEDULE_2026) | {"queryYear": 2027}
+    today = date(2026, 11, 26)
+    _serve(2027, {**payload, "data": [["2027-01-01", *payload["data"][0][1:]]]})
+    assert keep_up(today) == Extension.REFUSED
+    responses.reset()
+    _serve(2027, load_fixture(SCHEDULE_2027))
+    assert keep_up(today) == Extension.UNPUBLISHED
+    assert _reach(today).detail["level"] == 3
+    assert sent == [[(today, REACH, "warning")]]

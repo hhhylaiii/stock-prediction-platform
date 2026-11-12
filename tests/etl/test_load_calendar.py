@@ -212,6 +212,11 @@ def test_a_reload_that_flips_a_day_logs_the_change(
     monkeypatch.setattr(
         "apps.etl.management.commands.load_calendar.timezone.localdate", lambda: TODAY
     )
+    sent: list[list[str]] = []
+    monkeypatch.setattr(
+        "apps.etl.management.commands.load_calendar.announce",
+        lambda rows: sent.append([row.check_name for row in rows]),
+    )
     source = fixture_path("calendar/twse_2026_10.json")
     call_command("load_calendar", file=str(source))
     assert not DataQualityLog.objects.exists()
@@ -232,6 +237,7 @@ def test_a_reload_that_flips_a_day_logs_the_change(
         "days": {"2026-10-30": {"was": True, "now": False}},
         "earliest": "2026-10-30",
     }
+    assert sent == [[CHANGED]]
 
 
 def _provisional_file(tmp_path: Path, start: str, end: str, trading_days: list[str]) -> Path:
@@ -304,3 +310,38 @@ def test_from_confirms_provisional_days_and_says_next_year_is_unpublished() -> N
         "trading_calendar: TWSE has not published the 2027 schedule; "
         "confirmed days end 2026-12-31" in out.getvalue()
     )
+
+
+@pytest.mark.django_db
+def test_a_provisional_mark_that_is_not_a_boolean_is_refused(tmp_path: Path) -> None:
+    path = tmp_path / "odd.json"
+    payload = {
+        "start": "2026-11-01",
+        "end": "2026-11-02",
+        "trading_days": [],
+        "provisional": "true",
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(CommandError, match="cannot read calendar file: TypeError"):
+        call_command("load_calendar", file=str(path))
+    assert not TradingCalendar.objects.exists()
+
+
+@responses.activate
+@pytest.mark.django_db
+@pytest.mark.usefixtures("frozen_today")
+def test_from_refuses_a_next_year_published_in_part(load_fixture: Callable[[str], Any]) -> None:
+    _month(load_fixture, "202610")
+    _month(load_fixture, "202611")
+    current = load_fixture("twse/reference/holiday_schedule_2026.json")
+    partial = current | {"queryYear": 2027, "data": [["2027-01-01", *current["data"][0][1:]]]}
+    for year, payload in ((2026, current), (2027, partial)):
+        responses.get(
+            SCHEDULE_URL,
+            json=payload,
+            match=[matchers.query_param_matcher({"date": f"{year}0101", "response": "json"})],
+        )
+    with pytest.raises(CommandError, match=r"SchemaChangedError: .*2027 gives 260 sessions"):
+        call_command("load_calendar", "--from", "2026-10-01")
+    assert not TradingCalendar.objects.exists()
+    assert EtlRun.objects.get().status == "failed"

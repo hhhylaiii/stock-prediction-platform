@@ -9,6 +9,7 @@ from apps.etl.trading_calendar import (
     UNLABELLED_CLOSURE,
     WEEKEND_TRADING,
     build_calendar,
+    require_whole_year,
     schedule_days,
     schedule_years,
     traded_days,
@@ -423,3 +424,13 @@ def test_a_january_row_naming_a_december_day_means_the_year_before(
         date(2027, 1, 4): (True, ""),
         date(2026, 12, 31): (False, "市場無交易"),
     }
+
+
+@pytest.mark.parametrize("year", [2021, 2026])
+def test_a_recorded_schedule_is_a_whole_year(load_fixture: Callable[[str], Any], year: int) -> None:
+    require_whole_year(load_fixture(f"twse/reference/holiday_schedule_{year}.json"))
+
+
+def test_an_unpublished_schedule_is_not_a_whole_year(load_fixture: Callable[[str], Any]) -> None:
+    with pytest.raises(SchemaChangedError, match="lists no day of that year"):
+        require_whole_year(load_fixture("twse/reference/holiday_schedule_2027.json"))

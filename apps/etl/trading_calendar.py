@@ -32,6 +32,8 @@ DAY_RANGE = re.compile(rf"{ONE_DAY}{WEEKDAY}至{ONE_DAY}")
 LEADING_DAYS = re.compile(rf"^(?:(?:\d{{2,3}}年)?\d{{1,2}}月\d{{1,2}}日{WEEKDAY}[及、與和至]?)+")
 HALF_YEAR = timedelta(days=183)
 SUBJECT_FILLER = re.compile(rf"[及、與和至\s]|市場|{BRACKETED}")
+YEAR_SESSIONS = (235, 255)
+LISTED_THROUGH = (10, 1)
 ScheduledDay = tuple[bool, str]
 
 
@@ -226,3 +228,26 @@ def corrections(
             continue
         changed[day] = (opened, _note(day, opened, None))
     return changed
+
+
+def require_whole_year(payload: Mapping[str, Any]) -> None:
+    """A schedule published in part reads as a year of weekdays, so refuse what cannot be whole.
+
+    Every year lists National Day or a later holiday, so a table ending before October is cut.
+    """
+    year = schedule_year(payload)
+    first = date(year, 1, 1)
+    listed = [day for day in schedule_days(payload) if day.year == year]
+    if not listed:
+        raise SchemaChangedError(f"TWSE holiday schedule for {year} lists no day of that year")
+    calendar, _ = build_calendar((), first - timedelta(days=1), [payload], first)
+    sessions = len(calendar.between(first, date(year, 12, 31)))
+    low, high = YEAR_SESSIONS
+    if not low <= sessions <= high:
+        raise SchemaChangedError(
+            f"TWSE holiday schedule for {year} gives {sessions} sessions, outside {low}-{high}"
+        )
+    if calendar.is_trading_day(first):
+        raise SchemaChangedError(f"TWSE holiday schedule for {year} trades on {first}")
+    if max(listed) < date(year, *LISTED_THROUGH):
+        raise SchemaChangedError(f"TWSE holiday schedule for {year} stops at {max(listed)}")
