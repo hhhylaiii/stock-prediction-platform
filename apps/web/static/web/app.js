@@ -143,7 +143,8 @@
   const SOURCE_NOTE = { volatility: '波動率區間', tech_vol_20d: '近 20 日波動估計' };
   const PROB_HEAD = '跑贏大盤 5 個百分點機率';
   const PROB_TIP = '20 日報酬跑贏大盤（加權股價報酬指數，含息）超過 5 個百分點的機率';
-  const BAND_NOTE = '20 日價格區間是 80% 區間：研究期 2016–2024 年的測試資料裡，實際報酬落在區間內的比例是 77.7%；大盤急跌的季度曾明顯偏低，2020 年第 1 季 49%、2022 年第 2 季 66%、第 3 季 68%。';
+  const BAND_NOTE = '20 日價格區間是 80% 區間。設計定案後只跑一次的 holdout（2025 年起，到 2026-11-11 已到期的預測）裡，實際報酬落在區間內的比例是 75.0%；7 個完整的季度在 59% 到 84% 之間，偏低的是 2025 年第 1 季 59.4%、2026 年第 2 季 69.6%，最後一段只有 2026 年 10 月 1 日至 12 日的 7 個交易日（樣本很少）、40.4%。' +
+    '定案前的研究期 2016–2024 年是 77.7%，大盤急跌的季度曾明顯偏低：2020 年第 1 季 49%、2022 年第 2 季 66%、第 3 季 68%。';
   const MODEL_NAMES = { lightgbm: 'LightGBM', ridge: 'Ridge', xgboost: 'XGBoost' };
   const SEARCH_MAX = 32;
   const pctOf = (x, digits) => x === null || x === undefined ? '—' : sgn(x * 100, digits);
@@ -795,9 +796,9 @@
 
   function researchText(row) {
     if (row.objective !== 'rank') return '—';
-    if (!row.research) return '研究期成績尚未產出';
+    if (!row.research) return '回測成績尚未產出';
     const m = row.research.metrics || {};
-    const own = '研究期 rank IC ' + (has(m.rank_ic) ? num3(m.rank_ic) : '—') + (has(m.rank_icir) ? '，ICIR ' + m.rank_icir.toFixed(2) : '');
+    const own = (row.metric_source === 'holdout' ? 'holdout' : '研究期') + ' rank IC ' + (has(m.rank_ic) ? num3(m.rank_ic) : '—') + (has(m.rank_icir) ? '，ICIR ' + m.rank_icir.toFixed(2) : '');
     const b = row.baseline ? row.baseline.metrics || {} : null;
     return own + (b ? '；Ridge ' + (has(b.rank_ic) ? num3(b.rank_ic) : '—') + (has(b.rank_icir) ? '，ICIR ' + b.rank_icir.toFixed(2) : '') : '');
   }
@@ -853,7 +854,7 @@
       const spans = releaseSpans(data);
       host.innerHTML = !data.length ? '<p class="placeholder">模型尚未上線。</p>' :
         '<div class="scroll" style="margin-top:14px"><div class="table" style="min-width:1100px">' +
-        '<div class="thead model-cols"><div>目標</div><div>模型</div><div>版本</div><div>訓練區間</div><div>近 6 個月成績</div><div>研究期成績與 baseline</div></div>' +
+        '<div class="thead model-cols"><div>目標</div><div>模型</div><div>版本</div><div>訓練區間</div><div>近 6 個月成績</div><div>回測成績與 baseline</div></div>' +
         data.map((row, i) => modelRowHtml(row, spans[i])).join('') + '</div></div>';
     } catch (err) {
       host.innerHTML = errorBox(err);
@@ -898,7 +899,7 @@
     overlay.addEventListener('pointerleave', () => { hl.style.display = 'none'; tip.style.display = 'none'; });
   }
 
-  const IC_SOURCES = { params: '上線模型指定的研究', self: '上線模型的研究', holdout: '最近一次 holdout' };
+  const IC_SOURCES = { params: '上線模型指定的研究', self: '上線模型的研究' };
 
   async function renderIcChart() {
     const host = document.getElementById('ic-chart'), sub = document.getElementById('ic-sub'), legend = document.getElementById('ic-legend');
@@ -912,7 +913,7 @@
       }
       const model = modelName(meta.model_type), baseline = modelName(meta.baseline);
       legend.innerHTML = '<span><i class="sw-sq" style="background:var(--model)"></i>' + esc(model) + '</span><span><i class="sw-sq" style="background:var(--ink-4)"></i>' + esc(baseline) + '</span>';
-      sub.textContent = 'walk-forward 研究期的月平均，近 ' + data.length + ' 個月（' + (IC_SOURCES[meta.source] || meta.source) + '，' + meta.run_key + '）。' +
+      sub.textContent = (meta.source === 'holdout' ? 'holdout（設計定案後才跑的驗證期）的月平均，近 ' + data.length + ' 個月（' : 'walk-forward 研究期的月平均，近 ' + data.length + ' 個月（' + (IC_SOURCES[meta.source] || meta.source) + '，') + meta.run_key + '）。' +
         model + ' 有 ' + meta.above_baseline + ' 個月高於 ' + baseline + '，負值月份 ' + meta.negative + ' 個；天數少於 ' + meta.min_days + ' 天的月份不計，以淡色表示。';
       drawIcChart(host, data, meta);
     } catch (err) {
