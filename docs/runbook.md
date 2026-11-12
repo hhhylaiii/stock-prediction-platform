@@ -847,10 +847,10 @@ uv run python manage.py rebuild_market_history
 warning 與 error 一律寫 log；`.env` 設了 `ALERT_WEBHOOK_URL` 就另外 POST JSON：
 
 ```json
-{"text": "2 data quality alert(s) for 2026-10-28", "alerts": [{"date": "2026-10-28", "check": "row_count", "severity": "warning", "detail": {}}]}
+{"text": "2 data quality alert(s) for 2026-10-28: etl_runs error; row_count warning", "alerts": [{"date": "2026-10-28", "check": "etl_runs", "severity": "error", "detail": {}}, {"date": "2026-10-28", "check": "row_count", "severity": "warning", "detail": {}}]}
 ```
 
-Slack 類的 incoming webhook 會顯示頂層的 `text`；完整內容在 `alerts`。webhook 失敗只寫 log，不影響 ETL。
+Slack 類的 incoming webhook 只顯示頂層的 `text`：先是則數與日期，再列出每個檢查名稱與嚴重度（error 在前，同一種重複的寫 `×N`，最多列五種，其餘寫 `+N more`）。`detail` 不進 `text`（可能很長，也可能帶來源網址），完整內容在 `alerts`。webhook 失敗只寫 log，不影響 ETL。
 
 info 的列不送，唯一例外是 `calendar_reach` 在延伸成功、或級別變好的那一次。
 
