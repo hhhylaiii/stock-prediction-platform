@@ -253,16 +253,20 @@
     return '<div class="empty">沒有符合條件的股票。</div>';
   }
 
-  function modelNoteText(meta, shown) {
-    if (!meta.date || !shown) return '';
-    const twenty = state.h === 20;
-    const serving = new Set((meta.models || []).map(model => model.role));
+  function lackingText(models, horizon) {
+    const twenty = horizon === 20;
+    const serving = new Set((models || []).map(model => model.role));
     const lacking = [], blank = [];
     if (!serving.has('return')) { lacking.push(OBJECTIVES[twenty ? 'quantile' : 'regression']); blank.push('預測報酬', '預測價'); }
     if (twenty && !serving.has('probability')) { lacking.push(OBJECTIVES.classification); blank.push('跑贏大盤機率'); }
     if (!lacking.length) return '';
-    return '這一期沒有' + lacking.join('、') + '模型的預測：' + blank.join('、') + '留空' +
-      (twenty && !serving.has('interval') ? '，價格區間改用波動估計' : '') + '。' + MODEL_REQUIRES + '；上線中的模型列在模型頁。';
+    return '沒有' + lacking.join('、') + '模型的預測：' + blank.join('、') + '留空' + (twenty && !serving.has('interval') ? '，價格區間改用波動估計' : '') + '。';
+  }
+
+  function modelNoteText(meta, shown) {
+    if (!meta.date || !shown) return '';
+    const lacking = lackingText(meta.models, state.h);
+    return lacking ? '這一期' + lacking + MODEL_REQUIRES + '；上線中的模型列在模型頁。' : '';
   }
 
   function showNotes(meta, shown) {
@@ -491,9 +495,12 @@
     const rank = (twenty.models || []).find(model => model.role === 'rank') || (entries.flatMap(entry => entry.models || []).find(model => model.role === 'rank'));
     const degraded = entries.some(entry => (entry.degraded || []).length);
     const caveats = caveatText(entries.flatMap(entry => shownModels(entry.models, entry.horizon)));
+    const lacking = entries.filter(entry => entry.prediction).map(entry => [entry.horizon, lackingText(entry.models, entry.horizon)])
+      .filter(([, text]) => text).map(([horizon, text]) => horizon + ' 日' + text).join('');
     return '<p class="sub">排名、報酬與區間機率各由自己的模型產出；排名模型多用了幾個籌碼與除息日特徵，其餘特徵相同。價格以 ' + basis + ' 換算。</p><div class="list">' +
       '<div class="thead h-cols" style="padding-top:10px"><div>期間</div><div class="right">預測報酬</div><div class="right">預測價</div><div class="right">80% 區間</div><div class="right prob-head" title="' + esc(PROB_TIP) + '">' + PROB_HEAD + '</div></div>' +
       entries.map(forecastRowHtml).join('') + '</div>' + (quantileBand ? '<p class="note band-note">' + BAND_NOTE + '</p>' : '') +
+      (lacking ? '<p class="note model-note">' + lacking + MODEL_REQUIRES + '；<a href="#models">上線中的模型列在模型頁</a>。</p>' : '') +
       '<div class="pair"><div><div class="faint tiny">預測 20 日波動（年化）</div><div class="v">' + (vol === null || vol === undefined ? '—' : (vol * 100).toFixed(1) + '%') + '</div>' +
       (realised === null ? '' : '<div class="muted tiny">過去 60 日實際為 ' + (realised * 100).toFixed(1) + '%</div>') + '</div>' +
       '<div><div class="faint tiny">排名模型版本</div><div style="font-size:15px;font-weight:500;line-height:1.6">' + (rank ? esc((MODEL_NAMES[rank.model_type] || rank.model_type) + ' ' + rank.version) : '—') + '</div>' +

@@ -23,6 +23,8 @@ BAND_NOTE = (
     "定案前的研究期 2016–2024 年是 77.7%，大盤急跌的季度曾明顯偏低："
     "2020 年第 1 季 49%、2022 年第 2 季 66%、第 3 季 68%。"
 )
+MODEL_REQUIRES = "模型要在 holdout 判定達標之後才會上線，判定未達標或明顯退化時要經使用者放行"
+ONLINE = f"{MODEL_REQUIRES}；上線中的模型列在模型頁。"
 RELEASE_REASON = "差距在 seed 間標準差內，先上線觀察"
 BAR_COUNT = 70
 GAP_INDEX = 64
