@@ -1,11 +1,14 @@
 import math
 from datetime import date, timedelta
+from decimal import Decimal
 
 import pandas as pd
 import pytest
 from django.core.management import call_command
 from django.core.management.base import CommandError
 
+from apps.etl.adapters.exchange_notices import Notice
+from apps.etl.dividend_notices import apply_notices
 from apps.market.calendar import TradingDays
 from apps.market.models import DailyPrice, MarketHistory, StockMaster, TradingCalendar
 from apps.research.labels import LABEL_COLUMNS, build_labels, write_labels
@@ -115,6 +118,18 @@ def test_labels_are_limited_to_the_requested_trading_days() -> None:
     assert list(labels.columns) == LABEL_COLUMNS
     assert sorted(set(labels["date"])) == list(CALENDAR.between(d("2016-02-29"), d("2016-03-04")))
     assert labels.groupby("date").size().eq(2).all()
+
+
+def test_an_event_a_notice_wrote_ahead_changes_no_label() -> None:
+    listed("2330")
+    prices("2330", "2016-01-04", "2016-04-29")
+    before = build_labels(CALENDAR, d("2016-02-01"), d("2016-03-31"))
+
+    coming = Notice("2330", d("2016-03-07"), Decimal(1), Decimal(0))
+    assert apply_notices("twse", [coming], d("2016-02-24")).rows == 1
+
+    pd.testing.assert_frame_equal(build_labels(CALENDAR, d("2016-02-01"), d("2016-03-31")), before)
+    assert not before.empty
 
 
 def test_labels_past_the_data_end_stay_open() -> None:

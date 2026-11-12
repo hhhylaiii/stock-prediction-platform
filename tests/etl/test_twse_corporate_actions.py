@@ -151,7 +151,8 @@ def test_a_quiet_session_has_no_events(
     adapter: TwseAdapter, load_fixture: Callable[[str], Any]
 ) -> None:
     responses.get(TWT49U, json=NO_DATA)
-    for url in RESTARTS:
-        responses.get(url, json=load_fixture(f"{FIXTURES}/twtauu_20261006.json"))
+    reduction, par_value = RESTARTS
+    responses.get(reduction, json=load_fixture(f"{FIXTURES}/twtauu_20261006.json"))
+    responses.get(par_value, json=load_fixture(f"{FIXTURES}/twtb8u_20261006.json"))
     assert _events(adapter, OCT_6).empty
     assert len(responses.calls) == 3

@@ -34,6 +34,8 @@
     revenue_source_mismatch: '月營收兩來源數字不同',
     statement_history_mismatch: '財報由 MOPS 歷史彙總頁補缺',
     dividend_source_mismatch: '股利兩來源不同',
+    dividend_notice: '除權除息預告表',
+    ex_date_unannounced: '除息日沒有公告日',
     exchange_fill: '交易所逐日表補缺',
     industry_fill: '交易所產業補缺',
     output_width_ratio: '區間寬度比異常',
@@ -185,15 +187,22 @@
 
   const shownModels = (models, horizon) => (models || []).filter(model => horizon === 20 || ['rank', 'return'].includes(model.role));
 
-  function releasedText(models) {
-    const groups = new Map(), order = Object.keys(OBJECTIVES);
-    [...models].sort((a, b) => order.indexOf(a.objective) - order.indexOf(b.objective) || b.horizon - a.horizon).forEach(model => {
-      if (!model.released_verdict) return;
-      const name = (OBJECTIVES[model.objective] || model.objective) + ' ' + model.horizon + ' 日';
-      const names = groups.get(model.released_verdict) || [];
-      if (!names.includes(name)) groups.set(model.released_verdict, [...names, name]);
-    });
-    return [...groups].map(([verdict, names]) => names.join('、') + '模型的 holdout 判定' + verdict + '，經使用者放行上線').join('；');
+  function caveatText(models) {
+    const order = Object.keys(OBJECTIVES);
+    const sorted = [...models].sort((a, b) => order.indexOf(a.objective) - order.indexOf(b.objective) || b.horizon - a.horizon);
+    const grouped = (keyOf, clause) => {
+      const groups = new Map();
+      sorted.forEach(model => {
+        const key = keyOf(model), name = (OBJECTIVES[model.objective] || model.objective) + ' ' + model.horizon + ' 日';
+        const names = groups.get(key) || [];
+        if (key && !names.includes(name)) groups.set(key, [...names, name]);
+      });
+      return [...groups].map(([key, names]) => names.join('、') + clause(key));
+    };
+    return [
+      ...grouped(model => model.released_verdict, verdict => '模型的 holdout 判定' + verdict + '，經使用者放行上線'),
+      ...grouped(model => (model.forced_gates || []).map(gate => GATES[gate] || gate).join('、'), gates => '模型的換模門檻沒過（' + gates + '），經使用者強制換上')
+    ].join('；');
   }
 
   function todayMetaText(meta) {
@@ -208,8 +217,8 @@
     const degraded = meta.degraded || [];
     const degradedRuns = new Set((meta.models || []).filter(model => degraded.includes(model.role)).map(model => model.run_id)).size;
     if (degraded.length) parts.push(degradedRuns + ' 個模型降級中，結果僅供參考' + (meta.interval_alert ? '，區間改用波動率區間' : ''));
-    const released = releasedText(shownModels(meta.models, state.h));
-    return parts.join('，') + '。' + (released ? released + '。原因見模型頁。' : '');
+    const caveats = caveatText(shownModels(meta.models, state.h));
+    return parts.join('，') + '。' + (caveats ? caveats + '。原因見模型頁。' : '');
   }
 
   function watchedStocks() {
@@ -479,7 +488,7 @@
     const realised = data.realized_vol && data.realized_vol.tech_vol_60d !== null ? data.realized_vol.tech_vol_60d : null;
     const rank = (twenty.models || []).find(model => model.role === 'rank') || (entries.flatMap(entry => entry.models || []).find(model => model.role === 'rank'));
     const degraded = entries.some(entry => (entry.degraded || []).length);
-    const released = releasedText(entries.flatMap(entry => shownModels(entry.models, entry.horizon)));
+    const caveats = caveatText(entries.flatMap(entry => shownModels(entry.models, entry.horizon)));
     return '<p class="sub">排名、報酬與區間機率各由自己的模型產出；排名模型多用了幾個籌碼與除息日特徵，其餘特徵相同。價格以 ' + basis + ' 換算。</p><div class="list">' +
       '<div class="thead h-cols" style="padding-top:10px"><div>期間</div><div class="right">預測報酬</div><div class="right">預測價</div><div class="right">80% 區間</div><div class="right prob-head" title="' + esc(PROB_TIP) + '">' + PROB_HEAD + '</div></div>' +
       entries.map(forecastRowHtml).join('') + '</div>' + (quantileBand ? '<p class="note band-note">' + BAND_NOTE + '</p>' : '') +
@@ -488,7 +497,7 @@
       '<div><div class="faint tiny">排名模型版本</div><div style="font-size:15px;font-weight:500;line-height:1.6">' + (rank ? esc((MODEL_NAMES[rank.model_type] || rank.model_type) + ' ' + rank.version) : '—') + '</div>' +
       (rank ? '<div class="muted tiny">訓練資料到 ' + esc(rank.train_end) + '，<a href="#models">成績在模型頁</a></div>' : '') + '</div></div>' +
       (degraded ? '<p class="note">有模型降級中，結果僅供參考。</p>' : '') +
-      (released ? '<p class="note released-note">' + esc(released) + '。<a href="#models">原因在模型頁</a></p>' : '');
+      (caveats ? '<p class="note caveat-note">' + esc(caveats) + '。<a href="#models">原因在模型頁</a></p>' : '');
   }
 
   function featuresHtml(data, meta) {
@@ -816,16 +825,23 @@
     return '<div class="released">' + lines.map(line => '<div>' + esc(line) + '</div>').join('') + '</div>';
   }
 
+  function forcedHtml(row) {
+    const f = row.forced_promotion;
+    if (!f) return '';
+    const lines = ['換模門檻沒過：' + f.gates.map(gateText).join('、'), [f.promoted_on, '經使用者強制換上：' + (f.reason || '沒有寫原因')].filter(Boolean).join(' ')];
+    return '<div class="forced">' + lines.map(line => '<div>' + esc(line) + '</div>').join('') + '</div>';
+  }
+
   function modelRowHtml(row, span) {
     const degraded = row.status === 'degraded' ? '<span class="faint small">　降級中</span>' : '';
     const detail = row.status === 'degraded' ? degradedText(row) : '';
-    const released = releasedHtml(row, span);
-    return '<div class="trow model-cols' + (released ? ' has-release' : '') + '"><div class="num">' + esc(OBJECTIVES[row.objective] || row.objective) + '<span class="faint small">　' + row.horizon + ' 日</span></div>' +
+    const notes = forcedHtml(row) + releasedHtml(row, span);
+    return '<div class="trow model-cols' + (notes ? ' has-release' : '') + '"><div class="num">' + esc(OBJECTIVES[row.objective] || row.objective) + '<span class="faint small">　' + row.horizon + ' 日</span></div>' +
       '<div>' + esc(modelName(row.model_type)) + degraded + (detail ? '<div class="faint small degraded">' + esc(detail) + '</div>' : '') + '</div>' +
       '<div class="muted version">' + esc(row.version) + '</div>' +
       '<div class="muted">' + esc(monthOf(row.train_start)) + ' 到 ' + esc(monthOf(row.train_end)) + '</div>' +
       '<div>' + esc(recentText(row)) + '</div>' +
-      '<div class="muted">' + esc(researchText(row)) + '</div></div>' + released;
+      '<div class="muted">' + esc(researchText(row)) + '</div></div>' + notes;
   }
 
   async function renderModelTable() {

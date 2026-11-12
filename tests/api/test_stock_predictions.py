@@ -7,6 +7,7 @@ from pytest_django import DjangoAssertNumQueries
 from apps.research.holdout import DEGRADED
 from apps.research.models import FeatureDaily, ModelRun, Prediction
 from tests.api.conftest import (
+    FORCED_REASON,
     NOV_2,
     OCT_29,
     OCT_30,
@@ -15,6 +16,7 @@ from tests.api.conftest import (
     add_predictions,
     add_stock,
     envelope_of,
+    forced_params,
     release_params,
 )
 
@@ -69,6 +71,21 @@ def test_each_horizon_names_its_models_built_on_a_released_holdout(
     }
     assert {model["released_verdict"] for model in twenty["models"]} == {None}
     assert RELEASE_REASON not in response.content.decode()
+
+
+def test_each_horizon_names_the_gates_its_forced_models_failed(client: Client, runs: Runs) -> None:
+    ModelRun.objects.filter(pk="reg-h5").update(params=forced_params("reg-h5", "regression", 5))
+
+    response = client.get("/api/stocks/2330/predictions")
+
+    five, twenty = horizons_of(envelope_of(response))[5], horizons_of(envelope_of(response))[20]
+    assert {model["role"]: model["forced_gates"] for model in five["models"]} == {
+        "rank": None,
+        "return": ["agreement", "shadow_oos"],
+        "volatility": None,
+    }
+    assert [model["forced_gates"] for model in twenty["models"]] == [None] * 5
+    assert FORCED_REASON not in response.content.decode()
 
 
 def test_realised_volatility_comes_from_the_twenty_day_prediction_date(

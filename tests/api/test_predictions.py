@@ -9,13 +9,15 @@ from django.test import Client
 from django.test.utils import CaptureQueriesContext
 from pytest_django import DjangoAssertNumQueries
 
-from apps.api.serving import HOLDOUT_RELEASE
+from apps.api.serving import HOLDOUT_RELEASE, warn_unreadable
 from apps.market.models import TradingCalendar
 from apps.research.holdout import DEGRADED, FAILED, PASSED, PRODUCTION
 from apps.research.models import FeatureDaily, ModelMonitor, ModelRun, Prediction
+from apps.research.promotion import PROMOTION
 from tests.api.conftest import (
     CALENDAR_START,
     EARLY_CALENDAR_START,
+    FORCED_REASON,
     NOV_2,
     OCT_28,
     OCT_29,
@@ -28,6 +30,7 @@ from tests.api.conftest import (
     add_predictions,
     add_stock,
     envelope_of,
+    forced_params,
     release_params,
     sessions_until,
     taipei,
@@ -104,6 +107,7 @@ def test_meta_names_the_date_universe_and_serving_models(client: Client, runs: R
         "train_start": "2023-10-01",
         "train_end": "2026-09-30",
         "released_verdict": None,
+        "forced_gates": None,
     }
     assert (meta["degraded"], meta["interval_alert"]) == ([], False)
 
@@ -149,6 +153,7 @@ def test_the_released_verdict_is_read_once_per_request_not_per_prediction_row(
 def test_a_release_the_model_page_cannot_show_is_not_served_as_released(
     client: Client, runs: Runs, caplog: pytest.LogCaptureFixture
 ) -> None:
+    warn_unreadable.cache_clear()
     half = {PRODUCTION: {HOLDOUT_RELEASE: {"status": FAILED, "reason": "half a record"}}}
     ModelRun.objects.filter(pk="rank-h20").update(params=half)
 
@@ -159,6 +164,74 @@ def test_a_release_the_model_page_cannot_show_is_not_served_as_released(
     assert [row["holdout_release"] for row in listed if row["run_id"] == "rank-h20"] == [None]
     assert "rank-h20" in caplog.text
     assert "holdout release" in caplog.text
+
+
+def gates_of(body: dict[str, Any]) -> dict[str, list[str] | None]:
+    return {model["role"]: model["forced_gates"] for model in body["meta"]["models"]}
+
+
+def test_a_model_swapped_in_by_force_names_the_gates_it_failed_and_not_the_reason(
+    client: Client, runs: Runs
+) -> None:
+    ModelRun.objects.filter(pk="rank-h20").update(params=forced_params("rank-h20"))
+    passed = {PROMOTION: {"forced": False, "reason": FORCED_REASON, "failed": []}}
+    ModelRun.objects.filter(pk="vol-h20").update(params=passed)
+
+    response = client.get("/api/predictions")
+
+    assert gates_of(envelope_of(response)) == {
+        "rank": ["agreement", "shadow_oos"],
+        "return": None,
+        "interval": None,
+        "volatility": None,
+        "probability": None,
+    }
+    assert FORCED_REASON not in response.content.decode()
+
+
+def test_a_run_released_and_forced_carries_both_from_one_read(client: Client, runs: Runs) -> None:
+    both = {**release_params(DEGRADED), **forced_params("rank-h20")}
+    ModelRun.objects.filter(pk="rank-h20").update(params=both)
+
+    with CaptureQueriesContext(connection) as queries:
+        rank = envelope_of(client.get("/api/predictions"))["meta"]["models"][0]
+
+    assert (rank["released_verdict"], rank["forced_gates"]) == (
+        DEGRADED,
+        ["agreement", "shadow_oos"],
+    )
+    reading = [query["sql"] for query in queries if HOLDOUT_RELEASE in query["sql"]]
+    assert len(reading) == 1
+    assert f"'{PROMOTION}'" in reading[0]
+
+
+FORCED_NOTE = forced_params("rank-h20")[PROMOTION]
+
+
+@pytest.mark.parametrize(
+    "note",
+    [
+        "forced",
+        {**FORCED_NOTE, "forced": "yes"},
+        {**FORCED_NOTE, "failed": "agreement"},
+        {**FORCED_NOTE, "failed": []},
+        {**FORCED_NOTE, "failed": [{"run_id": "rank-h20", "gates": "agreement"}]},
+        {**FORCED_NOTE, "failed": [{"run_id": "rank-h20", "gates": [{"name": 1}]}]},
+    ],
+)
+def test_a_promotion_note_that_names_no_failed_gate_is_not_served_as_forced(
+    client: Client, runs: Runs, note: object, caplog: pytest.LogCaptureFixture
+) -> None:
+    warn_unreadable.cache_clear()
+    ModelRun.objects.filter(pk="rank-h20").update(params={PROMOTION: note})
+
+    body = envelope_of(client.get("/api/predictions"))
+    listed = envelope_of(client.get("/api/models"))["data"]
+
+    assert gates_of(body)["rank"] is None
+    assert [row["forced_promotion"] for row in listed if row["run_id"] == "rank-h20"] == [None]
+    forced = isinstance(note, dict) and note["forced"] is True
+    assert ("run rank-h20 has an unreadable forced promotion" in caplog.text) is forced
 
 
 @pytest.mark.parametrize("status", [PASSED, "released", 1, None, [FAILED]])

@@ -25,7 +25,15 @@ from apps.etl.adapters.finmind_datasets import (
 )
 from apps.etl.adapters.finmind_fundamentals import monthly_revenues, statements
 from apps.etl.client import SourceClient
-from apps.etl.dividend_dates import Session, announcement_session, fill_announce_dates
+from apps.etl.dividend_dates import (
+    Redated,
+    Session,
+    announcement_session,
+    compare_announce_dates,
+    exchanges_lead_from,
+    fill_announce_dates,
+    moves,
+)
 from apps.etl.errors import SchemaChangedError, SourceError, SourceRequestError
 from apps.etl.models import RawFinmind
 from apps.etl.ratelimit import RateLimiter, ThrottledError
@@ -310,14 +318,15 @@ class FinmindAdapter(BaseAdapter):
             rows = insert_missing(SharesOutstanding, frame, ("stock_id", "effective_date"))
             drop_repeated_counts([stock_id])
             return rows
-        with_factor = frame["adj_factor"].notna()
+        own = frame[frame["ex_date"] < exchanges_lead_from()]
+        with_factor = own["adj_factor"].notna()
         rows = upsert(
             DividendEvent,
-            frame[with_factor],
+            own[with_factor],
             ("stock_id", "ex_date"),
             (*EVENT_FIELDS, "adj_factor"),
         )
-        rows += upsert(DividendEvent, frame[~with_factor], ("stock_id", "ex_date"), EVENT_FIELDS)
+        rows += upsert(DividendEvent, own[~with_factor], ("stock_id", "ex_date"), EVENT_FIELDS)
         fill_announce_dates(
             stock_id, dict(zip(frame["ex_date"], frame["announce_date"], strict=True))
         )
@@ -382,21 +391,33 @@ class Reapplied(NamedTuple):
     filled: int
     stocks: int
     rejected: dict[str, str]
+    compared: list[Redated]
 
 
-def reapply_announce_dates(session: Session, stock_ids: Sequence[str] | None = None) -> Reapplied:
-    """Every stored dividend answer read again, without fetching."""
+def reapply_announce_dates(
+    session: Session,
+    stock_ids: Sequence[str] | None = None,
+    earlier: bool = False,
+    dry_run: bool = False,
+) -> Reapplied:
+    """Every stored dividend answer read again, without fetching; a dry run writes nothing."""
     answers = RawFinmind.objects.filter(dataset=RAW_NAMES["TaiwanStockDividend"])
     if stock_ids:
         answers = answers.filter(request_params__data_id__in=list(stock_ids))
     by_stock: dict[str, list[Any]] = {}
     for params, payload in answers.values_list("request_params", "payload").iterator():
         by_stock.setdefault(str(params["data_id"]), []).extend(payload.get("data") or [])
-    filled, rejected = 0, {}
+    filled, rejected, compared = 0, {}, []
     for code, rows in sorted(by_stock.items()):
         try:
             with transaction.atomic():
-                filled += fill_announce_dates(code, ex_date_announcements(rows, code, session))
+                announced = ex_date_announcements(rows, code, session)
+                found = compare_announce_dates(code, announced)
+                if not dry_run:
+                    fill_announce_dates(code, announced, earlier)
         except SourceError as exc:
             rejected[code] = f"{type(exc).__name__}: {exc}"
-    return Reapplied(filled, len(by_stock), rejected)
+            continue
+        compared.extend(found)
+        filled += sum(moves(row, earlier) for row in found)
+    return Reapplied(filled, len(by_stock), rejected, compared)

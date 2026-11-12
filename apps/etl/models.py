@@ -109,6 +109,34 @@ class RawMops(RawRecord):
         indexes = [models.Index(fields=["dataset", "fetched_at"], name="raw_mops_ds_fetched_idx")]
 
 
+class DividendNotice(models.Model):
+    """A coming ex-date an exchange's notice table listed, and the sessions that saw it.
+
+    withdrawn is the session two sound lists in a row had dropped it by; it clears on return.
+    """
+
+    id = models.BigAutoField(primary_key=True)
+    source = models.CharField(max_length=32)
+    stock_id = models.CharField(max_length=10)
+    ex_date = models.DateField()
+    first_seen = models.DateField()
+    last_seen = models.DateField()
+    created_event = models.BooleanField(default=False)
+    withdrawn = models.DateField(null=True, blank=True)
+
+    class Meta:
+        db_table = "dividend_notice"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["source", "stock_id", "ex_date"], name="dividend_notice_event_uniq"
+            )
+        ]
+        indexes = [models.Index(fields=["source", "last_seen"], name="dividend_notice_seen_idx")]
+
+    def __str__(self) -> str:
+        return f"{self.source} {self.stock_id} {self.ex_date}"
+
+
 class EtlRun(models.Model):
     """One ETL execution with its outcome and a checkpoint for resuming."""
 

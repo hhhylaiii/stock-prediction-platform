@@ -17,13 +17,21 @@ from django.utils import timezone
 
 from apps.etl.adapters import build_adapter
 from apps.etl.adapters.corporate_actions import DIVIDEND_EVENT
+from apps.etl.adapters.exchange_notices import DIVIDEND_NOTICE
 from apps.etl.adapters.mops import REVENUE_SCAN, STATEMENT_SCAN
 from apps.etl.alerts import dispatch
 from apps.etl.catchup import REDONE, catch_up
 from apps.etl.errors import SourceError, SourceNotReadyError
 from apps.etl.master_refresh import DAILY_DATASET, refresh_stock_master
 from apps.etl.models import DataQualityLog, EtlRun
-from apps.etl.quality import CHECKS, alerting, run_checks, should_run_prediction
+from apps.etl.quality import (
+    CHECKS,
+    UNANNOUNCED,
+    alerting,
+    run_checks,
+    should_run_prediction,
+    unannounced_result,
+)
 from apps.etl.ratelimit import RetryableError, ThrottledError
 from apps.etl.revenue_scan import open_months
 from apps.etl.runs import covered_days
@@ -40,7 +48,7 @@ US_SERIES = {
 }
 US_CLOSE_CHECK = "us_close"
 ETL_RUNS_CHECK = "etl_runs"
-AUDITED = (*CHECKS, ETL_RUNS_CHECK)
+AUDITED = (*CHECKS, ETL_RUNS_CHECK, UNANNOUNCED)
 GATE_DATASETS = frozenset(
     {
         "daily_price",
@@ -64,7 +72,13 @@ BATCH_SLOTS = {
     "notices": "NOTICES_AGAIN",
 }
 EXCHANGES = ("twse", "tpex")
-CARRIED_FORWARD = frozenset({("stock_master", DAILY_DATASET), ("datagov", "business_signal")})
+CARRIED_FORWARD = frozenset(
+    {
+        ("stock_master", DAILY_DATASET),
+        ("datagov", "business_signal"),
+        *((source, DIVIDEND_NOTICE) for source in EXCHANGES),
+    }
+)
 
 
 class Due(NamedTuple):
@@ -98,6 +112,7 @@ BATCHES: dict[str, list[Fetch]] = {
         *_both("day_trade", sessions_back=tuple(range(REDONE["day_trade"] + 1))),
         Fetch("twse", "foreign_holding"),
         Fetch("twse", "shares_outstanding"),
+        *_both(DIVIDEND_NOTICE),
     ],
     "notices": _both("attention", "disposition"),
 }
@@ -131,7 +146,7 @@ def _landed(day: date, owned: frozenset[Due] = frozenset()) -> DataQualityLog:
 
 
 def _covered(due: Due) -> bool:
-    """A run covers the day; for the master and the signal, any later success carries it too."""
+    """A run covers the day; for snapshots without history, any later success carries it too."""
     if due.day in covered_days(due.source, due.dataset, [due.day]):
         return True
     return (due.source, due.dataset) in CARRIED_FORWARD and EtlRun.objects.filter(
@@ -145,9 +160,15 @@ def _covered(due: Due) -> bool:
 def _audit(
     day: date, calendar: TradingDays, owned: frozenset[Due] = frozenset()
 ) -> list[DataQualityLog]:
-    results = [*run_checks(day, calendar), _landed(day, owned)]
+    results = [*run_checks(day, calendar), _landed(day, owned), _unannounced(day)]
     dispatch(results)
     return results
+
+
+def _unannounced(day: date) -> DataQualityLog:
+    """Kept apart from CHECKS: it only warns, so the research gate never waits on it."""
+    found = unannounced_result(day)
+    return _replace_log(day, UNANNOUNCED, found.severity, found.detail)
 
 
 def _alerts(day: date) -> set[tuple[str, str]]:
@@ -163,6 +184,8 @@ def _reaudit(day: date, calendar: TradingDays | None = None) -> None:
         results.extend(run_checks(day, calendar or TradingDays.from_db()))
     if any(check == ETL_RUNS_CHECK for check, _ in before):
         results.append(_landed(day, _still_listed(day, calendar or TradingDays.from_db())))
+    if any(check == UNANNOUNCED for check, _ in before):
+        results.append(_unannounced(day))
     fresh = [row for row in alerting(results) if (row.check_name, row.severity) not in before]
     if fresh:
         dispatch(fresh)
