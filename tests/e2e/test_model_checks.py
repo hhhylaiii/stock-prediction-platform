@@ -232,6 +232,24 @@ def test_ex_dates_past_the_calendar_read_their_count_the_latest_and_the_calendar
     expect(row.locator("i")).to_have_class("warn")
 
 
+def test_an_ex_date_warning_written_at_night_keeps_the_block_on_the_last_day_monitored(
+    page: Page, live_server: LiveServer, seeded: Seed
+) -> None:
+    detail = {"count": 2, "latest_ex_date": "2027-01-12", "calendar_end": "2026-12-31"}
+    log(seeded, EX_DATE_CHECK, "warning", detail)
+    log(seeded, EX_DATE_CHECK, "warning", {**detail, "count": 1}, back=2)
+    clean = {"share": 0.0, "flagged": 0, "n_stocks": 1842, "stocks": []}
+    log(seeded, "output_width_ratio", "info", clean, back=2)
+
+    page.goto(f"{live_server.url}/#models")
+
+    expect(page.locator("#model-checks-sub")).to_contain_text(seeded.sessions[-2].isoformat())
+    rows = page.locator("#model-checks .check")
+    expect(rows).to_have_count(2)
+    expect(rows.filter(has_text="區間寬度比異常")).to_contain_text("沒有標記")
+    expect(rows.filter(has_text="除息日超出交易日曆")).to_contain_text("1 筆，最晚 2027-01-12")
+
+
 ALERT = {
     "objective": "rank",
     "horizon": 20,

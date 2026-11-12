@@ -1174,7 +1174,8 @@
 
   function renderModelChecks(data, meta) {
     const sub = document.getElementById('model-checks-sub'), host = document.getElementById('model-checks');
-    const day = data.find(entry => (entry.model_checks || []).some(isDaily));
+    const monitored = check => isDaily(check) && check.check_name !== 'monitor_ex_date_calendar';
+    const day = data.find(entry => (entry.model_checks || []).some(monitored)) || data.find(entry => (entry.model_checks || []).some(isDaily));
     const share = meta.output_alert_share;
     sub.textContent = day ? '最近一次寫入的交易日：' + day.date + '；區間寬度比的標記超過 ' + Math.round(share * 100) + '% 才算警告，機率矛盾只做參考。' : '';
     const promotions = latestBy(data, isPromotion, scopeOf);
