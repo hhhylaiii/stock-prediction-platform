@@ -792,3 +792,72 @@ def test_only_a_collapsed_feature_shuts_the_gate_the_predict_step_reads(
     assert done.detail["error"].startswith(f"{stopped_by}: ")
     assert done.detail["steps"][1]["step"] == "coverage"
     assert marker(WEDNESDAY, tasks.COVERAGE_CHECK).severity == severity
+
+
+LAST_COVERED = date(2026, 11, 30)
+UNCOVERED = date(2026, 12, 1)
+OUTSIDE = {"reason": tasks.OUTSIDE_CALENDAR, "calendar_end": LAST_COVERED.isoformat()}
+
+
+@pytest.mark.parametrize("args", [(), (UNCOVERED.isoformat(),)])
+def test_the_evening_of_a_day_past_the_calendar_warns_and_starts_nothing(
+    now: Callable[[date, time], None],
+    gate: list[bool],
+    ran: list[tuple[str, date, bool]],
+    sent: list[tuple[date, str, str]],
+    args: tuple[str, ...],
+) -> None:
+    now(UNCOVERED, time(23, 0))
+
+    assert tasks.evening.apply(args=args).get() == "outside calendar"
+
+    row = marker(UNCOVERED, tasks.EVENING_CHECK)
+    assert row.severity == Severity.WARNING
+    assert row.detail == OUTSIDE
+    assert sent == [(UNCOVERED, tasks.EVENING_CHECK, Severity.WARNING)]
+    assert ran == []
+
+
+def test_the_morning_whose_yesterday_is_past_the_calendar_warns_and_starts_nothing(
+    now: Callable[[date, time], None],
+    gate: list[bool],
+    ran: list[tuple[str, date, bool]],
+    sent: list[tuple[date, str, str]],
+) -> None:
+    now(UNCOVERED + timedelta(days=1), time(6, 0))
+
+    assert tasks.morning.apply().get() == "outside calendar"
+
+    row = marker(UNCOVERED, tasks.MORNING_CHECK)
+    assert row.severity == Severity.WARNING
+    assert row.detail == OUTSIDE
+    assert sent == [(UNCOVERED, tasks.MORNING_CHECK, Severity.WARNING)]
+    assert ran == []
+
+
+def test_the_morning_after_the_calendar_s_last_day_still_runs_that_session(
+    now: Callable[[date, time], None], gate: list[bool], ran: list[tuple[str, date, bool]]
+) -> None:
+    record(LAST_COVERED, tasks.EVENING_CHECK)
+    record(LAST_COVERED, US_CLOSE_CHECK)
+    now(UNCOVERED, time(6, 0))
+
+    assert tasks.morning.apply().get() == "started"
+
+    assert {day for _, day, _ in ran} == {LAST_COVERED}
+    assert steps(ran) == ["features", "coverage", "predict", "monitor"]
+
+
+def test_a_switched_off_or_early_run_past_the_calendar_writes_nothing(
+    now: Callable[[date, time], None], ran: list[tuple[str, date, bool]]
+) -> None:
+    now(UNCOVERED + timedelta(days=1), time(0, 30))
+    assert tasks.evening.apply().get() == "early"
+    assert tasks.morning.apply().get() == "early"
+    now(UNCOVERED + timedelta(days=1), time(23, 0))
+    with override_settings(RESEARCH_SCHEDULE_ENABLED=False):
+        assert tasks.evening.apply().get() == "disabled"
+        assert tasks.morning.apply().get() == "disabled"
+
+    assert ran == []
+    assert not DataQualityLog.objects.exists()
