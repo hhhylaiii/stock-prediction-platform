@@ -17,7 +17,7 @@ from apps.etl.models import DataQualityLog, EtlRun
 from apps.etl.quality import CHECKS
 from apps.etl.ratelimit import RetryableError, ThrottledError
 from apps.etl.trading_calendar import REFRESH_DATASET, REFRESH_SOURCE
-from apps.market.calendar import TradingDays
+from apps.market.calendar import OutsideCalendarError, TradingDays
 from apps.market.models import DividendEvent, IndexDaily, TradingCalendar
 from config.celery import app
 
@@ -49,6 +49,14 @@ def retries_run_in_place() -> Iterator[None]:
     app.conf.CELERY_TASK_EAGER_PROPAGATES = False
     yield
     app.conf.CELERY_TASK_EAGER_PROPAGATES = before
+
+
+@pytest.fixture(autouse=True)
+def upkeep(monkeypatch: pytest.MonkeyPatch) -> list[date]:
+    """The calendar upkeep has its own tests; here it only records the days it was asked for."""
+    asked: list[date] = []
+    monkeypatch.setattr("apps.etl.tasks.keep_up", asked.append)
+    return asked
 
 
 @pytest.fixture
@@ -905,3 +913,51 @@ def test_research_waits_for_the_gate_datasets_and_the_quality_gate() -> None:
     EtlRun.objects.filter(dataset="margin", source="tpex").update(status="failed")
     assert not tasks.etl_complete(DAY)
     assert not tasks.ready_for_research(DAY)
+
+
+def test_the_calendar_is_kept_ahead_before_anything_reads_it(
+    today: Callable[..., None],
+    monkeypatch: pytest.MonkeyPatch,
+    catch_ups: list[tuple[date, date, TradingDays]],
+) -> None:
+    order: list[str] = []
+    monkeypatch.setattr("apps.etl.tasks.keep_up", lambda day: order.append(f"upkeep {day}"))
+    monkeypatch.setattr("apps.etl.tasks.call_command", lambda name, **kwargs: order.append(name))
+    today(DAY, time(15, 10))
+    tasks.prepare_day()
+    assert order == ["upkeep 2026-10-28", "refresh_calendar"]
+    assert len(catch_ups) == 1
+
+
+def test_a_failing_upkeep_does_not_stop_the_day(
+    today: Callable[..., None],
+    monkeypatch: pytest.MonkeyPatch,
+    catch_ups: list[tuple[date, date, TradingDays]],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def broken(day: date) -> None:
+        raise RuntimeError("upkeep broke")
+
+    monkeypatch.setattr("apps.etl.tasks.keep_up", broken)
+    monkeypatch.setattr("apps.etl.tasks.call_command", lambda name, **kwargs: None)
+    today(DAY, time(15, 10))
+    tasks.prepare_day()
+    assert len(catch_ups) == 1
+    assert "trading_calendar upkeep" in caplog.text
+
+
+def test_the_upkeep_still_runs_once_the_calendar_ran_out(
+    today: Callable[..., None], upkeep: list[date]
+) -> None:
+    today(date(2026, 11, 2), time(15, 10))
+    with pytest.raises(OutsideCalendarError):
+        tasks.prepare_day()
+    assert upkeep == [date(2026, 11, 2)]
+
+
+def test_a_closed_day_is_still_offered_to_the_upkeep(
+    today: Callable[..., None], upkeep: list[date]
+) -> None:
+    today(date(2026, 10, 25), time(15, 10))
+    assert tasks.prepare_day() == []
+    assert upkeep == [date(2026, 10, 25)]

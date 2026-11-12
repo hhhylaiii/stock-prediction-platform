@@ -20,6 +20,7 @@ from apps.etl.adapters.corporate_actions import DIVIDEND_EVENT
 from apps.etl.adapters.exchange_notices import DIVIDEND_NOTICE
 from apps.etl.adapters.mops import REVENUE_SCAN, STATEMENT_SCAN
 from apps.etl.alerts import dispatch
+from apps.etl.calendar_upkeep import keep_up
 from apps.etl.catchup import REDONE, catch_up
 from apps.etl.errors import SourceError, SourceNotReadyError
 from apps.etl.master_refresh import DAILY_DATASET, refresh_stock_master
@@ -240,7 +241,11 @@ def run_batch(batch: str) -> list[str]:
 
 @shared_task(name="etl.prepare_day")
 def prepare_day() -> list[str]:
-    """Correct the calendar, fetch what earlier sessions missed, then audit those sessions."""
+    """Keep the calendar ahead and correct it, fetch what sessions missed, then audit them."""
+    try:
+        keep_up(timezone.localtime().date())
+    except Exception as exc:
+        _failed("trading_calendar upkeep", exc)
     session = _session_today()
     if session is None:
         return []
