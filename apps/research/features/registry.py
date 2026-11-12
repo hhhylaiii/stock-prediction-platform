@@ -108,6 +108,7 @@ FEATURES: tuple[FeatureSpec, ...] = (
     *_specs(MKT, "mkt_days_to_quarter_end", batch=2),
 )
 BY_NAME = {spec.name: spec for spec in FEATURES}
+DORMANT = ("chip_big_holder_pct_chg_1w", "chip_holder_count_chg_1w")
 
 
 def feature(name: str) -> FeatureSpec:
