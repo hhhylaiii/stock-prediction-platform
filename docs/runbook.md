@@ -854,6 +854,26 @@ Slack 類的 incoming webhook 會顯示頂層的 `text`；完整內容在 `alert
 
 info 的列不送，唯一例外是 `calendar_reach` 在延伸成功、或級別變好的那一次。
 
+### 任務失敗（`task_failure`）
+
+排程任務因為來源以外的錯誤而失敗時發一則告警，形狀和上面相同（`check` 是 `task_failure`、`severity` 是 warning）：
+
+```json
+{"text": "task failed: etl.run_batch (OutsideCalendarError)", "alerts": [{"date": "2027-01-04", "check": "task_failure", "severity": "warning", "detail": {"task": "etl.run_batch", "error": "OutsideCalendarError", "message": "2027-01-04 is outside 2008-01-01..2026-12-31", "context": "args=('prices',) kwargs={}", "first_at": "2027-01-04T15:30:00+08:00"}}]}
+```
+
+- 什麼會發：
+  - Celery 判定失敗的任務：沒被接住的例外，重試用完之後才算；worker 子行程被殺或超時也算。
+  - 任務自己接住、回傳 `failed` 的非預期例外（`apps/etl/tasks.py` 的 `_failed`，例如景氣燈號在日曆用完那天、或程式錯誤）。
+- 什麼不發：重試中的任務；來源自己的錯誤（還沒公布、連不上、格式改變、被限流），這些照舊由 22:50 的 `etl_runs` 列出。
+- 去重：同一個任務名稱、同一天、同一種例外類別只發第一次，之後只累計。資料庫連線類的錯誤不分任務合成一則。去重記在 Redis（`TASK_ALERT_REDIS_URL`，預設就是 broker；36 小時過期）；Redis 連不上就每次都發。
+- 內容只有例外的類別名稱，不含訊息與 traceback（別人的錯誤訊息可能帶網址或主機路徑）；唯一例外是交易日曆的錯誤，訊息是日期範圍。細節看 worker 的 log。
+- 另外盡力在 `data_quality_log` 記一列 `task_failure`（當天一列，`detail.tasks` 是各任務的次數、第一次時間、例外類別）；資料庫連不上時不寫。這一列永遠是 warning，不擋研究閘門與換模。
+- 已知缺口：
+  - worker 或 beat 整個沒在跑時沒有任何訊號，要另外看 `docker compose ps` 或主機的監控。
+  - 沒設 `ALERT_WEBHOOK_URL` 時告警只在 worker 的 log 與 `data_quality_log`；日曆用完那種情況下 API 會回 503 `calendar_outdated`，品質頁讀不出這些列，這是唯一看得到的徵兆。
+  - 日曆用完那幾天不會有 `etl_runs` 稽核列。日曆補上後，15:10 的補抓與補審只回頭 14 天（`ETL_CATCHUP_LOOKBACK_DAYS`），更早的要照「手動補抓與重建」處理。
+
 ## 交易日曆延伸
 
 `trading_calendar` 只到證交所已公布開休市表的年底。日期一超出日曆，每個 ETL 排程工作都會在讀日曆時失敗，研究排程則寫一列 warning 就結束、不產出預測（見本節最後一小節），所以隔年的表要在年底前接上。
