@@ -215,6 +215,20 @@ def test_the_same_warning_alerts_again_after_a_session_without_a_row(
 
 
 @pytest.mark.django_db
+def test_the_calendar_s_first_day_has_no_session_before_it_to_compare_with(
+    alerts: list[dict[str, object]],
+) -> None:
+    short = weekday_calendar(date(2016, 12, 26), date(2016, 12, 31))
+    DividendEvent.objects.bulk_create([cash_event("2330", "2017-01-05", "2016-12-20")])
+    first = {"count": 1, "latest_ex_date": "2017-01-05", "calendar_end": "2016-12-31"}
+
+    assert flag_ex_dates(d("2016-12-26"), short) == first
+    assert flag_ex_dates(d("2016-12-26"), short) == first
+
+    assert alerts == [first]
+
+
+@pytest.mark.django_db
 def test_a_rerun_once_the_calendar_reaches_the_ex_dates_removes_the_day_s_warning(
     alerts: list[dict[str, object]],
 ) -> None:
