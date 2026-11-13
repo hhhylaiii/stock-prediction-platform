@@ -494,8 +494,8 @@ def held_back(seed: Seed, run_key: str, *held: tuple[int, Gate]) -> None:
 
 def held_text(seed: Seed, slot: str, run_key: str, gates: str) -> str:
     return (
-        f"{slot}目前沒有上線中的模型：{run_key} 在 {seed.last_session.isoformat()} "
-        f"判定時沒過換模門檻，沒有換上。沒過的門檻：{gates}。"
+        f"{slot}目前沒有上線中的模型：{run_key} 沒過換模門檻，沒有換上"
+        f"（換模紀錄的日期 {seed.last_session.isoformat()}）。沒過的門檻：{gates}。"
     )
 
 
@@ -628,6 +628,32 @@ def test_a_model_held_only_by_its_group_is_said_to_have_passed_its_own_gates(
         )
     )
     expect(notes.nth(1)).to_have_text(
-        f"波動率 20 日目前沒有上線中的模型：interval-2026-11 在 {scored.last_session.isoformat()} "
-        "判定時沒有換上：它自己的門檻都過了，同一組有模型沒過。"
+        "波動率 20 日目前沒有上線中的模型：interval-2026-11 沒有換上"
+        f"（換模紀錄的日期 {scored.last_session.isoformat()}）；"
+        "它自己的門檻都過了，是同一組有模型沒過。"
+    )
+
+
+def test_a_held_note_without_a_run_key_still_names_the_horizon_and_the_gates(
+    page: Page, live_server: LiveServer, scored: Seed
+) -> None:
+    take_ranking_offline(20)
+    gate = {"name": "shadow_oos", "reason": "未達門檻", "value": -0.013, "threshold": "rank IC > 0"}
+    held = [{"slot": "rank 20 日", "objective": "rank", "horizon": 20, "gates": [gate]}]
+    DataQualityLog.objects.create(
+        date=scored.last_session,
+        check_name="model_promotion",
+        severity="warning",
+        detail={"scope": "rank", "held_slots": held},
+    )
+
+    page.goto(f"{live_server.url}/#models")
+
+    expect(page.locator("#model-table .held-note")).to_have_text(
+        held_text(
+            scored,
+            "排名 20 日",
+            "最近一次重訓的模型",
+            "影子模型最近 6 個月 OOS（未達門檻，實際 -0.013，門檻 rank IC > 0）",
+        )
     )

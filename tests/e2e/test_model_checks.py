@@ -1151,7 +1151,7 @@ def test_a_promotion_that_swapped_every_horizon_in_still_reads_as_one_line(
     expect(promotion_lines(page).first).to_have_text("已換上 rank-2026-12")
 
 
-def test_a_forced_or_a_refused_promotion_reads_as_before_with_the_new_lists(
+def test_a_refused_promotion_with_its_held_runs_listed_does_not_claim_a_serving_model(
     page: Page, live_server: LiveServer, seeded: Seed
 ) -> None:
     judged(seeded, "rank-2026-11", RANK_PAIR, set())
@@ -1159,8 +1159,9 @@ def test_a_forced_or_a_refused_promotion_reads_as_before_with_the_new_lists(
     page.goto(f"{live_server.url}/#models")
 
     expect(promotion_lines(page)).to_have_count(2)
-    expect(promotion_lines(page).nth(0)).to_have_text("換模門檻未過，續用現役模型（rank-2026-11）")
+    expect(promotion_lines(page).nth(0)).to_have_text("換模門檻未過，沒有換上（rank-2026-11）")
     expect(promotion_lines(page).nth(1)).to_have_text(f"排名 20 日（rank-n20）：{AGREEMENT_TEXT}")
+    expect(page.locator("#model-checks")).not_to_contain_text("續用現役模型")
 
     judged(seeded, "rank-2026-11", RANK_PAIR, {Slot("rank", 5), Slot("rank", 20)}, "先上線觀察")
     page.reload()

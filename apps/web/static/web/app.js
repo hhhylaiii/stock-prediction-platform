@@ -902,8 +902,9 @@
   function heldHtml(entry) {
     const slot = (OBJECTIVES[entry.objective] || entry.objective) + ' ' + Number(entry.horizon) + ' 日';
     const gates = (entry.gates || []).map(gateText).join('、');
-    const why = gates ? '判定時沒過換模門檻，沒有換上。沒過的門檻：' + gates + '。' : '判定時沒有換上：它自己的門檻都過了，同一組有模型沒過。';
-    return '<p class="note held-note">' + esc(slot + '目前沒有上線中的模型：' + (entry.run_key || '最近一次重訓的模型') + ' 在 ' + entry.date + ' ' + why) + '</p>';
+    const dated = '（換模紀錄的日期 ' + entry.date + '）';
+    const why = gates ? ' 沒過換模門檻，沒有換上' + dated + '。沒過的門檻：' + gates + '。' : ' 沒有換上' + dated + '；它自己的門檻都過了，是同一組有模型沒過。';
+    return '<p class="note held-note">' + esc(slot + '目前沒有上線中的模型：' + (entry.run_key || '最近一次重訓的模型') + why) + '</p>';
   }
 
   async function renderModelTable() {
@@ -1107,7 +1108,7 @@
       return ['已換上 ' + (d.run_key || '') + ' 的' + came, ...held.map(item => slotText(item.slot) + '未換上：' + (item.gates || []).map(gateText).join('、'))];
     }
     if (d.promoted === true && !d.forced) return ['已換上 ' + (d.run_key || '')];
-    const head = (d.forced ? '強制換模：' + (d.reason || '沒有寫原因') : '換模門檻未過，續用現役模型') + (d.run_key ? '（' + d.run_key + '）' : '');
+    const head = (d.forced ? '強制換模：' + (d.reason || '沒有寫原因') : held.length ? '換模門檻未過，沒有換上' : '換模門檻未過，續用現役模型') + (d.run_key ? '（' + d.run_key + '）' : '');
     return [head, ...(d.failed || []).map(item => slotText(item.slot) + (item.run_id ? '（' + item.run_id + '）' : '') + '：' + (item.gates || []).map(gateText).join('、'))];
   }
 
