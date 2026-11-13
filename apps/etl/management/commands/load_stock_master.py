@@ -85,7 +85,8 @@ class Command(BaseCommand):
             tpex = tpex_delistings(TpexClient.build(limiter_for("tpex")).delisted())
             master = build_stock_master(info, twse, tpex)
             listed = master.loc[master["delist_date"].isna(), "stock_id"].tolist()
-            check_listed_count(len(listed), self._last_listed_count())
+            suspended = suspended_codes(info, master)
+            check_listed_count(len(listed) - len(suspended), self._last_listed_count())
             chosen = _chosen(master, stocks)
             found = _differences(chosen)
             run.rows = upsert(StockMaster, chosen, ("stock_id",), UPDATED_FIELDS)
@@ -99,7 +100,6 @@ class Command(BaseCommand):
             unlisted = sorted(
                 set(unlisted_codes(info, master)) | set(self._vanished_from_db(listed))
             )
-            suspended = suspended_codes(info, master)
             run.checkpoint = {
                 "listed": len(listed),
                 "delisted": len(master) - len(listed),
@@ -114,6 +114,7 @@ class Command(BaseCommand):
 
     @staticmethod
     def _last_listed_count() -> int | None:
+        """Stocks the last full load found in its newest snapshot; the halted are not in one."""
         last = (
             EtlRun.objects.filter(
                 source="stock_master", dataset=DATASET, status=EtlRun.Status.SUCCESS
@@ -122,7 +123,9 @@ class Command(BaseCommand):
             .first()
         )
         count = last.checkpoint.get("listed") if last is not None else None
-        return int(count) if count is not None else None
+        if last is None or count is None:
+            return None
+        return int(count) - len(last.checkpoint.get("suspended") or [])
 
     @staticmethod
     def _vanished_from_db(listed: list[str]) -> list[str]:

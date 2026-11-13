@@ -48,7 +48,9 @@ def halted_sources(load_fixture: Callable[[str], Any]) -> None:
 @pytest.mark.django_db
 @pytest.mark.usefixtures("sources")
 def test_command_writes_listed_and_delisted_stocks() -> None:
-    call_command("load_stock_master")
+    out = StringIO()
+    call_command("load_stock_master", stdout=out)
+    assert out.getvalue().splitlines()[0] == "stock_master: 14 listed, 6 delisted (20 rows)"
     assert StockMaster.objects.count() == 20
     assert StockMaster.objects.filter(delist_date__isnull=False).count() == 6
     tsmc = StockMaster.objects.get(stock_id="2330")
@@ -280,7 +282,15 @@ def test_a_chosen_run_still_checks_the_listed_count() -> None:
             ["--stock", "1589"],
             ["create 1589 永冠-KY TWSE 電機機械 listed", "1 to create, 0 to change"],
         ),
-        ([], ["create 3454 晶睿 TWSE 光電業 delisted 2026-03-27", "20 to create, 1 to change"]),
+        (
+            [],
+            [
+                "create 3454 晶睿 TWSE 光電業 delisted 2026-03-27",
+                "20 to create, 1 to change",
+                "2 codes no longer listed and on no delisting list: 2891A, 9105",
+                "kept: 1589",
+            ],
+        ),
     ],
     ids=["chosen", "full"],
 )
@@ -297,3 +307,64 @@ def test_a_dry_run_prints_the_rows_and_leaves_nothing(chosen: list[str], lines: 
     assert not RawFinmind.objects.exists()
     assert not RawTwse.objects.exists()
     assert not RawTpex.objects.exists()
+
+
+@responses.activate
+@pytest.mark.django_db
+@pytest.mark.usefixtures("halted_sources")
+def test_a_long_preview_is_cut_short(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("apps.etl.management.commands.load_stock_master.DETAIL_LIMIT", 2)
+    out = StringIO()
+    call_command("load_stock_master", "--dry-run", stdout=out)
+    lines = out.getvalue().splitlines()
+    assert [line.split()[0] for line in lines[:3]] == ["create", "create", "and"]
+    assert lines[2] == "and 19 more lines"
+    assert lines[3] == "stock_master: 21 to create, 0 to change"
+
+
+def _stale_info(info: dict[str, Any], code: str, day: str) -> dict[str, Any]:
+    rows = [{**row, "date": day} if row["stock_id"] == code else row for row in info["data"]]
+    return {**info, "data": rows}
+
+
+def _baseline(checkpoint: dict[str, Any]) -> None:
+    EtlRun.objects.create(
+        source="stock_master",
+        dataset="stock_master",
+        start_date=date(2026, 10, 31),
+        end_date=date(2026, 10, 31),
+        status=EtlRun.Status.SUCCESS,
+        checkpoint=checkpoint,
+    )
+
+
+@responses.activate
+@pytest.mark.django_db
+@pytest.mark.parametrize("chosen", [[], ["--stock", "2330"]], ids=["full", "chosen"])
+def test_stale_common_stocks_do_not_let_a_partial_snapshot_through(
+    load_fixture: Callable[[str], Any], chosen: list[str]
+) -> None:
+    info = _stale_info(load_fixture("finmind/stock_info.json"), "2330", "2026-10-29")
+    responses.get(FINMIND_URL, json=info)
+    responses.get(TWSE_URL, json=load_fixture("twse/reference/suspend_listing.json"))
+    responses.post(TPEX_URL, json=load_fixture("tpex/delisted.json"))
+    _baseline({"listed": 14, "delisted": 6, "unlisted_without_delisting": 2})
+    with pytest.raises(CommandError, match="lists 13 stocks, down from 14"):
+        call_command("load_stock_master", *chosen)
+    assert StockMaster.objects.count() == 0
+
+
+@responses.activate
+@pytest.mark.django_db
+@pytest.mark.usefixtures("halted_sources")
+def test_the_baseline_counts_the_snapshot_without_the_halted() -> None:
+    _baseline(
+        {
+            "listed": 16,
+            "delisted": 6,
+            "unlisted_without_delisting": 2,
+            "suspended": ["1589", "4804"],
+        }
+    )
+    call_command("load_stock_master", stdout=StringIO())
+    assert StockMaster.objects.filter(delist_date__isnull=True).count() == 15
