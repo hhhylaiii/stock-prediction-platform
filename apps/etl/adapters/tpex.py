@@ -324,13 +324,34 @@ class TpexAdapter(BaseAdapter):
             payload = self._answered(dataset, ALTERED_PATH, _day_form(day))
             return event_frame(day_events(full_delivery_codes(payload, day), day, FULL_DELIVERY))
         if dataset == DAILY_PRICE:
-            otc_form = _day_form(day, type=QUOTED_TYPE)
-            otc = self._published(DAILY_PRICE, OTC_QUOTES_PATH, otc_form, day)
-            quotes = self._published(DAILY_PRICE, DAILY_QUOTES_PATH, _day_form(day), day)
-            return quote_rows(otc, quotes, day)
+            return self._quotes(day, DAILY_PRICE)
         table = TABLES[dataset]
         payload = self._published(dataset, table.path, _day_form(day, **table.params), day)
         return source_rows(payload, day, table, check_answer)
+
+    def _quotes(self, day: date, kept_as: str) -> pd.DataFrame:
+        """Both quote tables of the day as rows, their answers kept under the given raw dataset."""
+        otc = self._published(kept_as, OTC_QUOTES_PATH, _day_form(day, type=QUOTED_TYPE), day)
+        quotes = self._published(kept_as, DAILY_QUOTES_PATH, _day_form(day), day)
+        return quote_rows(otc, quotes, day)
+
+    def require_before_kept_quotes(self, day: date) -> None:
+        """A day from the first kept quote page on gets its bars from the usual fetch."""
+        kept_from = self._quotes_kept_from()
+        if kept_from is not None and f"{day:%Y%m%d}" >= kept_from:
+            raise ValueError(
+                f"TPEx quote pages are kept from {kept_from}; fetch {DAILY_PRICE} for {day}"
+            )
+
+    def day_quotes(self, day: date, kept_as: str) -> pd.DataFrame:
+        """Parsed quotes of a day before the first kept quote page, kept under another dataset.
+
+        Kept as daily_price they would become that first page and strand the days after them.
+        """
+        if kept_as == DAILY_PRICE:
+            raise ValueError(f"these answers must not be kept as {DAILY_PRICE}")
+        self.require_before_kept_quotes(day)
+        return parsed_quotes(self._quotes(day, kept_as))
 
     def _published(
         self, dataset: str, path: str, form: dict[str, str], day: date
