@@ -104,7 +104,11 @@ docker compose logs -f worker
   - 重訓不取研究鎖，但會佔住唯一的 worker 好幾個小時（真資料上的時間還沒量過）。那段時間不要手動重建特徵或 label、不要停 worker（`acks_late`：中斷的重訓要等 12 小時的 `CELERY_VISIBILITY_TIMEOUT` 才重新投遞，那時已不在動工時段，會直接結束；下一個早上若還在前 5 個交易日內會重排、從頭重建），並讓 Mac 醒到這列寫完：清晨的 caffeinate 只到 08:00，重訓那天手動再跑一次 `caffeinate -i -t 36000`，或確認能源選項的「顯示器關閉時避免自動進入睡眠」已開。
 - 換模：下一個早上起，06:00 的 chain 在 monitor 之後多一步 `promote`，把當月 `research_retrain` 建好、還沒試過的 run_key 一個個 `promote`，`--date` 取 D 與預設日（slot 已有列的最後一天）較晚的一天，所以第一次上線的 scope 也從 D 起服務。門檻沒過就舊模型續用並告警（`model_promotion` warning），之後由人決定要不要 `--force`。`promote` 報錯時其他 scope 照跑，chain 照常完成，另寫一列 `research_promote` warning（`detail.failed` 是 run_key 對錯誤、`detail.done` 是其他 scope 的結果）並告警；報錯的 run_key 不再自動重試，修好後先看它是不是已經 active（`model_promotion` 有沒有 `promoted: true` 那列），沒有再手動 `promote`。有 `model_promotion` 或 `research_promote` 列的 run_key 都算試過。設計凍結的那支 PR 要在 `DESIGNS` 填 `research_run_key`（不放環境變數）；填了之後，`build_run` 拒絕其他研究 run。
 - 漏跑告警：beat 觸發的 06:00 若發現前一個交易日沒有任何 `research_morning` 列，而再往前 5 個交易日內有過（排程在跑），就替那天記一列 warning（`reason: missed`）並告警，不自動補跑。關掉開關不到 5 個交易日又打開時，第一個早上也會記這一列。
-- 研究鎖：`predict`、`monitor`、`promote`、`restore_run` 與研究排程的每一步共用一把 Postgres advisory lock，同時只會有一個在跑（同一個工作內可重入，例如 `promote` 內部的 `predict`）。排程的步驟拿不到就 10 分鐘後重試，最多 6 次（`RESEARCH_LOCK_COUNTDOWN`、`RESEARCH_LOCK_RETRIES`），用完算失敗。手動指令拿不到會直接報錯，寫出持有者，例如 `the research lock is held by 'research 10-29 06:01 predict 2026-10-28' (pid 123)`（取得時間在前；Postgres 只留標籤前 63 個字元，太長的 run_id 尾巴會被截掉）；等它跑完再重跑。行程中斷時鎖隨連線釋放，不會卡住。
+- 研究鎖：`build_features`、`build_labels`、`feature_coverage`、`predict`、`monitor`、`promote`、`restore_run` 與研究排程的每一步共用一把 Postgres advisory lock，同時只會有一個在跑（同一個工作內可重入，例如 `promote` 內部的 `predict`、排程步驟裡的 `build_features`）。排程的步驟拿不到就 10 分鐘後重試，最多 6 次（`RESEARCH_LOCK_COUNTDOWN`、`RESEARCH_LOCK_RETRIES`），用完算失敗。手動指令拿不到會直接報錯，寫出持有者，例如 `the research lock is held by 'research 10-29 06:01 predict 2026-10-28' (pid 123)`（取得時間在前；Postgres 只留標籤前 63 個字元，太長的 run_id 尾巴會被截掉）；等它跑完再重跑。行程中斷時鎖隨連線釋放，不會卡住。
+  - 手動的 `build_features`、`build_labels` 先檢查參數，再取鎖，整段重建都持鎖，標籤帶日期範圍（例如 `build_features 2010-01-04..2026-11-13`）；拿不到鎖就立刻報錯，不等待，也不寫任何列。
+  - 全量重建特徵約 30 分鐘。這段時間其他手動的研究指令會立刻報錯；排程的步驟每 10 分鐘重試一次，6 次（1 小時）內等得到就照跑，等不到算失敗。
+  - 反過來也一樣：worker 正在跑研究排程的步驟時，主機上的手動重建會立刻被擋，等那一步跑完再重跑。
+  - 鎖只護住單一指令。特徵與 label 兩支互相擋，要一支跑完再跑下一支；兩支之間排程的步驟仍可能插進來。
 - 看狀態：
 
   ```bash
@@ -114,7 +118,7 @@ docker compose logs -f worker
   ```
 
 - Mac 在 06:00 睡著、同一天晚一點醒來時，beat 會補觸發 `research.morning` 照跑（可能已經開盤）；睡過午夜才醒的那次早於排定時間，會略過。平日的 D 沒跑成（閘門沒過、睡過午夜）不會自動補：隔天早上的 D 已經是新的一天。閘門沒過會記 warning 並告警；睡過午夜而被略過的那次，隔天早上會補記一列 `missed` warning（見上）。等 D 的 ETL 補齊（15:10 的補抓）後手動跑 `build_features --date D`、`feature_coverage --date D`、`predict --date D`、`monitor --date D`。
-- 手動長時間重建特徵或 label（`build_features`、`build_labels` 不取研究鎖）時先關掉開關，或避開 23:00–02:30 與 06:00–08:00，否則排程那一步可能和它搶同一批列而失敗（記 warning）。會改還原因子的手動操作（`fetch --dataset dividend_event`、`recompute_adj_factor`、FinMind 股利或價格回補）也避開這兩段：chain 開始之後才寫進來的改動，可能被那條 chain 記成已處理卻沒算到，事後照那天 `adj_factor_changed` 的 E 手動跑下面重建用的兩個指令。
+- 手動長時間重建特徵或 label 時先關掉開關，或避開 23:00–02:30 與 06:00–08:00：`build_features`、`build_labels` 取研究鎖，不會和排程的步驟同時寫同一批列，但重建超過 1 小時的話，排程那一步等不到鎖會失敗（記 warning）。會改還原因子的手動操作（`fetch --dataset dividend_event`、`recompute_adj_factor`、FinMind 股利或價格回補）不取鎖，照樣避開這兩段：chain 開始之後才寫進來的改動，可能被那條 chain 記成已處理卻沒算到，事後照那天 `adj_factor_changed` 的 E 手動跑下面重建用的兩個指令。
 - 排程的正確性假設 worker 只有一個（`CELERY_WORKER_CONCURRENCY=1`）：重訓和每日的 chain 靠排隊錯開，重訓本身不取研究鎖。`research.evening`、`research.morning`、`research.retrain` 開始時會讀 Celery 的 `worker_concurrency`，不是 1（包括設定成空值；環境變數沒設時預設是 1）就不跑，寫一列 warning（`reason` 寫明、`concurrency` 是讀到的值；重訓那列是每個 scope 都拒建，和記憶體不足一樣算用掉當月的重訓）並告警。只看設定值：`celery worker -c` 從指令列改的、`docker compose up --scale worker=2`、或在主機上另開一個連到同一個 redis 的 worker 都讀不到，不要那樣啟動。
 - 還原因子改寫後的重建：`refresh_adj_factor` 改寫了某檔的歷史因子時，在當天的 `adj_factor_changed`（info，資料層的列，研究層只讀）記下那檔第一個「新舊因子的倍數和前一個價格列不同」的交易日 E（單一事件就是除權息日；多個事件一起改取最早的）。只是整段等比例縮放（例如公布未來的除權息）不記，那些日子的比值不變；新價格列取得因子（`upsert_daily_prices`、FinMind 價格回補）也不記。同一天合成一列，超過 200 檔時 `detail` 只留最早的 E 與 `count`（收合時是檔數，之後每記一次加 1，同一檔再記會多算）。
   - 23:00 與 06:00 的 chain 在有還沒處理的列時，最後多一步：E 在最近 60 個交易日內（D 與之前 59 個，同 `--recent 60`）時，23:00 那條（以及補跑 23:00 的 06:00）的 60 天特徵與 81 天 label 已經涵蓋，只記下來；一般的 06:00 那條只算 D 的特徵，所以另外跑 `build_features --start E --end <D 前一個交易日>` 與 `build_labels --start <E 前 21 個交易日> --end D`（前一晚之後才出現的改動不等到下一晚，當天排的重訓才吃得到）。E 晚於 D 的列留給之後的 chain。
@@ -738,7 +742,7 @@ uv run python manage.py rebuild_market_history
 
 - `monitor --date D` 判的是 D 當天服務中的 run（D 在該 horizon 有 `prediction` 列的 run，依 API 的順序）。slot 當天沒有 `prediction` 列就不判，停機或 predict 失敗的那幾天監控會暫停；補跑時先補 `predict --date D`，再補 `monitor --date D`。
 - `model_alert` 每筆帶 `mode`：`judged` 會把 active 的 run 降級（`reason` 是 `missing_reference` 時只告警）；`grace`（上線日之前補寫的日子，以及換模後 5 個交易日）與 `reset`（`restore_run` 之後、該 slot（目標 × horizon）的窗口還沒累積滿 60 列，之後換上的 run 沿用；h20 約要 80 個交易日、h5 約 65 個）只告警。被判 run 自己的恢復日晚於告警日時（恢復後補跑之前的日子），`reset_rows` 是 0。`mostly_predecessors` 為 true 表示窗口多為前任 run 的列，人工恢復前先看這個。
-- `monitor`、`predict`、`promote`、`restore_run` 共用研究鎖，一次只跑一個（見「研究排程」）；手動指令拿不到鎖會報錯並寫出持有者，等它跑完再重跑。
+- `monitor`、`predict`、`promote`、`restore_run` 和手動的 `build_features`、`build_labels` 共用研究鎖，一次只跑一個（見「研究排程」）；手動指令拿不到鎖會報錯並寫出持有者，等它跑完再重跑。
 - 換模日落在交易日曆最後 4 個交易日內時，寬限結束日算不出來（log 會有 warning）；12 月換模前先照「交易日曆延伸」延伸日曆。
 - 換模：`promote --run-key K`，門檻沒過時舊模型續用並寫 `model_promotion` 告警；要強制換模用 `--force --reason "<原因>"`（原因與沒過的門檻會一直顯示在模型頁該模型下方，直到它被換下；不要寫私人資訊或主機路徑）。門檻判斷後正常結束的 promote（換上或被擋）都寫一列 `model_promotion`；在那之前或之後任何一步報錯（例如非交易日、claim 不符、寫預測失敗），整筆回復、不寫。`detail.scope` 是 rank／return／interval（一次 promote 只處理一個 scope），`detail.promoted` 表示換了沒有：門檻全過是 info（不告警），沒過與強制換模是 warning。同一個 scope 依 id（寫入順序）最新的那一列，就是最後一次換模嘗試的結果；`promoted` 是 false 時服務中的仍是前一個 build，restore 與降級不寫這一列。`data_quality` 門檻的 reason 只寫摘要（幾天有 error、最近一天是哪些檢查），完整清單在 N 的 `params["gates"]` 那一項的 `errors`（新到舊，最多 200 筆）與 `errors_total`。晚幾天才換模時，`--date` 預設會取 slot 已有列的最後一天。換上之後，promote 會重算那天的 `output_width_ratio` 與 `output_odds_vs_q50`（換模重寫了那天的預測），寬度比超標照樣告警，機率矛盾只記 info、不告警；重算失敗只寫 error log，換模不回復，等下一次 `monitor --date D` 再算。
 - 恢復：`restore_run --run-id R --date D --reason "<原因>"`，只接受 degraded 的 run，D 不早於它最後一個預測日、不晚於今天。
