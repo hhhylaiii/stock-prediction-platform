@@ -304,6 +304,10 @@ def test_a_stock_on_the_fallback_band_is_told_so_even_while_the_volatility_model
 
     rows = page.locator("#forecasts .trow")
     expect(rows.nth(1).locator(".band-text")).to_contain_text("（近 20 日波動估計）")
+    expect(page.locator("#forecasts .model-note")).to_have_text(
+        "20 日沒有報酬區間、跑贏大盤機率模型的預測：預測報酬、預測價、跑贏大盤機率留空，"
+        f"價格區間改用波動估計。{ONLINE}"
+    )
     expect(page.locator("#forecasts .fallback-note")).to_have_text(FALLBACK_NOTE)
 
 
