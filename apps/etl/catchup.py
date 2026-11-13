@@ -25,6 +25,7 @@ from apps.etl.quality import CHECKS, run_checks
 from apps.etl.ratelimit import RetryableError
 from apps.etl.replay import rebuild_after
 from apps.etl.runs import covered_days
+from apps.etl.task_alerts import report_swallowed
 from apps.market.calendar import CalendarError, OutsideCalendarError, TradingDays
 from apps.market.models import (
     DailyChip,
@@ -260,7 +261,9 @@ def _catch_up_job(job: Job, days: Sequence[date], calendar: TradingDays) -> JobO
 
 
 def _failure(job: Job, step: str, exc: Exception) -> str:
-    """Log a failed step, with the traceback when it is not a source answering badly."""
+    """Log a failed step; one that is not a source answering badly gets a traceback and an alert."""
     expected = isinstance(exc, (SourceError, RetryableError))
     logger.error("catchup failed %s %s: %s", job.key, step, exc, exc_info=not expected)
+    if not expected:
+        report_swallowed(exc, f"catchup {job.key} {step}")
     return f"{type(exc).__name__}: {exc}"

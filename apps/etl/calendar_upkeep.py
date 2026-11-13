@@ -17,6 +17,7 @@ from apps.etl.errors import SchemaChangedError, SourceError
 from apps.etl.models import DataQualityLog
 from apps.etl.ratelimit import RetryableError
 from apps.etl.runs import tracked_run
+from apps.etl.task_alerts import report_swallowed
 from apps.etl.trading_calendar import (
     build_calendar,
     require_whole_year,
@@ -68,6 +69,8 @@ def keep_up(today: date) -> Extension | None:
     except Exception as exc:
         expected = isinstance(exc, (SourceError, RetryableError))
         logger.error("trading_calendar extension failed: %s", exc, exc_info=not expected)
+        if not expected:
+            report_swallowed(exc, "trading_calendar extension")
         attempt = Attempt(Extension.FAILED, str(exc) if expected else type(exc).__name__)
     record_reach(today, attempt)
     return attempt.outcome

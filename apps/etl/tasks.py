@@ -37,6 +37,7 @@ from apps.etl.ratelimit import RetryableError, ThrottledError
 from apps.etl.revenue_scan import open_months
 from apps.etl.runs import covered_days
 from apps.etl.statement_summary import open_periods
+from apps.etl.task_alerts import report_swallowed
 from apps.etl.trading_calendar import REFRESH_DATASET, REFRESH_SOURCE
 from apps.market.calendar import OutsideCalendarError, TradingDays
 from apps.market.models import IndexDaily, IndexId
@@ -203,8 +204,12 @@ def _retry_later(task: Task[Any, Any], what: str, exc: Exception) -> str:
 
 
 def _failed(what: str, exc: Exception) -> str:
-    expected = isinstance(exc, (SourceError, RetryableError))
+    """A source's own failure is left to the evening audit; any other error is alerted too."""
+    known = (SourceError, RetryableError)
+    expected = isinstance(exc, known) or isinstance(exc.__cause__, known)
     logger.error("etl failed %s: %s", what, exc, exc_info=not expected)
+    if not expected:
+        report_swallowed(exc, what)
     return "failed"
 
 

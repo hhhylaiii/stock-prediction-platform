@@ -1,5 +1,6 @@
 import json
 import logging
+from typing import Any
 
 import pytest
 import responses
@@ -110,3 +111,55 @@ def test_an_info_row_is_posted_only_when_announced(caplog: pytest.LogCaptureFixt
     ]
     assert "calendar_reach" in caplog.text
     assert "ERROR" not in caplog.text
+
+
+def _log(check: str, severity: str, detail: dict[str, Any] | None = None) -> DataQualityLog:
+    return DataQualityLog(date=DAY, check_name=check, severity=severity, detail=detail or {})
+
+
+def _text(call: responses.Call) -> str:
+    raw = call.request.body
+    return str(json.loads(raw.decode() if isinstance(raw, bytes) else str(raw))["text"])
+
+
+@responses.activate
+@override_settings(ALERT_WEBHOOK_URL=WEBHOOK)
+def test_the_headline_names_each_check_and_severity_worst_first() -> None:
+    responses.post(WEBHOOK, status=200)
+    announce(
+        [
+            _log("row_count", "warning", {"table": "daily_price"}),
+            _log("row_count", "warning", {"table": "daily_chip"}),
+            _log("etl_runs", "error", {"missing": ["twse/foreign_holding"]}),
+            _log("calendar_reach", "info", {"level": 0}),
+        ]
+    )
+    assert _text(responses.calls[0]) == (
+        "4 data quality alert(s) for 2026-10-28: "
+        "etl_runs error; row_count warning ×2; calendar_reach info"
+    )
+
+
+@responses.activate
+@override_settings(ALERT_WEBHOOK_URL=WEBHOOK)
+def test_a_long_headline_lists_five_kinds_and_counts_the_rest() -> None:
+    responses.post(WEBHOOK, status=200)
+    announce([_log(f"check_{n}", "warning") for n in range(7)])
+    assert _text(responses.calls[0]) == (
+        "7 data quality alert(s) for 2026-10-28: check_0 warning; check_1 warning; "
+        "check_2 warning; check_3 warning; check_4 warning; +2 more"
+    )
+
+
+@responses.activate
+@override_settings(ALERT_WEBHOOK_URL=WEBHOOK)
+def test_the_headline_never_carries_the_detail() -> None:
+    responses.post(WEBHOOK, status=200)
+    detail = {"reason": "TWSE request failed: https://www.twse.com.tw/rwd/zh/x?date=20270101"}
+    announce([_log("calendar_reach", "warning", detail)])
+    assert _text(responses.calls[0]) == (
+        "1 data quality alert(s) for 2026-10-28: calendar_reach warning"
+    )
+    raw = responses.calls[0].request.body
+    body = json.loads(raw.decode() if isinstance(raw, bytes) else str(raw))
+    assert body["alerts"][0]["detail"] == detail

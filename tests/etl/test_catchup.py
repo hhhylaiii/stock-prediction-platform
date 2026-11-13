@@ -17,6 +17,7 @@ from apps.etl.adapters.twse import TwseAdapter
 from apps.etl.catchup import (
     JOBS,
     Job,
+    _failure,
     catch_up,
     covered_days,
     missing_days,
@@ -25,6 +26,7 @@ from apps.etl.catchup import (
     select_jobs,
 )
 from apps.etl.models import DataQualityLog, EtlRun, RawTwse
+from apps.etl.ratelimit import RetryableError
 from apps.etl.raw import store_raw
 from apps.market.calendar import TradingDays
 from apps.market.models import (
@@ -220,8 +222,13 @@ def test_a_day_not_published_yet_is_reported_and_others_go_on(
 def test_a_broken_answer_is_a_failure_that_does_not_stop_other_jobs(
     october_2026_in_db: TradingDays,
     load_fixture: Callable[[str], Any],
+    monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    alerted: list[str] = []
+    monkeypatch.setattr(
+        "apps.etl.catchup.report_swallowed", lambda exc, context: alerted.append(context)
+    )
     responses.get(MI_INDEX, json={"stat": "OK", "date": "20261027", "tables": [{"x": 1}]})
     _serve(MI_QFIIS, load_fixture(SHARES), DAYS[0], selectType="ALLBUT0999")
     with caplog.at_level(logging.ERROR, logger="apps.etl.catchup"):
@@ -229,6 +236,7 @@ def test_a_broken_answer_is_a_failure_that_does_not_stop_other_jobs(
     assert list(report.failed) == ["twse/daily_price 2026-10-27"]
     assert report.written == {"twse/shares_outstanding": ["2026-10-27"]}
     assert [(row.levelname, bool(row.exc_info)) for row in caplog.records] == [("ERROR", False)]
+    assert alerted == []
 
 
 @responses.activate
@@ -316,6 +324,18 @@ def test_a_next_session_with_only_other_logs_is_not_checked_again(
     assert report.checked == ["2026-10-28"]
 
 
+def test_a_source_out_of_reach_is_a_failed_step_without_an_alert(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    alerted: list[str] = []
+    monkeypatch.setattr(
+        "apps.etl.catchup.report_swallowed", lambda exc, context: alerted.append(context)
+    )
+    told = _failure(PRICE_JOB, "2026-10-27", RetryableError("read timed out"))
+    assert told == "RetryableError: read timed out"
+    assert alerted == []
+
+
 @responses.activate
 def test_an_unexpected_error_fails_its_job_only(
     october_2026_in_db: TradingDays,
@@ -330,7 +350,12 @@ def test_an_unexpected_error_fails_its_job_only(
             raise ValueError("duplicate keys")
         return original(self, dataset, raw)
 
+    alerted: list[tuple[str, str]] = []
     monkeypatch.setattr(TwseAdapter, "normalize", normalize)
+    monkeypatch.setattr(
+        "apps.etl.catchup.report_swallowed",
+        lambda exc, context: alerted.append((type(exc).__name__, context)),
+    )
     _serve_prices(load_fixture, DAYS[0])
     _serve(MI_QFIIS, load_fixture(SHARES), DAYS[0], selectType="ALLBUT0999")
     with caplog.at_level(logging.ERROR, logger="apps.etl.catchup"):
@@ -338,6 +363,7 @@ def test_an_unexpected_error_fails_its_job_only(
     assert report.failed == {"twse/daily_price 2026-10-27": "ValueError: duplicate keys"}
     assert report.written == {"twse/shares_outstanding": ["2026-10-27"]}
     assert [bool(row.exc_info) for row in caplog.records] == [True]
+    assert alerted == [("ValueError", "catchup twse/daily_price 2026-10-27; later days wait")]
 
 
 @responses.activate
