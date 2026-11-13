@@ -1,3 +1,5 @@
+import subprocess
+import sys
 from datetime import date, timedelta
 from pathlib import Path
 from statistics import fmean, stdev
@@ -709,7 +711,7 @@ def test_before_any_model_serves_the_rank_holdout_is_shown(client: Client, db: N
     body = envelope_of(client.get("/api/models/ic-monthly", {"months": "2"}))
 
     assert [(row["model"], row["baseline"]) for row in body["data"]] == [(0.03, 0.02), (0.03, 0.02)]
-    assert body["meta"]["run_key"] == "rank-frozen"
+    assert (body["meta"]["horizon"], body["meta"]["run_key"]) == (20, "rank-frozen")
     assert (body["meta"]["model_type"], body["meta"]["source"]) == ("lightgbm", "holdout")
 
 
@@ -1008,3 +1010,15 @@ def test_an_unreadable_row_is_warned_about_once_not_on_every_request(
 
     assert (not_live(client), not_live(client)) == ([], [])
     assert caplog.text.count("has unreadable held_slots") == 1
+
+
+def test_the_api_urls_load_without_the_training_modules() -> None:
+    probe = (
+        "import django, sys; django.setup(); import apps.api.urls; "
+        "heavy = ('lightgbm', 'apps.research.promotion'); "
+        "print(sorted(name for name in heavy if name in sys.modules))"
+    )
+
+    done = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, check=True)
+
+    assert done.stdout.strip() == "[]"
