@@ -235,6 +235,8 @@ def promote(
     with transaction.atomic():
         runs = _check_build(run_key, day, granted.frozen_by)
         checked = check_gates(run_key, directory)
+        if set(runs) != {result.slot for result in checked}:
+            raise RunError(f"{run_key} changed while its gates were checked; promote again")
         failed = _failed(checked)
         chosen = set(runs) if force else passing_slots(checked)
         swapped = {slot: run for slot, run in runs.items() if slot in chosen}
