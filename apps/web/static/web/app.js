@@ -93,7 +93,7 @@
     return out;
   }
 
-  const state = { h: DEFAULT_HORIZON, picked: false, ranked: [], mkt: 'all', q: '', watchOnly: false, watch: new Set(), stock: '2330', chart: 'candle', stockToken: 0, featureToken: 0, todayToken: 0, routeToken: 0, page: 1, watchCache: null };
+  const state = { h: DEFAULT_HORIZON, picked: false, ranked: [], mkt: 'all', q: '', watchOnly: false, watch: new Set(), stock: '2330', chart: 'candle', stockToken: 0, featureToken: 0, todayToken: 0, routeToken: 0, statusToken: 0, page: 1, watchCache: null };
   try { const c = localStorage.getItem('twp-chart'); if (c === 'line' || c === 'candle') state.chart = c; } catch (e) { state.chart = 'candle'; }
   try { const w = JSON.parse(localStorage.getItem('twp-watch') || '[]'); if (Array.isArray(w)) w.filter(c => STOCK_CODE.test(c)).forEach(c => state.watch.add(c)); } catch (e) { state.watch.clear(); }
   function saveWatch() { try { localStorage.setItem('twp-watch', JSON.stringify([...state.watch])); } catch (e) { return; } }
@@ -125,8 +125,10 @@
   }
 
   async function renderStatus() {
+    const mine = ++state.statusToken;
     try {
       const { data } = await api.get('status');
+      if (mine !== state.statusToken) return;
       const horizons = (data.horizons || []).map(entry => ({ ...entry, horizon: Number(entry.horizon) }));
       state.ranked = horizons.filter(entry => entry.prediction_date).map(entry => entry.horizon);
       const verdict = verdictOf(data.quality);
@@ -139,6 +141,7 @@
       if (data.degraded.length) parts.push('<span><i class="dot warn"></i>' + data.degraded.length + ' 個模型降級中</span>');
       statusEl.innerHTML = parts.join('');
     } catch (err) {
+      if (mine !== state.statusToken) return;
       statusEl.innerHTML = '<span><i class="dot warn"></i>' + esc(err.message) + '</span>';
     }
   }
