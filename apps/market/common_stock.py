@@ -10,7 +10,7 @@ DEPOSITARY_INDUSTRY = "存託憑證"
 def is_common_stock(stock_id: str, industry: str) -> bool:
     """The filters above for one code: four digits, not a depositary receipt."""
     return (
-        re.match(COMMON_STOCK_PATTERN, stock_id) is not None
+        re.fullmatch(COMMON_STOCK_PATTERN, stock_id) is not None
         and not stock_id.startswith(DEPOSITARY_PREFIX.removesuffix("%"))
         and industry != DEPOSITARY_INDUSTRY
     )

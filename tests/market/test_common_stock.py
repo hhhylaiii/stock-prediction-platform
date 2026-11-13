@@ -25,6 +25,7 @@ def test_four_digit_codes_off_the_depositary_range_are_common_stocks(
         ("912000", "存託憑證"),
         ("020039", "指數投資證券(ETN)"),
         ("23301", "半導體業"),
+        ("2330\n", "半導體業"),
         ("", ""),
     ],
 )
