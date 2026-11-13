@@ -71,7 +71,6 @@ def _report(name: str, exc: BaseException, context: str) -> None:
     now = timezone.localtime()
     kind = type(exc).__name__
     unreachable = isinstance(exc, UNREACHABLE)
-    subject = DATABASE if unreachable else name
     scope = DATABASE if unreachable else f"{name}:{kind}"
     key = f"alert:{CHECK}:{now.date().isoformat()}:{scope}"
     first = _claim(key)
@@ -79,7 +78,7 @@ def _report(name: str, exc: BaseException, context: str) -> None:
     if first and not _post(name, exc, context, now):
         _release(key)
     if not unreachable:
-        _record(now, subject, kind)
+        _record(now, name, kind)
 
 
 def _claim(key: str) -> bool:
