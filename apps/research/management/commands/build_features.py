@@ -15,6 +15,7 @@ from apps.research.features.build import build_feature_frame
 from apps.research.features.dividend import past_calendar
 from apps.research.features.store import export_year, write_features
 from apps.research.labels import latest_price_date
+from apps.research.lock import ResearchBusyError, research_lock
 from apps.research.ranges import years
 
 RECENT_DAYS = 60
@@ -58,7 +59,10 @@ def flag_ex_dates(end: date, calendar: TradingDays) -> dict[str, Any] | None:
 
 
 class Command(BaseCommand):
-    help = "Rebuild feature_daily year by year; without a range it redoes the last 60 trading days."
+    help = (
+        "Rebuild feature_daily year by year; without a range it redoes the last 60 trading days. "
+        "Holds the research lock for the whole run and fails at once when another job holds it."
+    )
 
     def add_arguments(self, parser: ArgumentParser) -> None:
         parser.add_argument("--start", type=date.fromisoformat)
@@ -94,6 +98,14 @@ class Command(BaseCommand):
     def handle(self, *args: Any, **options: Any) -> None:
         calendar = TradingDays.from_db()
         start, end = self._range(calendar, options)
+        try:
+            with research_lock(f"build_features {start}..{end}"):
+                self.stdout.write(self._build(calendar, start, end))
+        except ResearchBusyError as error:
+            raise CommandError(str(error)) from error
+
+    def _build(self, calendar: TradingDays, start: date, end: date) -> str:
+        """Rebuild start..end a year at a time; the line to print."""
         rows = 0
         for low, high in years(start, end):
             rows += write_features(build_feature_frame(calendar, low, high), low, high)
@@ -105,4 +117,4 @@ class Command(BaseCommand):
             else f"; {flagged['count']} announced ex-date(s) after the trading calendar, "
             f"see {EX_DATE_CHECK}"
         )
-        self.stdout.write(f"feature_daily: {rows} rows for {start}..{end}{beyond}")
+        return f"feature_daily: {rows} rows for {start}..{end}{beyond}"
