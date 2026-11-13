@@ -106,7 +106,8 @@ docker compose logs -f worker
 - 漏跑告警：beat 觸發的 06:00 若發現前一個交易日沒有任何 `research_morning` 列，而再往前 5 個交易日內有過（排程在跑），就替那天記一列 warning（`reason: missed`）並告警，不自動補跑。關掉開關不到 5 個交易日又打開時，第一個早上也會記這一列。
 - 研究鎖：`build_features`、`build_labels`、`feature_coverage`、`predict`、`monitor`、`promote`、`restore_run` 與研究排程的每一步共用一把 Postgres advisory lock，同時只會有一個在跑（同一個工作內可重入，例如 `promote` 內部的 `predict`、排程步驟裡的 `build_features`）。排程的步驟拿不到就 10 分鐘後重試，最多 6 次（`RESEARCH_LOCK_COUNTDOWN`、`RESEARCH_LOCK_RETRIES`），用完算失敗。手動指令拿不到會直接報錯，寫出持有者，例如 `the research lock is held by 'research 10-29 06:01 predict 2026-10-28' (pid 123)`（取得時間在前；Postgres 只留標籤前 63 個字元，太長的 run_id 尾巴會被截掉）；等它跑完再重跑。行程中斷時鎖隨連線釋放，不會卡住。
   - 手動的 `build_features`、`build_labels` 先檢查參數，再取鎖，整段重建都持鎖，標籤帶日期範圍（例如 `build_features 2010-01-04..2026-11-13`）；拿不到鎖就立刻報錯，不等待，也不寫任何列。
-  - 全量重建特徵約 30 分鐘。這段時間其他手動的研究指令會立刻報錯；排程的步驟每 10 分鐘重試一次，6 次（1 小時）內等得到就照跑，等不到算失敗。
+  - 全量重建特徵約 30 分鐘。這段時間其他取鎖的手動指令（`feature_coverage`、`predict`、`monitor`、`promote`、`restore_run`、另一支重建）會立刻報錯；排程的步驟每 10 分鐘重試一次，6 次（1 小時）內等得到就照跑，等不到算失敗。
+  - 訓練不取鎖：`build_run` 與每月重訓不會被擋，重建期間照樣會讀到正在改寫的分區（讀到一半分區變了會報錯要求重跑）。照上面重訓那一條，兩者不要同時進行。
   - 反過來也一樣：worker 正在跑研究排程的步驟時，主機上的手動重建會立刻被擋，等那一步跑完再重跑。
   - 鎖只護住單一指令。特徵與 label 兩支互相擋，要一支跑完再跑下一支；兩支之間排程的步驟仍可能插進來。
 - 看狀態：
