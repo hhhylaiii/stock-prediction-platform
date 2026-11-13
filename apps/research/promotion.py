@@ -1,7 +1,7 @@
 """Model swaps (SPEC §7 每月重訓): promote a build past its gates, restore a degraded run."""
 
 import logging
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -16,7 +16,7 @@ from apps.etl.alerts import dispatch
 from apps.etl.models import DataQualityLog
 from apps.market.calendar import TradingDays
 from apps.research.baseline_runs import SCOPES
-from apps.research.gates import SAMPLE_UNITS, SlotGates, build_runs, check_gates
+from apps.research.gates import SAMPLE_UNITS, SlotGates, build_runs, check_gates, passing_slots
 from apps.research.holdout import production_pass
 from apps.research.lock import locked
 from apps.research.models import ModelRun, ModelStatus, Prediction
@@ -43,6 +43,7 @@ class Promoted:
     retired: list[str] = field(default_factory=list)
     written: dict[str, int] = field(default_factory=dict)
     failed: list[dict[str, Any]] = field(default_factory=list)
+    held: list[str] = field(default_factory=list)
 
 
 def _scope(run_key: str) -> str:
@@ -100,27 +101,59 @@ def _refuse_later_rows(run_key: str, runs: dict[Slot, ModelRun], day: date) -> N
         )
 
 
-def _failed(checked: list[SlotGates]) -> list[dict[str, Any]]:
+def _failed_gates(result: SlotGates) -> list[dict[str, Any]]:
     return [
         {
-            "slot": str(result.slot),
-            "run_id": result.run_id,
-            "gates": [
-                {
-                    "name": gate.name,
-                    "reason": gate.reason,
-                    "value": gate.value,
-                    "threshold": gate.threshold,
-                    "sample": gate.sample,
-                    "sample_unit": SAMPLE_UNITS[gate.name],
-                }
-                for gate in result.gates
-                if gate.passed is False
-            ],
+            "name": gate.name,
+            "reason": gate.reason,
+            "value": gate.value,
+            "threshold": gate.threshold,
+            "sample": gate.sample,
+            "sample_unit": SAMPLE_UNITS[gate.name],
         }
+        for gate in result.gates
+        if gate.passed is False
+    ]
+
+
+def _failed(checked: list[SlotGates]) -> list[dict[str, Any]]:
+    return [
+        {"slot": str(result.slot), "run_id": result.run_id, "gates": _failed_gates(result)}
         for result in checked
         if not result.passed
     ]
+
+
+def _ordered(checked: list[SlotGates]) -> list[SlotGates]:
+    return sorted(checked, key=lambda result: (result.slot.horizon, result.slot.objective))
+
+
+def _listed(result: SlotGates) -> dict[str, Any]:
+    slot = result.slot
+    return {
+        "slot": str(slot),
+        "objective": slot.objective,
+        "horizon": slot.horizon,
+        "run_id": result.run_id,
+    }
+
+
+def _slots(
+    checked: list[SlotGates], swapped: set[Slot]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """The judged runs as the record lists them: those swapped in, then those held back."""
+    judged = _ordered(checked)
+    came = [
+        {**_listed(result), "forced": not result.passed}
+        for result in judged
+        if result.slot in swapped
+    ]
+    held = [
+        {**_listed(result), "gates": _failed_gates(result)}
+        for result in judged
+        if result.slot not in swapped
+    ]
+    return came, held
 
 
 def _note(
@@ -130,6 +163,8 @@ def _note(
     failed: list[dict[str, Any]],
     reason: str,
     promoted: bool,
+    swapped: Sequence[dict[str, Any]] = (),
+    held: Sequence[dict[str, Any]] = (),
 ) -> DataQualityLog:
     """The row of one promotion: info when every gate passed, else a warning to send."""
     detail = {
@@ -139,6 +174,8 @@ def _note(
         "reason": (reason or None) if failed else None,
         "failed": failed,
         "promoted": promoted,
+        "promoted_slots": list(swapped),
+        "held_slots": list(held),
     }
     severity = DataQualityLog.Severity.WARNING if failed else DataQualityLog.Severity.INFO
     return DataQualityLog.objects.create(
@@ -160,7 +197,7 @@ def _swap(
     failed: list[dict[str, Any]],
     reason: str,
 ) -> list[str]:
-    """Retire every serving run of N's slots and make N active from day, noting how."""
+    """Retire every serving run of the given slots and make their N active from day, noting how."""
     judged = {result.slot: result.serving for result in checked}
     retired = []
     for slot, run in runs.items():
@@ -186,7 +223,7 @@ def _swap(
 def promote(
     run_key: str, day: date, directory: Path, force: bool = False, reason: str = ""
 ) -> Promoted:
-    """Swap build run_key in from day when every gate passes, or by force with a reason."""
+    """Swap in from day each horizon of build run_key that passes its gates, or all by force."""
     reason = reason.strip()
     if force and not reason:
         raise RunError("--force needs a --reason saying why the failed gates are overridden")
@@ -199,15 +236,18 @@ def promote(
         runs = _check_build(run_key, day, granted.frozen_by)
         checked = check_gates(run_key, directory)
         failed = _failed(checked)
-        if failed and not force:
-            note = _note(day, scope, run_key, failed, "", promoted=False)
-            result = Promoted(False, checked, failed=failed)
+        chosen = set(runs) if force else passing_slots(checked)
+        swapped = {slot: run for slot, run in runs.items() if slot in chosen}
+        came, kept = _slots(checked, set(swapped))
+        held = [item["slot"] for item in kept]
+        if swapped:
+            retired = _swap(swapped, checked, day, failed, reason)
+            _refuse_later_rows(run_key, swapped, day)
+            written = predict(day, directory, replace=True, slots=list(swapped)).written
+            result = Promoted(True, checked, retired, written, failed, held)
         else:
-            retired = _swap(runs, checked, day, failed, reason)
-            _refuse_later_rows(run_key, runs, day)
-            written = predict(day, directory, replace=True, slots=list(runs)).written
-            note = _note(day, scope, run_key, failed, reason, promoted=True)
-            result = Promoted(True, checked, retired, written, failed)
+            result = Promoted(False, checked, failed=failed, held=held)
+        note = _note(day, scope, run_key, failed, reason, bool(swapped), came, kept)
     if note.severity == DataQualityLog.Severity.WARNING:
         dispatch([note])
     if result.promoted:

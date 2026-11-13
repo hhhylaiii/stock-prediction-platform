@@ -686,6 +686,8 @@ def test_the_three_interval_models_go_live_together_or_not_at_all(
 ) -> None:
     runs = built("interval", "interval-wf1", researched)
     passed(LAST)
+    clear = Gate("shadow_oos", True, 0.0, "", gates.MIN_DAYS, "")
+    monkeypatch.setattr(gates, "shadow_oos", lambda run, shadow, directory: clear)
     failing_objective(monkeypatch, "volatility")
     sent(monkeypatch)
     volatility = next(run for run in runs if run.objective == "volatility")
