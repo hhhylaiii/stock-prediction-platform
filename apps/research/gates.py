@@ -1,6 +1,7 @@
 """Promotion gates of a production build N against the serving runs (SPEC §7 每月重訓)."""
 
 import math
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field, fields
 from datetime import date
 from pathlib import Path
@@ -97,21 +98,29 @@ def _column(run: ModelRun) -> str:
 
 
 def build_runs(run_key: str) -> dict[Slot, ModelRun]:
-    """The candidate production model N of run_key by slot; others are refused."""
-    runs = ModelRun.objects.filter(run_key=run_key, model_type=MODEL)
+    """The production models N of run_key still candidate, by slot; a build with none is refused."""
+    runs = ModelRun.objects.filter(run_key=run_key, model_type=MODEL).order_by("run_id")
+    models = [run for run in runs if (run.params.get(PRODUCTION) or {}).get("role") == "model"]
+    if not models:
+        raise RunError(f"{run_key} holds no production model N; gates check build_run's run_key")
     found = {
         Slot(run.objective, int(run.params["horizon"])): run
-        for run in runs
-        if (run.params.get(PRODUCTION) or {}).get("role") == "model"
+        for run in models
+        if run.status == ModelStatus.CANDIDATE
     }
     if not found:
-        raise RunError(f"{run_key} holds no production model N; gates check build_run's run_key")
-    moved = sorted(run.run_id for run in found.values() if run.status != ModelStatus.CANDIDATE)
-    if moved:
-        raise RunError(f"{', '.join(moved)} left candidate; gates judge N before promotion only")
+        moved = ", ".join(run.run_id for run in models)
+        raise RunError(f"{moved} left candidate; gates judge N before promotion only")
     if not fold_path(run_key, MODEL, 0).exists():
         raise RunError(f"{run_key} has no cached fold 0; its last build_run did not finish")
     return found
+
+
+def passing_slots(checked: Iterable[SlotGates]) -> set[Slot]:
+    """Slots of the horizons where every slot passed; SPEC §7 judges each horizon on its own."""
+    judged = list(checked)
+    failed = {result.slot.horizon for result in judged if not result.passed}
+    return {result.slot for result in judged if result.slot.horizon not in failed}
 
 
 def agreement(run: ModelRun, serving: ModelRun | None, as_of: date) -> Gate:
@@ -277,7 +286,7 @@ def _stored(gate: Gate) -> dict[str, Any]:
 
 
 def check_gates(run_key: str, directory: Path) -> list[SlotGates]:
-    """Every gate of each N slot of run_key, recorded on the N runs together; no status changes."""
+    """Every gate of each candidate N of run_key, recorded on them together; no status changes."""
     runs = build_runs(run_key)
     shadows = {slot: paired_shadow(run) for slot, run in runs.items()}
     checked = []

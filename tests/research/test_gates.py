@@ -407,14 +407,39 @@ def test_gates_check_production_builds_only(researched: Path) -> None:
     for key in ("rank-prod-shadow", "rank-wf1"):
         with pytest.raises(RunError, match=f"{key} holds no production model N"):
             check_gates(key, researched)
-    ModelRun.objects.filter(run_id="rank-prod.lightgbm.h5.f000").update(status="active")
-    with pytest.raises(RunError, match=r"rank-prod\.lightgbm\.h5\.f000 left candidate"):
+    ModelRun.objects.filter(run_key="rank-prod").update(status="active")
+    with pytest.raises(RunError, match=r"h20\.f000, rank-prod\.lightgbm\.h5\.f000 left candidate"):
         check_gates("rank-prod", researched)
     assert not ModelRun.objects.filter(run_key="rank-prod", params__has_key="gates").exists()
     ModelRun.objects.filter(run_key="rank-prod").update(status="candidate")
     fold_path("rank-prod", MODEL, 0).unlink()
     with pytest.raises(RunError, match="rank-prod has no cached fold 0"):
         check_gates("rank-prod", researched)
+
+
+@pytest.mark.django_db
+def test_gates_judge_what_a_partly_promoted_build_still_holds(researched: Path) -> None:
+    built("rank", "rank-wf1", researched)
+    ModelRun.objects.filter(run_id="rank-prod.lightgbm.h5.f000").update(status="active")
+
+    [left] = check_gates("rank-prod", researched)
+
+    assert left.slot == Slot("rank", 20)
+    judged = ModelRun.objects.filter(run_key="rank-prod", params__has_key="gates")
+    assert list(judged.values_list("run_id", flat=True)) == ["rank-prod.lightgbm.h20.f000"]
+    assert ModelRun.objects.get(run_id="rank-prod.lightgbm.h5.f000").status == "active"
+
+
+def test_a_horizon_passes_only_when_each_of_its_slots_does() -> None:
+    def judged(objective: str, horizon: int, passed: bool) -> SlotGates:
+        return SlotGates(Slot(objective, horizon), f"{objective}-{horizon}", None, [gate(passed)])
+
+    rank = [judged("rank", 5, True), judged("rank", 20, False)]
+    band = [judged("quantile", 20, True), judged("volatility", 20, False)]
+
+    assert gates.passing_slots(rank) == {Slot("rank", 5)}
+    assert gates.passing_slots(band) == set()
+    assert gates.passing_slots([]) == set()
 
 
 @pytest.mark.django_db
