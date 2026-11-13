@@ -14,7 +14,7 @@ from celery import Task
 from celery.signals import task_failure
 from django.apps import apps
 from django.core.management.base import CommandError
-from django.db import DatabaseError, OperationalError
+from django.db import DatabaseError, InterfaceError, OperationalError
 from django.test import override_settings
 
 from apps.etl import task_alerts, tasks
@@ -50,7 +50,17 @@ def db_down() -> None:
 
 @app.task(name="tests.db_down_too")
 def db_down_too() -> None:
-    raise OperationalError("server closed the connection unexpectedly")
+    raise InterfaceError("connection already closed")
+
+
+@app.task(name="tests.boom_too")
+def boom_too() -> None:
+    raise RuntimeError("another task, the same class")
+
+
+@app.task(name="tests.either")
+def either(kind: str) -> None:
+    raise {"value": ValueError, "key": KeyError}[kind](kind)
 
 
 @app.task(bind=True, name="tests.flaky", max_retries=2)
@@ -90,6 +100,7 @@ def claimed(monkeypatch: pytest.MonkeyPatch) -> set[str]:
         return first
 
     monkeypatch.setattr("apps.etl.task_alerts._claim", claim)
+    monkeypatch.setattr("apps.etl.task_alerts._release", keys.discard)
     return keys
 
 
@@ -113,12 +124,21 @@ def _row(day: date = DAY) -> DataQualityLog:
     return DataQualityLog.objects.get(date=day, check_name=CHECK)
 
 
+class Unprintable:
+    """An argument whose repr raises."""
+
+    def __repr__(self) -> str:
+        raise RuntimeError("no repr")
+
+
 @pytest.mark.usefixtures("clock", "claimed")
 def test_an_unhandled_error_alerts_with_the_task_and_error_class_only(hook: Any) -> None:
     boom.apply(args=("night",), kwargs={"day": "2026-11-12"})
     (body,) = _bodies(hook)
     assert body == {
-        "text": "task failed: tests.boom (RuntimeError)",
+        "text": (
+            "task failed: tests.boom (RuntimeError) args=('night',) kwargs={'day': '2026-11-12'}"
+        ),
         "alerts": [
             {
                 "date": "2026-11-12",
@@ -152,10 +172,38 @@ def test_the_same_task_and_error_alert_once_a_day(hook: Any, clock: Callable[...
 
 
 @pytest.mark.usefixtures("clock", "claimed")
+def test_another_task_or_another_error_class_is_another_alert(hook: Any) -> None:
+    boom.apply()
+    boom_too.apply()
+    assert len(hook.calls) == 2
+    either.apply(args=("value",))
+    either.apply(args=("key",))
+    either.apply(args=("key",))
+    assert len(hook.calls) == 4
+
+
+@pytest.mark.usefixtures("clock", "claimed")
+def test_an_alert_that_did_not_arrive_is_posted_again_at_the_next_failure() -> None:
+    with override_settings(ALERT_WEBHOOK_URL=WEBHOOK), responses.RequestsMock() as mock:
+        mock.post(WEBHOOK, status=503)
+        mock.post(WEBHOOK, status=200)
+        boom.apply()
+        boom.apply()
+        boom.apply()
+        assert len(mock.calls) == 2
+    assert _row().detail["tasks"]["tests.boom"]["count"] == 3
+
+
+@pytest.mark.usefixtures("clock", "claimed")
 def test_a_calendar_error_carries_its_own_message(hook: Any) -> None:
     off_calendar.apply()
-    detail = _bodies(hook)[0]["alerts"][0]["detail"]
+    (body,) = _bodies(hook)
+    detail = body["alerts"][0]["detail"]
     assert (detail["error"], detail["message"]) == ("OutsideCalendarError", OFF_CALENDAR)
+    assert body["text"] == (
+        f"task failed: tests.off_calendar (OutsideCalendarError: {OFF_CALENDAR})"
+        " args=() kwargs={}"
+    )
 
 
 @pytest.mark.usefixtures("clock", "claimed")
@@ -186,8 +234,12 @@ def test_a_retry_is_not_a_failure_but_running_out_of_them_is(hook: Any) -> None:
 def test_a_dead_database_alerts_once_for_every_task_and_is_not_written_to(hook: Any) -> None:
     db_down.apply()
     db_down_too.apply()
+    db_down.apply()
     (body,) = _bodies(hook)
-    assert body["text"] == "task failed: tests.db_down (OperationalError)"
+    assert body["text"] == (
+        "task failed: database error (OperationalError), first seen in tests.db_down "
+        "args=() kwargs={}; one alert a day covers every task"
+    )
     assert not DataQualityLog.objects.exists()
 
 
@@ -215,6 +267,18 @@ def test_the_days_row_counts_each_tasks_failures() -> None:
     assert DataQualityLog.objects.filter(check_name=CHECK).count() == 1
 
 
+@pytest.mark.usefixtures("claimed", "hook")
+def test_the_first_time_a_task_failed_is_kept(clock: Callable[..., None]) -> None:
+    boom.apply()
+    clock(DAY, time(21, 30))
+    boom.apply()
+    assert _row().detail["tasks"]["tests.boom"] == {
+        "count": 2,
+        "first_at": "2026-11-12T15:10:00+08:00",
+        "errors": ["RuntimeError"],
+    }
+
+
 @pytest.mark.usefixtures("clock", "claimed")
 def test_a_row_that_cannot_be_written_does_not_stop_the_alert(
     hook: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
@@ -239,6 +303,14 @@ def test_the_handler_never_raises(
     monkeypatch.setattr("apps.etl.task_alerts._post", broken)
     report_failure("tests.direct", ValueError("x"))
     on_task_failure(sender=None, exception=None, args=None, kwargs=None)
+    assert "task failure alert broke: RuntimeError" in caplog.text
+
+
+@pytest.mark.usefixtures("clock", "claimed")
+def test_arguments_that_cannot_be_printed_do_not_break_the_handler(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    on_task_failure(sender=None, exception=ValueError("x"), args=(Unprintable(),), kwargs=None)
     assert "task failure alert broke: RuntimeError" in caplog.text
 
 
@@ -275,6 +347,9 @@ class FakeRedis:
         self.keys[key] = value
         return True
 
+    def delete(self, key: str) -> int:
+        return int(self.keys.pop(key, None) is not None)
+
     def close(self) -> None:
         self.closed += 1
 
@@ -300,6 +375,16 @@ def test_the_first_claim_of_a_key_wins_and_expires(monkeypatch: pytest.MonkeyPat
     assert store.closed == 2
 
 
+def test_a_released_key_can_be_claimed_again(monkeypatch: pytest.MonkeyPatch) -> None:
+    store = FakeRedis()
+    monkeypatch.setattr("apps.etl.task_alerts.redis.Redis.from_url", lambda url, **options: store)
+    with override_settings(TASK_ALERT_REDIS_URL="redis://store.test:6379/3"):
+        assert task_alerts._claim("key")
+        task_alerts._release("key")
+        assert task_alerts._claim("key")
+    assert store.closed == 3
+
+
 def test_a_store_that_cannot_answer_never_silences_an_alert(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -310,6 +395,7 @@ def test_a_store_that_cannot_answer_never_silences_an_alert(
     with override_settings(TASK_ALERT_REDIS_URL="redis://store.test:6379/3"):
         assert task_alerts._claim("key")
         assert task_alerts._claim("key")
+        task_alerts._release("key")
     assert "could not reach its store: ConnectionError" in caplog.text
     assert "store.test" not in caplog.text
 
@@ -324,6 +410,7 @@ def test_without_a_store_nothing_is_de_duplicated_or_connected(
     assert settings.TASK_ALERT_REDIS_URL == ""
     assert task_alerts._claim("key")
     assert task_alerts._claim("key")
+    task_alerts._release("key")
 
 
 def test_connecting_the_signal_is_idempotent_and_touches_nothing(
@@ -386,7 +473,7 @@ def test_an_unexpected_error_a_task_swallows_is_alerted_under_the_tasks_name(
         result = tasks.fetch_day.apply(args=("twse", dataset, "2026-10-28"))
         assert (result.successful(), result.get()) == (True, "failed")
     (body,) = _bodies(hook)
-    assert body["text"] == "task failed: etl.fetch_day (ValueError)"
+    assert body["text"] == "task failed: etl.fetch_day (ValueError) twse/daily_price 2026-10-28"
     assert body["alerts"][0]["detail"]["context"] == "twse/daily_price 2026-10-28"
     assert _row().detail["tasks"]["etl.fetch_day"]["count"] == 2
 
@@ -408,7 +495,7 @@ def test_a_source_error_a_task_swallows_stays_with_the_evening_audit(
 @pytest.mark.usefixtures("clock", "claimed")
 def test_a_swallowed_error_outside_a_task_is_filed_under_etl(hook: Any) -> None:
     assert tasks._failed("trading_calendar upkeep", KeyError("level")) == "failed"
-    assert _bodies(hook)[0]["text"] == "task failed: etl (KeyError)"
+    assert _bodies(hook)[0]["text"] == "task failed: etl (KeyError) trading_calendar upkeep"
 
 
 @pytest.mark.usefixtures("clock", "claimed")
@@ -419,4 +506,4 @@ def test_a_command_that_failed_on_its_source_is_expected_too(hook: Any) -> None:
     assert len(hook.calls) == 0
     own = CommandError("trading_calendar has no days in 2026-10-01..2026-11-11")
     assert tasks._failed("trading_calendar refresh", own) == "failed"
-    assert _bodies(hook)[0]["text"] == "task failed: etl (CommandError)"
+    assert _bodies(hook)[0]["text"] == "task failed: etl (CommandError) trading_calendar refresh"

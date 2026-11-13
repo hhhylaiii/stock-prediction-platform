@@ -7,7 +7,7 @@ from collections.abc import Sequence
 from datetime import date, time, timedelta
 from typing import Any, NamedTuple
 
-from celery import Task, current_task, shared_task
+from celery import Task, shared_task
 from celery.schedules import crontab
 from django.conf import settings
 from django.core.management import call_command
@@ -37,7 +37,7 @@ from apps.etl.ratelimit import RetryableError, ThrottledError
 from apps.etl.revenue_scan import open_months
 from apps.etl.runs import covered_days
 from apps.etl.statement_summary import open_periods
-from apps.etl.task_alerts import report_failure
+from apps.etl.task_alerts import report_swallowed
 from apps.etl.trading_calendar import REFRESH_DATASET, REFRESH_SOURCE
 from apps.market.calendar import OutsideCalendarError, TradingDays
 from apps.market.models import IndexDaily, IndexId
@@ -209,7 +209,7 @@ def _failed(what: str, exc: Exception) -> str:
     expected = isinstance(exc, known) or isinstance(exc.__cause__, known)
     logger.error("etl failed %s: %s", what, exc, exc_info=not expected)
     if not expected:
-        report_failure(str(current_task.name) if current_task else "etl", exc, what)
+        report_swallowed(exc, what)
     return "failed"
 
 
