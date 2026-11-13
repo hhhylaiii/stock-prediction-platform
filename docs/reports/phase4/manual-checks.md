@@ -594,3 +594,38 @@ prob shift when both flags flip (all other inputs at 0): min 0.11698 max 0.19741
    model, rows with tech_vol_20d: mean of daily 0.75564 over 422 days; pooled rows 0.75294
    missing rows per day: mean 0.0 max 0 days with any 0
 ```
+
+## Holdout（2026-11-12）：波動率區間（頁面備援）逐摺的覆蓋率
+
+2026-11-13 補算，只讀：讀 `interval-holdout-20261112` 已經存下的預測快取與 `label_daily`，另讀特徵分區的 `tech_vol_20d` 一欄（只用來數缺值）；沒有重新訓練、沒有重跑 holdout、沒有寫資料庫。備援區間的上下界是 holdout 當時存進快取的 baseline 預測（`volband_q10_h20`、`volband_q90_h20`），不是用現在的特徵重算的。`label_daily` 在 2026-11-13 早上重建過 2026-07-16 以後的列，特徵分區重建過 2026-08-14 以後的列；模型那一欄仍和 2026-11-12 的報告逐摺相同，備援區間的合併值也和上一節（重建前算的）相同，所以這次重建沒有改變這裡的結果。算法和上一節相同（每天 universe 內可交易、20 日 label 在 2026-10-12 以前已到期的列落在 q10 到 q90 之內的比例，再對天數取平均；label 是 `fwd_ret_open`），改成一摺一摺讀。模型那一欄是對帳用的：8 摺的值和 `interval-holdout-20261112.md`「每摺覆蓋率」那張表逐一相同，合併值、不計摺 51 的值、列數與天數和上一節相同。「below q10」「above q90」是每天低於下界、高於上界的列的比例，再對天數取平均。摺 51 的 7 天就是 holdout 最後 7 個 label 已到期的交易日。
+
+```
+run interval-holdout-20261112; claim last_date 2026-11-11; labels settled through 2026-10-12; label fwd_ret_open
+band columns volband_q10_h20, volband_q90_h20; model columns lightgbm_q10_h20, lightgbm_q90_h20
+fold | first day | last day | days | rows | band coverage | model coverage | band: below q10 | band: above q90 | tech_vol_20d missing
+44 | 2025-01-02 | 2025-03-31 | 55 | 51188 | 0.62809 | 0.59403 | 0.28184 | 0.09007 | 0
+45 | 2025-04-01 | 2025-06-30 | 61 | 54018 | 0.89404 | 0.84270 | 0.02866 | 0.07729 | 0
+46 | 2025-07-01 | 2025-09-30 | 65 | 57592 | 0.79429 | 0.78305 | 0.04725 | 0.15846 | 0
+47 | 2025-10-01 | 2025-12-31 | 62 | 55819 | 0.79390 | 0.79311 | 0.07187 | 0.13423 | 0
+48 | 2026-01-02 | 2026-03-31 | 55 | 53520 | 0.78644 | 0.75727 | 0.07307 | 0.14049 | 0
+49 | 2026-04-01 | 2026-06-30 | 61 | 63371 | 0.77665 | 0.69559 | 0.04817 | 0.17517 | 0
+50 | 2026-07-01 | 2026-09-30 | 63 | 62666 | 0.85706 | 0.80398 | 0.04453 | 0.09841 | 0
+51 | 2026-10-01 | 2026-10-12 | 7 | 6370 | 0.43449 | 0.40393 | 0.52828 | 0.03723 | 0
+all folds: days 429, rows 404544
+  band: mean of daily 0.78694; all rows together 0.78696
+  model: mean of daily 0.74990; all rows together 0.74744
+  band: mean of the 8 fold values 0.74562; folds under 0.70: 2
+  model: mean of the 8 fold values 0.70921; folds under 0.70: 3
+without fold 51: days 422
+  band: mean of daily 0.79279
+  model: mean of daily 0.75564
+fold 51 day by day (band, model):
+  2026-10-01 | 0.55458 | 0.53583
+  2026-10-02 | 0.50721 | 0.49390
+  2026-10-05 | 0.38022 | 0.35385
+  2026-10-06 | 0.31366 | 0.28087
+  2026-10-07 | 0.38974 | 0.34934
+  2026-10-08 | 0.41630 | 0.38877
+  2026-10-12 | 0.47974 | 0.42497
+band folds under 0.70: [0.62809, 0.43449]; over 0.90: []
+```
