@@ -73,6 +73,43 @@ def failing_h5(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(gates, "data_quality", quality)
 
 
+def failing_objective(monkeypatch: pytest.MonkeyPatch, objective: str) -> None:
+    checked_quality = gates.data_quality
+
+    def quality(run: ModelRun) -> Gate:
+        if run.objective == objective:
+            return Gate("data_quality", False, 1.0, "無 error", 1, "1 天有 error", {})
+        return checked_quality(run)
+
+    monkeypatch.setattr(gates, "data_quality", quality)
+
+
+def by_horizon(runs: list[ModelRun]) -> list[ModelRun]:
+    return sorted(runs, key=lambda run: (int(run.params["horizon"]), run.objective))
+
+
+def entry(run: ModelRun, **extra: Any) -> dict[str, Any]:
+    """A run as the promotion record lists it among the swapped or the held."""
+    horizon = int(run.params["horizon"])
+    return {
+        "slot": f"{run.objective} {horizon} 日",
+        "objective": run.objective,
+        "horizon": horizon,
+        "run_id": run.run_id,
+        **extra,
+    }
+
+
+QUALITY_GATE = {
+    "name": "data_quality",
+    "reason": f"1 天有 error，最近 {LAST} row_count",
+    "value": 1.0,
+    "threshold": "無 error",
+    "sample": 1,
+    "sample_unit": "days",
+}
+
+
 def untouched(runs: list[ModelRun], status: str = ModelStatus.CANDIDATE) -> None:
     for run in runs:
         current = fresh(run)
@@ -122,6 +159,8 @@ def test_a_first_launch_goes_live_with_its_rows(
         "reason": None,
         "failed": [],
         "promoted": True,
+        "promoted_slots": [entry(run, forced=False) for run in by_horizon(runs)],
+        "held_slots": [],
     }
     assert dispatched == []
     shadows = ModelRun.objects.filter(run_key="rank-prod-shadow")
@@ -285,6 +324,8 @@ def test_force_without_failures_is_not_recorded_as_forced(
         "reason": None,
         "failed": [],
         "promoted": True,
+        "promoted_slots": [entry(run, forced=False) for run in by_horizon(runs)],
+        "held_slots": [],
     }
     assert dispatched == []
 
@@ -334,7 +375,7 @@ def test_force_never_skips_a_refused_build(
     passed(LAST)
     day = LAST
     if case == "moved":
-        ModelRun.objects.filter(pk=runs[0].pk).update(status=ModelStatus.ACTIVE)
+        ModelRun.objects.filter(pk__in=[run.pk for run in runs]).update(status=ModelStatus.ACTIVE)
     if case == "other shadow":
         other_shadow("rank-prod", as_of="2016-11-30")
     if case == "no claim":
@@ -351,7 +392,7 @@ def test_force_never_skips_a_refused_build(
     with pytest.raises(error, match=match):
         promote("rank-prod", day, researched, force=True, reason="overriding")
 
-    untouched(runs[1:])
+    untouched(runs, ModelStatus.ACTIVE if case == "moved" else ModelStatus.CANDIDATE)
     assert not alerts()
     assert not Prediction.objects.exists()
 
@@ -470,7 +511,107 @@ def test_later_rows_set_the_default_day_and_refuse_an_earlier_one(
 
 
 @pytest.mark.django_db
-def test_one_failing_slot_keeps_the_whole_build_out_unless_forced(
+def test_a_failing_horizon_stays_out_while_the_passing_one_goes_live(
+    researched: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs = built("rank", "rank-wf1", researched)
+    passed(LAST)
+    failing_h5(monkeypatch)
+    dispatched = sent(monkeypatch)
+    five, twenty = by_horizon(runs)
+
+    result = promote("rank-prod", LAST, researched)
+
+    assert result.promoted is True
+    assert result.held == ["rank 5 日"]
+    assert set(result.written) == {twenty.run_id}
+    assert fresh(twenty).status == ModelStatus.ACTIVE
+    assert fresh(twenty).params["promoted_on"] == LAST.isoformat()
+    assert fresh(twenty).params["promotion"] == {"forced": False, "reason": None, "failed": []}
+    untouched([five])
+    assert fresh(five).params["gates"]["passed"] is False
+    assert set(Prediction.objects.values_list("run_id", "horizon")) == {(twenty.run_id, 20)}
+    [alert] = alerts()
+    assert dispatched == [alert]
+    assert alert.severity == DataQualityLog.Severity.WARNING
+    assert alert.detail == {
+        "scope": "rank",
+        "run_key": "rank-prod",
+        "forced": False,
+        "reason": None,
+        "failed": [{"slot": "rank 5 日", "run_id": five.run_id, "gates": [QUALITY_GATE]}],
+        "promoted": True,
+        "promoted_slots": [entry(twenty, forced=False)],
+        "held_slots": [entry(five, gates=[QUALITY_GATE])],
+    }
+
+
+@pytest.mark.django_db
+def test_only_the_horizon_swapped_in_retires_its_serving_run(
+    researched: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs = built("rank", "rank-wf1", researched)
+    passed(LAST)
+    old_five, old_twenty = by_horizon(serving_copies(runs, monkeypatch))
+    failing_h5(monkeypatch)
+    sent(monkeypatch)
+    five, twenty = by_horizon(runs)
+    kept = Prediction.objects.filter(run=old_five, date=LAST).count()
+
+    result = promote("rank-prod", LAST, researched)
+
+    assert result.retired == [old_twenty.run_id]
+    assert fresh(old_twenty).status == ModelStatus.RETIRED
+    assert fresh(old_five).status == ModelStatus.ACTIVE
+    assert Prediction.objects.filter(run=old_five, date=LAST).count() == kept > 0
+    assert not Prediction.objects.filter(run=old_twenty, date=LAST).exists()
+    assert not Prediction.objects.filter(run=five).exists()
+    assert Prediction.objects.filter(run=twenty, date=LAST).count() == result.written[twenty.run_id]
+
+
+@pytest.mark.django_db
+def test_a_held_horizon_comes_in_later_only_by_force(
+    researched: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs = built("rank", "rank-wf1", researched)
+    passed(LAST)
+    failing_h5(monkeypatch)
+    sent(monkeypatch)
+    five, twenty = by_horizon(runs)
+    promote("rank-prod", LAST, researched)
+    served = fresh(twenty).params
+
+    again = promote("rank-prod", LAST, researched)
+
+    assert again.promoted is False
+    assert again.held == ["rank 5 日"]
+    assert [result.slot for result in again.checked] == [Slot("rank", 5)]
+    untouched([five])
+    assert fresh(twenty).params == served
+    assert alerts()[-1].detail["promoted"] is False
+    assert alerts()[-1].detail["promoted_slots"] == []
+    assert alerts()[-1].detail["held_slots"] == [entry(five, gates=[QUALITY_GATE])]
+
+    forced = promote("rank-prod", LAST, researched, force=True, reason="checked by hand")
+
+    assert forced.promoted is True
+    assert forced.held == []
+    assert forced.retired == []
+    assert set(forced.written) == {five.run_id}
+    assert fresh(five).status == ModelStatus.ACTIVE
+    assert fresh(five).params["promotion"]["forced"] is True
+    assert fresh(five).params["promotion"]["reason"] == "checked by hand"
+    assert (fresh(twenty).status, fresh(twenty).params) == (ModelStatus.ACTIVE, served)
+    assert Prediction.objects.filter(run=twenty, date=LAST).exists()
+    last = alerts()[-1].detail
+    assert (last["promoted"], last["forced"], last["reason"]) == (True, True, "checked by hand")
+    assert last["promoted_slots"] == [entry(five, forced=True)]
+    assert last["held_slots"] == []
+    assert len(alerts()) == 3
+
+
+@pytest.mark.django_db
+def test_force_swaps_in_every_horizon_and_marks_only_the_failed_one_forced(
     researched: Path, settings: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     runs = built("rank", "rank-wf1", researched)
@@ -478,16 +619,7 @@ def test_one_failing_slot_keeps_the_whole_build_out_unless_forced(
     failing_h5(monkeypatch)
     settings.FEATURE_PARQUET_DIR = researched
     sent(monkeypatch)
-    five = next(run for run in runs if run.params["horizon"] == 5)
-    twenty = next(run for run in runs if run.params["horizon"] == 20)
-
-    kept = promote("rank-prod", LAST, researched)
-
-    assert kept.promoted is False
-    untouched(runs)
-    assert not Prediction.objects.exists()
-    [alert] = alerts()
-    assert [item["run_id"] for item in alert.detail["failed"]] == [five.run_id]
+    five, twenty = by_horizon(runs)
     out = StringIO()
 
     call_command("promote", run_key="rank-prod", force=True, reason="checked by hand", stdout=out)
@@ -495,22 +627,89 @@ def test_one_failing_slot_keeps_the_whole_build_out_unless_forced(
     assert "強制換模（checked by hand）" in out.getvalue()
     assert f"{five.run_id}：data_quality（1 天有 error，最近 {LAST} row_count）" in out.getvalue()
     assert fresh(five).params["promotion"]["forced"] is True
-    assert fresh(five).params["promotion"]["failed"][0]["gates"] == [
-        {
-            "name": "data_quality",
-            "reason": f"1 天有 error，最近 {LAST} row_count",
-            "value": 1.0,
-            "threshold": "無 error",
-            "sample": 1,
-            "sample_unit": "days",
-        }
-    ]
+    assert fresh(five).params["promotion"]["failed"][0]["gates"] == [QUALITY_GATE]
     assert fresh(twenty).params["promotion"] == {
         "forced": False,
         "reason": "checked by hand",
         "failed": [],
     }
     assert {fresh(run).status for run in runs} == {ModelStatus.ACTIVE}
+    [alert] = alerts()
+    assert alert.detail["promoted_slots"] == [entry(five, forced=True), entry(twenty, forced=False)]
+    assert alert.detail["held_slots"] == []
+
+
+@pytest.mark.django_db
+def test_the_command_names_the_horizon_it_left_out(
+    researched: Path, settings: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs = built("rank", "rank-wf1", researched)
+    passed(LAST)
+    failing_h5(monkeypatch)
+    settings.FEATURE_PARQUET_DIR = researched
+    sent(monkeypatch)
+    five, twenty = by_horizon(runs)
+    out = StringIO()
+
+    call_command("promote", run_key="rank-prod", stdout=out)
+
+    lines = out.getvalue().splitlines()
+    assert lines[0] == f"rank-prod 於 {LAST} 換模"
+    assert lines[1].startswith(f"  {twenty.run_id}：active，寫入 ")
+    assert lines[2] == "  沒過門檻、未換上（舊模型續用）："
+    assert lines[3] == (
+        f"  rank 5 日 {five.run_id}：data_quality（1 天有 error，最近 {LAST} row_count）"
+    )
+    assert len(lines) == 4
+    assert "強制換模" not in out.getvalue()
+
+
+@pytest.mark.django_db
+def test_the_gate_report_says_which_horizon_could_go_in_alone(
+    researched: Path, settings: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    built("rank", "rank-wf1", researched)
+    passed(LAST)
+    failing_h5(monkeypatch)
+    settings.FEATURE_PARQUET_DIR = researched
+    out = StringIO()
+
+    call_command("check_gates", run_key="rank-prod", stdout=out)
+
+    assert out.getvalue().strip().endswith("未通過：rank 5 日；可單獨換上：rank 20 日")
+    assert not ModelRun.objects.exclude(status=ModelStatus.CANDIDATE).exists()
+
+
+@pytest.mark.django_db
+def test_the_three_interval_models_go_live_together_or_not_at_all(
+    researched: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs = built("interval", "interval-wf1", researched)
+    passed(LAST)
+    failing_objective(monkeypatch, "volatility")
+    sent(monkeypatch)
+    volatility = next(run for run in runs if run.objective == "volatility")
+    gate = {**QUALITY_GATE, "reason": "1 天有 error"}
+
+    result = promote("interval-prod", LAST, researched)
+
+    assert result.promoted is False
+    assert result.held == ["classification 20 日", "quantile 20 日", "volatility 20 日"]
+    untouched(runs)
+    assert not Prediction.objects.exists()
+    [alert] = alerts()
+    assert alert.detail["promoted_slots"] == []
+    assert alert.detail["held_slots"] == [
+        entry(run, gates=[gate] if run == volatility else []) for run in by_horizon(runs)
+    ]
+    assert [item["run_id"] for item in alert.detail["failed"]] == [volatility.run_id]
+
+    promote("interval-prod", LAST, researched, force=True, reason="checked by hand")
+
+    assert {fresh(run).status for run in runs} == {ModelStatus.ACTIVE}
+    assert alerts()[-1].detail["promoted_slots"] == [
+        entry(run, forced=run == volatility) for run in by_horizon(runs)
+    ]
 
 
 @pytest.mark.django_db
