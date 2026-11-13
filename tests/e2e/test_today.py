@@ -23,7 +23,9 @@ from tests.e2e.conftest import (
     XSS_NAME,
     Seed,
     at,
+    no_ranking_text,
     released_on,
+    take_ranking_offline,
 )
 
 pytestmark = pytest.mark.e2e
@@ -560,3 +562,109 @@ def test_watch_only_names_the_replaced_band(
     expect(page.locator("#rows .trow")).to_have_count(1)
     expect(page.locator("#rows .trow").first).to_contain_text("（波動率區間）")
     expect(page.locator("#today-meta")).to_contain_text("區間改用波動率區間")
+
+
+def test_the_page_opens_on_five_days_when_only_that_ranking_is_live(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    take_ranking_offline(20)
+
+    page.goto(live_server.url)
+
+    rows = page.locator("#rows .trow")
+    expect(rows).to_have_count(20)
+    expect(rows.nth(1)).to_contain_text("2330")
+    expect(page.locator("[data-h='5']")).to_have_attribute("aria-pressed", "true")
+    expect(page.locator("[data-h='20']")).to_have_attribute("aria-pressed", "false")
+    expect(page.locator("#ret-head")).to_have_text("5 日預測報酬")
+    expect(page.locator("#today-empty")).to_have_count(0)
+    waiting = page.locator("#status span", has_text="排名未上線")
+    expect(waiting).to_have_text("20 日排名未上線")
+    expect(page.locator("#status")).not_to_contain_text("預測尚未產出")
+
+
+def test_the_twenty_day_page_says_no_ranking_is_live_while_five_days_are(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    take_ranking_offline(20)
+    page.goto(live_server.url)
+    expect(page.locator("#rows .trow")).to_have_count(20)
+
+    page.locator("[data-h='20']").click()
+
+    expect(page.locator("#today-empty")).to_have_text(no_ranking_text(20, 5))
+    expect(page.locator("#today-empty a")).to_have_attribute("href", "#models")
+    expect(page.locator("[data-h='20']")).to_have_attribute("aria-pressed", "true")
+    expect(page.locator("#rows .trow")).to_have_count(0)
+
+
+def test_a_picked_horizon_is_kept_when_the_page_is_left_and_opened_again(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    take_ranking_offline(20)
+    page.goto(live_server.url)
+    expect(page.locator("#rows .trow")).to_have_count(20)
+    page.locator("[data-h='20']").click()
+    expect(page.locator("#today-empty")).to_be_visible()
+
+    page.locator("[data-nav='models']").click()
+    expect(page.locator("#view-models")).to_be_visible()
+    page.locator("[data-nav='today']").click()
+
+    expect(page.locator("#today-empty")).to_have_text(no_ranking_text(20, 5))
+    expect(page.locator("[data-h='20']")).to_have_attribute("aria-pressed", "true")
+
+
+def test_the_five_day_page_says_so_when_only_twenty_days_are_live(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    take_ranking_offline(5)
+    page.goto(live_server.url)
+    expect(page.locator("#rows .trow")).to_have_count(20)
+    expect(page.locator("[data-h='20']")).to_have_attribute("aria-pressed", "true")
+
+    page.locator("[data-h='5']").click()
+
+    expect(page.locator("#today-empty")).to_have_text(no_ranking_text(5, 20))
+    expect(page.locator("#status span", has_text="排名未上線")).to_have_text("5 日排名未上線")
+
+
+def test_the_header_names_the_horizon_whose_predictions_are_behind(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    Prediction.objects.filter(run_id="rank-h20", date=predicted.last_session).delete()
+
+    page.goto(live_server.url)
+
+    behind = page.locator("#status span", has_text="尚未產出")
+    expect(behind).to_have_count(1)
+    expect(behind).to_have_text("20 日預測尚未產出")
+    expect(page.locator("#status")).not_to_contain_text("排名未上線")
+    expect(page.locator("[data-h='20']")).to_have_attribute("aria-pressed", "true")
+    expect(page.locator("#rows .trow")).to_have_count(4)
+
+
+def test_the_header_counts_a_degraded_model_without_a_twenty_day_ranking(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    take_ranking_offline(20)
+    ModelRun.objects.filter(pk="reg-h5").update(status="degraded")
+
+    page.goto(live_server.url)
+
+    expect(page.locator("#status")).to_contain_text("1 個模型降級中")
+
+
+def test_today_opens_on_twenty_days_with_the_old_words_when_the_status_request_fails(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    take_ranking_offline(20)
+    page.route("**/api/status", lambda route: route.abort())
+
+    page.goto(live_server.url)
+
+    expect(page.locator("#today-empty")).to_have_text(
+        f"預測資料尚未產出。排名{MODEL_REQUIRES}；上線後，這裡會列出全市場的排名。"
+    )
+    expect(page.locator("[data-h='20']")).to_have_attribute("aria-pressed", "true")
+    expect(page.locator("#status")).to_contain_text("無法連線到伺服器。")

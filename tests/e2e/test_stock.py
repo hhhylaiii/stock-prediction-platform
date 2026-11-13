@@ -1,3 +1,5 @@
+from datetime import date
+
 import pytest
 from playwright.sync_api import Page, Route, expect
 from pytest_django.live_server_helper import LiveServer
@@ -21,6 +23,7 @@ from tests.e2e.conftest import (
     RELEASE_REASON,
     Seed,
     released_on,
+    take_ranking_offline,
 )
 
 pytestmark = pytest.mark.e2e
@@ -117,6 +120,8 @@ def test_the_header_ranks_the_stock_and_the_table_lists_both_horizons(
     expect(pair).to_contain_text("30.0%")
     expect(pair).to_contain_text("過去 60 日實際為 25.0%")
     expect(pair).to_contain_text("LightGBM 2026-10")
+    expect(pair).to_contain_text("訓練資料到 2026-09-30，成績在模型頁")
+    expect(pair).not_to_contain_text("日 LightGBM")
     expect(page.locator("#forecasts .sub")).to_have_text(
         "排名、報酬與區間機率各由自己的模型產出；排名模型多用了幾個籌碼與除息日特徵，其餘特徵相同。"
         f"價格以 {explained.last_session.isoformat()} 收盤 1,138 換算。"
@@ -679,3 +684,70 @@ def test_each_horizon_names_its_own_close_when_they_differ(
         f"20 日以 {explained.last_session.isoformat()} 收盤 1,138、"
         f"5 日以 {explained.sessions[-2].isoformat()} 收盤 1,136 換算"
     )
+
+
+def test_the_stock_page_opens_on_the_horizon_that_has_a_prediction(
+    page: Page, live_server: LiveServer, explained: Seed
+) -> None:
+    take_ranking_offline(20)
+    add_contribs(explained, [("tech_ret_60d", 0.02)], (0.001, 72), horizon=5)
+
+    page.goto(f"{live_server.url}/#stock-2330")
+
+    expect(page.locator("#stock-seg [data-sh='5']")).to_have_attribute("aria-pressed", "true")
+    expect(page.locator("#stock-seg [data-sh='20']")).to_be_disabled()
+    expect(page.locator("#stock-seg-hint")).to_have_text("20 日預測尚未產出")
+    expect(page.locator(".stockhead .kpi")).to_contain_text("5 日預測排名")
+    expect(page.locator(".stockhead .kpi .v")).to_have_text("第 2 名 / 25")
+    expect(page.locator("#chart-title")).to_have_text("過去 60 個交易日，與未來 5 日的預測")
+    expect(page.locator("#features .sub")).to_contain_text("對 5 日排名分數影響最大")
+    pair = page.locator("#forecasts .pair")
+    expect(pair).to_contain_text("5 日 LightGBM 2026-10")
+    expect(pair).not_to_contain_text("20 日 LightGBM")
+
+
+def test_a_horizon_picked_on_today_is_kept_on_the_stock_page(
+    page: Page, live_server: LiveServer, explained: Seed
+) -> None:
+    take_ranking_offline(20)
+    page.goto(live_server.url)
+    expect(page.locator("#rows .trow")).to_have_count(20)
+    page.locator("[data-h='20']").click()
+    expect(page.locator("#today-empty")).to_be_visible()
+
+    page.goto(f"{live_server.url}/#stock-2330")
+
+    expect(page.locator("#stock-seg-hint")).to_have_text("20 日預測尚未產出")
+    expect(page.locator("#stock-seg [data-sh='20']")).to_have_attribute("aria-pressed", "true")
+    expect(page.locator(".stockhead .kpi")).to_contain_text("20 日預測排名")
+    expect(page.locator(".stockhead .kpi .v")).to_contain_text("尚未產出")
+
+
+def test_each_horizon_s_ranking_model_is_named_when_they_are_not_one_build(
+    page: Page, live_server: LiveServer, explained: Seed
+) -> None:
+    ModelRun.objects.filter(pk="rank-h5").update(train_end=date(2026, 8, 31))
+
+    page.goto(f"{live_server.url}/#stock-2330")
+
+    pair = page.locator("#forecasts .pair")
+    expect(pair).to_contain_text("5 日 LightGBM 2026-10")
+    expect(pair).to_contain_text("20 日 LightGBM 2026-10")
+    expect(pair).to_contain_text(
+        "5 日訓練資料到 2026-08-31、20 日訓練資料到 2026-09-30，成績在模型頁"
+    )
+
+
+def test_a_horizon_picked_on_the_stock_page_is_kept_on_today(
+    page: Page, live_server: LiveServer, explained: Seed
+) -> None:
+    page.goto(f"{live_server.url}/#stock-2330")
+    expect(page.locator("#stock-seg [data-sh='5']")).to_be_enabled()
+    page.locator("#stock-seg [data-sh='5']").click()
+    expect(page.locator(".stockhead .kpi")).to_contain_text("5 日預測排名")
+
+    page.locator("[data-nav='today']").click()
+
+    expect(page.locator("#rows .trow")).to_have_count(20)
+    expect(page.locator("[data-h='5']")).to_have_attribute("aria-pressed", "true")
+    expect(page.locator("#ret-head")).to_have_text("5 日預測報酬")
