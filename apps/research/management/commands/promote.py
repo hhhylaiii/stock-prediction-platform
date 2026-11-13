@@ -25,11 +25,23 @@ def failures(result: Promoted) -> list[str]:
     ]
 
 
+def left_out(result: Promoted) -> list[str]:
+    """Each run kept out of a partial swap, with the gates it failed."""
+    failed = {item["slot"]: item["gates"] for item in result.failed}
+    run_ids = {str(checked.slot): checked.run_id for checked in result.checked}
+    return [
+        f"  {slot} {run_ids[slot]}："
+        + "、".join(f"{gate['name']}（{gate['reason']}）" for gate in failed.get(slot, []))
+        for slot in result.held
+    ]
+
+
 class Command(BaseCommand):
     help = (
-        "Rerun a build_run run_key's gates and, when all pass, retire each slot's serving run, "
-        "make N active and write its rows for --date; --force with --reason overrides failed "
-        "gates, never a refused build."
+        "Rerun the gates of a build_run run_key's candidates and, for each horizon that passes, "
+        "retire its serving run, make N active and write its rows for --date; a failed horizon "
+        "keeps its serving run. --force with --reason overrides failed gates, never a refused "
+        "build."
     )
 
     def add_arguments(self, parser: ArgumentParser) -> None:
@@ -73,6 +85,9 @@ class Command(BaseCommand):
             self.stdout.write(f"  {run_id}：active，寫入 {count} 列")
         if result.retired:
             self.stdout.write(f"  retired：{', '.join(result.retired)}")
-        if result.failed:
+        if result.held:
+            self.stdout.write("  沒過門檻、未換上（舊模型續用）：")
+            self.stdout.write("\n".join(left_out(result)))
+        elif result.failed:
             self.stdout.write(f"  強制換模（{options['reason'].strip()}），沒過的門檻：")
             self.stdout.write("\n".join(failures(result)))
