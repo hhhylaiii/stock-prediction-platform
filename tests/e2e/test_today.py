@@ -13,6 +13,7 @@ from apps.research.models import FeatureDaily, ModelMonitor, ModelRun, Predictio
 from tests.api.conftest import FORCED_REASON, add_predictions, forced_params
 from tests.e2e.conftest import (
     BAND_NOTE,
+    BASIS_TODAY,
     EXTRA_STOCKS,
     FALLBACK_NOTE,
     MODEL_REQUIRES,
@@ -191,6 +192,7 @@ def test_no_predictions_yet_says_what_puts_a_model_online(
         f"預測資料尚未產出。排名{MODEL_REQUIRES}；上線後，這裡會列出全市場的排名。"
     )
     expect(page.locator("#band-note")).to_be_hidden()
+    expect(page.locator("#basis-note")).to_be_hidden()
     expect(page.locator("#fallback-note")).to_be_hidden()
     expect(page.locator("#model-note")).to_be_hidden()
 
@@ -236,13 +238,15 @@ def test_a_day_on_the_fallback_band_says_how_often_it_held_in_the_holdout(
     expect(page.locator("#fallback-note")).to_be_visible()
     expect(page.locator("#band-note")).to_be_hidden()
     expect(page.locator("#model-note")).to_be_visible()
-    expect(page.locator("#band-note + #fallback-note + #model-note")).to_have_count(1)
+    expect(page.locator("#band-note + #fallback-note + #basis-note + #model-note")).to_have_count(1)
+    expect(page.locator("#basis-note")).to_be_visible()
 
     page.get_by_role("button", name="5 日").click()
 
     expect(page.locator("#rows .trow").nth(0)).to_contain_text("9999")
     expect(page.locator("#model-note")).to_contain_text("這一期沒有絕對報酬模型的預測")
     expect(page.locator("#fallback-note")).to_be_hidden()
+    expect(page.locator("#basis-note")).to_be_hidden()
 
     page.get_by_role("button", name="20 日").click()
 
@@ -685,6 +689,92 @@ def test_watch_only_names_the_replaced_band(
     expect(page.locator("#rows .trow")).to_have_count(1)
     expect(page.locator("#rows .trow").first).to_contain_text("（波動率區間）")
     expect(page.locator("#today-meta")).to_contain_text("區間改用波動率區間")
+
+
+def test_the_prices_are_said_to_include_dividends_on_both_horizons(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    page.goto(live_server.url)
+
+    expect(page.locator("#rows .trow")).to_have_count(20)
+    note = page.locator("#basis-note")
+    expect(note).to_have_text(BASIS_TODAY)
+    expect(note).to_be_visible()
+    expect(page.locator("#fallback-note + #basis-note + #model-note")).to_have_count(1)
+
+    page.get_by_role("button", name="5 日").click()
+
+    expect(page.locator("#rows .trow").nth(0)).to_contain_text("9999")
+    expect(page.locator("#rows .trow").nth(1)).to_contain_text("1,149")
+    expect(page.locator("#rows .band")).to_have_count(0)
+    expect(note).to_be_visible()
+
+
+def test_a_band_without_a_predicted_price_still_gets_the_basis_note(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    Prediction.objects.filter(run_id__in=["quantile-h20", "prob-h20", "reg-h5"]).delete()
+
+    page.goto(live_server.url)
+
+    rows = page.locator("#rows .trow")
+    expect(rows.nth(0)).to_contain_text("（波動率區間）")
+    expect(page.locator("#model-note")).to_contain_text("預測報酬、預測價")
+    expect(page.locator("#basis-note")).to_be_visible()
+
+    page.get_by_role("button", name="5 日").click()
+
+    expect(rows.nth(0)).to_contain_text("9999")
+    expect(page.locator("#model-note")).to_contain_text("這一期沒有絕對報酬模型的預測")
+    expect(page.locator("#basis-note")).to_be_hidden()
+
+
+def test_a_page_without_a_price_or_a_band_does_not_explain_the_basis(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    Prediction.objects.filter(run_id__in=["quantile-h20", "vol-h20", "prob-h20"]).delete()
+
+    page.goto(live_server.url)
+
+    expect(page.locator("#rows .trow")).to_have_count(20)
+    expect(page.locator("#rows .band")).to_have_count(0)
+    expect(page.locator("#basis-note")).to_be_hidden()
+
+
+def test_the_basis_note_goes_when_the_rows_do(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    page.goto(live_server.url)
+    expect(page.locator("#basis-note")).to_be_visible()
+
+    page.locator("#q").fill("zzz")
+
+    expect(page.locator("#rows .empty")).to_contain_text("今日預測裡沒有符合「zzz」的股票")
+    expect(page.locator("#basis-note")).to_be_hidden()
+
+    page.locator("#q").fill("")
+
+    expect(page.locator("#rows .trow")).to_have_count(20)
+    expect(page.locator("#basis-note")).to_be_visible()
+    page.route("**/api/predictions?**", lambda route: route.abort())
+
+    page.get_by_role("button", name="上市").click()
+
+    expect(page.locator("#rows .error")).to_have_text("無法連線到伺服器。")
+    expect(page.locator("#basis-note")).to_be_hidden()
+
+
+def test_watch_only_explains_the_basis_too(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    page.add_init_script("localStorage.setItem('twp-watch', JSON.stringify(['2330']))")
+    page.goto(live_server.url)
+
+    page.locator("#watch-only").click()
+
+    expect(page.locator("#count")).to_have_text("追蹤中的 1 檔")
+    expect(page.locator("#basis-note")).to_have_text(BASIS_TODAY)
+    expect(page.locator("#basis-note")).to_be_visible()
 
 
 def test_the_page_opens_on_five_days_when_only_that_ranking_is_live(

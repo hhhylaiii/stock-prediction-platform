@@ -158,6 +158,7 @@
   const todayMetaEl = document.getElementById('today-meta');
   const bandNoteEl = document.getElementById('band-note');
   const fallbackNoteEl = document.getElementById('fallback-note');
+  const basisNoteEl = document.getElementById('basis-note');
   const modelNoteEl = document.getElementById('model-note');
   const prevBtn = document.getElementById('prev-page');
   const nextBtn = document.getElementById('next-page');
@@ -170,6 +171,8 @@
   const FALLBACK_NOTE = '20 日價格區間目前不是模型的預測：報酬區間模型沒有上線，區間是用近 20 日的波動估的，以最新收盤價為中心、上下各 1.28 個標準差（換算成 20 日）。' +
     '這個估法的 80% 區間在 holdout（2025 年起，到 2026-11-11 已到期的預測）裡，實際報酬落在區間內的比例是 78.7%；7 個完整的季度在 62.8% 到 89.4% 之間，偏低的是 2025 年第 1 季 62.8%，最後一段只有 2026 年 10 月 1 日至 12 日的 7 個交易日（樣本很少）、43.4%。' +
     '更早的研究期 2016–2024 年是 79.2%，大盤急跌的季度曾明顯偏低：2020 年第 1 季 55%。';
+  const BASIS_TODAY = '預測價與價格區間含息：期間內除息的股票，屆時的股價會比這裡再低約一個現金股利（除權依配股比例），頁面沒有扣除。';
+  const BASIS_STOCK = '預測報酬是含息的還原報酬，預測價與價格區間沒有扣掉期間內的除權息：這檔若在期間內除息，就算報酬預測得準，屆時的股價也會比預測價低約一個現金股利（除權依配股比例）。';
   const MODEL_NAMES = { lightgbm: 'LightGBM', ridge: 'Ridge', xgboost: 'XGBoost' };
   const SEARCH_MAX = 32;
   const pctOf = (x, digits) => x === null || x === undefined ? '—' : sgn(x * 100, digits);
@@ -310,6 +313,7 @@
     const serving = new Set((meta.models || []).map(model => model.role));
     bandNoteEl.hidden = !serving.has('interval') || Boolean(meta.interval_alert);
     fallbackNoteEl.hidden = state.h !== 20 || serving.has('interval') || serving.has('volatility') || !rows.some(onFallbackBand);
+    basisNoteEl.hidden = !rows.some(row => has(row.price_pred) || (state.h === 20 && Boolean(row.interval)));
     modelNoteEl.textContent = modelNoteText(meta, rows.length);
     modelNoteEl.hidden = !modelNoteEl.textContent;
   }
@@ -546,7 +550,8 @@
     const caveats = caveatText(entries.flatMap(entry => shownModels(entry.models, entry.horizon)));
     const lacking = entries.filter(entry => entry.prediction).map(entry => [entry.horizon, lackingText(entry.models, entry.horizon, entry.prediction)])
       .filter(([, text]) => text).map(([horizon, text]) => horizon + ' 日' + text).join('');
-    return '<p class="sub">排名、報酬與區間機率各由自己的模型產出；排名模型多用了幾個籌碼與除息日特徵，其餘特徵相同。價格以 ' + basis + ' 換算。</p><div class="list">' +
+    const priced = entries.some(entry => entry.prediction && has(entry.prediction.price_pred)) || Boolean(twenty.prediction && twenty.prediction.interval);
+    return '<p class="sub">排名、報酬與區間機率各由自己的模型產出；排名模型多用了幾個籌碼與除息日特徵，其餘特徵相同。價格以 ' + basis + ' 換算。' + (priced ? '<span class="basis-note">' + BASIS_STOCK + '</span>' : '') + '</p><div class="list">' +
       '<div class="thead h-cols" style="padding-top:10px"><div>期間</div><div class="right">預測報酬</div><div class="right">預測價</div><div class="right">80% 區間</div><div class="right prob-head" title="' + esc(PROB_TIP) + '">' + PROB_HEAD + '</div></div>' +
       entries.map(forecastRowHtml).join('') + '</div>' + (quantileBand ? '<p class="note band-note">' + BAND_NOTE + '</p>' : '') +
       (fallbackBand ? '<p class="note fallback-note">' + FALLBACK_NOTE + '</p>' : '') +
@@ -1321,6 +1326,7 @@
   document.getElementById('prob-head').title = PROB_TIP;
   bandNoteEl.textContent = BAND_NOTE;
   fallbackNoteEl.textContent = FALLBACK_NOTE;
+  basisNoteEl.textContent = BASIS_TODAY;
   window.addEventListener('hashchange', route);
   route();
 })();
