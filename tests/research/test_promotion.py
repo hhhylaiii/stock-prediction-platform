@@ -556,14 +556,16 @@ def test_only_the_horizon_swapped_in_retires_its_serving_run(
     failing_h5(monkeypatch)
     sent(monkeypatch)
     five, twenty = by_horizon(runs)
-    kept = Prediction.objects.filter(run=old_five, date=LAST).count()
+    kept = set(Prediction.objects.filter(run=old_five, date=LAST).values_list("pk", flat=True))
 
     result = promote("rank-prod", LAST, researched)
 
     assert result.retired == [old_twenty.run_id]
+    assert set(result.written) == {twenty.run_id}
     assert fresh(old_twenty).status == ModelStatus.RETIRED
     assert fresh(old_five).status == ModelStatus.ACTIVE
-    assert Prediction.objects.filter(run=old_five, date=LAST).count() == kept > 0
+    rows = Prediction.objects.filter(run=old_five, date=LAST)
+    assert set(rows.values_list("pk", flat=True)) == kept != set()
     assert not Prediction.objects.filter(run=old_twenty, date=LAST).exists()
     assert not Prediction.objects.filter(run=five).exists()
     assert Prediction.objects.filter(run=twenty, date=LAST).count() == result.written[twenty.run_id]
@@ -811,6 +813,32 @@ def test_rows_written_past_the_day_while_the_gates_run_stop_the_swap(
 
     untouched(runs)
     assert not Prediction.objects.exists()
+
+
+@pytest.mark.django_db
+def test_rows_a_held_horizon_gains_while_the_gates_run_do_not_stop_the_other(
+    researched: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs = built("rank", "rank-wf1", researched)
+    passed(LAST)
+    failing_h5(monkeypatch)
+    sent(monkeypatch)
+    five, twenty = by_horizon(runs)
+    judge = promotion.check_gates
+
+    def judged_while_predicting(run_key: str, directory: Path) -> list[Any]:
+        found = judge(run_key, directory)
+        [late] = retired_copies([five])
+        Prediction.objects.filter(run=late).update(date=LAST + timedelta(days=1))
+        return found
+
+    monkeypatch.setattr(promotion, "check_gates", judged_while_predicting)
+
+    result = promote("rank-prod", LAST, researched)
+
+    assert set(result.written) == {twenty.run_id}
+    assert fresh(twenty).status == ModelStatus.ACTIVE
+    untouched([five])
 
 
 def test_failed_gates_carry_the_unit_of_their_sample() -> None:
