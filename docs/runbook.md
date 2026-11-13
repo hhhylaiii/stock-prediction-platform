@@ -665,6 +665,27 @@ FinMind 的外資持股比有一部分存成 0，但交易所那天的頁面不�
 - 輸出的 `replaced` 是每個市場、每類的檔數與列數。`left` 是不動的列：`mixed_run`、`thin_run` 是兩類長段裡交易所不是 0 的檔數與列數；`unchecked` 是沒有交易所值的 0，分成 `no_page`（那天至少一個市場沒有頁面）、`unreadable`（那天至少一個市場的頁面讀不了，另記 warning）、`not_listed`（兩個市場的頁面都在、都沒列這檔）；原因是按整天判的，補缺跑到一半時兩個市場的數字會混在一起。補缺跑完後 `no_page`、`thin_run` 應該接近 0；不是的話先查補缺。
 - 覆寫後外資持股類特徵的歷史值會變，要重算：`uv run python manage.py build_features --start 2010-01-01 --end <最新價日>`。
 
+## 主檔補代號與停止交易的股票
+
+停止交易但還沒下市的普通股留在 `stock_master`，`delist_date` 是空的；研究層把沒有 K 棒的日子當停牌，不進 universe。停牌期間 FinMind 的股票清單不再更新這檔的日期，官方下市名單上也沒有它。`load_stock_master` 把這種普通股（四碼、不是存託憑證）照 FinMind 最後一次列出的名稱、市場與產業寫成仍上市，並在輸出與 checkpoint 的 `suspended` 列出代號。ETF、ETN、特別股這些代號下市時不會出現在公司的下市名單上，所以不適用，照舊不進主檔。
+
+只補幾檔時不要整份重跑。整份重跑會用 FinMind 的值覆寫所有列的名稱、市場、產業與下市日，`fill_industry` 補過的產業會被洗回空的。
+
+```bash
+uv run python manage.py load_stock_master --stock 1589 --stock 4804 --dry-run
+uv run python manage.py load_stock_master --stock 1589 --stock 4804
+```
+
+- `--stock` 只寫指定的代號，其他列不動；`list_date` 不在更新的欄位裡，原值保留。指定的代號不在今天的上市櫃清單、不是上一段說的停牌股、也不在下市名單時，整次失敗、不寫。
+- `--dry-run` 印出會新增的列（`create`）與會改的欄位（`change 代號 欄位 舊值 -> 新值`），最後印 `nothing was written`，raw 與 `etl_run` 也不留。不帶 `--stock` 時可以用來看整份重跑會改什麼，超過 50 行只印前 50 行。
+- 帶 `--stock` 的執行記在 dataset `stock_master_selected`（checkpoint 的 `stocks`、`created`、`changed`），不影響整份載入拿來比對的上市檔數。
+- 新增的代號沒有歷史。接著對它跑 FinMind 各 dataset 的 `backfill --stock <代號>`，再跑 `load_listing_dates --stock <代號>`，最後跑 `rebuild_market_history`。
+
+每日 16:00 的 `refresh_stock_master` 會在 `stock_master` 那列的 `added` 列出當天有報價、主檔原本沒有的代號。多半是新掛牌：當天是官方個股月成交表標 `*` 的掛牌首日。不是新掛牌的話，就是主檔原本漏掉的股票恢復交易，例如 2026-11-09 的 4207、5355、8176（建主檔那天正在停止交易）。這種代號要補兩件事：
+
+- 它之前的歷史沒有回補，照上面最後一條補。
+- 當天 15:30 的除權息批次只寫主檔裡有的代號，所以它恢復買賣那天的減資事件沒有寫進 `dividend_event`，還原價會在那天出現假的跳動。對那一天重跑 `reprocess --source <twse 或 tpex> --dataset dividend_event --start <那天> --end <那天>`，再確認停牌前最後一天的收盤價乘上 `adj_factor` 等於頁上的恢復買賣參考價。
+
 ## 交易所產業補缺（plan K17c）
 
 `stock_master.industry` 是空的股票（多半是 FinMind 股票清單沒有的下市股），用交易所「依產業別」的收盤行情補上。依序跑，先證交所、再櫃買；`--start` 從 2009-10-01 起，2009-12-31 那次抽樣才看得到 2010 年第一季就下市的股票：
@@ -681,7 +702,7 @@ uv run python manage.py fill_industry --source tpex --start 2009-10-01 --end 202
 - 一檔出現在好幾季時，用最後一次看到的產業。只寫產業是空的股票，已有的不動；跨市場的股票由先跑的市場補，所以要依序跑（上櫃轉上市的以證交所為準）。
 - 一次執行一列 `etl_run`（dataset `fill:industry`），每天記 checkpoint（`seen`、`types`），寫回 `stock_master` 留到最後一起做；中斷了就整段重跑（約 2 小時，raw 照存）。跑完記一列 `industry_fill`（info）：`types` 記每個抽樣日每個有股票的代碼 `[採用的產業（沒得採用是 null）, 頁面名稱, 多數產業, 票數, 有產業的股票數]`，`filled` 記真的寫進去的每檔 `[產業, 代碼, 這個產業第一次看到, 最後一次看到]`，`unfilled` 列出這個市場在 `--start` 時還沒下市、跑完仍是空的股票。
 - 抽樣頁整頁留在 raw，所有股票都在，不只空的那些：之後要建依時間的產業表，從 raw 加 `types` 重建，不用重抓。
-- `refresh_stock_master` 不更新 `industry`，補上的值會留著；但重跑 `load_stock_master` 會把 FinMind 沒有的股票洗回空的，之後要再跑一次本指令。每日的 `refresh_stock_master` 新增代號時產業也是空的，每季季底後兩個市場各跑一次（`--start` 季初、`--end` 季底）補上。
+- `refresh_stock_master` 不更新 `industry`，補上的值會留著；但整份重跑 `load_stock_master` 會把 FinMind 沒有的股票洗回空的，之後要再跑一次本指令（只補幾檔時用 `--stock`，見上一節）。每日的 `refresh_stock_master` 新增代號時產業也是空的，每季季底後兩個市場各跑一次（`--start` 季初、`--end` 季底）補上。
 - 補完後產業類特徵的歷史值會變：`uv run python manage.py build_features --start 2010-01-01 --end <最新價日>`（不帶範圍只重算最近 60 個交易日）。中性化 IC 直接讀 `stock_master`，補完當下就會變，補完前產出的 Phase 4 報表要重算才能比。
 - 2026-11-07 的 twp：3,065 檔裡 483 檔是空的，2010 年後下市或還在掛牌的 73 檔（櫃買 62、證交所 11），其餘 410 檔在 2010 年前下市，研究期間用不到。
 
