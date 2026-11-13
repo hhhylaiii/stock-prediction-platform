@@ -102,9 +102,14 @@ docker compose logs -f worker
   - 每個 scope 各自處理：`production.DESIGNS[scope].research_run_key` 是 None（設計還沒凍結）就拒建（2026-11-11 凍結後三個 scope 都有值，這一條不再發生；凍結後、holdout 的 claim 與報告出來之前，`build_run` 會以 `HoldoutError` 被擋，重訓把那個 scope 記在 `failed`）；`label_daily` 還沒建到 D 就全部拒建；那個月已經手動建過（當月建立、`<scope>-` 開頭的正式 build，重訓自己的 `<scope>-YYYY-MM` 與它的 shadow 不算）就拒建（`already built this month`）；否則 `build_run`，run_key 是 `<scope>-YYYY-MM`。上次重訓中斷留下的 `<scope>-YYYY-MM` 會被重建。
   - 結果寫一列 `research_retrain`（`date` 是 D）：全部建好是 info，有拒建或失敗是 warning 並告警。`detail` 有 `built`、`refused`、`failed`、`free_percent`（開始時的可用記憶體 %）與 `runs`（每個 scope 的 `elapsed_s`，以及建完那個 scope 時 worker 行程到當時為止的最高 RSS `peak_rss_mb`，會跨 scope 累積）。
   - 重訓不取研究鎖，但會佔住唯一的 worker 好幾個小時（真資料上的時間還沒量過）。那段時間不要手動重建特徵或 label、不要停 worker（`acks_late`：中斷的重訓要等 12 小時的 `CELERY_VISIBILITY_TIMEOUT` 才重新投遞，那時已不在動工時段，會直接結束；下一個早上若還在前 5 個交易日內會重排、從頭重建），並讓 Mac 醒到這列寫完：清晨的 caffeinate 只到 08:00，重訓那天手動再跑一次 `caffeinate -i -t 36000`，或確認能源選項的「顯示器關閉時避免自動進入睡眠」已開。
-- 換模：下一個早上起，06:00 的 chain 在 monitor 之後多一步 `promote`，把當月 `research_retrain` 建好、還沒試過的 run_key 一個個 `promote`，`--date` 取 D 與預設日（slot 已有列的最後一天）較晚的一天，所以第一次上線的 scope 也從 D 起服務。門檻按 horizon 分開判定：通過的 horizon 換上，沒過的那個 horizon 舊模型續用並告警（`model_promotion` warning），之後由人決定要不要對它 `--force`。`promote` 報錯時其他 scope 照跑，chain 照常完成，另寫一列 `research_promote` warning（`detail.failed` 是 run_key 對錯誤、`detail.done` 是其他 scope 的結果）並告警；報錯的 run_key 不再自動重試，修好後先看它的每個模型是不是已經 active（`model_run.status`，或 `model_promotion` 最新一列的 `promoted_slots` 有沒有列到；`promoted: true` 只表示至少換上一個），還沒上的再手動 `promote`。有 `model_promotion` 或 `research_promote` 列的 run_key 都算試過。設計凍結的那支 PR 要在 `DESIGNS` 填 `research_run_key`（不放環境變數）；填了之後，`build_run` 拒絕其他研究 run。
+- 換模：下一個早上起，06:00 的 chain 在 monitor 之後多一步 `promote`，把當月 `research_retrain` 建好、還沒試過的 run_key 一個個 `promote`，`--date` 取 D 與預設日（線上已有預測列的最新一天，或 slot 已有列的最後一天，取較晚者）較晚的一天，所以第一次上線的 scope 也從 D 起服務。門檻按 horizon 分開判定：通過的 horizon 換上，沒過的那個 horizon 舊模型續用並告警（`model_promotion` warning），之後由人決定要不要對它 `--force`。`promote` 報錯時其他 scope 照跑，chain 照常完成，另寫一列 `research_promote` warning（`detail.failed` 是 run_key 對錯誤、`detail.done` 是其他 scope 的結果）並告警；報錯的 run_key 不再自動重試，修好後先看它的每個模型是不是已經 active（`model_run.status`，或 `model_promotion` 最新一列的 `promoted_slots` 有沒有列到；`promoted: true` 只表示至少換上一個），還沒上的再手動 `promote`。有 `model_promotion` 或 `research_promote` 列的 run_key 都算試過。設計凍結的那支 PR 要在 `DESIGNS` 填 `research_run_key`（不放環境變數）；填了之後，`build_run` 拒絕其他研究 run。
 - 漏跑告警：beat 觸發的 06:00 若發現前一個交易日沒有任何 `research_morning` 列，而再往前 5 個交易日內有過（排程在跑），就替那天記一列 warning（`reason: missed`）並告警，不自動補跑。關掉開關不到 5 個交易日又打開時，第一個早上也會記這一列。
-- 研究鎖：`predict`、`monitor`、`promote`、`restore_run` 與研究排程的每一步共用一把 Postgres advisory lock，同時只會有一個在跑（同一個工作內可重入，例如 `promote` 內部的 `predict`）。排程的步驟拿不到就 10 分鐘後重試，最多 6 次（`RESEARCH_LOCK_COUNTDOWN`、`RESEARCH_LOCK_RETRIES`），用完算失敗。手動指令拿不到會直接報錯，寫出持有者，例如 `the research lock is held by 'research 10-29 06:01 predict 2026-10-28' (pid 123)`（取得時間在前；Postgres 只留標籤前 63 個字元，太長的 run_id 尾巴會被截掉）；等它跑完再重跑。行程中斷時鎖隨連線釋放，不會卡住。
+- 研究鎖：`build_features`、`build_labels`、`feature_coverage`、`predict`、`monitor`、`promote`、`restore_run` 與研究排程的每一步共用一把 Postgres advisory lock，同時只會有一個在跑（同一個工作內可重入，例如 `promote` 內部的 `predict`、排程步驟裡的 `build_features`）。排程的步驟拿不到就 10 分鐘後重試，最多 6 次（`RESEARCH_LOCK_COUNTDOWN`、`RESEARCH_LOCK_RETRIES`），用完算失敗。手動指令拿不到會直接報錯，寫出持有者，例如 `the research lock is held by 'research 10-29 06:01 predict 2026-10-28' (pid 123)`（取得時間在前；Postgres 只留標籤前 63 個字元，太長的 run_id 尾巴會被截掉）；等它跑完再重跑。行程中斷時鎖隨連線釋放，不會卡住。
+  - 手動的 `build_features`、`build_labels` 先檢查參數，再取鎖，整段重建都持鎖，標籤帶日期範圍（例如 `build_features 2010-01-04..2026-11-13`）；拿不到鎖就立刻報錯，不等待，也不寫任何列。
+  - 全量重建特徵約 30 分鐘。這段時間其他取鎖的手動指令（`feature_coverage`、`predict`、`monitor`、`promote`、`restore_run`、另一支重建）會立刻報錯；排程的步驟每 10 分鐘重試一次，6 次（1 小時）內等得到就照跑，等不到算失敗。
+  - 訓練不取鎖：`build_run` 與每月重訓不會被擋，重建期間照樣會讀到正在改寫的分區（讀到一半分區變了會報錯要求重跑）。照上面重訓那一條，兩者不要同時進行。
+  - 反過來也一樣：worker 正在跑研究排程的步驟時，主機上的手動重建會立刻被擋，等那一步跑完再重跑。
+  - 鎖只護住單一指令。特徵與 label 兩支互相擋，要一支跑完再跑下一支；兩支之間排程的步驟仍可能插進來。
 - 看狀態：
 
   ```bash
@@ -114,7 +119,7 @@ docker compose logs -f worker
   ```
 
 - Mac 在 06:00 睡著、同一天晚一點醒來時，beat 會補觸發 `research.morning` 照跑（可能已經開盤）；睡過午夜才醒的那次早於排定時間，會略過。平日的 D 沒跑成（閘門沒過、睡過午夜）不會自動補：隔天早上的 D 已經是新的一天。閘門沒過會記 warning 並告警；睡過午夜而被略過的那次，隔天早上會補記一列 `missed` warning（見上）。等 D 的 ETL 補齊（15:10 的補抓）後手動跑 `build_features --date D`、`feature_coverage --date D`、`predict --date D`、`monitor --date D`。
-- 手動長時間重建特徵或 label（`build_features`、`build_labels` 不取研究鎖）時先關掉開關，或避開 23:00–02:30 與 06:00–08:00，否則排程那一步可能和它搶同一批列而失敗（記 warning）。會改還原因子的手動操作（`fetch --dataset dividend_event`、`recompute_adj_factor`、FinMind 股利或價格回補）也避開這兩段：chain 開始之後才寫進來的改動，可能被那條 chain 記成已處理卻沒算到，事後照那天 `adj_factor_changed` 的 E 手動跑下面重建用的兩個指令。
+- 手動長時間重建特徵或 label 時先關掉開關，或避開 23:00–02:30 與 06:00–08:00：`build_features`、`build_labels` 取研究鎖，不會和排程的步驟同時寫同一批列，但重建超過 1 小時的話，排程那一步等不到鎖會失敗（記 warning）。會改還原因子的手動操作（`fetch --dataset dividend_event`、`recompute_adj_factor`、FinMind 股利或價格回補）不取鎖，照樣避開這兩段：chain 開始之後才寫進來的改動，可能被那條 chain 記成已處理卻沒算到，事後照那天 `adj_factor_changed` 的 E 手動跑下面重建用的兩個指令。
 - 排程的正確性假設 worker 只有一個（`CELERY_WORKER_CONCURRENCY=1`）：重訓和每日的 chain 靠排隊錯開，重訓本身不取研究鎖。`research.evening`、`research.morning`、`research.retrain` 開始時會讀 Celery 的 `worker_concurrency`，不是 1（包括設定成空值；環境變數沒設時預設是 1）就不跑，寫一列 warning（`reason` 寫明、`concurrency` 是讀到的值；重訓那列是每個 scope 都拒建，和記憶體不足一樣算用掉當月的重訓）並告警。只看設定值：`celery worker -c` 從指令列改的、`docker compose up --scale worker=2`、或在主機上另開一個連到同一個 redis 的 worker 都讀不到，不要那樣啟動。
 - 還原因子改寫後的重建：`refresh_adj_factor` 改寫了某檔的歷史因子時，在當天的 `adj_factor_changed`（info，資料層的列，研究層只讀）記下那檔第一個「新舊因子的倍數和前一個價格列不同」的交易日 E（單一事件就是除權息日；多個事件一起改取最早的）。只是整段等比例縮放（例如公布未來的除權息）不記，那些日子的比值不變；新價格列取得因子（`upsert_daily_prices`、FinMind 價格回補）也不記。同一天合成一列，超過 200 檔時 `detail` 只留最早的 E 與 `count`（收合時是檔數，之後每記一次加 1，同一檔再記會多算）。
   - 23:00 與 06:00 的 chain 在有還沒處理的列時，最後多一步：E 在最近 60 個交易日內（D 與之前 59 個，同 `--recent 60`）時，23:00 那條（以及補跑 23:00 的 06:00）的 60 天特徵與 81 天 label 已經涵蓋，只記下來；一般的 06:00 那條只算 D 的特徵，所以另外跑 `build_features --start E --end <D 前一個交易日>` 與 `build_labels --start <E 前 21 個交易日> --end D`（前一晚之後才出現的改動不等到下一晚，當天排的重訓才吃得到）。E 晚於 D 的列留給之後的 chain。
@@ -132,8 +137,8 @@ docker compose logs -f worker
 06:00 的 chain 在重算特徵之後、`predict` 之前，檢查凍結設計讀的每個特徵在 D 的 universe 裡有值的比例，和前 5 年同月份比（定義與門檻見 SPEC 第 5 節「資料品質檢查」的「結果寫入」那一條）。結果是 `data_quality_log` 的 `monitor_feature_coverage`，每天一列；頁面「模型輸出檢查」的「線上特徵覆蓋率」顯示最近一天的這一列，崩落的特徵排在偏低的前面。
 
 - 啟用前先補跑（第一次打開研究排程前，以及排程停過之後）：被這個檢查標過的（特徵、日期）不進之後的參考值，但只認 `data_quality_log` 裡有的列；沒跑過的缺口日會被當成正常日留在參考裡，隔年同月份的下緣可能被拉到 0，那個月就不判了。
-  - 第一次：`feature_coverage --start 2022-10-03 --end <最近一個交易日> --quiet`。2022-10-25 是回放裡第一個被標的日子，更早沒有。約 1,000 個交易日，主機上每天約 0.2 秒（容器裡還沒量過）。`--quiet` 只寫列、不發告警。
-  - 預期結果：warning 只出現在 `fund_days_to_ex_date`（2022-10、2024-09、2024-11、2025-10，以及 2026-10-29 起），沒有 error。出現 error 先看輸出，不要留著不管：error 列會算進每月重訓的上線門檻 (4)。
+  - 第一次：`feature_coverage --start 2022-10-03 --end <最近一個交易日> --quiet`。2022-10-25 是回放裡第一個被標的日子，更早沒有。約 1,000 個交易日，主機上每天約 0.2 秒；worker 容器裡 2026-11-13 實跑 995 個交易日花 392 秒。`--quiet` 只寫列、不發告警。
+  - 預期結果：warning 只出現在 `fund_days_to_ex_date`（2022-10、2024-09、2024-11、2025-10），沒有 error。2026-11-13 實跑到 2026-11-12：995 列，warning 10 列（2022-10 有 5 天、2024-09 有 3 天、2024-11-07、2025-10-28）。2026-10-29 起原本也會被標，除權除息預告表上線並重建最近 60 個交易日之後就不會了。出現 error 先看輸出，不要留著不管：error 列會算進每月重訓的上線門檻 (4)。
   - 排程停過：從停的那天補到最近一個交易日，再打開開關。
   - 一定要一次給一段連續的範圍、由指令依日期順序跑；後面日子的參考值會用到前面日子的結果。
 - 看結果：
@@ -199,6 +204,79 @@ uv run python manage.py check_quality --date 2026-10-28
   ```bash
   uv run python manage.py shell -c "from datetime import date; from apps.etl.tasks import _reaudit; _reaudit(date(2026, 10, 28))"
   ```
+
+### 補一根缺的 K 棒（櫃買、第一頁行情存檔之前的日子）
+
+FinMind 回補偶爾會少一根：2026-11-13 拿已存的官方個股月成交頁全部對過，2,180 檔普通股、63,119 個股票日只缺兩根，都是上櫃掛牌首日（`7825` 2026-09-10、`7856` 2026-09-22），FinMind 的回應本身沒有那一天。
+
+這種日子**不要**用 `fetch --source tpex --dataset daily_price --date <那天>` 補。那會把那天的行情原始頁存成 `daily_price`，「第一頁行情存檔」就從 2026-10-22 往前移到那天；之後到 10-21 之間的日子沒有存行情頁，當沖的重放或補抓會全部 `SourceNotReadyError`（見「當沖歷史回補」）。改用：
+
+```bash
+uv run python manage.py fill_price_bars --source tpex --date 2026-09-10 --stock 7825 --dry-run
+uv run python manage.py fill_price_bars --source tpex --date 2026-09-10 --stock 7825
+```
+
+- 抓那一天的兩張行情頁，只把指定代號那天的 K 棒新增進 `daily_price`（`--stock` 可重複）；頁上其他代號不寫，已有的列不改。之後有除權息事件的，還原因子照既有規則補上。
+- 原始頁存在 dataset `daily_price_fill`，不算那天的行情頁，所以「第一頁行情存檔」不會動。`etl_run` 也記在 `daily_price_fill`，checkpoint 的 `stocks` 是補的代號。
+- 整次全有或全無。發請求之前就拒絕的：那天不是交易日；那天在第一頁行情存檔當天或之後（改用 `fetch`）；代號不在 `stock_master`、那天早於 `list_date` 或不早於 `delist_date`；代號那天已經有 K 棒。抓到頁才知道的：代號不在那天的行情頁上，這時留下 raw 與一列 failed 的 `etl_run`，`daily_price` 不寫。
+- 每新增一列印一行 `insert 代號 日期 open … turnover …`，最後印 `daily_price: N bars added for 日期`。`--dry-run` 印同樣的列，總結行是 `N bars to add`，再印 `nothing was written`，raw 與 `etl_run` 也不留。
+- 只支援櫃買。證交所目前沒有這種缺口。
+- 補完之後還有三件事：
+  - 當沖量要對同一天重放一次（`reprocess --source tpex --dataset day_trade --start <那天> --end <那天>`），理由同「當沖歷史回補」倒數第二條。
+  - 對同一天重跑 `fill_from_exchange --source tpex --fill margin --start <那天> --end <那天>` 與同樣區間的 `--fill sbl`（兩者都冪等），理由見「交易所逐日表補缺」：那兩個補缺只替當天有價的代號寫列。剛掛牌的股票通常還不在融資券與借券表上，這一步多半不會新增任何列，照跑即可。
+  - 特徵與 label：每晚只重算最近 60 個交易日的特徵與 81 個交易日的 label，新增價格列也不會記 `adj_factor_changed`。補的那天在這個範圍內時當晚就會算進去；在範圍以外時，照下一節「補進一檔股票的歷史之後」整段重建特徵與 label 並比對。`list_date` 是空的股票，第一根 K 棒往前移，上市天數也會跟著改。
+
+### 補進一檔股票的歷史之後
+
+適用的情況：一檔股票在 60 個交易日以前的 `daily_price`、`stock_master` 的產業或掛牌日、`market_history` 的區間被補進來或改掉。例子是 2026-11 查出 4207、5355、8176、1589、4804 五檔普通股整段歷史不在庫裡。這個流程預定 2026-11 下旬第一次在正式資料上做，下面的順序是依程式推出來的，做完回來更新這一節。「市場歷史」「交易所產業補缺」「FinMind 外資持股 0 的覆寫」各自只寫了重建的指令；同一段時間做完的規則與比對以這一節為準。
+
+- 每晚的重算不夠：23:00 的 chain 只重算最近 60 個交易日的特徵、81 個交易日的 label。補進來的股票只要某天在 universe，那一天就會改到別的股票：
+  - 同產業股票的四個欄位（`ind_sector_ret_20d`、`ind_rel_ret_20d`、`ind_mom_neutral`、`ind_ep_neutral`），以及沒有產業、或當天該產業沒有 universe 股票有值而改用全 universe 平均或中位數的列。
+  - 所有 universe 股票的 `fwd_rank_pct`。
+  - 訓練與推論時每天的 winsorize 與 z-score（不存在表裡，讀的時候才算）。
+  - 只靠每晚的重算，分區會變成 60 個交易日以前沒有這檔、之後有。
+- 規則：從留備份（第 2 步）到第二次重建做完（第 4 步）要在同一段時間內，中間不能有 23:00 或 06:00 的 chain、每月重訓，也不能有 ETL 批次在寫；兩次重建用同一個 `--end`。研究排程可以先關掉 `RESEARCH_SCHEDULE_ENABLED`（見「研究排程」手動長時間重建那一條），ETL 批次不受這個開關管，要另外避開。排不下就整個不開始。
+  - 原因：中間只要多一天的價量或一條 chain，最近 60 個交易日的特徵、81 個交易日的 label 就和備份不同，第 4 步會把無關的差異當成問題。
+  - 這檔股票要補的資料一次補齊：主檔、掛牌區間、價量、除權息與減資事件、股數、籌碼、估值、財報與營收。價量補進來之後，當沖要照「當沖歷史回補」對同一段日期重放，否則當沖量被當成 0。60 個交易日以前的任何一項晚補，都要再整段重建一次。
+  - 只缺某一天的 K 棒、而且那天在第一頁行情存檔（2026-10-22）之前時，用上一節「補一根缺的 K 棒」的 `fill_price_bars`，不要用 `fetch` 抓那天的交易所行情：原始頁一存成 `daily_price`，之後到 10-21 之間的當沖重放會全部失敗。
+  - repo 裡沒有比對分區或 `label_daily` 的指令。比對用的查詢或腳本先寫好，先拿第 1 步前後的兩份備份跑過，再開始第 3 步。
+- 順序，一步做完再做下一步：
+  1. 補資料之前，先整段重建一次特徵與 label 當基準。上一次整段重建之後改到舊日期的資料（還原因子、當沖定案值、財報與營收掃描、主檔異動）會在這一步進來，和要補的股票無關；重建前先把 `artifacts/features` 複製一份，重建後逐年比，把這些差異看過。
+  2. 留備份，分兩種用途：
+     - 拿來比的：`artifacts/features` 整個目錄再複製一份；`label_daily` 匯出成可以直接比的檔（例如 psql 的 `\copy (select * from label_daily order by stock_id, date, horizon) to ...`）。
+     - 要退回時用的：`feature_daily`、`label_daily`、`stock_master`、`market_history` 用 `pg_dump` 匯出。分區是從 `feature_daily` 重新匯出的，只有分區的備份退不回去。
+  3. 補資料，逐項做下面的「重建前先確認」。有跑 `rebuild_market_history` 的話，記下它印的 `stored spans that changed` 與 `market_history_rebuilt` 那一列的 `changed`、`start_shifted`：它整張表重寫，補進來的代號以外也可能變，第 4 步別的股票的 `in_universe` 差異要對著這份清單看。
+  4. 再整段重建一次特徵與 label，照下面的判準和第 2 步的備份比。
+  5. 照「線上特徵覆蓋率檢查」把覆蓋率整段重跑一次：universe 的檔數變了，每天的比例跟著變。
+
+  ```bash
+  uv run python manage.py build_features --start 2010-01-01 --end <最新價日>
+  uv run python manage.py build_labels --start 2010-01-01 --end <最新價日>
+  ```
+
+  - 在主機上跑，不在 worker 容器裡：特徵整段重建約 26 到 34 分鐘、峰值記憶體約 4.6 GB，label 約 6 到 10 分鐘、不到 3 GB（2026-11 的兩次整段重建）；容器和資料庫共用同一個 VM 的記憶體。整個流程要重建兩次，每次特徵加 label 約 32 到 44 分鐘，另外加上備份、補資料、比對與覆蓋率的時間。
+  - 特徵重建到一半報錯時，已經寫完的年份是新的、後面的年份還是舊的；排除原因後從報錯那一年用 `--start <年>-01-01` 接著跑。
+- 重建前先確認（第 3 步），缺一項的後果寫在後面：
+  - `daily_price` 整張表的最小日期沒有變：panel 用它判斷一檔股票是不是在資料開始之前就掛牌。往前移的話，沒有掛牌日、第一筆報價在原本最小日期的股票會被當成那一天才上市，前 60 個交易日被排除在 universe 外。
+  - 補進來的 `daily_price` 沒有落在非交易日的列：只要有一列，所有股票的特徵與 label 建置都會報錯。
+  - 還原價（收盤價乘上 `adj_factor`）在每次除權息、減資前後接得上：每個事件在 `dividend_event` 都有列、事件的 `adj_factor` 不是空的，而且事件前一個交易日的 `adj_factor` 除以當天的 `adj_factor` 等於那個事件的因子。有過事件的股票 `adj_factor` 整段都是 1，代表事件沒有補進來，或事件的因子是空的；那樣事件當天是假的大跌或大漲，會進到這檔的報酬、波動與 label，也透過產業平均進到同產業的股票。
+  - `market_history` 的區間涵蓋真正的掛牌期間：區間以外的股票日不在 universe，補了價量也不會進訓練。
+  - `stock_master.list_date`、`delist_date` 和第一筆、最後一筆報價對得上：早於 `list_date` 或不早於 `delist_date` 的報價不會被讀，FinMind 回補時也會被濾掉；`list_date` 是空的而第一筆報價晚於資料起點時，上市天數從第一筆報價算起，前 60 個交易日不在 universe。
+  - `stock_master.industry` 是產業代碼表（`apps/research/features/size_risk.py` 的 `SECTOR_CODES` 與別名）裡有的名字：空白的話這檔不屬於任何產業，`ind_sector_id` 是空的。產業用現值套這檔最後一段掛牌的整段歷史。
+  - 補進來的報價中間沒有超過 250 個交易日的缺口：panel 把這麼長的缺口當成代號重新掛牌，缺口之前那一段沒有產業，缺口之後的前 60 個交易日不在 universe。
+  - 處置與全額交割事件完整：少了的話，那段期間會被誤算進 universe。
+- 確認只有預期的地方變了（第 4 步）：
+  - 特徵，逐年比分區：別的股票只能在上面那四個欄位不同，而且只在補進來的股票在 universe 的那些天、同一個產業的列，或改用全 universe 平均或中位數的列。別的股票的 `in_universe` 與其餘欄位要相同（浮點數最後幾位的差異除外）。
+    - 兩個少見的例外也會被這一條列出來，看到時對著原因判：被改的是 2330 時，`mkt_tsm_adr_gap` 會改到所有股票；某個市場某一天原本沒有任何當沖列時，`chip_day_trade_ratio_5d` 會改到那個市場的股票。
+  - label，比 `label_daily`：別的股票只有 `fwd_rank_pct` 可以不同，而且只在補進來的股票排得進名次的那些天；其餘欄位相同。
+  - 不符時先停，不要接著跑覆蓋率。要退回的話，特徵、label 與補進來的資料要一起退：只退一部分，當晚的重算又會留下 60 個交易日的界線。還原資料表與刪資料先回報，由使用者決定。分區從備份蓋回各 `year=` 目錄裡的檔，不要刪 `artifacts/features` 目錄本身（見「上線前」）。
+- 做完之後：
+  - 重建當天起，線上的模型讀到的輸入會有很小的變化，補進來的股票開始有預測；下一次每月重訓才會用到新的歷史列。寫進當次的紀錄。
+  - 舊年度分區的內容變了，研究期的報表與快取會對不上，都屬預期，不要照訊息重跑：
+    - `phase3_report` 會拒跑並要求重跑 `ic_report`；`ic_report` 在 holdout 之後拒絕寫入（特徵篩選已經定案，SPEC 第 6 節處理步驟 7），所以這份報表之後不能再產生。
+    - `evaluate_rank`、`evaluate_targets` 對研究期的 run 會回報快取過期並要求重跑 `train`。重跑會重新擬合已經凍結的研究 run，先回報再決定。
+    - 每月重訓的 `build_run` 不做這些檢查，不受影響。
+  - 價格先補、股利後補時，之後第一條 chain 可能替補進來的股票發一則 `research_rebuild` 的 `by_hand` 告警（還原因子在 60 個交易日以前改過）。`notes` 裡的列都早於這次整段重建的話可以略過，判法見「研究排程」講 `by_hand` 的那一條。
 
 ## 財報實際公告日回補
 
@@ -665,6 +743,27 @@ FinMind 的外資持股比有一部分存成 0，但交易所那天的頁面不�
 - 輸出的 `replaced` 是每個市場、每類的檔數與列數。`left` 是不動的列：`mixed_run`、`thin_run` 是兩類長段裡交易所不是 0 的檔數與列數；`unchecked` 是沒有交易所值的 0，分成 `no_page`（那天至少一個市場沒有頁面）、`unreadable`（那天至少一個市場的頁面讀不了，另記 warning）、`not_listed`（兩個市場的頁面都在、都沒列這檔）；原因是按整天判的，補缺跑到一半時兩個市場的數字會混在一起。補缺跑完後 `no_page`、`thin_run` 應該接近 0；不是的話先查補缺。
 - 覆寫後外資持股類特徵的歷史值會變，要重算：`uv run python manage.py build_features --start 2010-01-01 --end <最新價日>`。
 
+## 主檔補代號與停止交易的股票
+
+停止交易但還沒下市的普通股留在 `stock_master`，`delist_date` 是空的；研究層把沒有 K 棒的日子當停牌，不進 universe。停牌期間 FinMind 的股票清單不再更新這檔的日期，官方下市名單上也沒有它。`load_stock_master` 把這種普通股（四碼、不是存託憑證）照 FinMind 最後一次列出的名稱、市場與產業寫成仍上市，並在輸出與 checkpoint 的 `suspended` 列出代號。ETF、ETN、特別股這些代號下市時不會出現在公司的下市名單上，所以不適用，照舊不進主檔。下市名單也會列出換市場的股票在舊市場的那一筆（例如上櫃轉上市）；普通股最後掛牌的市場在下市名單上沒有紀錄時，那一筆只當成換市場，不當成下市。上市檔數的檢查只算最新快照裡的檔數，停牌股不算進去，所以一份缺了一批普通股的快照仍然會被拒收。
+
+只補幾檔時不要整份重跑。整份重跑會用 FinMind 的值覆寫所有列的名稱、市場、產業與下市日，`fill_industry` 補過的產業會被洗回空的。
+
+```bash
+uv run python manage.py load_stock_master --stock 1589 --stock 4804 --dry-run
+uv run python manage.py load_stock_master --stock 1589 --stock 4804
+```
+
+- `--stock` 只寫指定的代號，其他列不動；`list_date` 不在更新的欄位裡，原值保留。指定的代號不在今天的上市櫃清單、不是上一段說的停牌股、也不在下市名單時，整次失敗、不寫。
+- `--dry-run` 印出會新增的列（`create`）與會改的欄位（`change 代號 欄位 舊值 -> 新值`），最後印 `nothing was written`，raw 與 `etl_run` 也不留。不帶 `--stock` 時可以用來看整份重跑會改什麼，超過 50 行只印前 50 行。
+- 帶 `--stock` 的執行記在 dataset `stock_master_selected`（checkpoint 的 `stocks`、`created`、`changed`），不影響整份載入拿來比對的上市檔數。
+- 新增的代號沒有歷史。接著對它跑 FinMind 各 dataset 的 `backfill --stock <代號>`，再跑 `load_listing_dates --stock <代號>`，最後跑 `rebuild_market_history`。
+
+每日 16:00 的 `refresh_stock_master` 會在 `stock_master` 那列的 `added` 列出當天有報價、主檔原本沒有的代號。多半是新掛牌：當天是官方個股月成交表標 `*` 的掛牌首日。不是新掛牌的話，就是主檔原本漏掉的股票恢復交易，例如 2026-11-09 的 4207、5355、8176（建主檔那天正在停止交易）。這種代號要補兩件事：
+
+- 它之前的歷史沒有回補，照上面最後一條補。
+- 當天 15:30 的除權息批次只寫主檔裡有的代號，所以它恢復買賣那天的減資事件沒有寫進 `dividend_event`，還原價會在那天出現假的跳動。對那一天重跑 `reprocess --source <twse 或 tpex> --dataset dividend_event --start <那天> --end <那天>`，再確認停牌前最後一天的收盤價乘上 `adj_factor` 等於頁上的恢復買賣參考價。
+
 ## 交易所產業補缺（plan K17c）
 
 `stock_master.industry` 是空的股票（多半是 FinMind 股票清單沒有的下市股），用交易所「依產業別」的收盤行情補上。依序跑，先證交所、再櫃買；`--start` 從 2009-10-01 起，2009-12-31 那次抽樣才看得到 2010 年第一季就下市的股票：
@@ -681,7 +780,7 @@ uv run python manage.py fill_industry --source tpex --start 2009-10-01 --end 202
 - 一檔出現在好幾季時，用最後一次看到的產業。只寫產業是空的股票，已有的不動；跨市場的股票由先跑的市場補，所以要依序跑（上櫃轉上市的以證交所為準）。
 - 一次執行一列 `etl_run`（dataset `fill:industry`），每天記 checkpoint（`seen`、`types`），寫回 `stock_master` 留到最後一起做；中斷了就整段重跑（約 2 小時，raw 照存）。跑完記一列 `industry_fill`（info）：`types` 記每個抽樣日每個有股票的代碼 `[採用的產業（沒得採用是 null）, 頁面名稱, 多數產業, 票數, 有產業的股票數]`，`filled` 記真的寫進去的每檔 `[產業, 代碼, 這個產業第一次看到, 最後一次看到]`，`unfilled` 列出這個市場在 `--start` 時還沒下市、跑完仍是空的股票。
 - 抽樣頁整頁留在 raw，所有股票都在，不只空的那些：之後要建依時間的產業表，從 raw 加 `types` 重建，不用重抓。
-- `refresh_stock_master` 不更新 `industry`，補上的值會留著；但重跑 `load_stock_master` 會把 FinMind 沒有的股票洗回空的，之後要再跑一次本指令。每日的 `refresh_stock_master` 新增代號時產業也是空的，每季季底後兩個市場各跑一次（`--start` 季初、`--end` 季底）補上。
+- `refresh_stock_master` 不更新 `industry`，補上的值會留著；但整份重跑 `load_stock_master` 會把 FinMind 沒有的股票洗回空的，之後要再跑一次本指令（只補幾檔時用 `--stock`，見上一節）。每日的 `refresh_stock_master` 新增代號時產業也是空的，每季季底後兩個市場各跑一次（`--start` 季初、`--end` 季底）補上。
 - 補完後產業類特徵的歷史值會變：`uv run python manage.py build_features --start 2010-01-01 --end <最新價日>`（不帶範圍只重算最近 60 個交易日）。中性化 IC 直接讀 `stock_master`，補完當下就會變，補完前產出的 Phase 4 報表要重算才能比。
 - 2026-11-07 的 twp：3,065 檔裡 483 檔是空的，2010 年後下市或還在掛牌的 73 檔（櫃買 62、證交所 11），其餘 410 檔在 2010 年前下市，研究期間用不到。
 
@@ -738,9 +837,9 @@ uv run python manage.py rebuild_market_history
 
 - `monitor --date D` 判的是 D 當天服務中的 run（D 在該 horizon 有 `prediction` 列的 run，依 API 的順序）。slot 當天沒有 `prediction` 列就不判，停機或 predict 失敗的那幾天監控會暫停；補跑時先補 `predict --date D`，再補 `monitor --date D`。
 - `model_alert` 每筆帶 `mode`：`judged` 會把 active 的 run 降級（`reason` 是 `missing_reference` 時只告警）；`grace`（上線日之前補寫的日子，以及換模後 5 個交易日）與 `reset`（`restore_run` 之後、該 slot（目標 × horizon）的窗口還沒累積滿 60 列，之後換上的 run 沿用；h20 約要 80 個交易日、h5 約 65 個）只告警。被判 run 自己的恢復日晚於告警日時（恢復後補跑之前的日子），`reset_rows` 是 0。`mostly_predecessors` 為 true 表示窗口多為前任 run 的列，人工恢復前先看這個。
-- `monitor`、`predict`、`promote`、`restore_run` 共用研究鎖，一次只跑一個（見「研究排程」）；手動指令拿不到鎖會報錯並寫出持有者，等它跑完再重跑。
+- `monitor`、`predict`、`promote`、`restore_run` 和手動的 `build_features`、`build_labels` 共用研究鎖，一次只跑一個（見「研究排程」）；手動指令拿不到鎖會報錯並寫出持有者，等它跑完再重跑。
 - 換模日落在交易日曆最後 4 個交易日內時，寬限結束日算不出來（log 會有 warning）；12 月換模前先照「交易日曆延伸」延伸日曆。
-- 換模：`promote --run-key K` 按 horizon 分開判定（排名的 5 日與 20 日各自判；區間、波動率、機率三個 20 日模型一起判）：通過的換上，沒過的那個 horizon 舊模型續用並寫 `model_promotion` 告警；同一支 run_key 之後再下一次，只處理還是 candidate 的模型：重判通過就直接換上、不算強制，仍不過就維持不換。要強制換模用 `--force --reason "<原因>"`（原因與沒過的門檻會一直顯示在模型頁該模型下方，直到它被換下；不要寫私人資訊或主機路徑）。門檻判斷後正常結束的 promote（換上或被擋）都寫一列 `model_promotion`；在那之前或之後任何一步報錯（例如非交易日、claim 不符、寫預測失敗），整筆回復、不寫。`detail.scope` 是 rank／return／interval（一次 promote 只處理一個 scope），`detail.promoted` 表示這一次有沒有換上任何一個模型，換上的列在 `detail.promoted_slots`，留在 candidate 的列在 `detail.held_slots`（附各自沒過的門檻）：門檻全過是 info（不告警），有沒過的與強制換模是 warning。同一個 scope 依 id（寫入順序）最新的那一列，就是最後一次換模嘗試的結果，涵蓋那支 run_key 當時還沒上線的每個模型；`held_slots` 裡的 horizon 服務中的仍是之前的版本（可能來自更早月份的重訓），restore 與降級不寫這一列。`data_quality` 門檻的 reason 只寫摘要（幾天有 error、最近一天是哪些檢查），完整清單在 N 的 `params["gates"]` 那一項的 `errors`（新到舊，最多 200 筆）與 `errors_total`。晚幾天才換模時，`--date` 預設會取 slot 已有列的最後一天。被留下的 horizon 之後才強制換上、而那一格從沒有服務過時，預設仍是建置的 as_of：要明寫 `--date <開始服務的那一天>`，否則上線日與第一批預測列會落在過去那一天，中間的日子沒有列。換上之後，promote 會重算那天的 `output_width_ratio` 與 `output_odds_vs_q50`（換模重寫了那天的預測），寬度比超標照樣告警，機率矛盾只記 info、不告警；重算失敗只寫 error log，換模不回復，等下一次 `monitor --date D` 再算。
+- 換模：`promote --run-key K` 按 horizon 分開判定（排名的 5 日與 20 日各自判；區間、波動率、機率三個 20 日模型一起判）：通過的換上，沒過的那個 horizon 舊模型續用並寫 `model_promotion` 告警；同一支 run_key 之後再下一次，只處理還是 candidate 的模型：重判通過就直接換上、不算強制，仍不過就維持不換。要強制換模用 `--force --reason "<原因>"`（原因與沒過的門檻會一直顯示在模型頁該模型下方，直到它被換下；不要寫私人資訊或主機路徑）。門檻判斷後正常結束的 promote（換上或被擋）都寫一列 `model_promotion`；在那之前或之後任何一步報錯（例如非交易日、claim 不符、寫預測失敗），整筆回復、不寫。`detail.scope` 是 rank／return／interval（一次 promote 只處理一個 scope），`detail.promoted` 表示這一次有沒有換上任何一個模型，換上的列在 `detail.promoted_slots`，留在 candidate 的列在 `detail.held_slots`（附各自沒過的門檻）：門檻全過是 info（不告警），有沒過的與強制換模是 warning。同一個 scope 依 id（寫入順序）最新的那一列，就是最後一次換模嘗試的結果，涵蓋那支 run_key 當時還沒上線的每個模型；`held_slots` 裡的 horizon 服務中的仍是之前的版本（可能來自更早月份的重訓），restore 與降級不寫這一列。`data_quality` 門檻的 reason 只寫摘要（幾天有 error、最近一天是哪些檢查），完整清單在 N 的 `params["gates"]` 那一項的 `errors`（新到舊，最多 200 筆）與 `errors_total`。不帶 `--date` 時，上線日取目前線上已有預測列的最新一天（所有服務中的模型一起看；不早於建置的 as_of，也不早於那幾格已有列的最後一天），線上完全沒有預測列時才取最新一個研究資料就緒的交易日。所以晚幾天才換模、或被留下的 horizon 之後才換上，上線日會和其他模型最新的預測日對齊；as_of 到上線日之間沒有預測列是事實，不補寫。線上的預測若已多日沒跑，預設日會落在那個舊日子：手動換上前先唯讀印出預設日（`uv run python manage.py shell -c "from apps.research.promotion import first_day; print(first_day('<run_key>'))"`），並把看到的日期用 `--date` 明帶進實際指令，確認框以那個日期核對；那一天的特徵還沒建時 `promote` 會失敗、整筆回復。晚上換上一格本來就在服務的模型，會把前一個交易日那一格已顯示的列改寫成新模型的（既有行為）；建議在早上鏈跑完之後才手動換上。服務中的版本比要換上的建置新（訓練窗終點較晚）時，`promote` 整次拒絕、什麼都不換，加 `--force` 也一樣，沒有跳過的旗標；服務中的那個版本正在降級中也一樣會擋。同一支 run_key 底下一格較舊、另一格想強制時，這一支也強制不了。排程的 promote 步驟被這條擋下時，會寫一列 `research_promote` warning 並告警，那支 run_key 不再自動重試；看到這則告警表示中間有人手動換上了更新的建置。要讓較舊的模型回到線上沒有指令可用（`restore_run` 只收降級中的版本），只能重新建置。換上之後，promote 會重算那天的 `output_width_ratio` 與 `output_odds_vs_q50`（換模重寫了那天的預測），寬度比超標照樣告警，機率矛盾只記 info、不告警；重算失敗只寫 error log，換模不回復，等下一次 `monitor --date D` 再算。
 - 恢復：`restore_run --run-id R --date D --reason "<原因>"`，只接受 degraded 的 run，D 不早於它最後一個預測日、不晚於今天。
 
 ## 告警

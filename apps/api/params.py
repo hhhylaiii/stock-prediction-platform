@@ -53,5 +53,5 @@ class HistoryQuery(serializers.Serializer[Any]):
 
 
 class MonthlyIcQuery(serializers.Serializer[Any]):
-    horizon = serializers.ChoiceField(choices=[5, 20], default=DEFAULT_HORIZON)
+    horizon = serializers.ChoiceField(choices=[5, 20], required=False)
     months = serializers.IntegerField(min_value=1, max_value=120, default=24)
