@@ -14,7 +14,7 @@ from django.test.utils import CaptureQueriesContext
 
 from apps.market.calendar import TradingDays
 from apps.market.models import DailyPrice, Market, StockMaster, TradingCalendar
-from apps.research import lock
+from apps.research import lock, tasks
 from apps.research.feature_coverage import run_coverage
 from apps.research.lock import LOCK_ID, ResearchBusyError, locked, research_lock
 from apps.research.management.commands import build_features, build_labels
@@ -26,6 +26,11 @@ from apps.research.promotion import promote, restore
 DAY = date(2026, 10, 28)
 WAIT = 10
 BUILDS = [("build_features", {"date": DAY}), ("build_labels", {"start": DAY, "end": DAY})]
+YEAR_END, NEW_YEAR = date(2026, 12, 31), date(2027, 1, 4)
+WRITERS = [
+    ("build_features", build_features, "write_features", FeatureDaily),
+    ("build_labels", build_labels, "write_labels", LabelDaily),
+]
 
 
 @pytest.fixture
@@ -43,9 +48,13 @@ def one_bar(calendar_rows: None, settings: Any, tmp_path: Path) -> None:
     StockMaster.objects.create(
         stock_id="2330", name="台積電", market=Market.TWSE, industry="半導體業"
     )
-    DailyPrice.objects.create(
+    bar(DAY).save()
+
+
+def bar(day: date) -> DailyPrice:
+    return DailyPrice(
         stock_id="2330",
-        date=DAY,
+        date=day,
         open=100,
         high=101,
         low=99,
@@ -53,6 +62,17 @@ def one_bar(calendar_rows: None, settings: Any, tmp_path: Path) -> None:
         volume=1000,
         turnover=100000,
     )
+
+
+@pytest.fixture
+def two_years(one_bar: None) -> None:
+    """Bars on the last session of 2026 and the first Monday of 2027, with a calendar past them."""
+    first = date(2027, 1, 1)
+    TradingCalendar.objects.bulk_create(
+        TradingCalendar(date=day, is_trading_day=day.weekday() < 5)
+        for day in (first + timedelta(days=n) for n in range(59))
+    )
+    DailyPrice.objects.bulk_create([bar(YEAR_END), bar(NEW_YEAR)])
 
 
 def holds_here() -> bool:
@@ -260,15 +280,14 @@ def test_a_manual_build_fails_at_once_while_another_job_holds_the_lock(
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize(
-    ("command", "module", "writer"),
-    [
-        ("build_features", build_features, "write_features"),
-        ("build_labels", build_labels, "write_labels"),
-    ],
-)
+@pytest.mark.parametrize(("command", "module", "writer", "table"), WRITERS)
 def test_a_manual_build_holds_the_lock_while_it_writes_and_names_its_range(
-    one_bar: None, monkeypatch: pytest.MonkeyPatch, command: str, module: Any, writer: str
+    one_bar: None,
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+    module: Any,
+    writer: str,
+    table: Any,
 ) -> None:
     seen: list[tuple[bool, bool, str]] = []
     real = getattr(module, writer)
@@ -284,8 +303,73 @@ def test_a_manual_build_holds_the_lock_while_it_writes_and_names_its_range(
     assert held
     assert not free
     assert re.search(rf"research \d{{2}}-\d{{2}} \d{{2}}:\d{{2}} {command} {DAY}\.\.{DAY}$", name)
+    assert table.objects.filter(date=DAY).exists()
     assert not holds_here()
     assert free_elsewhere()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(("command", "module", "writer", "table"), WRITERS)
+def test_a_build_over_two_years_takes_the_lock_once_and_keeps_it_between_the_years(
+    two_years: None,
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+    module: Any,
+    writer: str,
+    table: Any,
+) -> None:
+    held: list[bool] = []
+    real = getattr(module, writer)
+
+    def spy(*args: Any) -> int:
+        held.append(holds_here() and not free_elsewhere())
+        return int(real(*args))
+
+    monkeypatch.setattr(module, writer, spy)
+    with CaptureQueriesContext(connection) as queries:
+        call_command(command, start=YEAR_END, end=NEW_YEAR)
+    taken = [
+        query["sql"] for query in queries.captured_queries if "pg_try_advisory_lock" in query["sql"]
+    ]
+    assert len(taken) == 1
+    assert held == [True, True]
+    assert set(table.objects.values_list("date", flat=True)) >= {YEAR_END, NEW_YEAR}
+    assert free_elsewhere()
+
+
+@pytest.mark.django_db
+def test_the_feature_build_still_holds_the_lock_while_it_exports_and_flags_ex_dates(
+    two_years: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    held: dict[str, list[bool]] = {"export_year": [], "flag_ex_dates": []}
+
+    def watched(name: str) -> Any:
+        real = getattr(build_features, name)
+
+        def spy(*args: Any, **kwargs: Any) -> Any:
+            held[name].append(holds_here())
+            return real(*args, **kwargs)
+
+        return spy
+
+    for name in held:
+        monkeypatch.setattr(build_features, name, watched(name))
+    call_command("build_features", start=YEAR_END, end=NEW_YEAR)
+    assert held == {"export_year": [True, True], "flag_ex_dates": [True]}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("name", "table"), [("recent_features", FeatureDaily), ("labels", LabelDaily)]
+)
+def test_a_scheduled_step_runs_the_real_build_under_its_own_lock(
+    one_bar: None, name: str, table: Any
+) -> None:
+    done = tasks.step.run([], name, tasks.EVENING_CHECK, DAY.isoformat())
+    assert [entry["step"] for entry in done] == [name]
+    assert "rows for" in done[0]["result"]
+    assert table.objects.filter(date=DAY).exists()
+    assert not holds_here()
 
 
 @pytest.mark.django_db
@@ -301,14 +385,24 @@ def test_a_build_inside_a_scheduled_step_runs_under_the_step_lock(
 
 
 @pytest.mark.django_db
-def test_a_build_with_a_bad_argument_says_so_even_while_the_lock_is_held(one_bar: None) -> None:
-    saturday = date(2026, 10, 31)
+@pytest.mark.parametrize(
+    ("command", "options", "complaint"),
+    [
+        ("build_features", {"date": date(2026, 10, 31)}, "is not a trading day"),
+        ("build_labels", {"start": date(2026, 10, 29), "end": DAY}, "is after the end"),
+    ],
+)
+def test_a_build_with_a_bad_argument_says_so_even_while_the_lock_is_held(
+    one_bar: None, command: str, options: dict[str, Any], complaint: str
+) -> None:
     with held_elsewhere("predict 2026-10-27"), pytest.raises(CommandError) as caught:
-        call_command("build_features", date=saturday)
-    assert "is not a trading day" in str(caught.value)
+        call_command(command, **options)
+    assert complaint in str(caught.value)
+    assert "research lock" not in str(caught.value)
 
 
 @pytest.mark.parametrize("command", ["build_features", "build_labels"])
 def test_the_build_commands_say_in_their_help_that_they_take_the_lock(command: str) -> None:
     parser = load_command_class("apps.research", command).create_parser("manage.py", command)
-    assert "research lock" in parser.format_help()
+    shown = " ".join(parser.format_help().split())
+    assert "Holds the research lock for the whole run and fails at once" in shown
