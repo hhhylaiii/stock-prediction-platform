@@ -14,6 +14,7 @@ from django.utils import timezone
 from apps.api.serving import day_of
 from apps.etl.alerts import dispatch
 from apps.etl.models import DataQualityLog
+from apps.etl.tasks import ready_for_research
 from apps.market.calendar import TradingDays
 from apps.research.baseline_runs import SCOPES
 from apps.research.gates import SAMPLE_UNITS, SlotGates, build_runs, check_gates, passing_slots
@@ -71,11 +72,19 @@ def _last_rows(slots: Iterable[Slot]) -> date | None:
     return last
 
 
+def _latest_ready(since: date) -> date | None:
+    """The latest day from since on whose research gate has passed, among days quality-checked."""
+    checked = DataQualityLog.objects.filter(date__gte=since).values_list("date", flat=True)
+    days = sorted(set(checked), reverse=True)
+    return next((day for day in days if ready_for_research(day)), None)
+
+
 def first_day(run_key: str) -> date:
-    """The first day build run_key can serve: its as_of, or its slots' latest rows if later."""
+    """Build run_key's default first day: the latest ready day from its as_of, or later rows."""
     runs = build_runs(run_key)
-    last = _last_rows(runs)
-    return max(_as_of(runs), last) if last is not None else _as_of(runs)
+    as_of = _as_of(runs)
+    later = (_latest_ready(as_of), _last_rows(runs))
+    return max([as_of, *(day for day in later if day is not None)])
 
 
 def _check_build(run_key: str, day: date, frozen_by: str) -> dict[Slot, ModelRun]:
@@ -99,6 +108,21 @@ def _refuse_later_rows(run_key: str, runs: dict[Slot, ModelRun], day: date) -> N
         raise RunError(
             f"the slots of {run_key} already hold rows through {last}; promote on {last} or later"
         )
+
+
+def _refuse_older_build(run_key: str, swapped: dict[Slot, ModelRun]) -> None:
+    """Refuse a swap that would replace a serving run trained through a later day than N."""
+    older = []
+    for slot, run in sorted(swapped.items(), key=lambda item: (item[0].horizon, item[0].objective)):
+        serving = serving_run(slot)
+        if serving is not None and serving.train_end > run.train_end:
+            older.append(
+                f"{slot}: {serving.run_id} serves, trained through {serving.train_end}, "
+                f"after {run.run_id} through {run.train_end}"
+            )
+    if older:
+        found = "; ".join(older)
+        raise RunError(f"{run_key} is an older build than what serves; rebuild it. {found}")
 
 
 def _failed_gates(result: SlotGates) -> list[dict[str, Any]]:
@@ -243,6 +267,7 @@ def promote(
         came, kept = _slots(checked, set(swapped))
         held = [item["slot"] for item in kept]
         if swapped:
+            _refuse_older_build(run_key, swapped)
             retired = _swap(swapped, checked, day, failed, reason)
             _refuse_later_rows(run_key, swapped, day)
             written = predict(day, directory, replace=True, slots=list(swapped)).written

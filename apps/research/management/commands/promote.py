@@ -51,7 +51,10 @@ class Command(BaseCommand):
         parser.add_argument("--run-key", required=True, help="The run_key build_run fitted.")
         parser.add_argument(
             "--date",
-            help="First day N serves, YYYY-MM-DD; the build's as_of, or its slots' latest rows.",
+            help=(
+                "First day N serves, YYYY-MM-DD; by default the latest research-ready day from "
+                "the build's as_of on, or its slots' latest rows if later."
+            ),
         )
         parser.add_argument("--force", action="store_true", help="Swap in despite failed gates.")
         parser.add_argument("--reason", default="", help="Why --force overrides the gates.")
