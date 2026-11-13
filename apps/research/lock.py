@@ -15,7 +15,10 @@ from django.utils import timezone
 logger = logging.getLogger(__name__)
 LOCK_ID = 74_600_001
 LABEL = "research {since} {holder}"
-JOBS = "predict, monitor, promote, restore and the scheduled research steps run one at a time"
+JOBS = (
+    "feature and label builds, coverage, predict, monitor, promote, restore and the scheduled "
+    "research steps run one at a time"
+)
 LOCK_SQL = "SELECT pg_try_advisory_lock(%s), current_setting('application_name')"
 LABEL_SQL = "SELECT set_config('application_name', %s, false)"
 UNLOCK_SQL = "SELECT pg_advisory_unlock(%s), set_config('application_name', %s, false)"
