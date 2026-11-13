@@ -548,11 +548,12 @@ def test_the_default_day_is_the_latest_ready_day_from_the_build_day_on(
 
 @pytest.mark.django_db
 @pytest.mark.parametrize(("as_of", "expected"), [(PREV, PREV), (LAST, LAST)])
+@pytest.mark.parametrize("status", [ModelStatus.ACTIVE, ModelStatus.DEGRADED])
 def test_the_default_day_follows_the_latest_day_served_not_a_later_ready_one(
-    researched: Path, as_of: date, expected: date
+    researched: Path, as_of: date, expected: date, status: str
 ) -> None:
     serving = built("interval", "interval-wf1", researched)[0]
-    ModelRun.objects.filter(pk=serving.pk).update(status=ModelStatus.ACTIVE)
+    ModelRun.objects.filter(pk=serving.pk).update(status=status)
     Prediction.objects.create(
         run=serving, stock_id="1101", date=PREV, horizon=20, in_universe=True, vol_pred=0.3
     )
@@ -562,6 +563,22 @@ def test_the_default_day_follows_the_latest_day_served_not_a_later_ready_one(
     passed(LAST)
 
     assert first_day("rank-prod") == expected
+
+
+@pytest.mark.django_db
+def test_a_day_served_after_the_build_day_is_the_default_day_even_if_not_ready(
+    researched: Path,
+) -> None:
+    serving = built("interval", "interval-wf1", researched)[0]
+    ModelRun.objects.filter(pk=serving.pk).update(status=ModelStatus.ACTIVE)
+    Prediction.objects.create(
+        run=serving, stock_id="1101", date=LAST, horizon=20, in_universe=True, vol_pred=0.3
+    )
+    built("rank", "rank-wf1", researched)
+    rebased("rank-prod", PREV)
+    passed(PREV)
+
+    assert first_day("rank-prod") == LAST
 
 
 @pytest.mark.django_db
@@ -582,10 +599,17 @@ def test_rows_of_runs_no_longer_serving_do_not_set_the_latest_day_served(researc
 def test_the_scheduled_step_promotes_on_its_own_day_with_the_real_default(
     researched: Path, settings: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    serving = built("interval", "interval-wf1", researched)[0]
+    ModelRun.objects.filter(pk=serving.pk).update(status=ModelStatus.ACTIVE)
+    Prediction.objects.create(
+        run=serving, stock_id="1101", date=PREV, horizon=20, in_universe=True, vol_pred=0.3
+    )
     built("rank", "rank-wf1", researched)
+    rebased("rank-prod", PREV)
+    passed(PREV)
     passed(LAST)
     DataQualityLog.objects.create(
-        date=LAST,
+        date=PREV,
         check_name=tasks.RETRAIN_CHECK,
         severity="info",
         detail={"built": {"rank": "rank-prod"}},
@@ -599,8 +623,8 @@ def test_the_scheduled_step_promotes_on_its_own_day_with_the_real_default(
 
     monkeypatch.setattr(tasks, "promote", promoted)
 
-    assert tasks.STEPS["promote"](LAST) == "rank-prod: promoted"
-    assert swaps == [("rank-prod", LAST)]
+    assert tasks.STEPS["promote"](PREV) == "rank-prod: promoted"
+    assert swaps == [("rank-prod", PREV)]
 
 
 @pytest.mark.django_db
@@ -702,6 +726,24 @@ def test_one_horizon_older_than_what_serves_keeps_the_whole_build_out(
     assert set(Prediction.objects.values_list("pk", flat=True)) == kept
     assert not ModelRun.objects.filter(run_key="rank-prod", params__has_key="gates").exists()
     assert (alerts(), dispatched) == ([], [])
+
+
+@pytest.mark.django_db
+def test_a_degraded_serving_run_trained_through_a_later_day_blocks_the_swap_too(
+    researched: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs = built("rank", "rank-wf1", researched)
+    passed(LAST)
+    old = [newer_by_a_day(run) for run in serving_copies(runs, monkeypatch)]
+    ModelRun.objects.filter(pk__in=[run.pk for run in old]).update(status=ModelStatus.DEGRADED)
+    sent(monkeypatch)
+
+    with pytest.raises(RunError, match="rank-prod is an older build than what serves"):
+        promote("rank-prod", LAST, researched, force=True, reason="overriding")
+
+    untouched(runs)
+    assert {fresh(run).status for run in old} == {ModelStatus.DEGRADED}
+    assert not alerts()
 
 
 @pytest.mark.django_db
