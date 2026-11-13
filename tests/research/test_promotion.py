@@ -8,12 +8,12 @@ from django.core.management import call_command
 from django.core.management.base import CommandError
 
 from apps.etl.models import DataQualityLog
-from apps.research import gates, promotion
+from apps.research import gates, promotion, tasks
 from apps.research.gates import Gate, SlotGates
 from apps.research.holdout import HoldoutError
 from apps.research.models import HoldoutRun, ModelRun, ModelStatus, Prediction
 from apps.research.predict import PredictionGateError, Slot
-from apps.research.promotion import PROMOTION_CHECK, first_day, promote
+from apps.research.promotion import PROMOTION_CHECK, Promoted, first_day, promote
 from apps.research.runs import RunError
 from tests.research.run_panels import weekdays
 from tests.research.test_gates import LAST, built, logged, other_shadow, serve_copy
@@ -547,6 +547,63 @@ def test_the_default_day_is_the_latest_ready_day_from_the_build_day_on(
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize(("as_of", "expected"), [(PREV, PREV), (LAST, LAST)])
+def test_the_default_day_follows_the_latest_day_served_not_a_later_ready_one(
+    researched: Path, as_of: date, expected: date
+) -> None:
+    serving = built("interval", "interval-wf1", researched)[0]
+    ModelRun.objects.filter(pk=serving.pk).update(status=ModelStatus.ACTIVE)
+    Prediction.objects.create(
+        run=serving, stock_id="1101", date=PREV, horizon=20, in_universe=True, vol_pred=0.3
+    )
+    built("rank", "rank-wf1", researched)
+    rebased("rank-prod", as_of)
+    passed(PREV)
+    passed(LAST)
+
+    assert first_day("rank-prod") == expected
+
+
+@pytest.mark.django_db
+def test_rows_of_runs_no_longer_serving_do_not_set_the_latest_day_served(researched: Path) -> None:
+    retired = built("interval", "interval-wf1", researched)[0]
+    ModelRun.objects.filter(pk=retired.pk).update(status=ModelStatus.RETIRED)
+    Prediction.objects.create(
+        run=retired, stock_id="1101", date=PREV, horizon=20, in_universe=True, vol_pred=0.3
+    )
+    built("rank", "rank-wf1", researched)
+    rebased("rank-prod", PREV)
+    passed(LAST)
+
+    assert first_day("rank-prod") == LAST
+
+
+@pytest.mark.django_db
+def test_the_scheduled_step_promotes_on_its_own_day_with_the_real_default(
+    researched: Path, settings: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    built("rank", "rank-wf1", researched)
+    passed(LAST)
+    DataQualityLog.objects.create(
+        date=LAST,
+        check_name=tasks.RETRAIN_CHECK,
+        severity="info",
+        detail={"built": {"rank": "rank-prod"}},
+    )
+    settings.FEATURE_PARQUET_DIR = researched
+    swaps: list[tuple[str, date]] = []
+
+    def promoted(run_key: str, on: date, directory: Path) -> Promoted:
+        swaps.append((run_key, on))
+        return Promoted(True, [])
+
+    monkeypatch.setattr(tasks, "promote", promoted)
+
+    assert tasks.STEPS["promote"](LAST) == "rank-prod: promoted"
+    assert swaps == [("rank-prod", LAST)]
+
+
+@pytest.mark.django_db
 def test_rows_past_the_latest_ready_day_still_set_the_default_day(researched: Path) -> None:
     runs = built("rank", "rank-wf1", researched)
     rebased("rank-prod", PREV)
@@ -600,7 +657,7 @@ def test_a_build_older_than_what_serves_is_refused_whatever_the_gates_say(
     old_five, old_twenty = (
         newer_by_a_day(run) for run in by_horizon(serving_copies(runs, monkeypatch))
     )
-    sent(monkeypatch)
+    dispatched = sent(monkeypatch)
     five, twenty = by_horizon(runs)
     kept = set(Prediction.objects.values_list("pk", flat=True))
     named = (
@@ -619,7 +676,32 @@ def test_a_build_older_than_what_serves_is_refused_whatever_the_gates_say(
     untouched(runs)
     assert {fresh(run).status for run in (old_five, old_twenty)} == {ModelStatus.ACTIVE}
     assert set(Prediction.objects.values_list("pk", flat=True)) == kept
-    assert not alerts()
+    assert not ModelRun.objects.filter(run_key="rank-prod", params__has_key="gates").exists()
+    assert (alerts(), dispatched) == ([], [])
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("force", [True, False])
+def test_one_horizon_older_than_what_serves_keeps_the_whole_build_out(
+    researched: Path, monkeypatch: pytest.MonkeyPatch, force: bool
+) -> None:
+    runs = built("rank", "rank-wf1", researched)
+    passed(LAST)
+    old_five, old_twenty = by_horizon(serving_copies(runs, monkeypatch))
+    newer_by_a_day(old_five)
+    dispatched = sent(monkeypatch)
+    kept = set(Prediction.objects.values_list("pk", flat=True))
+
+    with pytest.raises(RunError) as refused:
+        promote("rank-prod", LAST, researched, force=force, reason="overriding" if force else "")
+
+    assert f"rank 5 日: {old_five.run_id} serves" in str(refused.value)
+    assert "rank 20 日" not in str(refused.value)
+    untouched(runs)
+    assert {fresh(run).status for run in (old_five, old_twenty)} == {ModelStatus.ACTIVE}
+    assert set(Prediction.objects.values_list("pk", flat=True)) == kept
+    assert not ModelRun.objects.filter(run_key="rank-prod", params__has_key="gates").exists()
+    assert (alerts(), dispatched) == ([], [])
 
 
 @pytest.mark.django_db
