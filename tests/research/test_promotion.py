@@ -11,9 +11,10 @@ from apps.etl.models import DataQualityLog
 from apps.research import gates, promotion
 from apps.research.gates import Gate, SlotGates
 from apps.research.holdout import HoldoutError
+from apps.research.management.commands.promote import left_out
 from apps.research.models import HoldoutRun, ModelRun, ModelStatus, Prediction
 from apps.research.predict import PredictionGateError, Slot
-from apps.research.promotion import PROMOTION_CHECK, promote
+from apps.research.promotion import PROMOTION_CHECK, Promoted, promote
 from apps.research.runs import RunError
 from tests.research.run_panels import weekdays
 from tests.research.test_gates import LAST, built, logged, other_shadow, serve_copy
@@ -28,7 +29,7 @@ def fresh(run: ModelRun) -> ModelRun:
 
 
 def alerts() -> list[DataQualityLog]:
-    return list(DataQualityLog.objects.filter(check_name=PROMOTION_CHECK))
+    return list(DataQualityLog.objects.filter(check_name=PROMOTION_CHECK).order_by("pk"))
 
 
 def sent(monkeypatch: pytest.MonkeyPatch) -> list[DataQualityLog]:
@@ -573,15 +574,17 @@ def test_only_the_horizon_swapped_in_retires_its_serving_run(
 
 @pytest.mark.django_db
 def test_a_held_horizon_comes_in_later_only_by_force(
-    researched: Path, monkeypatch: pytest.MonkeyPatch
+    researched: Path, settings: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     runs = built("rank", "rank-wf1", researched)
     passed(LAST)
     failing_h5(monkeypatch)
+    settings.FEATURE_PARQUET_DIR = researched
     sent(monkeypatch)
     five, twenty = by_horizon(runs)
     promote("rank-prod", LAST, researched)
     served = fresh(twenty).params
+    rows = set(Prediction.objects.filter(run=twenty).values_list("pk", flat=True))
 
     again = promote("rank-prod", LAST, researched)
 
@@ -594,17 +597,20 @@ def test_a_held_horizon_comes_in_later_only_by_force(
     assert alerts()[-1].detail["promoted_slots"] == []
     assert alerts()[-1].detail["held_slots"] == [entry(five, gates=[QUALITY_GATE])]
 
-    forced = promote("rank-prod", LAST, researched, force=True, reason="checked by hand")
+    out = StringIO()
+    call_command("promote", run_key="rank-prod", force=True, reason="checked by hand", stdout=out)
 
-    assert forced.promoted is True
-    assert forced.held == []
-    assert forced.retired == []
-    assert set(forced.written) == {five.run_id}
+    assert f"rank-prod 於 {LAST} 換模" in out.getvalue()
+    assert "強制換模（checked by hand）" in out.getvalue()
+    assert twenty.run_id not in out.getvalue()
+    assert not ModelRun.objects.filter(status=ModelStatus.RETIRED).exists()
     assert fresh(five).status == ModelStatus.ACTIVE
+    assert fresh(five).params["promoted_on"] == LAST.isoformat()
     assert fresh(five).params["promotion"]["forced"] is True
     assert fresh(five).params["promotion"]["reason"] == "checked by hand"
+    assert Prediction.objects.filter(run=five, date=LAST).exists()
     assert (fresh(twenty).status, fresh(twenty).params) == (ModelStatus.ACTIVE, served)
-    assert Prediction.objects.filter(run=twenty, date=LAST).exists()
+    assert set(Prediction.objects.filter(run=twenty).values_list("pk", flat=True)) == rows != set()
     last = alerts()[-1].detail
     assert (last["promoted"], last["forced"], last["reason"]) == (True, True, "checked by hand")
     assert last["promoted_slots"] == [entry(five, forced=True)]
@@ -711,6 +717,11 @@ def test_the_three_interval_models_go_live_together_or_not_at_all(
     promote("interval-prod", LAST, researched, force=True, reason="checked by hand")
 
     assert {fresh(run).status for run in runs} == {ModelStatus.ACTIVE}
+    assert {run.objective: fresh(run).params["promotion"]["forced"] for run in runs} == {
+        "classification": False,
+        "quantile": False,
+        "volatility": True,
+    }
     assert alerts()[-1].detail["promoted_slots"] == [
         entry(run, forced=run == volatility) for run in by_horizon(runs)
     ]
@@ -839,6 +850,85 @@ def test_rows_a_held_horizon_gains_while_the_gates_run_do_not_stop_the_other(
     assert set(result.written) == {twenty.run_id}
     assert fresh(twenty).status == ModelStatus.ACTIVE
     untouched([five])
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("force", [True, False])
+def test_a_run_leaving_candidate_while_the_gates_run_stops_the_swap(
+    researched: Path, monkeypatch: pytest.MonkeyPatch, force: bool
+) -> None:
+    runs = built("rank", "rank-wf1", researched)
+    passed(LAST)
+    sent(monkeypatch)
+    five, _ = by_horizon(runs)
+    judge = promotion.check_gates
+
+    def judged_after_a_change(run_key: str, directory: Path) -> list[Any]:
+        ModelRun.objects.filter(pk=five.pk).update(status=ModelStatus.RETIRED)
+        return judge(run_key, directory)
+
+    monkeypatch.setattr(promotion, "check_gates", judged_after_a_change)
+    with pytest.raises(RunError, match="rank-prod changed while its gates were checked"):
+        promote("rank-prod", LAST, researched, force=force, reason="overriding" if force else "")
+
+    untouched(runs)
+    assert not alerts()
+    assert not Prediction.objects.exists()
+
+
+@pytest.mark.django_db
+def test_the_gate_report_adds_nothing_when_no_horizon_could_go_in_alone(
+    researched: Path, settings: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    built("rank", "rank-wf1", researched)
+    passed(LAST)
+    monkeypatch.setattr(gates, "MIN_DAYS", 500)
+    settings.FEATURE_PARQUET_DIR = researched
+    out = StringIO()
+
+    call_command("check_gates", run_key="rank-prod", stdout=out)
+
+    assert out.getvalue().strip().endswith("未通過：rank 20 日, rank 5 日")
+
+
+@pytest.mark.django_db
+def test_a_record_written_with_the_six_old_arguments_holds_both_lists_empty() -> None:
+    row = promotion._note(LAST, "rank", "rank-a", [], "", True)
+
+    assert row.detail["promoted"] is True
+    assert (row.detail["promoted_slots"], row.detail["held_slots"]) == ([], [])
+
+
+def test_the_record_lists_runs_by_horizon_then_objective() -> None:
+    def judged(objective: str, horizon: int, run_id: str) -> SlotGates:
+        return SlotGates(Slot(objective, horizon), run_id, None, [])
+
+    checked = [
+        judged("volatility", 20, "a"),
+        judged("rank", 20, "b"),
+        judged("classification", 20, "c"),
+        judged("rank", 5, "d"),
+    ]
+
+    came, held = promotion._slots(checked, {Slot("rank", 5), Slot("volatility", 20)})
+
+    assert [item["run_id"] for item in came] == ["d", "a"]
+    assert [item["run_id"] for item in held] == ["c", "b"]
+
+
+def test_a_run_held_only_by_its_group_is_listed_with_that_note() -> None:
+    clear = SlotGates(Slot("quantile", 20), "band-q", None, [])
+    short = SlotGates(Slot("volatility", 20), "band-vol", None, [])
+    gate = {"name": "agreement", "reason": "相關太低"}
+    failed = [{"slot": "volatility 20 日", "run_id": "band-vol", "gates": [gate]}]
+    held = ["quantile 20 日", "volatility 20 日"]
+
+    lines = left_out(Promoted(True, [clear, short], failed=failed, held=held))
+
+    assert lines == [
+        "  quantile 20 日 band-q：同一組有模型沒過",
+        "  volatility 20 日 band-vol：agreement（相關太低）",
+    ]
 
 
 def test_failed_gates_carry_the_unit_of_their_sample() -> None:
