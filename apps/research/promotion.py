@@ -14,6 +14,7 @@ from django.utils import timezone
 from apps.api.serving import day_of
 from apps.etl.alerts import dispatch
 from apps.etl.models import DataQualityLog
+from apps.etl.quality import CHECKS
 from apps.etl.tasks import ready_for_research
 from apps.market.calendar import TradingDays
 from apps.research.baseline_runs import SCOPES
@@ -74,16 +75,24 @@ def _last_rows(slots: Iterable[Slot]) -> date | None:
 
 def _latest_ready(since: date) -> date | None:
     """The latest day from since on whose research gate has passed, among days quality-checked."""
-    checked = DataQualityLog.objects.filter(date__gte=since).values_list("date", flat=True)
-    days = sorted(set(checked), reverse=True)
+    rows = DataQualityLog.objects.filter(date__gte=since, check_name__in=CHECKS)
+    days = sorted(set(rows.values_list("date", flat=True)), reverse=True)
     return next((day for day in days if ready_for_research(day)), None)
 
 
+def _latest_served() -> date | None:
+    """The latest day any serving run holds prediction rows for, whatever its slot."""
+    rows = Prediction.objects.filter(run__status__in=SERVING)
+    last: date | None = rows.aggregate(last=Max("date"))["last"]
+    return last
+
+
 def first_day(run_key: str) -> date:
-    """Build run_key's default first day: the latest ready day from its as_of, or later rows."""
+    """Build run_key's default first day: the latest day served, else ready, its as_of or rows."""
     runs = build_runs(run_key)
     as_of = _as_of(runs)
-    later = (_latest_ready(as_of), _last_rows(runs))
+    served = _latest_served()
+    later = (_latest_ready(as_of) if served is None else served, _last_rows(runs))
     return max([as_of, *(day for day in later if day is not None)])
 
 

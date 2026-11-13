@@ -49,8 +49,9 @@ class Command(BaseCommand):
         parser.add_argument(
             "--date",
             help=(
-                "First day N serves, YYYY-MM-DD; by default the latest research-ready day from "
-                "the build's as_of on, or its slots' latest rows if later."
+                "First day N serves, YYYY-MM-DD; by default the latest day predictions are "
+                "served for (the latest research-ready day when none are), never before the "
+                "build's as_of or its slots' latest rows."
             ),
         )
         parser.add_argument("--force", action="store_true", help="Swap in despite failed gates.")
