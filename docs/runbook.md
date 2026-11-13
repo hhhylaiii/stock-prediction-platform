@@ -205,6 +205,27 @@ uv run python manage.py check_quality --date 2026-10-28
   uv run python manage.py shell -c "from datetime import date; from apps.etl.tasks import _reaudit; _reaudit(date(2026, 10, 28))"
   ```
 
+### 補一根缺的 K 棒（櫃買、第一頁行情存檔之前的日子）
+
+FinMind 回補偶爾會少一根：2026-11-13 拿已存的官方個股月成交頁全部對過，2,180 檔普通股、63,119 個股票日只缺兩根，都是上櫃掛牌首日（`7825` 2026-09-10、`7856` 2026-09-22），FinMind 的回應本身沒有那一天。
+
+這種日子**不要**用 `fetch --source tpex --dataset daily_price --date <那天>` 補。那會把那天的行情原始頁存成 `daily_price`，「第一頁行情存檔」就從 2026-10-22 往前移到那天；之後到 10-21 之間的日子沒有存行情頁，當沖的重放或補抓會全部 `SourceNotReadyError`（見「當沖歷史回補」）。改用：
+
+```bash
+uv run python manage.py fill_price_bars --source tpex --date 2026-09-10 --stock 7825 --dry-run
+uv run python manage.py fill_price_bars --source tpex --date 2026-09-10 --stock 7825
+```
+
+- 抓那一天的兩張行情頁，只把指定代號那天的 K 棒新增進 `daily_price`（`--stock` 可重複）；頁上其他代號不寫，已有的列不改。之後有除權息事件的，還原因子照既有規則補上。
+- 原始頁存在 dataset `daily_price_fill`，不算那天的行情頁，所以「第一頁行情存檔」不會動。`etl_run` 也記在 `daily_price_fill`，checkpoint 的 `stocks` 是補的代號。
+- 整次全有或全無。發請求之前就拒絕的：那天不是交易日；那天在第一頁行情存檔當天或之後（改用 `fetch`）；代號不在 `stock_master`、那天早於 `list_date` 或不早於 `delist_date`；代號那天已經有 K 棒。抓到頁才知道的：代號不在那天的行情頁上，這時留下 raw 與一列 failed 的 `etl_run`，`daily_price` 不寫。
+- 每新增一列印一行 `insert 代號 日期 open … turnover …`，最後印 `daily_price: N bars added for 日期`。`--dry-run` 印同樣的列，總結行是 `N bars to add`，再印 `nothing was written`，raw 與 `etl_run` 也不留。
+- 只支援櫃買。證交所目前沒有這種缺口。
+- 補完之後還有三件事：
+  - 當沖量要對同一天重放一次（`reprocess --source tpex --dataset day_trade --start <那天> --end <那天>`），理由同「當沖歷史回補」倒數第二條。
+  - 對同一天重跑 `fill_from_exchange --source tpex --fill margin --start <那天> --end <那天>` 與同樣區間的 `--fill sbl`（兩者都冪等），理由見「交易所逐日表補缺」：那兩個補缺只替當天有價的代號寫列。剛掛牌的股票通常還不在融資券與借券表上，這一步多半不會新增任何列，照跑即可。
+  - 特徵與 label：每晚只重算最近 60 個交易日的特徵與 81 個交易日的 label，新增價格列也不會記 `adj_factor_changed`。補的那天在這個範圍內時當晚就會算進去；在範圍以外時，照下一節「補進一檔股票的歷史之後」整段重建特徵與 label 並比對。`list_date` 是空的股票，第一根 K 棒往前移，上市天數也會跟著改。
+
 ### 補進一檔股票的歷史之後
 
 適用的情況：一檔股票在 60 個交易日以前的 `daily_price`、`stock_master` 的產業或掛牌日、`market_history` 的區間被補進來或改掉。例子是 2026-11 查出 4207、5355、8176、1589、4804 五檔普通股整段歷史不在庫裡。這個流程預定 2026-11 下旬第一次在正式資料上做，下面的順序是依程式推出來的，做完回來更新這一節。「市場歷史」「交易所產業補缺」「FinMind 外資持股 0 的覆寫」各自只寫了重建的指令；同一段時間做完的規則與比對以這一節為準。
@@ -217,6 +238,7 @@ uv run python manage.py check_quality --date 2026-10-28
 - 規則：從留備份（第 2 步）到第二次重建做完（第 4 步）要在同一段時間內，中間不能有 23:00 或 06:00 的 chain、每月重訓，也不能有 ETL 批次在寫；兩次重建用同一個 `--end`。研究排程可以先關掉 `RESEARCH_SCHEDULE_ENABLED`（見「研究排程」手動長時間重建那一條），ETL 批次不受這個開關管，要另外避開。排不下就整個不開始。
   - 原因：中間只要多一天的價量或一條 chain，最近 60 個交易日的特徵、81 個交易日的 label 就和備份不同，第 4 步會把無關的差異當成問題。
   - 這檔股票要補的資料一次補齊：主檔、掛牌區間、價量、除權息與減資事件、股數、籌碼、估值、財報與營收。價量補進來之後，當沖要照「當沖歷史回補」對同一段日期重放，否則當沖量被當成 0。60 個交易日以前的任何一項晚補，都要再整段重建一次。
+  - 只缺某一天的 K 棒、而且那天在第一頁行情存檔（2026-10-22）之前時，用上一節「補一根缺的 K 棒」的 `fill_price_bars`，不要用 `fetch` 抓那天的交易所行情：原始頁一存成 `daily_price`，之後到 10-21 之間的當沖重放會全部失敗。
   - repo 裡沒有比對分區或 `label_daily` 的指令。比對用的查詢或腳本先寫好，先拿第 1 步前後的兩份備份跑過，再開始第 3 步。
 - 順序，一步做完再做下一步：
   1. 補資料之前，先整段重建一次特徵與 label 當基準。上一次整段重建之後改到舊日期的資料（還原因子、當沖定案值、財報與營收掃描、主檔異動）會在這一步進來，和要補的股票無關；重建前先把 `artifacts/features` 複製一份，重建後逐年比，把這些差異看過。
