@@ -59,6 +59,9 @@
   const OBJECTIVES = { rank: '排名', regression: '絕對報酬', quantile: '報酬區間', volatility: '波動率', classification: '跑贏大盤機率' };
   const SCOPES = { rank: '排名', return: '絕對報酬', interval: '區間與機率' };
   const MODEL_REQUIRES = '模型要在 holdout 判定達標之後才會上線，判定未達標或明顯退化時要經使用者放行';
+  const NOT_LIVE_WHY = '模型要通過 holdout 判定（未達標或明顯退化時要經使用者放行）與每月重訓的換模門檻（沒過時要經使用者強制換上）才會上線，沒上線的原因見<a href="#models">模型頁</a>。';
+  const DEFAULT_HORIZON = 20;
+  const STATUS_WAIT_MS = 1500;
   const SEVERITY = { info: ['通過', 'in'], warning: ['警告', 'warn'], error: ['錯誤', 'warn'] };
 
   const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -90,7 +93,7 @@
     return out;
   }
 
-  const state = { h: 20, mkt: 'all', q: '', watchOnly: false, watch: new Set(), stock: '2330', chart: 'candle', stockToken: 0, featureToken: 0, todayToken: 0, page: 1, watchCache: null };
+  const state = { h: DEFAULT_HORIZON, picked: false, ranked: [], mkt: 'all', q: '', watchOnly: false, watch: new Set(), stock: '2330', chart: 'candle', stockToken: 0, featureToken: 0, todayToken: 0, routeToken: 0, page: 1, watchCache: null };
   try { const c = localStorage.getItem('twp-chart'); if (c === 'line' || c === 'candle') state.chart = c; } catch (e) { state.chart = 'candle'; }
   try { const w = JSON.parse(localStorage.getItem('twp-watch') || '[]'); if (Array.isArray(w)) w.filter(c => STOCK_CODE.test(c)).forEach(c => state.watch.add(c)); } catch (e) { state.watch.clear(); }
   function saveWatch() { try { localStorage.setItem('twp-watch', JSON.stringify([...state.watch])); } catch (e) { return; } }
@@ -112,15 +115,27 @@
     return { label: '通過', cls: 'in', text: '全部檢查通過。' };
   }
 
+  function preferHorizon(available) {
+    if (state.picked) return false;
+    const next = !available.length || available.includes(DEFAULT_HORIZON) ? DEFAULT_HORIZON : Math.max(...available);
+    if (next === state.h) return false;
+    state.h = next;
+    state.page = 1;
+    return true;
+  }
+
   async function renderStatus() {
     try {
       const { data } = await api.get('status');
+      const horizons = (data.horizons || []).map(entry => ({ ...entry, horizon: Number(entry.horizon) }));
+      state.ranked = horizons.filter(entry => entry.prediction_date).map(entry => entry.horizon);
       const verdict = verdictOf(data.quality);
       const cls = verdict.cls === 'in' ? '' : ' ' + verdict.cls;
       const prices = data.price_date ? esc(data.price_date) + ' 收盤資料' : '尚無收盤資料';
       const parts = ['<span>' + prices + '</span>', '<span><i class="dot' + cls + '"></i>品質檢查' + esc(verdict.label) + '</span>'];
       if (data.updated_at) parts.push('<span>' + esc(hhmm(data.updated_at)) + ' 更新</span>');
       if (!data.predictions_ready) parts.push('<span><i class="dot idle"></i>預測尚未產出</span>');
+      else horizons.filter(entry => !entry.ready).forEach(entry => parts.push('<span><i class="dot idle"></i>' + entry.horizon + (entry.prediction_date ? ' 日預測尚未產出' : ' 日排名未上線') + '</span>'));
       if (data.degraded.length) parts.push('<span><i class="dot warn"></i>' + data.degraded.length + ' 個模型降級中</span>');
       statusEl.innerHTML = parts.join('');
     } catch (err) {
@@ -255,8 +270,15 @@
   function emptyHtml(meta) {
     if (state.q.trim()) return '<div class="empty">今日預測裡沒有符合「' + esc(state.q.trim()) + '」的股票。試試代號或公司名稱的一部分。</div>';
     if (watchingOnly()) return '<div class="empty">追蹤的股票沒有這一期的預測。</div>';
+    const others = state.ranked.filter(horizon => horizon !== state.h);
+    if (!meta.date && others.length) return '<div class="empty" id="today-empty">' + state.h + ' 日排名目前沒有上線中的模型，所以這一頁沒有資料；' + others.join('、') + ' 日排名有上線中的模型，可以切到 ' + others.join('、') + ' 日。' + NOT_LIVE_WHY + '</div>';
     if (!meta.date) return '<div class="empty" id="today-empty">預測資料尚未產出。排名' + MODEL_REQUIRES + '；上線後，這裡會列出全市場的排名。</div>';
     return '<div class="empty">沒有符合條件的股票。</div>';
+  }
+
+  function refreshEmpty() {
+    const empty = document.getElementById('today-empty');
+    if (empty) empty.outerHTML = emptyHtml({});
   }
 
   function lackingText(models, horizon, own) {
@@ -356,7 +378,7 @@
 
   function reloadToday() { state.page = 1; loadToday(); }
   let searchTimer = null;
-  document.querySelectorAll('[data-h]').forEach(b => b.addEventListener('click', () => { state.h = Number(b.dataset.h); reloadToday(); }));
+  document.querySelectorAll('[data-h]').forEach(b => b.addEventListener('click', () => { state.h = Number(b.dataset.h); state.picked = true; reloadToday(); }));
   document.querySelectorAll('[data-mkt]').forEach(b => b.addEventListener('click', () => { state.mkt = b.dataset.mkt; reloadToday(); }));
   qEl.addEventListener('input', () => { state.q = qEl.value; clearTimeout(searchTimer); searchTimer = setTimeout(reloadToday, 250); });
   watchOnlyBtn.addEventListener('click', () => { state.watchOnly = !state.watchOnly; state.watchCache = null; reloadToday(); });
@@ -491,6 +513,16 @@
       '<div class="right prob">' + (p.prob_up_5pct === null || p.prob_up_5pct === undefined ? '—' : Math.round(p.prob_up_5pct * 100) + '%') + '</div></div>';
   }
 
+  function rankBuilds(entries) {
+    const nameOf = model => (MODEL_NAMES[model.model_type] || model.model_type) + ' ' + model.version;
+    const ranks = entries.map(entry => ({ h: entry.horizon, model: (entry.models || []).find(model => model.role === 'rank') })).filter(item => item.model);
+    if (!ranks.length) return { names: [], trained: '' };
+    const first = ranks[0].model;
+    const one = ranks.length === entries.length && ranks.every(item => nameOf(item.model) === nameOf(first) && item.model.train_end === first.train_end);
+    if (one) return { names: [nameOf(first)], trained: '訓練資料到 ' + first.train_end };
+    return { names: ranks.map(item => item.h + ' 日 ' + nameOf(item.model)), trained: ranks.map(item => item.h + ' 日訓練資料到 ' + item.model.train_end).join('、') };
+  }
+
   function forecastsHtml(data) {
     const entries = [...data.horizons].sort((a, b) => a.horizon - b.horizon);
     const based = [...entries].reverse().filter(entry => entry.prediction && entry.prediction.close !== null);
@@ -503,7 +535,7 @@
     const quantileBand = Boolean(twenty.prediction && twenty.prediction.interval && twenty.prediction.interval_source === 'quantile');
     const fallbackBand = onFallbackBand(twenty.prediction) && !(twenty.models || []).some(model => model.role === 'interval');
     const realised = data.realized_vol && data.realized_vol.tech_vol_60d !== null ? data.realized_vol.tech_vol_60d : null;
-    const rank = (twenty.models || []).find(model => model.role === 'rank') || (entries.flatMap(entry => entry.models || []).find(model => model.role === 'rank'));
+    const builds = rankBuilds(entries);
     const degraded = entries.some(entry => (entry.degraded || []).length);
     const caveats = caveatText(entries.flatMap(entry => shownModels(entry.models, entry.horizon)));
     const lacking = entries.filter(entry => entry.prediction).map(entry => [entry.horizon, lackingText(entry.models, entry.horizon, entry.prediction)])
@@ -515,8 +547,8 @@
       (lacking ? '<p class="note model-note">' + lacking + MODEL_REQUIRES + '；<a href="#models">上線中的模型列在模型頁</a>。</p>' : '') +
       '<div class="pair"><div><div class="faint tiny">預測 20 日波動（年化）</div><div class="v">' + (vol === null || vol === undefined ? '—' : (vol * 100).toFixed(1) + '%') + '</div>' +
       (realised === null ? '' : '<div class="muted tiny">過去 60 日實際為 ' + (realised * 100).toFixed(1) + '%</div>') + '</div>' +
-      '<div><div class="faint tiny">排名模型版本</div><div style="font-size:15px;font-weight:500;line-height:1.6">' + (rank ? esc((MODEL_NAMES[rank.model_type] || rank.model_type) + ' ' + rank.version) : '—') + '</div>' +
-      (rank ? '<div class="muted tiny">訓練資料到 ' + esc(rank.train_end) + '，<a href="#models">成績在模型頁</a></div>' : '') + '</div></div>' +
+      '<div><div class="faint tiny">排名模型版本</div><div style="font-size:15px;font-weight:500;line-height:1.6">' + (builds.names.map(esc).join('<br>') || '—') + '</div>' +
+      (builds.names.length ? '<div class="muted tiny">' + esc(builds.trained) + '，<a href="#models">成績在模型頁</a></div>' : '') + '</div></div>' +
       (degraded ? '<p class="note">有模型降級中，結果僅供參考。</p>' : '') +
       (caveats ? '<p class="note caveat-note">' + esc(caveats) + '。<a href="#models">原因在模型頁</a></p>' : '');
   }
@@ -654,7 +686,7 @@
       drawChart();
       loadFeatures(s.stock_id, token);
     };
-    document.querySelectorAll('#stock-seg [data-sh]').forEach(b => b.addEventListener('click', () => { state.h = Number(b.dataset.sh); state.page = 1; drawHorizon(); }));
+    document.querySelectorAll('#stock-seg [data-sh]').forEach(b => b.addEventListener('click', () => { state.h = Number(b.dataset.sh); state.picked = true; state.page = 1; drawHorizon(); }));
     document.querySelectorAll('#chart-seg [data-ct]').forEach(b => b.addEventListener('click', () => {
       state.chart = b.dataset.ct;
       try { localStorage.setItem('twp-chart', state.chart); } catch (e) { state.chart = b.dataset.ct; }
@@ -665,8 +697,10 @@
       if (token !== state.stockToken) return;
       forecasts = result;
       document.querySelector('#forecasts .body').innerHTML = result.status === 'rejected' ? errorBox(result.reason) : forecastsHtml(result.value.data);
-      showRank();
       showSeg();
+      const ready = result.status === 'fulfilled' ? result.value.data.horizons.filter(entry => entry.prediction).map(entry => entry.horizon) : [];
+      if (!stockEl.hidden && preferHorizon(ready)) { drawHorizon(); return; }
+      showRank();
       if (fanOf(entryOf())) drawChart();
     });
     later.history.then(result => { if (token === state.stockToken) showHistory(document.getElementById('history'), result); });
@@ -1241,10 +1275,23 @@
     Object.keys(views).forEach(k => { views[k].hidden = k !== name; });
     document.querySelectorAll('[data-nav]').forEach(a => { if (a.dataset.nav === name) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current'); });
     document.querySelector('[data-nav="stock"]').setAttribute('href', '#stock-' + encodeURIComponent(state.stock));
-    if (name === 'today') { state.watchCache = null; loadToday(); }
+    const ticket = ++state.routeToken;
+    const status = renderStatus();
+    if (name === 'today') {
+      controls();
+      state.watchCache = null;
+      const loads = state.todayToken;
+      const show = () => {
+        if (ticket !== state.routeToken) return;
+        const moved = preferHorizon(state.ranked);
+        if (state.todayToken !== loads && !moved) { refreshEmpty(); return; }
+        loadToday();
+      };
+      if (state.picked) show(); else setTimeout(show, STATUS_WAIT_MS);
+      status.then(show);
+    }
     if (name === 'stock') renderStock(code);
     if (name === 'models') { renderModelTable(); renderIcChart(); renderEtl(); renderQuality(); renderCorrections(); }
-    renderStatus();
     window.scrollTo(0, 0);
   }
   document.getElementById('prob-head').title = PROB_TIP;

@@ -187,11 +187,14 @@ def timing_checks(timings: list[Timing]) -> list[Check]:
 def acceptance_checks(client: Client, stock: str, timings: list[Timing]) -> list[Check]:
     status = fetch(client, "/api/status").get("data") or {}
     day, predicted = status.get("price_date"), status.get("prediction_date")
+    horizons = status.get("horizons") or []
+    behind = [f"{entry['horizon']} 日" for entry in horizons if not entry["ready"]]
     return [
         Check(
             "最新交易日有預測",
-            day is not None and predicted == day,
-            f"price_date {day}，prediction_date {predicted}",
+            day is not None and bool(horizons) and not behind,
+            f"price_date {day}，prediction_date {predicted}"
+            + (f"，沒跟上的期間 {'、'.join(behind)}" if behind else ""),
         ),
         *table_checks(client, day),
         *stock_checks(client, stock, day),

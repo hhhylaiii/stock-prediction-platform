@@ -17,20 +17,17 @@ from apps.api.serving import (
     HOLDOUT_RELEASE,
     MONITOR_FIELDS,
     PROMOTION,
-    SERVING_FIELDS,
     ServingRun,
     Slot,
-    best_runs,
     day_of,
-    eligible,
     forced_gates,
     latest_days,
     latest_served_date,
     months_before,
     release_of,
     runs_on,
+    runs_on_days,
     served_monitor,
-    serving_run,
 )
 from apps.api.views import ReadOnlyView
 from apps.research.eval_report import RANK_METRICS
@@ -67,13 +64,7 @@ WINDOW_FIELDS = {"own_rows": int, "days": int, "mostly_predecessors": bool}
 def serving_models() -> list[tuple[ServingRun, date]]:
     """Per page slot its active or degraded run on the slot's own latest served day."""
     days = latest_days(PAGE_ORDER)
-    if not days:
-        return []
-    condition = Q()
-    for slot, day in days.items():
-        condition |= Q(run__objective=slot.objective, horizon=slot.horizon, date=day)
-    rows = eligible().filter(condition).values(*SERVING_FIELDS).distinct()
-    best = best_runs((serving_run(row) for row in rows), days)
+    best = runs_on_days(days)
     return [(best[slot], days[slot]) for slot in PAGE_ORDER if slot in best]
 
 
