@@ -14,6 +14,8 @@ from tests.api.conftest import FORCED_REASON, add_predictions, forced_params
 from tests.e2e.conftest import (
     BAND_NOTE,
     EXTRA_STOCKS,
+    MODEL_REQUIRES,
+    ONLINE,
     PROB_HEAD,
     PROB_TIP,
     RELEASE_REASON,
@@ -176,10 +178,6 @@ def test_five_days_reads_the_five_day_models(
     expect(page.locator("#model-note")).to_be_hidden()
 
 
-MODEL_REQUIRES = "模型要在 holdout 判定達標之後才會上線，判定未達標或明顯退化時要經使用者放行"
-ONLINE = f"{MODEL_REQUIRES}；上線中的模型列在模型頁。"
-
-
 def test_no_predictions_yet_says_what_puts_a_model_online(
     page: Page, live_server: LiveServer, seeded: Seed
 ) -> None:
@@ -230,6 +228,18 @@ def test_five_days_without_the_return_model_says_so(
 
     page.get_by_role("button", name="20 日").click()
 
+    expect(page.locator("#band-note")).to_be_visible()
+    expect(page.locator("#model-note")).to_be_hidden()
+
+
+def test_a_day_without_the_volatility_model_says_nothing_on_the_list(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    Prediction.objects.filter(run_id="vol-h20").delete()
+
+    page.goto(live_server.url)
+
+    expect(page.locator("#rows .trow")).to_have_count(20)
     expect(page.locator("#band-note")).to_be_visible()
     expect(page.locator("#model-note")).to_be_hidden()
 

@@ -42,6 +42,7 @@
     output_odds_vs_q50: '機率與中位數矛盾',
     monitor_unscored: '到期預測缺 label',
     monitor_feature_coverage: '線上特徵覆蓋率',
+    monitor_ex_date_calendar: '除息日超出交易日曆',
     model_alert: '模型告警',
     model_promotion: '換模',
     model_holdout_release: 'holdout 放行後建模',
@@ -142,7 +143,8 @@
   const SOURCE_NOTE = { volatility: '波動率區間', tech_vol_20d: '近 20 日波動估計' };
   const PROB_HEAD = '跑贏大盤 5 個百分點機率';
   const PROB_TIP = '20 日報酬跑贏大盤（加權股價報酬指數，含息）超過 5 個百分點的機率';
-  const BAND_NOTE = '20 日價格區間是 80% 區間：研究期 2016–2024 年的測試資料裡，實際報酬落在區間內的比例是 77.7%；大盤急跌的季度曾明顯偏低，2020 年第 1 季 49%、2022 年第 2 季 66%、第 3 季 68%。';
+  const BAND_NOTE = '20 日價格區間是 80% 區間。設計定案後只跑一次的 holdout（2025 年起，到 2026-11-11 已到期的預測）裡，實際報酬落在區間內的比例是 75.0%；7 個完整的季度在 59% 到 84% 之間，偏低的是 2025 年第 1 季 59.4%、2026 年第 2 季 69.6%，最後一段只有 2026 年 10 月 1 日至 12 日的 7 個交易日（樣本很少）、40.4%。' +
+    '定案前的研究期 2016–2024 年是 77.7%，大盤急跌的季度曾明顯偏低：2020 年第 1 季 49%、2022 年第 2 季 66%、第 3 季 68%。';
   const MODEL_NAMES = { lightgbm: 'LightGBM', ridge: 'Ridge', xgboost: 'XGBoost' };
   const SEARCH_MAX = 32;
   const pctOf = (x, digits) => x === null || x === undefined ? '—' : sgn(x * 100, digits);
@@ -252,16 +254,23 @@
     return '<div class="empty">沒有符合條件的股票。</div>';
   }
 
-  function modelNoteText(meta, shown) {
-    if (!meta.date || !shown) return '';
-    const twenty = state.h === 20;
-    const serving = new Set((meta.models || []).map(model => model.role));
+  function lackingText(models, horizon, own) {
+    const twenty = horizon === 20;
+    const serving = new Set((models || []).map(model => model.role));
+    const estimated = twenty && !serving.has('interval') && (!own || Boolean(own.interval));
     const lacking = [], blank = [];
     if (!serving.has('return')) { lacking.push(OBJECTIVES[twenty ? 'quantile' : 'regression']); blank.push('預測報酬', '預測價'); }
+    if (twenty && own && !serving.has('interval') && !own.interval) blank.push('80% 區間');
+    if (twenty && own && !serving.has('volatility')) { lacking.push(OBJECTIVES.volatility); blank.push('預測 20 日波動'); }
     if (twenty && !serving.has('probability')) { lacking.push(OBJECTIVES.classification); blank.push('跑贏大盤機率'); }
     if (!lacking.length) return '';
-    return '這一期沒有' + lacking.join('、') + '模型的預測：' + blank.join('、') + '留空' +
-      (twenty && !serving.has('interval') ? '，價格區間改用波動估計' : '') + '。' + MODEL_REQUIRES + '；上線中的模型列在模型頁。';
+    return '沒有' + lacking.join('、') + '模型的預測：' + blank.join('、') + '留空' + (estimated ? '，價格區間改用波動估計' : '') + '。';
+  }
+
+  function modelNoteText(meta, shown) {
+    if (!meta.date || !shown) return '';
+    const lacking = lackingText(meta.models, state.h);
+    return lacking ? '這一期' + lacking + MODEL_REQUIRES + '；上線中的模型列在模型頁。' : '';
   }
 
   function showNotes(meta, shown) {
@@ -490,9 +499,12 @@
     const rank = (twenty.models || []).find(model => model.role === 'rank') || (entries.flatMap(entry => entry.models || []).find(model => model.role === 'rank'));
     const degraded = entries.some(entry => (entry.degraded || []).length);
     const caveats = caveatText(entries.flatMap(entry => shownModels(entry.models, entry.horizon)));
+    const lacking = entries.filter(entry => entry.prediction).map(entry => [entry.horizon, lackingText(entry.models, entry.horizon, entry.prediction)])
+      .filter(([, text]) => text).map(([horizon, text]) => horizon + ' 日' + text).join('');
     return '<p class="sub">排名、報酬與區間機率各由自己的模型產出；排名模型多用了幾個籌碼與除息日特徵，其餘特徵相同。價格以 ' + basis + ' 換算。</p><div class="list">' +
       '<div class="thead h-cols" style="padding-top:10px"><div>期間</div><div class="right">預測報酬</div><div class="right">預測價</div><div class="right">80% 區間</div><div class="right prob-head" title="' + esc(PROB_TIP) + '">' + PROB_HEAD + '</div></div>' +
       entries.map(forecastRowHtml).join('') + '</div>' + (quantileBand ? '<p class="note band-note">' + BAND_NOTE + '</p>' : '') +
+      (lacking ? '<p class="note model-note">' + lacking + MODEL_REQUIRES + '；<a href="#models">上線中的模型列在模型頁</a>。</p>' : '') +
       '<div class="pair"><div><div class="faint tiny">預測 20 日波動（年化）</div><div class="v">' + (vol === null || vol === undefined ? '—' : (vol * 100).toFixed(1) + '%') + '</div>' +
       (realised === null ? '' : '<div class="muted tiny">過去 60 日實際為 ' + (realised * 100).toFixed(1) + '%</div>') + '</div>' +
       '<div><div class="faint tiny">排名模型版本</div><div style="font-size:15px;font-weight:500;line-height:1.6">' + (rank ? esc((MODEL_NAMES[rank.model_type] || rank.model_type) + ' ' + rank.version) : '—') + '</div>' +
@@ -794,9 +806,9 @@
 
   function researchText(row) {
     if (row.objective !== 'rank') return '—';
-    if (!row.research) return '研究期成績尚未產出';
+    if (!row.research) return '回測成績尚未產出';
     const m = row.research.metrics || {};
-    const own = '研究期 rank IC ' + (has(m.rank_ic) ? num3(m.rank_ic) : '—') + (has(m.rank_icir) ? '，ICIR ' + m.rank_icir.toFixed(2) : '');
+    const own = (row.metric_source === 'holdout' ? 'holdout' : '研究期') + ' rank IC ' + (has(m.rank_ic) ? num3(m.rank_ic) : '—') + (has(m.rank_icir) ? '，ICIR ' + m.rank_icir.toFixed(2) : '');
     const b = row.baseline ? row.baseline.metrics || {} : null;
     return own + (b ? '；Ridge ' + (has(b.rank_ic) ? num3(b.rank_ic) : '—') + (has(b.rank_icir) ? '，ICIR ' + b.rank_icir.toFixed(2) : '') : '');
   }
@@ -852,7 +864,7 @@
       const spans = releaseSpans(data);
       host.innerHTML = !data.length ? '<p class="placeholder">模型尚未上線。</p>' :
         '<div class="scroll" style="margin-top:14px"><div class="table" style="min-width:1100px">' +
-        '<div class="thead model-cols"><div>目標</div><div>模型</div><div>版本</div><div>訓練區間</div><div>近 6 個月成績</div><div>研究期成績與 baseline</div></div>' +
+        '<div class="thead model-cols"><div>目標</div><div>模型</div><div>版本</div><div>訓練區間</div><div>近 6 個月成績</div><div>回測成績與 baseline</div></div>' +
         data.map((row, i) => modelRowHtml(row, spans[i])).join('') + '</div></div>';
     } catch (err) {
       host.innerHTML = errorBox(err);
@@ -897,7 +909,7 @@
     overlay.addEventListener('pointerleave', () => { hl.style.display = 'none'; tip.style.display = 'none'; });
   }
 
-  const IC_SOURCES = { params: '上線模型指定的研究', self: '上線模型的研究', holdout: '最近一次 holdout' };
+  const IC_SOURCES = { params: '上線模型指定的研究', self: '上線模型的研究' };
 
   async function renderIcChart() {
     const host = document.getElementById('ic-chart'), sub = document.getElementById('ic-sub'), legend = document.getElementById('ic-legend');
@@ -911,7 +923,7 @@
       }
       const model = modelName(meta.model_type), baseline = modelName(meta.baseline);
       legend.innerHTML = '<span><i class="sw-sq" style="background:var(--model)"></i>' + esc(model) + '</span><span><i class="sw-sq" style="background:var(--ink-4)"></i>' + esc(baseline) + '</span>';
-      sub.textContent = 'walk-forward 研究期的月平均，近 ' + data.length + ' 個月（' + (IC_SOURCES[meta.source] || meta.source) + '，' + meta.run_key + '）。' +
+      sub.textContent = (meta.source === 'holdout' ? 'holdout（設計定案後才跑的驗證期）的月平均，近 ' + data.length + ' 個月（' : 'walk-forward 研究期的月平均，近 ' + data.length + ' 個月（' + (IC_SOURCES[meta.source] || meta.source) + '，') + meta.run_key + '）。' +
         model + ' 有 ' + meta.above_baseline + ' 個月高於 ' + baseline + '，負值月份 ' + meta.negative + ' 個；天數少於 ' + meta.min_days + ' 天的月份不計，以淡色表示。';
       drawIcChart(host, data, meta);
     } catch (err) {
@@ -1117,6 +1129,7 @@
       case 'output_odds_vs_q50': return ['', [d.flagged ? '參考，' + stocks : '沒有標記']];
       case 'monitor_unscored': return ['warn', [fmtInt(sizeOf(d.runs)) + ' 筆']];
       case 'monitor_feature_coverage': return [check.severity === 'info' ? '' : 'warn', coverageLines(d)];
+      case 'monitor_ex_date_calendar': return ['warn', [fmtInt(d.count || 0) + ' 筆，最晚 ' + (d.latest_ex_date || '—') + '；交易日曆只到 ' + (d.calendar_end || '—')]];
       case 'model_alert': return ['warn', (d.runs || []).map(run => alertLine(run, date))];
       case 'model_promotion': return [check.severity === 'info' ? '' : 'warn', promotionLines(d)];
       case 'model_holdout_release': return ['warn', releaseLines(d)];
@@ -1172,7 +1185,8 @@
 
   function renderModelChecks(data, meta) {
     const sub = document.getElementById('model-checks-sub'), host = document.getElementById('model-checks');
-    const day = data.find(entry => (entry.model_checks || []).some(isDaily));
+    const monitored = check => isDaily(check) && check.check_name !== 'monitor_ex_date_calendar';
+    const day = data.find(entry => (entry.model_checks || []).some(monitored)) || data.find(entry => (entry.model_checks || []).some(isDaily));
     const share = meta.output_alert_share;
     sub.textContent = day ? '最近一次寫入的交易日：' + day.date + '；區間寬度比的標記超過 ' + Math.round(share * 100) + '% 才算警告，機率矛盾只做參考。' : '';
     const promotions = latestBy(data, isPromotion, scopeOf);

@@ -1,8 +1,9 @@
 """Every stored feature of a date range, assembled from the groups (SPEC §6)."""
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from datetime import date
 
+import numpy as np
 import pandas as pd
 
 from apps.market.calendar import TradingDays
@@ -33,7 +34,7 @@ from apps.research.features.market import (
     attach_market_features,
     load_market_features,
 )
-from apps.research.features.registry import FEATURES, Group, feature_names
+from apps.research.features.registry import DORMANT, FEATURES, Group, feature_names
 from apps.research.features.residual import (
     FALLBACKS,
     LISTING_WINDOWS,
@@ -77,11 +78,13 @@ def _with_inputs(panel: pd.DataFrame, calendar: TradingDays, end: date) -> pd.Da
 
 
 def compute_features(
-    panel: pd.DataFrame, masked: Mapping[str, frozenset[str]] = MASKED_MONTHS
+    panel: pd.DataFrame,
+    masked: Mapping[str, frozenset[str]] = MASKED_MONTHS,
+    dormant: Iterable[str] = DORMANT,
 ) -> pd.DataFrame:
     """Stock, date, universe flag and every stored feature of each panel row, source-gap rules on.
 
-    The second batch and unused features are stored too; screening and training read the first.
+    The second batch and unused features are stored too; dormant features are stored empty.
     """
     technical = technical_features(panel)
     fundamental = apply_fallbacks(fundamental_features(panel), panel)
@@ -100,7 +103,10 @@ def compute_features(
         [group.drop(columns=["stock_id", "date"], errors="ignore") for group in groups], axis=1
     )
     keys = panel[["stock_id", "date"]].assign(in_universe=panel["in_universe"].astype(bool))
-    return mask_months(pd.concat([keys, values[FEATURE_COLUMNS].astype("float64")], axis=1), masked)
+    ruled = mask_months(
+        pd.concat([keys, values[FEATURE_COLUMNS].astype("float64")], axis=1), masked
+    )
+    return ruled.assign(**dict.fromkeys(dormant, np.nan))
 
 
 def build_feature_frame(
@@ -108,6 +114,7 @@ def build_feature_frame(
     start: date,
     end: date,
     masked: Mapping[str, frozenset[str]] = MASKED_MONTHS,
+    dormant: Iterable[str] = DORMANT,
 ) -> pd.DataFrame:
     """Features of every listed stock on the trading days in [start, end], after the warm-up.
 
@@ -119,7 +126,7 @@ def build_feature_frame(
     panel = load_feature_panel(calendar, start, end)
     if panel.empty:
         return pd.DataFrame(columns=FRAME_COLUMNS).astype(FRAME_TYPES)
-    features = compute_features(_with_inputs(panel, calendar, end), masked)
+    features = compute_features(_with_inputs(panel, calendar, end), masked, dormant)
     inside = features[features["date"].between(start, end)]
     return inside.sort_values(["date", "stock_id"], ignore_index=True)[FRAME_COLUMNS]
 

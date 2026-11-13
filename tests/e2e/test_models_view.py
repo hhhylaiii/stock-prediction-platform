@@ -8,7 +8,7 @@ from pytest_django.live_server_helper import LiveServer
 
 from apps.api.serving import HOLDOUT_RELEASE
 from apps.market.calendar import TradingDays
-from apps.research.models import BacktestMetric, ModelMonitor, ModelRun
+from apps.research.models import BacktestMetric, HoldoutRun, ModelMonitor, ModelRun
 from tests.api.conftest import forced_params
 from tests.e2e.conftest import Seed
 
@@ -17,6 +17,7 @@ pytestmark = pytest.mark.e2e
 RESEARCH = (date(2014, 1, 2), date(2024, 12, 3))
 RANK_ICS = [0.04 + 0.002 * n for n in range(10)]
 XSS_VERSION = "<img src=x onerror=1>"
+XSS_KEY = "rank-<img src=x onerror=1>"
 
 
 def metric(
@@ -25,12 +26,14 @@ def metric(
     value: float,
     grain: str = "total",
     period: tuple[date, date] = RESEARCH,
+    run_key: str = "rank-serving",
+    horizon: int = 20,
 ) -> BacktestMetric:
     return BacktestMetric(
-        run_key="rank-serving",
+        run_key=run_key,
         model_type=model_type,
         objective="rank",
-        horizon=20,
+        horizon=horizon,
         metric=name,
         grain=grain,
         period_start=period[0],
@@ -51,7 +54,7 @@ def month_starts(count: int) -> list[date]:
 MONTHS = month_starts(26)
 
 
-def month_rows() -> list[BacktestMetric]:
+def month_rows(run_key: str = "rank-serving") -> list[BacktestMetric]:
     """26 months; two negative ones and a 2-day last month that is negative too."""
     rows = []
     for n, start in enumerate(MONTHS):
@@ -59,11 +62,17 @@ def month_rows() -> list[BacktestMetric]:
         last = start == MONTHS[-1]
         model = -0.01 if last else 0.04 + (-0.07 if n in (5, 9) else 0.0)
         rows += [
-            metric("lightgbm", "rank_ic", model, "month", (start, end)),
-            metric("ridge", "rank_ic", 0.02, "month", (start, end)),
-            metric("lightgbm", "rank_ic_days", 2.0 if last else 21.0, "month", (start, end)),
+            metric("lightgbm", "rank_ic", model, "month", (start, end), run_key),
+            metric("ridge", "rank_ic", 0.02, "month", (start, end), run_key),
+            metric(
+                "lightgbm", "rank_ic_days", 2.0 if last else 21.0, "month", (start, end), run_key
+            ),
         ]
     return rows
+
+
+def claim_rank_holdout(run_key: str, last_date: date) -> None:
+    HoldoutRun.objects.create(scope="rank", attempt=1, run_key=run_key, last_date=last_date)
 
 
 @pytest.fixture
@@ -118,7 +127,8 @@ def test_the_serving_models_are_listed_with_their_scores(
     expect(rows.nth(0)).to_contain_text(f"rank IC 0.049，ICIR {icir:.2f}（近 10 個評估日）")
     expect(rows.nth(0)).to_contain_text("研究期 rank IC 0.041，ICIR 0.62；Ridge 0.027，ICIR 0.41")
     expect(rows.nth(1)).to_contain_text("5 日")
-    expect(rows.nth(1)).to_contain_text("研究期成績尚未產出")
+    expect(rows.nth(1)).to_contain_text("回測成績尚未產出")
+    expect(page.locator("#model-table .thead")).to_contain_text("回測成績與 baseline")
     expect(rows.nth(2).locator("div").last).to_have_text("—")
     expect(rows.nth(2)).to_contain_text(XSS_VERSION)
     expect(rows.nth(3)).to_contain_text("報酬區間")
@@ -308,6 +318,9 @@ def test_the_monthly_chart_draws_24_months_and_marks_the_short_one(
     expect(chart.locator("rect.bar-model.partial")).to_have_count(1)
     assert page.evaluate(BARS_INSIDE_PLOT) is True
     sub = page.locator("#ic-sub")
+    expect(sub).to_contain_text(
+        "walk-forward 研究期的月平均，近 24 個月（上線模型的研究，rank-serving）。"
+    )
     expect(sub).to_contain_text("LightGBM 有 21 個月高於 Ridge")
     expect(sub).to_contain_text("負值月份 2 個")
     expect(sub).to_contain_text("天數少於 10 天的月份不計")
@@ -330,6 +343,71 @@ def test_the_chart_tooltip_names_the_month_and_both_values(
     expect(tip).to_contain_text("2024 年 12 月")
     expect(tip).to_contain_text("LightGBM −0.010，Ridge 0.020")
     expect(tip).to_contain_text("只有 2 天")
+
+
+def test_holdout_months_are_not_called_the_research_period(
+    page: Page, live_server: LiveServer, seeded: Seed
+) -> None:
+    claim_rank_holdout(XSS_KEY, seeded.last_session)
+    BacktestMetric.objects.bulk_create(month_rows(XSS_KEY))
+
+    page.goto(f"{live_server.url}/#models")
+
+    expect(page.locator("#ic-chart rect.bar-model")).to_have_count(24)
+    sub = page.locator("#ic-sub")
+    expect(sub).to_contain_text(
+        f"holdout（設計定案後才跑的驗證期）的月平均，近 24 個月（{XSS_KEY}）。"
+    )
+    expect(sub).to_contain_text("LightGBM 有 21 個月高於 Ridge")
+    expect(sub).not_to_contain_text("研究期")
+    expect(sub.locator("img")).to_have_count(0)
+    expect(page.locator("#model-table")).to_contain_text("模型尚未上線。")
+
+
+def test_a_rank_score_read_from_the_holdout_says_so(
+    page: Page, live_server: LiveServer, scored: Seed
+) -> None:
+    claim_rank_holdout("rank-frozen", scored.last_session)
+    BacktestMetric.objects.bulk_create(
+        [
+            metric("lightgbm", "rank_ic", 0.033, run_key="rank-frozen", horizon=5),
+            metric("lightgbm", "rank_icir", 0.51, run_key="rank-frozen", horizon=5),
+            metric("ridge", "rank_ic", 0.021, run_key="rank-frozen", horizon=5),
+            metric("ridge", "rank_icir", 0.37, run_key="rank-frozen", horizon=5),
+        ]
+    )
+
+    page.goto(f"{live_server.url}/#models")
+
+    rows = page.locator("#model-table .trow")
+    expect(rows.nth(0)).to_contain_text("研究期 rank IC 0.041，ICIR 0.62；Ridge 0.027，ICIR 0.41")
+    expect(rows.nth(1)).to_contain_text("holdout rank IC 0.033，ICIR 0.51；Ridge 0.021，ICIR 0.37")
+    expect(rows.nth(1)).not_to_contain_text("研究期")
+    expect(page.locator("#ic-sub")).to_contain_text("walk-forward 研究期的月平均")
+
+
+def test_a_research_run_named_by_the_serving_model_is_called_research(
+    page: Page, live_server: LiveServer, scored: Seed
+) -> None:
+    ModelRun.objects.filter(pk="rank-h20").update(params={"research_run_key": "rank-research"})
+    BacktestMetric.objects.bulk_create(
+        [
+            metric("lightgbm", "rank_ic", 0.055, run_key="rank-research"),
+            metric("lightgbm", "rank_icir", 0.71, run_key="rank-research"),
+            metric("ridge", "rank_ic", 0.031, run_key="rank-research"),
+            metric("ridge", "rank_icir", 0.44, run_key="rank-research"),
+            *month_rows("rank-research"),
+        ]
+    )
+
+    page.goto(f"{live_server.url}/#models")
+
+    rows = page.locator("#model-table .trow")
+    expect(rows.nth(0)).to_contain_text("研究期 rank IC 0.055，ICIR 0.71；Ridge 0.031，ICIR 0.44")
+    expect(rows.nth(0)).not_to_contain_text("holdout rank IC")
+    expect(page.locator("#ic-sub")).to_contain_text(
+        "walk-forward 研究期的月平均，近 24 個月（上線模型指定的研究，rank-research）。"
+    )
 
 
 def test_nothing_served_or_researched_yet(
