@@ -26,15 +26,12 @@ def failures(result: Promoted) -> list[str]:
 
 
 def left_out(result: Promoted) -> list[str]:
-    """Each run kept out, with its own failed gates or a note that its horizon's group failed."""
+    """Each run kept out of a partial swap, with the gates it failed."""
     failed = {item["slot"]: item["gates"] for item in result.failed}
     run_ids = {str(checked.slot): checked.run_id for checked in result.checked}
     return [
         f"  {slot} {run_ids[slot]}："
-        + (
-            "、".join(f"{gate['name']}（{gate['reason']}）" for gate in failed.get(slot, []))
-            or "同一組有模型沒過"
-        )
+        + "、".join(f"{gate['name']}（{gate['reason']}）" for gate in failed.get(slot, []))
         for slot in result.held
     ]
 

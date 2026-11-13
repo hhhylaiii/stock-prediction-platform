@@ -11,10 +11,9 @@ from apps.etl.models import DataQualityLog
 from apps.research import gates, promotion
 from apps.research.gates import Gate, SlotGates
 from apps.research.holdout import HoldoutError
-from apps.research.management.commands.promote import left_out
 from apps.research.models import HoldoutRun, ModelRun, ModelStatus, Prediction
 from apps.research.predict import PredictionGateError, Slot
-from apps.research.promotion import PROMOTION_CHECK, Promoted, first_day, promote
+from apps.research.promotion import PROMOTION_CHECK, first_day, promote
 from apps.research.runs import RunError
 from tests.research.run_panels import weekdays
 from tests.research.test_gates import LAST, built, logged, other_shadow, serve_copy
@@ -753,6 +752,32 @@ def test_a_held_horizon_comes_in_later_only_by_force(
 
 
 @pytest.mark.django_db
+def test_a_held_horizon_whose_gates_pass_on_a_later_try_goes_in_unforced(
+    researched: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs = built("rank", "rank-wf1", researched)
+    passed(LAST)
+    sound = gates.data_quality
+    failing_h5(monkeypatch)
+    sent(monkeypatch)
+    five, twenty = by_horizon(runs)
+    promote("rank-prod", LAST, researched)
+    served = fresh(twenty).params
+    monkeypatch.setattr(gates, "data_quality", sound)
+
+    result = promote("rank-prod", LAST, researched)
+
+    assert (result.promoted, result.held, result.retired) == (True, [], [])
+    assert fresh(five).status == ModelStatus.ACTIVE
+    assert fresh(five).params["promotion"] == {"forced": False, "reason": None, "failed": []}
+    assert (fresh(twenty).status, fresh(twenty).params) == (ModelStatus.ACTIVE, served)
+    last = alerts()[-1]
+    assert last.severity == DataQualityLog.Severity.INFO
+    assert last.detail["promoted_slots"] == [entry(five, forced=False)]
+    assert (last.detail["held_slots"], last.detail["failed"]) == ([], [])
+
+
+@pytest.mark.django_db
 def test_force_swaps_in_every_horizon_and_marks_only_the_failed_one_forced(
     researched: Path, settings: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -988,24 +1013,27 @@ def test_rows_a_held_horizon_gains_while_the_gates_run_do_not_stop_the_other(
 
 @pytest.mark.django_db
 @pytest.mark.parametrize("force", [True, False])
-def test_a_run_leaving_candidate_while_the_gates_run_stops_the_swap(
-    researched: Path, monkeypatch: pytest.MonkeyPatch, force: bool
+@pytest.mark.parametrize(("before", "during"), [("candidate", "retired"), ("retired", "candidate")])
+def test_a_run_changing_status_while_the_gates_run_stops_the_swap(
+    researched: Path, monkeypatch: pytest.MonkeyPatch, force: bool, before: str, during: str
 ) -> None:
     runs = built("rank", "rank-wf1", researched)
     passed(LAST)
     sent(monkeypatch)
-    five, _ = by_horizon(runs)
+    five, twenty = by_horizon(runs)
+    ModelRun.objects.filter(pk=five.pk).update(status=before)
     judge = promotion.check_gates
 
     def judged_after_a_change(run_key: str, directory: Path) -> list[Any]:
-        ModelRun.objects.filter(pk=five.pk).update(status=ModelStatus.RETIRED)
+        ModelRun.objects.filter(pk=five.pk).update(status=during)
         return judge(run_key, directory)
 
     monkeypatch.setattr(promotion, "check_gates", judged_after_a_change)
     with pytest.raises(RunError, match="rank-prod changed while its gates were checked"):
         promote("rank-prod", LAST, researched, force=force, reason="overriding" if force else "")
 
-    untouched(runs)
+    untouched([five], before)
+    untouched([twenty])
     assert not alerts()
     assert not Prediction.objects.exists()
 
@@ -1048,21 +1076,6 @@ def test_the_record_lists_runs_by_horizon_then_objective() -> None:
 
     assert [item["run_id"] for item in came] == ["d", "a"]
     assert [item["run_id"] for item in held] == ["c", "b"]
-
-
-def test_a_run_held_only_by_its_group_is_listed_with_that_note() -> None:
-    clear = SlotGates(Slot("quantile", 20), "band-q", None, [])
-    short = SlotGates(Slot("volatility", 20), "band-vol", None, [])
-    gate = {"name": "agreement", "reason": "相關太低"}
-    failed = [{"slot": "volatility 20 日", "run_id": "band-vol", "gates": [gate]}]
-    held = ["quantile 20 日", "volatility 20 日"]
-
-    lines = left_out(Promoted(True, [clear, short], failed=failed, held=held))
-
-    assert lines == [
-        "  quantile 20 日 band-q：同一組有模型沒過",
-        "  volatility 20 日 band-vol：agreement（相關太低）",
-    ]
 
 
 def test_failed_gates_carry_the_unit_of_their_sample() -> None:
