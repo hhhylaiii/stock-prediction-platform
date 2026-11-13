@@ -219,9 +219,12 @@ uv run python manage.py fill_price_bars --source tpex --date 2026-09-10 --stock 
 - 抓那一天的兩張行情頁，只把指定代號那天的 K 棒新增進 `daily_price`（`--stock` 可重複）；頁上其他代號不寫，已有的列不改。之後有除權息事件的，還原因子照既有規則補上。
 - 原始頁存在 dataset `daily_price_fill`，不算那天的行情頁，所以「第一頁行情存檔」不會動。`etl_run` 也記在 `daily_price_fill`，checkpoint 的 `stocks` 是補的代號。
 - 整次全有或全無。發請求之前就拒絕的：那天不是交易日；那天在第一頁行情存檔當天或之後（改用 `fetch`）；代號不在 `stock_master`、那天早於 `list_date` 或不早於 `delist_date`；代號那天已經有 K 棒。抓到頁才知道的：代號不在那天的行情頁上，這時留下 raw 與一列 failed 的 `etl_run`，`daily_price` 不寫。
-- `--dry-run` 印出會新增的列（`insert 代號 日期 open … turnover …`），最後印 `nothing was written`，raw 與 `etl_run` 也不留。
+- 每新增一列印一行 `insert 代號 日期 open … turnover …`，最後印 `daily_price: N bars added for 日期`。`--dry-run` 印同樣的列，總結行是 `N bars to add`，再印 `nothing was written`，raw 與 `etl_run` 也不留。
 - 只支援櫃買。證交所目前沒有這種缺口。
-- 補完之後，那幾天的當沖量要對同一天重放一次（`reprocess --source tpex --dataset day_trade --start <那天> --end <那天>`），理由同「當沖歷史回補」最後第二條。
+- 補完之後還有三件事：
+  - 當沖量要對同一天重放一次（`reprocess --source tpex --dataset day_trade --start <那天> --end <那天>`），理由同「當沖歷史回補」倒數第二條。
+  - 對同一天重跑 `fill_from_exchange --source tpex --fill margin --start <那天> --end <那天>` 與同樣區間的 `--fill sbl`（兩者都冪等），理由見「交易所逐日表補缺」：那兩個補缺只替當天有價的代號寫列。剛掛牌的股票通常還不在融資券與借券表上，這一步多半不會新增任何列，照跑即可。
+  - 特徵與 label：每晚只重算最近 60 個交易日的特徵與 81 個交易日的 label，新增價格列也不會記 `adj_factor_changed`。補的那天在這個範圍內時當晚就會算進去；在範圍以外時要手動跑 `build_features --start <那天> --end <最近交易日>` 與 `build_labels --start <那天往前 21 個交易日> --end <最近交易日>`。`list_date` 是空的股票，第一根 K 棒往前移，上市天數也會跟著改。
 
 ### 補進一檔股票的歷史之後
 
