@@ -19,6 +19,7 @@ from apps.etl.calendar_upkeep import (
 )
 from apps.etl.models import DataQualityLog, EtlRun
 from apps.etl.quality import CHECKS, should_run_prediction
+from apps.etl.ratelimit import RetryableError
 from apps.etl.tasks import AUDITED
 from apps.market.models import TradingCalendar
 
@@ -351,6 +352,25 @@ def test_a_source_failure_still_records_the_reach(
     assert row.detail["extension"] == "failed"
     assert "403" in row.detail["reason"]
     assert not EtlRun.objects.exists()
+    assert alerted == []
+
+
+def test_a_source_out_of_reach_fails_the_extension_without_an_alert(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _calendar(date(2026, 10, 1), date(2026, 12, 31))
+    alerted: list[str] = []
+
+    def unreachable(today: date) -> None:
+        raise RetryableError("read timed out")
+
+    monkeypatch.setattr("apps.etl.calendar_upkeep.extend", unreachable)
+    monkeypatch.setattr(
+        "apps.etl.calendar_upkeep.report_swallowed", lambda exc, context: alerted.append(context)
+    )
+    today = date(2026, 11, 12)
+    assert keep_up(today) == Extension.FAILED
+    assert _reach(today).detail["reason"] == "read timed out"
     assert alerted == []
 
 

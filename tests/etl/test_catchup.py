@@ -17,6 +17,7 @@ from apps.etl.adapters.twse import TwseAdapter
 from apps.etl.catchup import (
     JOBS,
     Job,
+    _failure,
     catch_up,
     covered_days,
     missing_days,
@@ -25,6 +26,7 @@ from apps.etl.catchup import (
     select_jobs,
 )
 from apps.etl.models import DataQualityLog, EtlRun, RawTwse
+from apps.etl.ratelimit import RetryableError
 from apps.etl.raw import store_raw
 from apps.market.calendar import TradingDays
 from apps.market.models import (
@@ -320,6 +322,18 @@ def test_a_next_session_with_only_other_logs_is_not_checked_again(
     _serve_prices(load_fixture, DAYS[1])
     report = catch_up(DAYS[1], DAYS[1], october_2026_in_db, [PRICE_JOB])
     assert report.checked == ["2026-10-28"]
+
+
+def test_a_source_out_of_reach_is_a_failed_step_without_an_alert(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    alerted: list[str] = []
+    monkeypatch.setattr(
+        "apps.etl.catchup.report_swallowed", lambda exc, context: alerted.append(context)
+    )
+    told = _failure(PRICE_JOB, "2026-10-27", RetryableError("read timed out"))
+    assert told == "RetryableError: read timed out"
+    assert alerted == []
 
 
 @responses.activate

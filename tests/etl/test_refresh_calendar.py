@@ -9,6 +9,7 @@ from django.core.management.base import CommandError
 from responses import matchers
 
 from apps.etl.calendar_upkeep import CHANGED
+from apps.etl.errors import SourceError
 from apps.etl.models import DataQualityLog, EtlRun
 from apps.etl.trading_calendar import UNLABELLED_CLOSURE, WEEKEND_TRADING, corrections
 from apps.market.models import DailyPrice, TradingCalendar
@@ -147,8 +148,9 @@ def test_a_broken_table_changes_nothing_and_fails_the_run(
     _today(monkeypatch, date(2026, 10, 31))
     _serve("202610", {**load_fixture(OCTOBER), "fields": ["成交股數"]})
     before = _flags()
-    with pytest.raises(CommandError, match="fields changed"):
+    with pytest.raises(CommandError, match="fields changed") as raised:
         call_command("refresh_calendar")
+    assert isinstance(raised.value.__cause__, SourceError)
     assert _flags() == before
     assert EtlRun.objects.get().status == "failed"
 

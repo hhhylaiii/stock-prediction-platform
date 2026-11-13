@@ -18,9 +18,10 @@ from django.db import DatabaseError, InterfaceError, OperationalError
 from django.test import override_settings
 
 from apps.etl import task_alerts, tasks
-from apps.etl.errors import SchemaChangedError, SourceNotReadyError
+from apps.etl.errors import SchemaChangedError, SourceNotReadyError, SourceRequestError
 from apps.etl.models import DataQualityLog, EtlRun
 from apps.etl.quality import CHECKS, should_run_prediction
+from apps.etl.ratelimit import RetryableError, ThrottledError
 from apps.etl.task_alerts import CHECK, KEY_TTL, on_task_failure, report_failure
 from apps.market.calendar import OutsideCalendarError
 from config.celery import app
@@ -488,6 +489,19 @@ def test_a_source_error_a_task_swallows_stays_with_the_evening_audit(
     )
     result = tasks.fetch_day.apply(args=("twse", "daily_price", "2026-10-28"))
     assert result.get() == "failed"
+    assert len(hook.calls) == 0
+    assert not DataQualityLog.objects.filter(check_name=CHECK).exists()
+
+
+@pytest.mark.usefixtures("clock", "claimed")
+@pytest.mark.parametrize(
+    "error",
+    [RetryableError("read timed out"), ThrottledError("HTTP 429"), SourceRequestError("HTTP 403")],
+)
+def test_a_source_out_of_reach_or_throttling_stays_with_the_evening_audit(
+    hook: Any, error: Exception
+) -> None:
+    assert tasks._failed("yahoo/us_close 2026-11-12", error) == "failed"
     assert len(hook.calls) == 0
     assert not DataQualityLog.objects.filter(check_name=CHECK).exists()
 
