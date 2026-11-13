@@ -629,3 +629,151 @@ fold 51 day by day (band, model):
   2026-10-12 | 0.47974 | 0.42497
 band folds under 0.70: [0.62809, 0.43449]; over 0.90: []
 ```
+
+## Holdout（2026-11-12）：覆蓋率改以當日收盤價起算的對照
+
+2026-11-13 補算，只讀、描述用：不取代定案 holdout 的對外數字（那些用的是 `fwd_ret_open`），要不要寫上頁面由使用者決定。讀的東西和上一節相同，另從 `label_daily` 多讀 20 日的 `fwd_ret` 一欄；沒有重新訓練、沒有重跑 holdout、沒有寫資料庫。
+
+兩個口徑只差報酬的起點：現行的 `fwd_ret_open` 是還原收盤價（t+20）除以隔天的還原開盤價（t+1）減 1；對照的 `fwd_ret` 是還原收盤價（t+20）除以當日的還原收盤價（t）減 1，終點相同（`apps/research/labels.py` 的 `label_panel`）。頁面拿最新收盤價換算價格區間，規格把兩者的差（隔夜跳空）記為已知近似（`docs/SPEC.md` 輸出一致性）。區間不動：模型用快取的 q10、q90，備援用快取的波動率區間。列和上一節相同；這批列的 `fwd_ret` 沒有空值，所以兩個口徑比的是同一批列。「open (every row)」那一欄是對帳用的，和上一節與 `interval-holdout-20261112.md` 的每摺覆蓋率相同。
+
+```
+run interval-holdout-20261112; claim last_date 2026-11-11; labels settled through 2026-10-12
+open basis: fwd_ret_open = adj_close(t+20) / adj_open(t+1) - 1; close basis: fwd_ret = adj_close(t+20) / adj_close(t) - 1
+rows: universe, tradable at the next open, fwd_ret_open known; both bases compared on rows where fwd_ret is known too
+fold | days | rows | rows without fwd_ret | band open (every row) | band open | band close | model open (every row) | model open | model close
+44 | 55 | 51188 | 0 | 0.62809 | 0.62809 | 0.62467 | 0.59403 | 0.59403 | 0.58973
+45 | 61 | 54018 | 0 | 0.89404 | 0.89404 | 0.89119 | 0.84270 | 0.84270 | 0.83867
+46 | 65 | 57592 | 0 | 0.79429 | 0.79429 | 0.79142 | 0.78305 | 0.78305 | 0.78229
+47 | 62 | 55819 | 0 | 0.79390 | 0.79390 | 0.79178 | 0.79311 | 0.79311 | 0.79182
+48 | 55 | 53520 | 0 | 0.78644 | 0.78644 | 0.78444 | 0.75727 | 0.75727 | 0.75561
+49 | 61 | 63371 | 0 | 0.77665 | 0.77665 | 0.77442 | 0.69559 | 0.69559 | 0.69602
+50 | 63 | 62666 | 0 | 0.85706 | 0.85706 | 0.85587 | 0.80398 | 0.80398 | 0.80507
+51 | 7 | 6370 | 0 | 0.43449 | 0.43449 | 0.43361 | 0.40393 | 0.40393 | 0.40445
+all folds: rows 404544, without fwd_ret 0
+all 8 folds: mean of daily
+  band: days 429; open (every row) 0.78694; open 0.78694; close 0.78459; close minus open -0.00235
+  model: days 429; open (every row) 0.74990; open 0.74990; close 0.74849; close minus open -0.00141
+without the last fold: mean of daily
+  band: days 422; open (every row) 0.79279; open 0.79279; close 0.79041; close minus open -0.00237
+  model: days 422; open (every row) 0.75564; open 0.75564; close 0.75420; close minus open -0.00144
+per fold, close minus open (band, model):
+  44 | -0.00342 | -0.00429
+  45 | -0.00286 | -0.00403
+  46 | -0.00287 | -0.00076
+  47 | -0.00212 | -0.00130
+  48 | -0.00200 | -0.00167
+  49 | -0.00224 | +0.00044
+  50 | -0.00118 | +0.00109
+  51 | -0.00088 | +0.00052
+```
+
+## Holdout（2026-11-12）：20 日期間內的除權息，與未還原股價口徑的覆蓋率
+
+2026-11-13 補算，只讀、描述用：不取代定案 holdout 的對外數字，要不要寫上頁面由使用者決定。讀的東西和上一節相同，另讀 `dividend_event` 在這段期間的列；沒有重新訓練、沒有重跑 holdout、沒有寫資料庫。這一節沒有讀 `daily_price`；公式另用 200 列的未還原收盤抽樣對過，見下一節。
+
+為什麼要看：覆蓋率用的報酬是含息還原的，頁面卻是拿未還原的最新收盤價乘上報酬畫出價格區間；20 日內遇到除權息的股票，實際股價會多掉一段，還原報酬不會。規格的輸出一致性只記了隔夜跳空那個近似，沒有記這一個。
+
+定義：列和上一節相同。事件是 `dividend_event` 裡除權息日晚於 t、不晚於 t 之後第 20 個交易日的列。未還原報酬 =（1 + `fwd_ret`）× 期間內各事件 `adj_factor` 的乘積 − 1；依據是每日還原因子等於之後各事件因子的乘積（`apps/market/adjust.py` 的 `refresh_adj_factor`）。`adj_factor` 是空的事件當成 1（還原報酬也沒有扣它，那一跳兩個口徑都量不到）。`1 − adj_factor` 是相對除權息前一日收盤的比例，不是相對 t 的收盤。現金與股票股利都是 0 的事件是表裡只有還原因子的那些（除權、減資、分割或面額變更），這張表分不出是哪一種。「已公告」指事件的 `announce_date` 不晚於 t，和特徵 `fund_days_to_ex_date` 的判斷相同，用的是 2026-11-13 當時表裡的值。(d) 的「open basis」「close basis」兩欄是對帳用的，和前兩節相同。
+
+```
+run interval-holdout-20261112; rows 404544; days 429; first 2025-01-02; last 2026-10-12; labels settled through 2026-10-12
+window of a row dated t: ex_date after t and on or before the 20th trading day after t
+unadjusted return: (1 + fwd_ret) * product of dividend_event.adj_factor over the window - 1; fwd_ret = adj_close(t+20) / adj_close(t) - 1
+dividend_event rows with ex_date in (2025-01-02, 2026-11-11]: 5394; adj_factor empty 116; announce_date empty 1974
+(a) rows with an ex-date inside the window
+  all rows together: 36901 of 404544 = 0.09122; mean of the daily share 0.08965; rows with more than one event 87
+  by fold: 44 0.03409; 45 0.13542; 46 0.12639; 47 0.01679; 48 0.03389; 49 0.14953; 50 0.13163; 51 0.01350
+  by month of t (share of rows, rows with an event, rows):
+    2025-01 | 0.01600 | 220 | 13747
+    2025-02 | 0.02544 | 438 | 17215
+    2025-03 | 0.05374 | 1087 | 20226
+    2025-04 | 0.01706 | 314 | 18403
+    2025-05 | 0.07934 | 1395 | 17583
+    2025-06 | 0.31089 | 5606 | 18032
+    2025-07 | 0.21971 | 4176 | 19007
+    2025-08 | 0.12567 | 2326 | 18509
+    2025-09 | 0.03870 | 777 | 20076
+    2025-10 | 0.01282 | 239 | 18636
+    2025-11 | 0.01640 | 302 | 18410
+    2025-12 | 0.02109 | 396 | 18773
+    2026-01 | 0.01105 | 220 | 19903
+    2026-02 | 0.01887 | 229 | 12134
+    2026-03 | 0.06354 | 1365 | 21483
+    2026-04 | 0.01989 | 381 | 19157
+    2026-05 | 0.08793 | 1837 | 20892
+    2026-06 | 0.31121 | 7258 | 23322
+    2026-07 | 0.21613 | 5112 | 23652
+    2026-08 | 0.12615 | 2586 | 20499
+    2026-09 | 0.02976 | 551 | 18515
+    2026-10 | 0.01350 | 86 | 6370
+(b) affected rows by kind: cash only 30853; with a stock dividend 3584; neither cash nor stock (factor-only: ex-rights, capital reduction, split or par value change) 2464
+  affected rows with an event whose adj_factor is empty (its jump is in neither return): 79
+  cash-only rows with every factor known: 30847; 1 - product of adj_factor: median 0.02922, mean 0.03160, 90th percentile 0.05882, 99th 0.08898, max 0.13612
+  other rows with every factor known: 5975; product of adj_factor - 1: 10th percentile -0.16667, median -0.04787, 90th -0.00618, min -0.95000, max 1.00000
+(c) affected rows by what was announced on t: every event announced by t 21512 (0.58297); some event announced after t 14917 (0.40424); announce_date empty for some event 472 (0.01279)
+  share announced by t, by month of t: 2025-01 0.31818; 2025-02 0.21918; 2025-03 0.66145; 2025-04 0.79936; 2025-05 0.31971; 2025-06 0.57010; 2025-07 0.70785; 2025-08 0.66810; 2025-09 0.62162; 2025-10 0.46444; 2025-11 0.25166; 2025-12 0.62121; 2026-01 0.37727; 2026-02 0.13537; 2026-03 0.65128; 2026-04 0.65879; 2026-05 0.32608; 2026-06 0.55732; 2026-07 0.67703; 2026-08 0.60209; 2026-09 0.62976; 2026-10 0.52326
+(d) coverage, mean of daily: open basis | close basis | unadjusted | unadjusted minus close
+  all 8 folds, band: 0.78694 | 0.78459 | 0.77747 | -0.00712
+  all 8 folds, model: 0.74990 | 0.74849 | 0.74064 | -0.00785
+  without the last fold, band: 0.79279 | 0.79041 | 0.78320 | -0.00722
+  without the last fold, model: 0.75564 | 0.75420 | 0.74623 | -0.00797
+  by fold: fold | band close | band unadjusted | model close | model unadjusted
+    44 | 0.62467 | 0.62168 | 0.58973 | 0.58717
+    45 | 0.89119 | 0.87856 | 0.83867 | 0.82384
+    46 | 0.79142 | 0.78097 | 0.78229 | 0.77464
+    47 | 0.79178 | 0.79110 | 0.79182 | 0.79116
+    48 | 0.78444 | 0.78141 | 0.75561 | 0.75198
+    49 | 0.77442 | 0.76527 | 0.69602 | 0.68516
+    50 | 0.85587 | 0.84529 | 0.80507 | 0.79053
+    51 | 0.43361 | 0.43251 | 0.40445 | 0.40382
+  by month of t, mean of daily: month | share of rows with an event | band close | band unadjusted | model close | model unadjusted
+    2025-01 | 0.01600 | 0.77254 | 0.77385 | 0.75991 | 0.76144
+    2025-02 | 0.02544 | 0.83786 | 0.83605 | 0.82302 | 0.82098
+    2025-03 | 0.05374 | 0.32615 | 0.31902 | 0.25711 | 0.25117
+    2025-04 | 0.01706 | 0.91445 | 0.91410 | 0.86343 | 0.86211
+    2025-05 | 0.07934 | 0.90308 | 0.89383 | 0.81888 | 0.80213
+    2025-06 | 0.31089 | 0.85770 | 0.83017 | 0.83393 | 0.80806
+    2025-07 | 0.21971 | 0.75319 | 0.74000 | 0.75936 | 0.75257
+    2025-08 | 0.12567 | 0.78542 | 0.77257 | 0.78722 | 0.77691
+    2025-09 | 0.03870 | 0.83928 | 0.83425 | 0.80247 | 0.79655
+    2025-10 | 0.01282 | 0.75940 | 0.75726 | 0.76478 | 0.76231
+    2025-11 | 0.01640 | 0.84485 | 0.84502 | 0.84556 | 0.84556
+    2025-12 | 0.02109 | 0.77297 | 0.77286 | 0.76754 | 0.76792
+    2026-01 | 0.01105 | 0.76890 | 0.76737 | 0.77678 | 0.77583
+    2026-02 | 0.01887 | 0.74904 | 0.74696 | 0.73251 | 0.73018
+    2026-03 | 0.06354 | 0.81858 | 0.81359 | 0.74800 | 0.74110
+    2026-04 | 0.01989 | 0.71715 | 0.71689 | 0.66611 | 0.66475
+    2026-05 | 0.08793 | 0.75231 | 0.75146 | 0.70714 | 0.70650
+    2026-06 | 0.31121 | 0.85001 | 0.82450 | 0.71393 | 0.68427
+    2026-07 | 0.21613 | 0.84196 | 0.82230 | 0.73580 | 0.70888
+    2026-08 | 0.12615 | 0.90065 | 0.89141 | 0.86754 | 0.85347
+    2026-09 | 0.02976 | 0.82415 | 0.82216 | 0.81566 | 0.81426
+    2026-10 | 0.01350 | 0.43361 | 0.43251 | 0.40445 | 0.40382
+  rows with an event only, all rows together (not a mean of daily): group | rows | band close | band unadjusted | model close | model unadjusted
+    any event | 36901 | 0.79594 | 0.71621 | 0.74133 | 0.65215
+    cash only | 30853 | 0.80102 | 0.73335 | 0.73964 | 0.66211
+    other kinds | 6048 | 0.77001 | 0.62880 | 0.75000 | 0.60136
+  rows with an event, share under the lower bound: band close 0.08526, unadjusted 0.20181; model close 0.13490, unadjusted 0.25834
+```
+
+## Holdout（2026-11-12）：未還原報酬公式的抽樣對帳
+
+2026-11-13，只讀。從上一節「有事件的列」用固定的 seed 抽 200 列（只有現金股利 80、含股票股利 50、只有還原因子的事件 50、同一列有多個事件的 20），只讀這些列兩端（t 與 t 之後第 20 個交易日）的 `daily_price`，共 400 列；拿未還原收盤算的報酬對上一節的公式，另拿事件因子的乘積對兩端每日還原因子的比值。200 列全部相同，差都在 1e-15 以內。這個樣本沒有抽到終點那天沒有收盤價、要往前補價的列，那條路徑沒有驗到。輸出的前四行和上一節相同。
+
+```
+run interval-holdout-20261112; rows 404544; days 429; first 2025-01-02; last 2026-10-12; labels settled through 2026-10-12
+window of a row dated t: ex_date after t and on or before the 20th trading day after t
+unadjusted return: (1 + fwd_ret) * product of dividend_event.adj_factor over the window - 1; fwd_ret = adj_close(t+20) / adj_close(t) - 1
+dividend_event rows with ex_date in (2025-01-02, 2026-11-11]: 5394; adj_factor empty 116; announce_date empty 1974
+sample: seed 20261113; 200 rows; by group cash only 80; with a stock dividend 50; factor-only 50; more than one event 20
+  stocks 156; days 128; t from 2025-01-14 to 2026-09-23
+daily_price rows read: 400 of 400 asked (two ends of each sampled row)
+rows with a close on both ends: 200; without: 0 (no row or no close on t: 0; on the 20th day: 0)
+unadjusted return, prices against the formula: max |diff| 4.441e-16; median |diff| 0.000e+00; rows over 1e-09: 0
+product of event factors against daily adj_factor(t) / adj_factor(20th day): rows 200; max |diff| 1.110e-16; rows over 1e-09: 0
+by group: group | rows with both closes | max |diff| | rows over the tolerance
+  cash only | 80 | 2.220e-16 | 0
+  factor-only | 50 | 4.441e-16 | 0
+  more than one event | 20 | 2.220e-16 | 0
+  with a stock dividend | 50 | 2.220e-16 | 0
+```
