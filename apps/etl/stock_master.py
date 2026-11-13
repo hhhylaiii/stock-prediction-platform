@@ -1,4 +1,4 @@
-"""stock_master rows from current listings plus the official delisting lists (SPEC §5, §8.3)."""
+"""stock_master rows from FinMind listings plus the official delisting lists (SPEC §5, §8.3)."""
 
 from collections.abc import Sequence
 from typing import Any
@@ -142,11 +142,11 @@ def _only_changed_boards(code: str, known: list[dict[str, Any]], left: set[str])
     newest = [row for row in known if row["date"] == known[0]["date"]]
     last = {str(INFO_MARKETS[row["type"]]) for row in newest}
     industry = pick_industry(sorted(str(row["industry_category"]) for row in newest))
-    return len(last) == 1 and not last & left and is_common_stock(code.strip(), industry)
+    return not last & left and is_common_stock(code.strip(), industry)
 
 
 def _halted(info: pd.DataFrame, taken: set[str]) -> pd.DataFrame:
-    """Common stocks FinMind stopped listing that no delisting list names stay listed.
+    """Common stocks FinMind stopped listing that were not delisted stay listed.
 
     A stock halted from trading drops off the snapshot without being delisted.
     """

@@ -197,7 +197,7 @@ def test_halted_common_stocks_are_kept_and_named() -> None:
         "unlisted_without_delisting": 2,
         "suspended": ["1589"],
     }
-    assert "1 common stocks no longer listed and on no delisting list, kept: 1589" in (
+    assert "1 common stocks the newest snapshot no longer lists, kept as listed: 1589" in (
         out.getvalue()
     )
 
@@ -253,6 +253,21 @@ def test_a_chosen_code_no_source_gives_is_refused() -> None:
         call_command("load_stock_master", "--stock", "1589", "--stock", "9999", "--stock", "9105")
     assert StockMaster.objects.count() == 0
     assert EtlRun.objects.get().status == "failed"
+    kept = [model.objects.count() for model in (RawFinmind, RawTwse, RawTpex)]
+    assert kept == [1, 1, 1]
+
+
+@responses.activate
+@pytest.mark.django_db
+@pytest.mark.usefixtures("halted_sources")
+def test_a_refused_dry_run_leaves_nothing_either() -> None:
+    with pytest.raises(CommandError, match="neither listed, halted nor delisted: 9999"):
+        call_command("load_stock_master", "--stock", "9999", "--dry-run")
+    assert not StockMaster.objects.exists()
+    assert not EtlRun.objects.exists()
+    assert not RawFinmind.objects.exists()
+    assert not RawTwse.objects.exists()
+    assert not RawTpex.objects.exists()
 
 
 @responses.activate
@@ -288,7 +303,7 @@ def test_a_chosen_run_still_checks_the_listed_count() -> None:
                 "create 3454 晶睿 TWSE 光電業 delisted 2026-03-27",
                 "20 to create, 1 to change",
                 "2 codes no longer listed and on no delisting list: 2891A, 9105",
-                "kept: 1589",
+                "kept as listed: 1589",
             ],
         ),
     ],

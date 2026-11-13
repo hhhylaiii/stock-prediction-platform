@@ -43,7 +43,9 @@ class Found(NamedTuple):
 
 
 class Command(BaseCommand):
-    help = "Upsert every listed and officially delisted stock into stock_master (SPEC §5)."
+    help = (
+        "Upsert listed, officially delisted and halted common stocks into stock_master (SPEC §5)."
+    )
 
     def add_arguments(self, parser: ArgumentParser) -> None:
         parser.add_argument(
@@ -195,6 +197,6 @@ def _notes(unlisted: list[str], suspended: list[str]) -> list[str]:
     if suspended:
         count, kept = len(suspended), ", ".join(suspended)
         notes.append(
-            f"{count} common stocks no longer listed and on no delisting list, kept: {kept}"
+            f"{count} common stocks the newest snapshot no longer lists, kept as listed: {kept}"
         )
     return notes
