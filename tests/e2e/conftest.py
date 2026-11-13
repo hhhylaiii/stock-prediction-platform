@@ -36,8 +36,8 @@ FALLBACK_NOTE = (
 MODEL_REQUIRES = "模型要在 holdout 判定達標之後才會上線，判定未達標或明顯退化時要經使用者放行"
 ONLINE = f"{MODEL_REQUIRES}；上線中的模型列在模型頁。"
 NOT_LIVE_WHY = (
-    "模型要通過 holdout 判定（未達標或明顯退化時要經使用者放行）與每月重訓的換模門檻才會上線，"
-    "沒上線的原因見模型頁。"
+    "模型要通過 holdout 判定（未達標或明顯退化時要經使用者放行）"
+    "與每月重訓的換模門檻（沒過時要經使用者強制換上）才會上線，沒上線的原因見模型頁。"
 )
 RELEASE_REASON = "差距在 seed 間標準差內，先上線觀察"
 BAR_COUNT = 70
@@ -174,7 +174,7 @@ def released_on(status: str) -> dict[str, Any]:
 def no_ranking_text(horizon: int, other: int) -> str:
     return (
         f"{horizon} 日排名目前沒有上線中的模型，所以這一頁沒有資料；"
-        f"{other} 日排名照常產出。{NOT_LIVE_WHY}"
+        f"{other} 日排名有上線中的模型，可以切到 {other} 日。{NOT_LIVE_WHY}"
     )
 
 

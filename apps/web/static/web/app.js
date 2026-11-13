@@ -59,8 +59,9 @@
   const OBJECTIVES = { rank: '排名', regression: '絕對報酬', quantile: '報酬區間', volatility: '波動率', classification: '跑贏大盤機率' };
   const SCOPES = { rank: '排名', return: '絕對報酬', interval: '區間與機率' };
   const MODEL_REQUIRES = '模型要在 holdout 判定達標之後才會上線，判定未達標或明顯退化時要經使用者放行';
-  const NOT_LIVE_WHY = '模型要通過 holdout 判定（未達標或明顯退化時要經使用者放行）與每月重訓的換模門檻才會上線，沒上線的原因見<a href="#models">模型頁</a>。';
+  const NOT_LIVE_WHY = '模型要通過 holdout 判定（未達標或明顯退化時要經使用者放行）與每月重訓的換模門檻（沒過時要經使用者強制換上）才會上線，沒上線的原因見<a href="#models">模型頁</a>。';
   const DEFAULT_HORIZON = 20;
+  const STATUS_WAIT_MS = 1500;
   const SEVERITY = { info: ['通過', 'in'], warning: ['警告', 'warn'], error: ['錯誤', 'warn'] };
 
   const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -119,6 +120,7 @@
     const next = available.includes(DEFAULT_HORIZON) ? DEFAULT_HORIZON : Math.max(...available);
     if (next === state.h) return false;
     state.h = next;
+    state.page = 1;
     return true;
   }
 
@@ -137,7 +139,6 @@
       if (data.degraded.length) parts.push('<span><i class="dot warn"></i>' + data.degraded.length + ' 個模型降級中</span>');
       statusEl.innerHTML = parts.join('');
     } catch (err) {
-      state.ranked = [];
       statusEl.innerHTML = '<span><i class="dot warn"></i>' + esc(err.message) + '</span>';
     }
   }
@@ -270,7 +271,7 @@
     if (state.q.trim()) return '<div class="empty">今日預測裡沒有符合「' + esc(state.q.trim()) + '」的股票。試試代號或公司名稱的一部分。</div>';
     if (watchingOnly()) return '<div class="empty">追蹤的股票沒有這一期的預測。</div>';
     const others = state.ranked.filter(horizon => horizon !== state.h);
-    if (!meta.date && others.length) return '<div class="empty" id="today-empty">' + state.h + ' 日排名目前沒有上線中的模型，所以這一頁沒有資料；' + others.join('、') + ' 日排名照常產出。' + NOT_LIVE_WHY + '</div>';
+    if (!meta.date && others.length) return '<div class="empty" id="today-empty">' + state.h + ' 日排名目前沒有上線中的模型，所以這一頁沒有資料；' + others.join('、') + ' 日排名有上線中的模型，可以切到 ' + others.join('、') + ' 日。' + NOT_LIVE_WHY + '</div>';
     if (!meta.date) return '<div class="empty" id="today-empty">預測資料尚未產出。排名' + MODEL_REQUIRES + '；上線後，這裡會列出全市場的排名。</div>';
     return '<div class="empty">沒有符合條件的股票。</div>';
   }
@@ -693,7 +694,7 @@
       document.querySelector('#forecasts .body').innerHTML = result.status === 'rejected' ? errorBox(result.reason) : forecastsHtml(result.value.data);
       showSeg();
       const ready = result.status === 'fulfilled' ? result.value.data.horizons.filter(entry => entry.prediction).map(entry => entry.horizon) : [];
-      if (preferHorizon(ready)) { drawHorizon(); return; }
+      if (!stockEl.hidden && preferHorizon(ready)) { drawHorizon(); return; }
       showRank();
       if (fanOf(entryOf())) drawChart();
     });
@@ -1271,7 +1272,19 @@
     document.querySelector('[data-nav="stock"]').setAttribute('href', '#stock-' + encodeURIComponent(state.stock));
     const ticket = ++state.routeToken;
     const status = renderStatus();
-    if (name === 'today') status.then(() => { if (ticket !== state.routeToken) return; preferHorizon(state.ranked); state.watchCache = null; loadToday(); });
+    if (name === 'today') {
+      let shown = false;
+      const show = () => {
+        if (ticket !== state.routeToken) return;
+        const moved = preferHorizon(state.ranked);
+        if (shown && !moved) return;
+        shown = true;
+        state.watchCache = null;
+        loadToday();
+      };
+      if (state.picked) show(); else setTimeout(show, STATUS_WAIT_MS);
+      status.then(show);
+    }
     if (name === 'stock') renderStock(code);
     if (name === 'models') { renderModelTable(); renderIcChart(); renderEtl(); renderQuality(); renderCorrections(); }
     window.scrollTo(0, 0);

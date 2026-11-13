@@ -756,6 +756,7 @@ def test_the_stock_page_opens_on_the_horizon_that_has_a_prediction(
     expect(page.locator("#features .sub")).to_contain_text("對 5 日排名分數影響最大")
     pair = page.locator("#forecasts .pair")
     expect(pair).to_contain_text("5 日 LightGBM 2026-10")
+    expect(pair).to_contain_text("5 日訓練資料到 2026-09-30，成績在模型頁")
     expect(pair).not_to_contain_text("20 日 LightGBM")
 
 
@@ -804,3 +805,28 @@ def test_a_horizon_picked_on_the_stock_page_is_kept_on_today(
     expect(page.locator("#rows .trow")).to_have_count(20)
     expect(page.locator("[data-h='5']")).to_have_attribute("aria-pressed", "true")
     expect(page.locator("#ret-head")).to_have_text("5 日預測報酬")
+
+
+def test_each_horizon_s_ranking_model_is_named_when_their_versions_differ(
+    page: Page, live_server: LiveServer, explained: Seed
+) -> None:
+    ModelRun.objects.filter(pk="rank-h5").update(version="2026-09")
+
+    page.goto(f"{live_server.url}/#stock-2330")
+
+    pair = page.locator("#forecasts .pair")
+    expect(pair).to_contain_text("5 日 LightGBM 2026-09")
+    expect(pair).to_contain_text("20 日 LightGBM 2026-10")
+
+
+def test_an_unpicked_stock_page_returns_to_twenty_days_when_the_next_stock_has_them(
+    page: Page, live_server: LiveServer, explained: Seed
+) -> None:
+    Prediction.objects.filter(run_id="rank-h20", stock_id="9999").delete()
+    page.goto(f"{live_server.url}/#stock-9999")
+    expect(page.locator("#stock-seg [data-sh='5']")).to_have_attribute("aria-pressed", "true")
+
+    page.goto(f"{live_server.url}/#stock-2330")
+
+    expect(page.locator(".stockhead .kpi")).to_contain_text("20 日預測排名")
+    expect(page.locator("#stock-seg [data-sh='20']")).to_have_attribute("aria-pressed", "true")
