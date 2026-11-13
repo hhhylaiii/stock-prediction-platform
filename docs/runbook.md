@@ -205,6 +205,24 @@ uv run python manage.py check_quality --date 2026-10-28
   uv run python manage.py shell -c "from datetime import date; from apps.etl.tasks import _reaudit; _reaudit(date(2026, 10, 28))"
   ```
 
+### 補一根缺的 K 棒（櫃買、第一頁行情存檔之前的日子）
+
+FinMind 回補偶爾會少一根：2026-11-13 拿已存的官方個股月成交頁全部對過，2,180 檔普通股、63,119 個股票日只缺兩根，都是上櫃掛牌首日（`7825` 2026-09-10、`7856` 2026-09-22），FinMind 的回應本身沒有那一天。
+
+這種日子**不要**用 `fetch --source tpex --dataset daily_price --date <那天>` 補。那會把那天的行情原始頁存成 `daily_price`，「第一頁行情存檔」就從 2026-10-22 往前移到那天；之後到 10-21 之間的日子沒有存行情頁，當沖的重放或補抓會全部 `SourceNotReadyError`（見「當沖歷史回補」）。改用：
+
+```bash
+uv run python manage.py fill_price_bars --source tpex --date 2026-09-10 --stock 7825 --dry-run
+uv run python manage.py fill_price_bars --source tpex --date 2026-09-10 --stock 7825
+```
+
+- 抓那一天的兩張行情頁，只把指定代號那天的 K 棒新增進 `daily_price`（`--stock` 可重複）；頁上其他代號不寫，已有的列不改。之後有除權息事件的，還原因子照既有規則補上。
+- 原始頁存在 dataset `daily_price_fill`，不算那天的行情頁，所以「第一頁行情存檔」不會動。`etl_run` 也記在 `daily_price_fill`，checkpoint 的 `stocks` 是補的代號。
+- 整次全有或全無。發請求之前就拒絕的：那天不是交易日；那天在第一頁行情存檔當天或之後（改用 `fetch`）；代號不在 `stock_master`、那天早於 `list_date` 或不早於 `delist_date`；代號那天已經有 K 棒。抓到頁才知道的：代號不在那天的行情頁上，這時留下 raw 與一列 failed 的 `etl_run`，`daily_price` 不寫。
+- `--dry-run` 印出會新增的列（`insert 代號 日期 open … turnover …`），最後印 `nothing was written`，raw 與 `etl_run` 也不留。
+- 只支援櫃買。證交所目前沒有這種缺口。
+- 補完之後，那幾天的當沖量要對同一天重放一次（`reprocess --source tpex --dataset day_trade --start <那天> --end <那天>`），理由同「當沖歷史回補」最後第二條。
+
 ### 補進一檔股票的歷史之後
 
 適用的情況：一檔股票在 60 個交易日以前的 `daily_price`、`stock_master` 的產業或掛牌日、`market_history` 的區間被補進來或改掉。例子是 2026-11 查出 4207、5355、8176、1589、4804 五檔普通股整段歷史不在庫裡。這個流程預定 2026-11 下旬第一次在正式資料上做，下面的順序是依程式推出來的，做完回來更新這一節。「市場歷史」「交易所產業補缺」「FinMind 外資持股 0 的覆寫」各自只寫了重建的指令；同一段時間做完的規則與比對以這一節為準。
