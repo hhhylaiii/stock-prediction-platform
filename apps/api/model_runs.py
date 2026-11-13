@@ -1,5 +1,6 @@
 """The serving models with recent monitoring, research totals and the monthly rank IC chart."""
 
+import functools
 import logging
 from collections import defaultdict
 from collections.abc import Iterable
@@ -21,6 +22,7 @@ from apps.api.serving import (
     HOLDOUT_RELEASE,
     MONITOR_FIELDS,
     PROMOTION,
+    PROMOTION_CHECK,
     ServingRun,
     Slot,
     day_of,
@@ -47,7 +49,6 @@ from apps.research.models import (
     ModelStatus,
 )
 from apps.research.monitor import DEGRADED_WINDOW, PROMOTED_ON
-from apps.research.promotion import PROMOTION_CHECK
 
 PAGE_ORDER = (
     Slot(ModelObjective.RANK, 20),
@@ -226,6 +227,11 @@ def forced_promotion(params: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+@functools.cache
+def warn_unreadable_held(row_id: int) -> None:
+    logger.warning("promotion row %s has unreadable held_slots; left out", row_id)
+
+
 def latest_promotions() -> list[DataQualityLog]:
     """Each scope's newest promotion row."""
     newest = (
@@ -269,7 +275,7 @@ def not_live(serving: Iterable[ServingRun]) -> list[dict[str, Any]]:
         items, run_key = detail.get(HELD, []), detail.get("run_key")
         entries = [held_entry(item) for item in items] if isinstance(items, list) else [None]
         if None in entries:
-            logger.warning("promotion row %s has unreadable held_slots; left out", row.id)
+            warn_unreadable_held(row.id)
         for slot, entry in filter(None, entries):
             if slot not in live:
                 found[slot] = {

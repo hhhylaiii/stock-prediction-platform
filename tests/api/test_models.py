@@ -967,3 +967,44 @@ def test_with_both_rankings_serving_the_chart_stays_on_twenty_days(
     add_months("lightgbm", horizon=5)
 
     assert envelope_of(client.get("/api/models/ic-monthly"))["meta"]["horizon"] == 20
+
+
+def test_the_api_reads_the_check_name_the_research_layer_writes() -> None:
+    assert serving.PROMOTION_CHECK == promotion.PROMOTION_CHECK
+
+
+def test_one_unreadable_held_entry_does_not_drop_the_readable_ones(
+    client: Client, runs: Runs, caplog: pytest.LogCaptureFixture
+) -> None:
+    ModelRun.objects.filter(pk=runs.rank20.pk).update(status="candidate")
+    row = promotion_row("rank", "rank-2026-11", [held("rank", 20, SHADOW_GATE), None])
+
+    listed = not_live(client)
+
+    assert [(entry["objective"], entry["horizon"]) for entry in listed] == [("rank", 20)]
+    assert f"promotion row {row.id} has unreadable held_slots" in caplog.text
+
+
+def test_the_row_written_last_is_read_even_when_it_is_dated_earlier(
+    client: Client, runs: Runs
+) -> None:
+    ModelRun.objects.filter(pk=runs.rank20.pk).update(status="candidate")
+    promotion_row("rank", "rank-first", [held("rank", 20, {**SHADOW_GATE, "value": -0.5})], OCT_30)
+    promotion_row("rank", "rank-second", [held("rank", 20, SHADOW_GATE)], OCT_29)
+
+    listed = not_live(client)
+
+    assert [(entry["run_key"], entry["date"]) for entry in listed] == [
+        ("rank-second", "2026-10-29")
+    ]
+    assert listed[0]["gates"] == [SHADOW_GATE]
+
+
+def test_an_unreadable_row_is_warned_about_once_not_on_every_request(
+    client: Client, runs: Runs, caplog: pytest.LogCaptureFixture
+) -> None:
+    ModelRun.objects.filter(pk=runs.rank20.pk).update(status="candidate")
+    promotion_row("rank", "rank-2026-11", [None])
+
+    assert (not_live(client), not_live(client)) == ([], [])
+    assert caplog.text.count("has unreadable held_slots") == 1

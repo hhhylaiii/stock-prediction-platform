@@ -42,6 +42,7 @@ RELEASE = f"params__{PRODUCTION}__{HOLDOUT_RELEASE}"
 RELEASE_TEXTS = ("status", "reason", "released_at")
 RELEASE_LISTS = ("failed", "flagged")
 PROMOTION = "promotion"
+PROMOTION_CHECK = "model_promotion"
 GATE_FIELDS = ("name", "reason", "value", "threshold", "sample", "sample_unit")
 NO_CAVEATS: dict[str, Any] = {"released_verdict": None, "forced_gates": None}
 ISO_DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
