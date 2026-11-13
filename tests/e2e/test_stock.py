@@ -17,6 +17,7 @@ from apps.research.models import (
 from tests.api.conftest import FORCED_REASON, add_model_run, add_predictions, forced_params
 from tests.e2e.conftest import (
     BAND_NOTE,
+    BASIS_STOCK,
     FALLBACK_NOTE,
     ONLINE,
     PROB_HEAD,
@@ -125,8 +126,9 @@ def test_the_header_ranks_the_stock_and_the_table_lists_both_horizons(
     expect(pair).not_to_contain_text("日 LightGBM")
     expect(page.locator("#forecasts .sub")).to_have_text(
         "排名、報酬與區間機率各由自己的模型產出；排名模型多用了幾個籌碼與除息日特徵，其餘特徵相同。"
-        f"價格以 {explained.last_session.isoformat()} 收盤 1,138 換算。"
+        f"價格以 {explained.last_session.isoformat()} 收盤 1,138 換算。{BASIS_STOCK}"
     )
+    expect(page.locator("#forecasts .sub .basis-note")).to_have_text(BASIS_STOCK)
     head = page.locator("#forecasts .thead .prob-head")
     expect(head).to_have_text(PROB_HEAD)
     expect(head).to_have_attribute("title", PROB_TIP)
@@ -208,6 +210,7 @@ def test_the_forecasts_say_which_models_have_no_prediction_per_horizon(
     expect(page.locator("#forecasts .band-note")).to_have_count(0)
     expect(page.locator("#forecasts .fallback-note")).to_have_text(FALLBACK_NOTE)
     expect(page.locator("#forecasts .list + .fallback-note + .model-note + .pair")).to_have_count(1)
+    expect(page.locator("#forecasts .sub .basis-note")).to_have_text(BASIS_STOCK)
 
 
 def test_only_the_horizon_that_lacks_a_model_is_named(
@@ -737,6 +740,62 @@ def test_each_horizon_names_its_own_close_when_they_differ(
         f"20 日以 {explained.last_session.isoformat()} 收盤 1,138、"
         f"5 日以 {explained.sessions[-2].isoformat()} 收盤 1,136 換算"
     )
+
+
+def test_a_stock_with_a_band_but_no_predicted_price_is_told_the_basis(
+    page: Page, live_server: LiveServer, explained: Seed
+) -> None:
+    Prediction.objects.filter(run_id__in=["quantile-h20", "prob-h20", "reg-h5"]).delete()
+
+    page.goto(f"{live_server.url}/#stock-2330")
+
+    rows = page.locator("#forecasts .trow")
+    expect(rows.nth(1).locator(".band-text")).to_contain_text("（波動率區間）")
+    expect(rows.nth(0)).not_to_contain_text("1,149")
+    expect(page.locator("#forecasts .sub .basis-note")).to_have_text(BASIS_STOCK)
+
+
+def test_a_stock_priced_on_five_days_only_is_told_the_basis(
+    page: Page, live_server: LiveServer, explained: Seed
+) -> None:
+    Prediction.objects.filter(run_id__in=["quantile-h20", "vol-h20", "prob-h20"]).delete()
+    FeatureDaily.objects.filter(stock_id="2330").update(tech_vol_20d=None)
+
+    page.goto(f"{live_server.url}/#stock-2330")
+
+    rows = page.locator("#forecasts .trow")
+    expect(rows.nth(0)).to_contain_text("1,149")
+    expect(rows.nth(1).locator(".band-text")).to_have_text("—")
+    expect(page.locator("#forecasts .sub .basis-note")).to_have_text(BASIS_STOCK)
+
+
+def test_a_stock_without_a_price_or_a_band_is_not_told_the_basis(
+    page: Page, live_server: LiveServer, explained: Seed
+) -> None:
+    Prediction.objects.filter(run_id__in=["quantile-h20", "vol-h20", "prob-h20", "reg-h5"]).delete()
+    FeatureDaily.objects.filter(stock_id="2330").update(tech_vol_20d=None)
+
+    page.goto(f"{live_server.url}/#stock-2330")
+
+    expect(page.locator("#forecasts .trow")).to_have_count(2)
+    expect(page.locator("#forecasts .sub")).to_have_text(
+        "排名、報酬與區間機率各由自己的模型產出；排名模型多用了幾個籌碼與除息日特徵，其餘特徵相同。"
+        f"價格以 {explained.last_session.isoformat()} 收盤 1,138 換算。"
+    )
+    expect(page.locator("#forecasts .sub .basis-note")).to_have_count(0)
+
+
+def test_a_five_day_band_the_page_does_not_draw_is_no_reason_to_explain_the_basis(
+    page: Page, live_server: LiveServer, explained: Seed
+) -> None:
+    Prediction.objects.filter(run_id="rank-h20", stock_id="2330").delete()
+    Prediction.objects.filter(run_id="reg-h5").delete()
+
+    page.goto(f"{live_server.url}/#stock-2330")
+
+    expect(page.locator("#forecasts .trow")).to_have_count(2)
+    expect(page.locator("#forecasts .sub")).to_contain_text("換算。")
+    expect(page.locator("#forecasts .sub .basis-note")).to_have_count(0)
 
 
 def test_the_stock_page_opens_on_the_horizon_that_has_a_prediction(
