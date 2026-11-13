@@ -547,6 +547,26 @@ def test_the_default_day_is_the_latest_ready_day_from_the_build_day_on(
 
 
 @pytest.mark.django_db
+def test_rows_past_the_latest_ready_day_still_set_the_default_day(researched: Path) -> None:
+    runs = built("rank", "rank-wf1", researched)
+    rebased("rank-prod", PREV)
+    passed(PREV)
+    retired_copies(runs)
+
+    assert first_day("rank-prod") == LAST
+
+
+@pytest.mark.django_db
+def test_a_day_checked_but_not_fully_loaded_is_not_the_default_day(researched: Path) -> None:
+    built("rank", "rank-wf1", researched)
+    rebased("rank-prod", PREV)
+    passed(PREV)
+    checked(LAST)
+
+    assert first_day("rank-prod") == PREV
+
+
+@pytest.mark.django_db
 def test_a_default_day_without_features_changes_nothing_and_says_so(
     researched: Path, settings: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
