@@ -205,6 +205,7 @@ def test_the_forecasts_say_which_models_have_no_prediction_per_horizon(
     expect(page.locator("#forecasts .band-note")).to_have_count(0)
     expect(page.locator("#forecasts .fallback-note")).to_have_text(FALLBACK_NOTE)
     expect(page.locator("#forecasts .list + .fallback-note + .model-note + .pair")).to_have_count(1)
+    expect(page.locator("#forecasts .sub .basis-note")).to_have_text(BASIS_STOCK)
 
 
 def test_only_the_horizon_that_lacks_a_model_is_named(
@@ -776,4 +777,17 @@ def test_a_stock_without_a_price_or_a_band_is_not_told_the_basis(
         "排名、報酬與區間機率各由自己的模型產出；排名模型多用了幾個籌碼與除息日特徵，其餘特徵相同。"
         f"價格以 {explained.last_session.isoformat()} 收盤 1,138 換算。"
     )
+    expect(page.locator("#forecasts .sub .basis-note")).to_have_count(0)
+
+
+def test_a_five_day_band_the_page_does_not_draw_is_no_reason_to_explain_the_basis(
+    page: Page, live_server: LiveServer, explained: Seed
+) -> None:
+    Prediction.objects.filter(run_id="rank-h20", stock_id="2330").delete()
+    Prediction.objects.filter(run_id="reg-h5").delete()
+
+    page.goto(f"{live_server.url}/#stock-2330")
+
+    expect(page.locator("#forecasts .trow")).to_have_count(2)
+    expect(page.locator("#forecasts .sub")).to_contain_text("換算。")
     expect(page.locator("#forecasts .sub .basis-note")).to_have_count(0)

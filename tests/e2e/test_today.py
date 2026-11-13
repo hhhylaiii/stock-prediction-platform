@@ -236,12 +236,14 @@ def test_a_day_on_the_fallback_band_says_how_often_it_held_in_the_holdout(
     expect(page.locator("#band-note")).to_be_hidden()
     expect(page.locator("#model-note")).to_be_visible()
     expect(page.locator("#band-note + #fallback-note + #basis-note + #model-note")).to_have_count(1)
+    expect(page.locator("#basis-note")).to_be_visible()
 
     page.get_by_role("button", name="5 日").click()
 
     expect(page.locator("#rows .trow").nth(0)).to_contain_text("9999")
     expect(page.locator("#model-note")).to_contain_text("這一期沒有絕對報酬模型的預測")
     expect(page.locator("#fallback-note")).to_be_hidden()
+    expect(page.locator("#basis-note")).to_be_hidden()
 
     page.get_by_role("button", name="20 日").click()
 
