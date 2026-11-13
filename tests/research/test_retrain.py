@@ -586,6 +586,19 @@ def test_the_promote_step_swaps_each_untried_build_from_today_or_its_later_first
     assert not DataQualityLog.objects.filter(check_name=tasks.PROMOTE_CHECK).exists()
 
 
+def test_the_promote_step_names_the_horizon_a_build_left_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    retrained(FIRST, {"rank": "rank-2026-11"})
+    partly = Promoted(True, [], held=["rank 20 日"])
+    monkeypatch.setattr(tasks, "first_day", lambda run_key: FIRST)
+    monkeypatch.setattr(tasks, "promote", lambda run_key, on, directory: partly)
+
+    summary = tasks.STEPS["promote"](FIRST)
+
+    assert summary == "rank-2026-11: promoted, kept the serving runs of rank 20 日"
+
+
 def test_a_promote_that_fails_is_recorded_and_sent_while_the_others_go_on(
     monkeypatch: pytest.MonkeyPatch, sent: list[Any]
 ) -> None:

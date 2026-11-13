@@ -265,6 +265,17 @@ def runs_on(day: date, slots: Iterable[Slot]) -> dict[Slot, ServingRun]:
     return best_runs((serving_run(row) for row in rows), wanted)
 
 
+def runs_on_days(days: dict[Slot, date]) -> dict[Slot, ServingRun]:
+    """The run whose rows count for each slot on that slot's own day."""
+    if not days:
+        return {}
+    condition = Q()
+    for slot, day in days.items():
+        condition |= Q(run__objective=slot.objective, horizon=slot.horizon, date=day)
+    rows = eligible().filter(condition).values(*SERVING_FIELDS).distinct()
+    return best_runs((serving_run(row) for row in rows), days)
+
+
 def serving_run(row: dict[str, Any]) -> ServingRun:
     return ServingRun(
         run_id=row["run_id"],

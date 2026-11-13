@@ -18,7 +18,7 @@ from apps.api.management.commands import phase5_report
 from apps.api.management.commands.measure_api import ENDPOINTS, Timing
 from apps.api.status import StatusView
 from apps.market.models import StockMaster
-from apps.research.models import FeatureDaily, Prediction, PredictionContrib
+from apps.research.models import FeatureDaily, ModelRun, Prediction, PredictionContrib
 from tests.api.conftest import OCT_30, Runs, add_bars, add_predictions, seed_market
 
 pytestmark = pytest.mark.django_db
@@ -202,7 +202,7 @@ def test_predictions_a_session_behind_the_prices_are_not_the_latest(
     assert failed(text) == set(CHECKS) - set(TIMED)
     assert (
         checks_of(text)["最新交易日有預測"][1]
-        == "price_date 2026-11-02，prediction_date 2026-10-30"
+        == "price_date 2026-11-02，prediction_date 2026-10-30，沒跟上的期間 5 日、20 日"
     )
     assert checks_of(text)["20 日預測價格"][1] == "沒有最新交易日的表"
     assert checks_of(text)["2330 個股頁兩個期間"][1] == "齊全的期間 無"
@@ -247,6 +247,18 @@ def test_a_throttled_check_says_to_raise_the_rate(
         report(tmp_path)
 
 
+def test_one_horizon_keeping_up_is_not_every_horizon(complete: Runs, tmp_path: Path) -> None:
+    ModelRun.objects.filter(pk=complete.rank20.pk).update(status="candidate")
+
+    _, text = failing(tmp_path)
+
+    assert "最新交易日有預測" in failed(text)
+    assert (
+        checks_of(text)["最新交易日有預測"][1]
+        == "price_date 2026-10-30，prediction_date 2026-10-30，沒跟上的期間 20 日"
+    )
+
+
 def test_prices_without_predictions_fail_every_prediction_check(
     calendar_in_db: list[date], tmp_path: Path
 ) -> None:
@@ -255,7 +267,10 @@ def test_prices_without_predictions_fail_every_prediction_check(
     error, text = failing(tmp_path)
 
     assert failed(text) == set(CHECKS) - set(TIMED)
-    assert checks_of(text)["最新交易日有預測"][1] == "price_date 2026-10-30，prediction_date None"
+    assert (
+        checks_of(text)["最新交易日有預測"][1]
+        == "price_date 2026-10-30，prediction_date None，沒跟上的期間 5 日、20 日"
+    )
     assert str(error).startswith("未通過：最新交易日有預測、20 日排名")
 
 
@@ -263,7 +278,10 @@ def test_two_missing_dates_are_not_the_same_day(calendar_in_db: list[date], tmp_
     _, text = failing(tmp_path)
 
     assert {"最新交易日有預測", "20 日排名", "5 日排名、預測價格與區間"} <= failed(text)
-    assert checks_of(text)["最新交易日有預測"][1] == "price_date None，prediction_date None"
+    assert (
+        checks_of(text)["最新交易日有預測"][1]
+        == "price_date None，prediction_date None，沒跟上的期間 5 日、20 日"
+    )
 
 
 def test_a_non_200_status_and_a_slow_p95_fail_the_timing_checks(

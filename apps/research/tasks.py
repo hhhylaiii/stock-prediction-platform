@@ -34,7 +34,7 @@ from apps.research.models import HoldoutScope, LabelDaily, ModelRun
 from apps.research.monitor import run_monitor
 from apps.research.predict import predict
 from apps.research.production import DESIGNS, build_run, shadow_key
-from apps.research.promotion import PROMOTION_CHECK, first_day, promote
+from apps.research.promotion import PROMOTION_CHECK, Promoted, first_day, promote
 from apps.research.resources import free_percent, peak_rss_mb
 from apps.research.runs import PRODUCTION
 
@@ -146,6 +146,13 @@ def _pending(day: date) -> list[str]:
     return [key for key in keys if key not in tried]
 
 
+def _outcome(result: Promoted) -> str:
+    if not result.promoted:
+        return "kept the serving runs"
+    kept = f", kept the serving runs of {', '.join(result.held)}" if result.held else ""
+    return f"promoted{kept}"
+
+
 def _promote(day: date) -> str:
     """Promote each untried build from day, or its first day if later; errors make one warning."""
     done: list[str] = []
@@ -157,7 +164,7 @@ def _promote(day: date) -> str:
             logger.error("research promote %s %s failed: %s", run_key, day, error)
             failed[run_key] = f"{type(error).__name__}: {error}"
             continue
-        done.append(f"{run_key}: {'promoted' if result.promoted else 'kept the serving runs'}")
+        done.append(f"{run_key}: {_outcome(result)}")
     if failed:
         _record(day, PROMOTE_CHECK, Severity.WARNING, {"failed": failed, "done": done})
     return "; ".join([*done, *(f"{key}: failed, see {PROMOTE_CHECK}" for key in failed)])

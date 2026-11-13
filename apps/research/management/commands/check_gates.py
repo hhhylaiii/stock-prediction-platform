@@ -6,7 +6,7 @@ from typing import Any
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
 
-from apps.research.gates import ERROR_LIMIT, Gate, check_gates
+from apps.research.gates import ERROR_LIMIT, Gate, check_gates, passing_slots
 from apps.research.prediction_cache import FoldMismatchError, MissingFoldsError
 from apps.research.runs import RunError
 
@@ -51,4 +51,6 @@ class Command(BaseCommand):
             for gate in result.gates:
                 self.stdout.write(f"  {gate.name}：{verdict(gate)}")
         failed = [str(result.slot) for result in results if not result.passed]
-        self.stdout.write("全部通過" if not failed else f"未通過：{', '.join(failed)}")
+        alone = sorted(str(slot) for slot in passing_slots(results)) if failed else []
+        apart = f"；可單獨換上：{', '.join(alone)}" if alone else ""
+        self.stdout.write("全部通過" if not failed else f"未通過：{', '.join(failed)}{apart}")

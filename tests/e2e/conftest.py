@@ -9,6 +9,7 @@ from django.utils import timezone
 
 from apps.etl.models import DataQualityLog, EtlRun
 from apps.market.models import Market, TradingCalendar
+from apps.research.models import ModelRun, ModelStatus, Prediction
 from tests.api.conftest import add_bars, add_model_run, add_predictions, add_stock
 
 XSS_NAME = '<img src=x onerror="window.__xss=1">'
@@ -42,6 +43,10 @@ BASIS_STOCK = (
 )
 MODEL_REQUIRES = "模型要在 holdout 判定達標之後才會上線，判定未達標或明顯退化時要經使用者放行"
 ONLINE = f"{MODEL_REQUIRES}；上線中的模型列在模型頁。"
+NOT_LIVE_WHY = (
+    "模型要通過 holdout 判定（未達標或明顯退化時要經使用者放行）"
+    "與每月重訓的換模門檻（沒過時要經使用者強制換上）才會上線，沒上線的原因見模型頁。"
+)
 RELEASE_REASON = "差距在 seed 間標準差內，先上線觀察"
 BAR_COUNT = 70
 GAP_INDEX = 64
@@ -172,6 +177,19 @@ def released_on(status: str) -> dict[str, Any]:
         "sha256": "ab" * 32,
     }
     return {"production": {"role": "model", "holdout_release": release}}
+
+
+def no_ranking_text(horizon: int, other: int) -> str:
+    return (
+        f"{horizon} 日排名目前沒有上線中的模型，所以這一頁沒有資料；"
+        f"{other} 日排名有上線中的模型，可以切到 {other} 日。{NOT_LIVE_WHY}"
+    )
+
+
+def take_ranking_offline(horizon: int) -> None:
+    """Leave the horizon without a serving rank run, as when its build failed a promotion gate."""
+    Prediction.objects.filter(run_id=f"rank-h{horizon}").delete()
+    ModelRun.objects.filter(pk=f"rank-h{horizon}").update(status=ModelStatus.CANDIDATE)
 
 
 def rank_rows(order: list[str]) -> dict[str, dict[str, Any]]:
