@@ -1,3 +1,5 @@
+import subprocess
+import sys
 from datetime import date, timedelta
 from pathlib import Path
 from statistics import fmean, stdev
@@ -10,6 +12,7 @@ from pytest_django import DjangoAssertNumQueries
 from apps.api import serving
 from apps.api.model_runs import MONTH_DAYS, MONTH_IC
 from apps.api.serving import HOLDOUT_RELEASE
+from apps.etl.models import DataQualityLog
 from apps.research import production, promotion
 from apps.research.eval_report import RANK_METRICS
 from apps.research.holdout import (
@@ -607,7 +610,7 @@ def test_models_query_count(
         Prediction.objects.filter(run=run, date=OCT_30).delete()
         add_predictions(run, OCT_29, horizon, {"2330": row})
 
-    with django_assert_max_num_queries(9):
+    with django_assert_max_num_queries(10):
         body = envelope_of(client.get("/api/models"))
 
     assert len(body["data"]) == 6
@@ -708,7 +711,7 @@ def test_before_any_model_serves_the_rank_holdout_is_shown(client: Client, db: N
     body = envelope_of(client.get("/api/models/ic-monthly", {"months": "2"}))
 
     assert [(row["model"], row["baseline"]) for row in body["data"]] == [(0.03, 0.02), (0.03, 0.02)]
-    assert body["meta"]["run_key"] == "rank-frozen"
+    assert (body["meta"]["horizon"], body["meta"]["run_key"]) == (20, "rank-frozen")
     assert (body["meta"]["model_type"], body["meta"]["source"]) == ("lightgbm", "holdout")
 
 
@@ -760,3 +763,262 @@ def test_monthly_ic_query_count(
 
     with django_assert_max_num_queries(6):
         client.get("/api/models/ic-monthly")
+
+
+SHADOW_GATE = {
+    "name": "shadow_oos",
+    "reason": "未達門檻",
+    "value": -0.013,
+    "threshold": "rank IC > 0",
+    "sample": 105,
+    "sample_unit": "days",
+}
+
+
+def held(objective: str, horizon: int, *gates: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "slot": f"{objective} {horizon} 日",
+        "objective": objective,
+        "horizon": horizon,
+        "run_id": f"{objective}-2026-11.h{horizon}",
+        "gates": list(gates),
+    }
+
+
+def promotion_row(
+    scope: str, run_key: object, held_slots: object, day: date = OCT_30
+) -> DataQualityLog:
+    detail = {
+        "scope": scope,
+        "run_key": run_key,
+        "promoted": True,
+        "forced": False,
+        "reason": None,
+        "failed": [],
+        "promoted_slots": [],
+        "held_slots": held_slots,
+    }
+    return DataQualityLog.objects.create(
+        date=day, check_name="model_promotion", severity="warning", detail=detail
+    )
+
+
+def not_live(client: Client) -> list[dict[str, Any]]:
+    listed: list[dict[str, Any]] = envelope_of(client.get("/api/models"))["meta"]["not_live"]
+    return listed
+
+
+def test_a_horizon_held_back_with_nothing_serving_is_listed_with_its_gates(
+    client: Client, runs: Runs
+) -> None:
+    ModelRun.objects.filter(pk=runs.rank20.pk).update(status="candidate")
+    promotion_row("rank", "rank-2026-11", [held("rank", 20, {**SHADOW_GATE, "note": "internal"})])
+
+    body = envelope_of(client.get("/api/models"))
+
+    assert body["meta"]["not_live"] == [
+        {
+            "objective": "rank",
+            "horizon": 20,
+            "run_key": "rank-2026-11",
+            "run_id": "rank-2026-11.h20",
+            "date": "2026-10-30",
+            "gates": [SHADOW_GATE],
+        }
+    ]
+    assert [(row["objective"], row["horizon"]) for row in body["data"]][:2] == [
+        ("rank", 5),
+        ("regression", 5),
+    ]
+
+
+def test_a_held_horizon_that_still_has_a_serving_run_is_not_listed(
+    client: Client, runs: Runs
+) -> None:
+    promotion_row("rank", "rank-2026-12", [held("rank", 5, SHADOW_GATE)])
+
+    assert not_live(client) == []
+
+
+def test_nothing_is_listed_before_any_promotion_is_recorded(client: Client, runs: Runs) -> None:
+    ModelRun.objects.filter(pk=runs.rank20.pk).update(status="candidate")
+
+    assert not_live(client) == []
+
+
+def test_each_scope_s_latest_promotion_is_the_one_read(client: Client, runs: Runs) -> None:
+    waiting = [runs.rank20.pk, runs.quantile.pk, runs.vol.pk, runs.prob.pk]
+    ModelRun.objects.filter(pk__in=waiting).update(status="candidate")
+    promotion_row(
+        "rank", "rank-2026-10", [held("rank", 20, {**SHADOW_GATE, "value": -0.5})], OCT_29
+    )
+    promotion_row(
+        "interval",
+        "interval-2026-11",
+        [
+            held("classification", 20),
+            held("quantile", 20, {**SHADOW_GATE, "name": "data_quality"}),
+            held("volatility", 20),
+        ],
+    )
+    promotion_row("rank", "rank-2026-11", [held("rank", 20, SHADOW_GATE)])
+
+    listed = not_live(client)
+
+    assert [(entry["objective"], entry["horizon"], entry["run_key"]) for entry in listed] == [
+        ("rank", 20, "rank-2026-11"),
+        ("quantile", 20, "interval-2026-11"),
+        ("volatility", 20, "interval-2026-11"),
+        ("classification", 20, "interval-2026-11"),
+    ]
+    assert listed[0]["gates"] == [SHADOW_GATE]
+    assert listed[1]["gates"][0]["name"] == "data_quality"
+    assert listed[2]["gates"] == []
+
+
+def test_a_later_promotion_that_held_nothing_clears_the_older_one(
+    client: Client, runs: Runs
+) -> None:
+    ModelRun.objects.filter(pk=runs.rank20.pk).update(status="candidate")
+    promotion_row("rank", "rank-2026-10", [held("rank", 20, SHADOW_GATE)], OCT_29)
+    promotion_row("rank", "rank-2026-11", [])
+
+    assert not_live(client) == []
+
+
+def test_a_promotion_row_from_before_the_lists_names_nothing(
+    client: Client, runs: Runs, caplog: pytest.LogCaptureFixture
+) -> None:
+    ModelRun.objects.filter(pk=runs.rank20.pk).update(status="candidate")
+    DataQualityLog.objects.create(
+        date=OCT_30,
+        check_name="model_promotion",
+        severity="warning",
+        detail={"scope": "rank", "run_key": "rank-2026-11", "promoted": False, "failed": []},
+    )
+
+    assert not_live(client) == []
+    assert "unreadable" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "held_slots",
+    [
+        None,
+        "rank 20 日",
+        [None],
+        [{"objective": "rank"}],
+        [{**held("rank", 20, SHADOW_GATE), "horizon": 60}],
+        [{**held("rank", 20, SHADOW_GATE), "horizon": "20"}],
+        [{**held("rank", 20, SHADOW_GATE), "objective": "screening"}],
+        [{**held("rank", 20), "gates": "shadow_oos"}],
+        [{**held("rank", 20), "gates": [{"reason": "沒有名字"}]}],
+    ],
+)
+def test_held_entries_that_cannot_be_read_are_left_out(
+    client: Client, runs: Runs, held_slots: object, caplog: pytest.LogCaptureFixture
+) -> None:
+    ModelRun.objects.filter(pk=runs.rank20.pk).update(status="candidate")
+    row = promotion_row("rank", "rank-2026-11", held_slots)
+
+    assert not_live(client) == []
+    assert f"promotion row {row.id} has unreadable held_slots" in caplog.text
+
+
+def test_keys_that_are_not_text_come_back_empty(client: Client, runs: Runs) -> None:
+    ModelRun.objects.filter(pk=runs.rank20.pk).update(status="candidate")
+    promotion_row("rank", 202611, [{**held("rank", 20, SHADOW_GATE), "run_id": ["x"]}])
+
+    listed = not_live(client)
+
+    assert [(entry["run_key"], entry["run_id"]) for entry in listed] == [(None, None)]
+
+
+def test_without_a_horizon_the_chart_follows_the_ranking_that_serves(
+    client: Client, runs: Runs
+) -> None:
+    ModelRun.objects.filter(pk=runs.rank20.pk).update(status="candidate")
+    add_months("lightgbm")
+    add_months("lightgbm", horizon=5)
+    BacktestMetric.objects.filter(horizon=5, metric="rank_ic").update(value=0.01)
+
+    body = envelope_of(client.get("/api/models/ic-monthly", {"months": "3"}))
+
+    assert (body["meta"]["horizon"], body["meta"]["source"]) == (5, "self")
+    assert [row["model"] for row in body["data"]] == [0.01, 0.01, 0.01]
+
+
+def test_an_asked_horizon_is_charted_even_when_its_ranking_does_not_serve(
+    client: Client, runs: Runs
+) -> None:
+    ModelRun.objects.filter(pk=runs.rank20.pk).update(status="candidate")
+    add_months("lightgbm", run_key="rank-frozen")
+    add_months("lightgbm", horizon=5)
+    HoldoutRun.objects.create(scope="rank", attempt=1, run_key="rank-frozen", last_date=OCT_30)
+
+    body = envelope_of(client.get("/api/models/ic-monthly", {"horizon": "20", "months": "2"}))
+
+    assert (body["meta"]["horizon"], body["meta"]["source"]) == (20, "holdout")
+    assert body["meta"]["run_key"] == "rank-frozen"
+
+
+def test_with_both_rankings_serving_the_chart_stays_on_twenty_days(
+    client: Client, runs: Runs
+) -> None:
+    add_months("lightgbm")
+    add_months("lightgbm", horizon=5)
+
+    assert envelope_of(client.get("/api/models/ic-monthly"))["meta"]["horizon"] == 20
+
+
+def test_the_api_reads_the_check_name_the_research_layer_writes() -> None:
+    assert serving.PROMOTION_CHECK == promotion.PROMOTION_CHECK
+
+
+def test_one_unreadable_held_entry_does_not_drop_the_readable_ones(
+    client: Client, runs: Runs, caplog: pytest.LogCaptureFixture
+) -> None:
+    ModelRun.objects.filter(pk=runs.rank20.pk).update(status="candidate")
+    row = promotion_row("rank", "rank-2026-11", [held("rank", 20, SHADOW_GATE), None])
+
+    listed = not_live(client)
+
+    assert [(entry["objective"], entry["horizon"]) for entry in listed] == [("rank", 20)]
+    assert f"promotion row {row.id} has unreadable held_slots" in caplog.text
+
+
+def test_the_row_written_last_is_read_even_when_it_is_dated_earlier(
+    client: Client, runs: Runs
+) -> None:
+    ModelRun.objects.filter(pk=runs.rank20.pk).update(status="candidate")
+    promotion_row("rank", "rank-first", [held("rank", 20, {**SHADOW_GATE, "value": -0.5})], OCT_30)
+    promotion_row("rank", "rank-second", [held("rank", 20, SHADOW_GATE)], OCT_29)
+
+    listed = not_live(client)
+
+    assert [(entry["run_key"], entry["date"]) for entry in listed] == [
+        ("rank-second", "2026-10-29")
+    ]
+    assert listed[0]["gates"] == [SHADOW_GATE]
+
+
+def test_an_unreadable_row_is_warned_about_once_not_on_every_request(
+    client: Client, runs: Runs, caplog: pytest.LogCaptureFixture
+) -> None:
+    ModelRun.objects.filter(pk=runs.rank20.pk).update(status="candidate")
+    promotion_row("rank", "rank-2026-11", [None])
+
+    assert (not_live(client), not_live(client)) == ([], [])
+    assert caplog.text.count("has unreadable held_slots") == 1
+
+
+def test_the_api_urls_load_without_the_training_modules() -> None:
+    probe = (
+        "import django, sys; django.setup(); import apps.api.urls; "
+        "heavy = ('lightgbm', 'apps.research.promotion'); "
+        "print(sorted(name for name in heavy if name in sys.modules))"
+    )
+
+    done = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, check=True)
+
+    assert done.stdout.strip() == "[]"

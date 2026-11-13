@@ -950,6 +950,7 @@ def test_a_status_answer_for_a_page_the_reader_left_does_not_load_today(
     expect(page.locator(".stockhead .kpi")).to_contain_text("5 日預測排名")
 
     held[0].continue_()
+    held[1].continue_()
 
     expect(page.locator("#status")).to_contain_text("20 日排名未上線")
     page.clock.fast_forward(5000)
@@ -1020,3 +1021,44 @@ def test_an_unpicked_page_returns_to_twenty_days_when_no_ranking_is_live_any_mor
     expect(page.locator("#today-empty")).to_have_text(
         f"預測資料尚未產出。排名{MODEL_REQUIRES}；上線後，這裡會列出全市場的排名。"
     )
+
+
+def test_an_older_status_answer_does_not_overwrite_a_newer_one(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    page.goto(live_server.url)
+    expect(page.locator("#rows .trow")).to_have_count(20)
+    held: list[Route] = []
+    page.route("**/api/status", lambda route: route.abort() if held else held.append(route))
+    page.locator("[data-nav='models']").click()
+    expect(page.locator("#view-models")).to_be_visible()
+    page.locator("[data-nav='today']").click()
+    expect(page.locator("#status")).to_contain_text("無法連線到伺服器。")
+
+    with page.expect_response("**/api/status") as answered:
+        held[0].continue_()
+    answered.value.finished()
+    page.evaluate("() => new Promise(resolve => setTimeout(resolve, 200))")
+
+    assert "無法連線到伺服器。" in (page.locator("#status").text_content() or "")
+
+
+def test_an_older_status_failure_does_not_overwrite_a_newer_answer(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    page.goto(live_server.url)
+    expect(page.locator("#rows .trow")).to_have_count(20)
+    held: list[Route] = []
+    page.route("**/api/status", lambda route: route.continue_() if held else held.append(route))
+    page.locator("[data-nav='models']").click()
+    expect(page.locator("#view-models")).to_be_visible()
+    with page.expect_response("**/api/status") as answered:
+        page.locator("[data-nav='today']").click()
+    answered.value.finished()
+
+    held[0].abort()
+    page.evaluate("() => new Promise(resolve => setTimeout(resolve, 200))")
+
+    shown = page.locator("#status").text_content() or ""
+    assert "收盤資料" in shown
+    assert "無法連線到伺服器。" not in shown
