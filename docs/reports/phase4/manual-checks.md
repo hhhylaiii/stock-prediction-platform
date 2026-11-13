@@ -597,7 +597,7 @@ prob shift when both flags flip (all other inputs at 0): min 0.11698 max 0.19741
 
 ## Holdout（2026-11-12）：波動率區間（頁面備援）逐摺的覆蓋率
 
-2026-11-13 補算，只讀：讀 `interval-holdout-20261112` 已經存下的預測快取與 `label_daily`，沒有重新訓練、沒有重跑 holdout、沒有寫資料庫。算法和上一節相同（每天 universe 內可交易、20 日 label 在 2026-10-12 以前已到期的列落在 q10 到 q90 之內的比例，再對天數取平均；label 是 `fwd_ret_open`），改成一摺一摺讀。模型那一欄是對帳用的：8 摺的值和 `interval-holdout-20261112.md`「每摺覆蓋率」那張表逐一相同，合併值、不計摺 51 的值、列數與天數和上一節相同。「below q10」「above q90」是每天低於下界、高於上界的列的比例，再對天數取平均。摺 51 的 7 天就是 holdout 最後 7 個 label 已到期的交易日。
+2026-11-13 補算，只讀：讀 `interval-holdout-20261112` 已經存下的預測快取與 `label_daily`，另讀特徵分區的 `tech_vol_20d` 一欄（只用來數缺值）；沒有重新訓練、沒有重跑 holdout、沒有寫資料庫。備援區間的上下界是 holdout 當時存進快取的 baseline 預測（`volband_q10_h20`、`volband_q90_h20`），不是用現在的特徵重算的。`label_daily` 在 2026-11-13 早上重建過 2026-07-16 以後的列，特徵分區重建過 2026-08-14 以後的列；模型那一欄仍和 2026-11-12 的報告逐摺相同，備援區間的合併值也和上一節（重建前算的）相同，所以這次重建沒有改變這裡的結果。算法和上一節相同（每天 universe 內可交易、20 日 label 在 2026-10-12 以前已到期的列落在 q10 到 q90 之內的比例，再對天數取平均；label 是 `fwd_ret_open`），改成一摺一摺讀。模型那一欄是對帳用的：8 摺的值和 `interval-holdout-20261112.md`「每摺覆蓋率」那張表逐一相同，合併值、不計摺 51 的值、列數與天數和上一節相同。「below q10」「above q90」是每天低於下界、高於上界的列的比例，再對天數取平均。摺 51 的 7 天就是 holdout 最後 7 個 label 已到期的交易日。
 
 ```
 run interval-holdout-20261112; claim last_date 2026-11-11; labels settled through 2026-10-12; label fwd_ret_open
