@@ -193,6 +193,22 @@ def test_each_horizon_s_serving_rank_dates_its_own_predictions(
     assert (data["prediction_date"], data["predictions_ready"]) == ("2026-11-02", True)
 
 
+@time_machine.travel(taipei(2026, 11, 2, 23), tick=False)
+def test_the_twenty_day_ranking_dates_the_predictions_when_it_is_the_newer(
+    client: Client, loaded: None
+) -> None:
+    add_bars("2330", [NOV_2], [1010.0])
+    rank_rows("rank-h20-new", NOV_2)
+
+    data = envelope_of(client.get("/api/status"))["data"]
+
+    assert data["horizons"] == [
+        {"horizon": 5, "prediction_date": "2026-10-30", "ready": False},
+        {"horizon": 20, "prediction_date": "2026-11-02", "ready": True},
+    ]
+    assert (data["prediction_date"], data["predictions_ready"]) == ("2026-11-02", True)
+
+
 @time_machine.travel(FRIDAY_NIGHT, tick=False)
 def test_a_horizon_without_a_serving_rank_has_no_date(client: Client, loaded: None) -> None:
     ModelRun.objects.filter(pk="rank-h20").update(status="candidate")
