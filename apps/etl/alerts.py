@@ -1,4 +1,4 @@
-"""Alerts for data-quality warnings and errors: always logged, posted when a webhook is set."""
+"""Alerts for data-quality rows: always logged, posted when a webhook is set."""
 
 import logging
 from collections.abc import Sequence
@@ -13,15 +13,23 @@ from apps.etl.quality import alerting
 logger = logging.getLogger(__name__)
 
 
+LEVELS = {
+    DataQualityLog.Severity.ERROR: logging.ERROR,
+    DataQualityLog.Severity.WARNING: logging.WARNING,
+}
+
+
 def dispatch(results: Sequence[DataQualityLog]) -> None:
     """Log each warning or error; a failing webhook is logged, never raised."""
-    alerts = [_payload(row) for row in alerting(results)]
+    announce(alerting(results))
+
+
+def announce(rows: Sequence[DataQualityLog]) -> None:
+    """Log and post the rows whatever their severity, for news that is not a warning."""
+    alerts = [_payload(row) for row in rows]
     for alert in alerts:
-        level = (
-            logging.ERROR if alert["severity"] == DataQualityLog.Severity.ERROR else logging.WARNING
-        )
         logger.log(
-            level,
+            LEVELS.get(alert["severity"], logging.INFO),
             "data quality %s %s %s: %s",
             alert["date"],
             alert["check"],
