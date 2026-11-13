@@ -1154,13 +1154,18 @@ def test_a_promotion_that_swapped_every_horizon_in_still_reads_as_one_line(
 def test_a_refused_promotion_with_its_held_runs_listed_does_not_claim_a_serving_model(
     page: Page, live_server: LiveServer, seeded: Seed
 ) -> None:
-    judged(seeded, "rank-2026-11", RANK_PAIR, set())
+    neither = [
+        refused(Slot("rank", 5), "rank-n5", DATA_QUALITY),
+        refused(Slot("rank", 20), "rank-n20", AGREEMENT),
+    ]
+    judged(seeded, "rank-2026-11", neither, set())
 
     page.goto(f"{live_server.url}/#models")
 
-    expect(promotion_lines(page)).to_have_count(2)
+    expect(promotion_lines(page)).to_have_count(3)
     expect(promotion_lines(page).nth(0)).to_have_text("換模門檻未過，沒有換上（rank-2026-11）")
-    expect(promotion_lines(page).nth(1)).to_have_text(f"排名 20 日（rank-n20）：{AGREEMENT_TEXT}")
+    expect(promotion_lines(page).nth(1)).to_contain_text("排名 5 日（rank-n5）：訓練窗內的資料品質")
+    expect(promotion_lines(page).nth(2)).to_have_text(f"排名 20 日（rank-n20）：{AGREEMENT_TEXT}")
     expect(page.locator("#model-checks")).not_to_contain_text("續用現役模型")
 
     judged(seeded, "rank-2026-11", RANK_PAIR, {Slot("rank", 5), Slot("rank", 20)}, "先上線觀察")
@@ -1169,3 +1174,30 @@ def test_a_refused_promotion_with_its_held_runs_listed_does_not_claim_a_serving_
     expect(promotion_lines(page)).to_have_count(2)
     expect(promotion_lines(page).nth(0)).to_have_text("強制換模：先上線觀察（rank-2026-11）")
     expect(promotion_lines(page).nth(1)).to_have_text(f"排名 20 日（rank-n20）：{AGREEMENT_TEXT}")
+
+
+def test_a_promotion_row_with_unreadable_lists_does_not_break_the_checks(
+    page: Page, live_server: LiveServer, seeded: Seed
+) -> None:
+    DataQualityLog.objects.create(
+        date=seeded.last_session,
+        check_name="model_promotion",
+        severity="warning",
+        detail={
+            "scope": "rank",
+            "run_key": "rank-2026-11",
+            "promoted": True,
+            "forced": False,
+            "failed": [],
+            "promoted_slots": [None, {"slot": "rank 5 日"}],
+            "held_slots": [None, "rank 20 日", {"slot": "rank 20 日", "gates": "shadow_oos"}],
+        },
+    )
+
+    page.goto(f"{live_server.url}/#models")
+
+    expect(page.locator("#model-checks .error")).to_have_count(0)
+    expect(page.locator("#quality .error")).to_have_count(0)
+    expect(promotion_lines(page)).to_have_count(2)
+    expect(promotion_lines(page).nth(0)).to_have_text("已換上 rank-2026-11 的排名 5 日")
+    expect(promotion_lines(page).nth(1)).to_have_text("排名 20 日未換上：")

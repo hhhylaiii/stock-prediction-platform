@@ -650,10 +650,7 @@ def test_a_held_note_without_a_run_key_still_names_the_horizon_and_the_gates(
     page.goto(f"{live_server.url}/#models")
 
     expect(page.locator("#model-table .held-note")).to_have_text(
-        held_text(
-            scored,
-            "排名 20 日",
-            "最近一次重訓的模型",
-            "影子模型最近 6 個月 OOS（未達門檻，實際 -0.013，門檻 rank IC > 0）",
-        )
+        "排名 20 日目前沒有上線中的模型：最近一次重訓的模型沒過換模門檻，沒有換上"
+        f"（換模紀錄的日期 {scored.last_session.isoformat()}）。"
+        "沒過的門檻：影子模型最近 6 個月 OOS（未達門檻，實際 -0.013，門檻 rank IC > 0）。"
     )
