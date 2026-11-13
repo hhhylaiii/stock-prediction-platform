@@ -97,7 +97,7 @@ Oct 29, 2026 · @Owen Lai
 | --- | --- | --- | --- | --- |
 | `stock_master` | stock\_id | name、market（TWSE/TPEx）、industry、list\_date、delist\_date | 證交所、櫃買中心 | — |
 | `market_history` | id；唯一鍵 stock\_id, start\_date | end\_date（含當天；每檔最後一段留空，代表到目前）、market（TWSE/TPEx）；同一檔的區間連續、不重疊 | 證交所、櫃買中心（歷史：每日外資持股頁；每日：當天報價） | start\_date、end\_date |
-| `trading_calendar` | date | is\_trading\_day、note（補班、颱風假） | 證交所 | — |
+| `trading_calendar` | date | is\_trading\_day、note（補班、颱風假）、is\_provisional（隔年開休市表公布前先載入的暫定日） | 證交所 | — |
 | `daily_price` | stock\_id, date | open、high、low、close、volume（股）、turnover（元）、adj\_factor | 證交所、櫃買中心 | date |
 | `dividend_event` | stock\_id, ex\_date | cash\_dividend、stock\_dividend、adj\_factor、announce\_date（除權息日第一次公開的交易日，22:40 以後公告的算下一個交易日；沒有公告日的留空）；減資、分割、面額變更存成只帶 adj\_factor 的列（現金、股票股利為 0） | FinMind（歷史，除權息日到 2026-10-30）；證交所、櫃買中心（每日：預告表先寫列與 announce\_date，結果表定金額與 adj\_factor；預告表每一列第一次、最後一次看到的交易日與撤下日另存輔助表 `dividend_notice`） | ex\_date、announce\_date |
 | `daily_chip` | stock\_id, date | fi\_net、it\_net、dealer\_self\_net、dealer\_hedge\_net（股）、margin\_balance、margin\_limit、short\_balance、sbl\_short\_balance、fi\_holding\_pct、day\_trade\_volume（股，第二批） | 證交所、櫃買中心 | date |
@@ -160,7 +160,7 @@ Oct 29, 2026 · @Owen Lai
 
 | 時間 | 工作 | 來源 | 頻率 |
 | --- | --- | --- | --- |
-| 15:10 | 更正交易日曆；補抓前 14 天到前一交易日漏掉的日子，並補跑那些日子的品質檢查 | 證交所、櫃買中心 | 每交易日 |
+| 15:10 | 隔年開休市表公布後延伸交易日曆，記錄日曆還剩幾個交易日（`calendar_reach`，剩 60、40、25 天三級，只告警、不擋預測），並更正交易日曆；補抓前 14 天到前一交易日漏掉的日子，並補跑那些日子的品質檢查 | 證交所、櫃買中心 | 每交易日 |
 | 15:30 | 日成交價量、加權與櫃買指數、加權股價報酬指數；當日的除權除息、減資、面額變更計算結果 | 證交所、櫃買中心 | 每交易日 |
 | 16:00 | 以當日行情更新 `stock_master` 與 `market_history` | 證交所、櫃買中心 | 每交易日 |
 | 16:30 | 三大法人買賣超、本益比與淨值比、注意與處置名單、全額交割名單 | 證交所、櫃買中心 | 每交易日 |

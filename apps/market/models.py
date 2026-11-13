@@ -86,11 +86,15 @@ class MarketHistory(models.Model):
 
 
 class TradingCalendar(models.Model):
-    """Every calendar day of the loaded range and whether TWSE trades on it (SPEC §8.7)."""
+    """Every calendar day of the loaded range and whether TWSE trades on it (SPEC §8.7).
+
+    A provisional day was loaded before TWSE published its year and is not counted as reach.
+    """
 
     date = models.DateField(primary_key=True)
     is_trading_day = models.BooleanField()
     note = models.CharField(max_length=64, blank=True, default="")
+    is_provisional = models.BooleanField(default=False, db_default=False)
 
     class Meta:
         db_table = "trading_calendar"

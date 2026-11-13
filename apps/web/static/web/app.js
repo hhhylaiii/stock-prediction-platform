@@ -36,6 +36,8 @@
     dividend_source_mismatch: '股利兩來源不同',
     dividend_notice: '除權除息預告表',
     ex_date_unannounced: '除息日沒有公告日',
+    calendar_reach: '交易日曆還剩幾個交易日',
+    calendar_changed: '交易日曆有日子改了開休市',
     exchange_fill: '交易所逐日表補缺',
     industry_fill: '交易所產業補缺',
     output_width_ratio: '區間寬度比異常',
@@ -1030,6 +1032,8 @@
         const earliest = d.earliest || days.slice().sort()[0];
         return fmtInt(has(d.count) ? d.count : days.length) + ' 檔' + (earliest ? '，最早 ' + earliest : '');
       }
+      case 'calendar_reach': return '已確認到 ' + (d.ends || '—') + '，還剩 ' + fmtInt(d.sessions_left || 0) + ' 個交易日';
+      case 'calendar_changed': return fmtInt(Object.keys(d.days || {}).length) + ' 天，最早 ' + (d.earliest || '—');
       case 'us_close': return Object.keys(d.stale || {}).length ? '未更新：' + Object.keys(d.stale).join('、') : '全部已更新';
       case 'etl_runs': {
         const blocking = d.blocking || [], rest = (d.missing || []).filter(key => !blocking.includes(key));

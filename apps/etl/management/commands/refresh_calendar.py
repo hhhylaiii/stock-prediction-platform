@@ -10,6 +10,8 @@ from django.utils import timezone
 
 from apps.etl.adapters import limiter_for
 from apps.etl.adapters.twse import TwseClient
+from apps.etl.alerts import announce
+from apps.etl.calendar_upkeep import log_changes
 from apps.etl.errors import SourceError
 from apps.etl.ratelimit import RetryableError
 from apps.etl.runs import tracked_run
@@ -47,12 +49,16 @@ class Command(BaseCommand):
                         TradingCalendar.objects.filter(date=day).update(
                             is_trading_day=is_open, note=note
                         )
+                    turned = {day: (not is_open, is_open) for day, (is_open, _) in changed.items()}
+                    logged = log_changes("refresh_calendar", today, turned)
                 run.rows = len(changed)
                 run.checkpoint = {
                     "corrected": {day.isoformat(): is_open for day, (is_open, _) in changed.items()}
                 }
         except (SourceError, RetryableError) as exc:
             raise CommandError(f"{type(exc).__name__}: {exc}") from exc
+        if logged is not None:
+            announce([logged])
         self.stdout.write(
             f"trading_calendar: {len(changed)} day(s) corrected in {first}..{through}"
         )
