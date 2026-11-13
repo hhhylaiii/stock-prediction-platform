@@ -14,7 +14,7 @@ from apps.research.holdout import HoldoutError
 from apps.research.management.commands.promote import left_out
 from apps.research.models import HoldoutRun, ModelRun, ModelStatus, Prediction
 from apps.research.predict import PredictionGateError, Slot
-from apps.research.promotion import PROMOTION_CHECK, Promoted, promote
+from apps.research.promotion import PROMOTION_CHECK, Promoted, first_day, promote
 from apps.research.runs import RunError
 from tests.research.run_panels import weekdays
 from tests.research.test_gates import LAST, built, logged, other_shadow, serve_copy
@@ -509,6 +509,140 @@ def test_later_rows_set_the_default_day_and_refuse_an_earlier_one(
     assert f"rank-prod 於 {LAST} 換模" in out.getvalue()
     assert {fresh(run).params["promoted_on"] for run in runs} == {LAST.isoformat()}
     assert not Prediction.objects.filter(run__in=copies).exists()
+
+
+@pytest.mark.django_db
+def test_a_build_with_no_rows_goes_live_on_the_latest_ready_day_by_default(
+    researched: Path, settings: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs = built("rank", "rank-wf1", researched)
+    rebased("rank-prod", PREV)
+    logged(runs[0])
+    passed(LAST)
+    settings.FEATURE_PARQUET_DIR = researched
+    sent(monkeypatch)
+    out = StringIO()
+
+    assert first_day("rank-prod") == LAST
+    call_command("promote", run_key="rank-prod", stdout=out)
+
+    assert f"rank-prod 於 {LAST} 換模" in out.getvalue()
+    assert {fresh(run).params["promoted_on"] for run in runs} == {LAST.isoformat()}
+    assert set(Prediction.objects.values_list("date", flat=True)) == {LAST}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("as_of", "ready", "expected"),
+    [(LAST, [], LAST), (LAST, [PREV], LAST), (PREV, [PREV], PREV), (PREV, [PREV, LAST], LAST)],
+)
+def test_the_default_day_is_the_latest_ready_day_from_the_build_day_on(
+    researched: Path, as_of: date, ready: list[date], expected: date
+) -> None:
+    built("rank", "rank-wf1", researched)
+    rebased("rank-prod", as_of)
+    for day in ready:
+        passed(day)
+
+    assert first_day("rank-prod") == expected
+
+
+@pytest.mark.django_db
+def test_a_default_day_without_features_changes_nothing_and_says_so(
+    researched: Path, settings: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs = built("rank", "rank-wf1", researched)
+    passed(LAST)
+    settings.FEATURE_PARQUET_DIR = tmp_path / "unbuilt"
+    sent(monkeypatch)
+
+    with pytest.raises(
+        CommandError, match=r"no feature partition for \d{4} in .*; run build_features"
+    ):
+        call_command("promote", run_key="rank-prod")
+
+    untouched(runs)
+    assert not alerts()
+    assert not Prediction.objects.exists()
+
+
+def newer_by_a_day(run: ModelRun) -> ModelRun:
+    ModelRun.objects.filter(pk=run.pk).update(train_end=run.train_end + timedelta(days=1))
+    return fresh(run)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("force", [True, False])
+def test_a_build_older_than_what_serves_is_refused_whatever_the_gates_say(
+    researched: Path, monkeypatch: pytest.MonkeyPatch, force: bool
+) -> None:
+    runs = built("rank", "rank-wf1", researched)
+    passed(LAST)
+    old_five, old_twenty = (
+        newer_by_a_day(run) for run in by_horizon(serving_copies(runs, monkeypatch))
+    )
+    sent(monkeypatch)
+    five, twenty = by_horizon(runs)
+    kept = set(Prediction.objects.values_list("pk", flat=True))
+    named = (
+        f"rank 5 日: {old_five.run_id} serves, trained through {old_five.train_end}, "
+        f"after {five.run_id} through {five.train_end}; "
+        f"rank 20 日: {old_twenty.run_id} serves, trained through {old_twenty.train_end}, "
+        f"after {twenty.run_id} through {twenty.train_end}"
+    )
+
+    with pytest.raises(RunError) as refused:
+        promote("rank-prod", LAST, researched, force=force, reason="overriding" if force else "")
+
+    assert (
+        str(refused.value) == f"rank-prod is an older build than what serves; rebuild it. {named}"
+    )
+    untouched(runs)
+    assert {fresh(run).status for run in (old_five, old_twenty)} == {ModelStatus.ACTIVE}
+    assert set(Prediction.objects.values_list("pk", flat=True)) == kept
+    assert not alerts()
+
+
+@pytest.mark.django_db
+def test_a_serving_run_trained_through_an_earlier_day_is_swapped_out(
+    researched: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs = built("rank", "rank-wf1", researched)
+    passed(LAST)
+    for run in serving_copies(runs, monkeypatch):
+        ModelRun.objects.filter(pk=run.pk).update(train_end=run.train_end - timedelta(days=1))
+    sent(monkeypatch)
+
+    result = promote("rank-prod", LAST, researched)
+
+    assert result.promoted is True
+    assert len(result.retired) == 2
+    assert {fresh(run).status for run in runs} == {ModelStatus.ACTIVE}
+
+
+@pytest.mark.django_db
+def test_only_the_horizons_being_swapped_in_are_compared_with_what_serves(
+    researched: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs = built("rank", "rank-wf1", researched)
+    passed(LAST)
+    old_five, old_twenty = by_horizon(serving_copies(runs, monkeypatch))
+    newer_by_a_day(old_five)
+    failing_h5(monkeypatch)
+    sent(monkeypatch)
+    five, twenty = by_horizon(runs)
+
+    result = promote("rank-prod", LAST, researched)
+
+    assert result.retired == [old_twenty.run_id]
+    assert fresh(twenty).status == ModelStatus.ACTIVE
+    untouched([five])
+    with pytest.raises(
+        RunError, match=f"older build than what serves; rebuild it. rank 5 日: {old_five.run_id}"
+    ):
+        promote("rank-prod", LAST, researched, force=True, reason="overriding")
+    untouched([five])
+    assert fresh(old_five).status == ModelStatus.ACTIVE
 
 
 @pytest.mark.django_db
