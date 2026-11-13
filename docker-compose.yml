@@ -10,7 +10,6 @@ x-app: &app
     DJANGO_SETTINGS_MODULE: ${DJANGO_SETTINGS_MODULE:-config.settings.dev}
     DATABASE_URL: postgres://${POSTGRES_USER:-twp}:${POSTGRES_PASSWORD:-twp}@db:5432/${POSTGRES_DB:-twp}
     CELERY_BROKER_URL: redis://redis:6379/0
-    TASK_ALERT_REDIS_URL: redis://redis:6379/0
     TZ: Asia/Taipei
   depends_on:
     db:
