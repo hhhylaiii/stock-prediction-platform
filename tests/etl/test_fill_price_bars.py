@@ -244,3 +244,40 @@ def test_fetching_the_day_the_usual_way_is_unchanged(
     assert set(frame["stock_id"]) == {"006201", "1240", "2064", "3293", "6488"}
     assert set(RawTpex.objects.values_list("dataset", flat=True)) == {"daily_price"}
     assert RawTpex.objects.count() == 2
+
+
+@responses.activate
+@pytest.mark.usefixtures("quotes")
+def test_the_listing_day_itself_can_be_filled() -> None:
+    _listed("6488", list_date=DAY)
+    _fill("6488")
+    assert DailyPrice.objects.filter(stock_id="6488", date=DAY).exists()
+
+
+@responses.activate
+@pytest.mark.usefixtures("quotes")
+def test_the_adapter_refuses_a_day_from_the_first_kept_quote_page_on(
+    october_2026: TradingDays, twse_limiter: RateLimiter
+) -> None:
+    _kept_page("20261028")
+    adapter = TpexAdapter(october_2026, twse_limiter)
+    with pytest.raises(ValueError, match="quote pages are kept from 20261028"):
+        adapter.day_quotes(DAY, FILL)
+    assert len(responses.calls) == 0
+
+
+@responses.activate
+@pytest.mark.usefixtures("quotes")
+def test_a_failure_after_the_insert_leaves_no_bar_and_counts_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def broken(*args: Any, **kwargs: Any) -> int:
+        raise RuntimeError("factor refresh broke")
+
+    monkeypatch.setattr("apps.etl.price_fill.refresh_where_later_events", broken)
+    _listed("6488")
+    with pytest.raises(RuntimeError, match="factor refresh broke"):
+        _fill("6488")
+    assert not DailyPrice.objects.exists()
+    run = EtlRun.objects.get()
+    assert (run.status, run.rows) == ("failed", 0)

@@ -39,8 +39,9 @@ def fill_price_bars(
         if absent:
             raise ValueError(f"{source} quotes of {day} do not list: {', '.join(absent)}")
         with transaction.atomic():
-            run.rows = insert_missing(DailyPrice, bars, KEYS)
+            added = insert_missing(DailyPrice, bars, KEYS)
             refresh_where_later_events(codes, day)
+        run.rows = added
         run.checkpoint = {"stocks": codes}
     return [{str(name): value for name, value in bar.items()} for bar in bars.to_dict("records")]
 

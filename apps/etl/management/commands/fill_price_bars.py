@@ -6,14 +6,12 @@ from typing import Any
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
+from apps.etl.adapters.exchange_tables import COUNT_COLUMNS, PRICE_COLUMNS
 from apps.etl.errors import SourceError
 from apps.etl.management.options import required_date
 from apps.etl.price_fill import FILLABLE, Bar, fill_price_bars
 from apps.etl.ratelimit import RetryableError
 from apps.market.calendar import TradingDays
-
-PRICES = ("open", "high", "low", "close")
-COUNTS = ("volume", "turnover")
 
 
 class Command(BaseCommand):
@@ -51,5 +49,5 @@ class Command(BaseCommand):
 
 
 def _line(bar: Bar) -> str:
-    figures = " ".join(f"{name} {bar[name]}" for name in (*PRICES, *COUNTS))
+    figures = " ".join(f"{name} {bar[name]}" for name in (*PRICE_COLUMNS, *COUNT_COLUMNS))
     return f"insert {bar['stock_id']} {bar['date']} {figures}"
