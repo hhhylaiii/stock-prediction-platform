@@ -866,7 +866,7 @@ info 的列不送，唯一例外是 `calendar_reach` 在延伸成功、或級別
   - Celery 判定失敗的任務：沒被接住的例外，重試用完之後才算；worker 子行程被殺或超時也算。
   - 任務自己接住、照常結束的非預期例外，Celery 看到的是成功，所以由程式自己報：`apps/etl/tasks.py` 的 `_failed`（例如景氣燈號在日曆用完那天、或程式錯誤）、15:10 補抓裡某個資料集的步驟（`apps/etl/catchup.py` 的 `_failure`）、15:10 的交易日曆延伸（`apps/etl/calendar_upkeep.py` 的 `keep_up`）。這幾處的 `context` 是資料集或步驟的標籤，不是參數。
 - 什麼不發：重試中的任務；來源自己的錯誤（還沒公布、連不上、格式改變、被限流），這些照舊由 22:50 的 `etl_runs` 列出；研究排程（23:00、06:00）遇到日期超出日曆時自己寫一列 warning 就正常結束（見「交易日曆延伸」最後一小節），不算任務失敗。
-- 去重：同一個任務名稱、同一天、同一種例外類別只發第一次，之後只累計。資料庫的 `OperationalError` 與 `InterfaceError` 不分任務、不分類別，整天合成一則，`text` 會寫 `database error`、第一個撞到的任務，以及 `one alert a day covers every task`；這兩種類別也包含鎖死、連線數用完這類資料庫還活著的錯誤。webhook 沒送成功（逾時、非 2xx）的那一則不算發過，下一次失敗會再送。去重記在 Redis（`TASK_ALERT_REDIS_URL`，沒設就是 broker；36 小時過期）；Redis 連不上就每次都發。Compose 裡這個位址和 broker 一樣由 `docker-compose.yml` 固定成 `redis://redis:6379/0`，`.env` 裡的值只在容器外生效。
+- 去重：同一個任務名稱、同一天、同一種例外類別只發第一次，之後只累計。資料庫的 `OperationalError` 與 `InterfaceError` 不分任務、不分類別，整天合成一則，`text` 會寫 `database error`、第一個撞到的任務，以及 `one alert a day covers every task`；這兩種類別也包含鎖死、連線數用完這類資料庫還活著的錯誤。webhook 沒送成功（逾時、非 2xx）的那一則不算發過，下一次失敗會再送。去重記在 Redis（36 小時過期），預設就是 broker，不用設定；Redis 連不上就每次都發。要另指一個 Redis 時才在 `.env` 設 `TASK_ALERT_REDIS_URL`：`.env` 會整份帶進容器，位址要寫容器裡連得到的服務名（例如 `redis://redis:6379/0`），寫 `localhost` 會連到容器自己、等於沒有去重；設成空字串是關掉去重。
 - 內容只有例外的類別名稱，不含訊息與 traceback（別人的錯誤訊息可能帶網址或主機路徑）；唯一例外是交易日曆的錯誤，訊息是日期範圍。`text` 是任務名稱、類別（日曆錯誤加訊息）與 `context`，只顯示 `text` 的管道也看得到是哪個批次或資料集。細節看 worker 的 log。
 - 另外盡力在 `data_quality_log` 記一列 `task_failure`（當天一列，`detail.tasks` 是各任務的次數、第一次時間、例外類別）；資料庫連不上時不寫。這一列永遠是 warning，不擋研究閘門與換模。
 - 已知缺口：
