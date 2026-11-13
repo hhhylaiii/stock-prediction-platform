@@ -7,10 +7,20 @@ from playwright.sync_api import Page, Route, expect
 from pytest_django.live_server_helper import LiveServer
 
 from apps.api.serving import HOLDOUT_RELEASE
+from apps.etl.models import DataQualityLog
 from apps.market.calendar import TradingDays
-from apps.research.models import BacktestMetric, HoldoutRun, ModelMonitor, ModelRun
+from apps.research.gates import Gate, SlotGates
+from apps.research.models import (
+    BacktestMetric,
+    HoldoutRun,
+    ModelMonitor,
+    ModelRun,
+    Prediction,
+)
+from apps.research.predict import Slot
+from apps.research.promotion import _failed, _note, _slots
 from tests.api.conftest import forced_params
-from tests.e2e.conftest import Seed
+from tests.e2e.conftest import Seed, take_ranking_offline
 
 pytestmark = pytest.mark.e2e
 
@@ -319,7 +329,7 @@ def test_the_monthly_chart_draws_24_months_and_marks_the_short_one(
     assert page.evaluate(BARS_INSIDE_PLOT) is True
     sub = page.locator("#ic-sub")
     expect(sub).to_contain_text(
-        "walk-forward 研究期的月平均，近 24 個月（上線模型的研究，rank-serving）。"
+        "20 日排名：walk-forward 研究期的月平均，近 24 個月（上線模型的研究，rank-serving）。"
     )
     expect(sub).to_contain_text("LightGBM 有 21 個月高於 Ridge")
     expect(sub).to_contain_text("負值月份 2 個")
@@ -356,7 +366,7 @@ def test_holdout_months_are_not_called_the_research_period(
     expect(page.locator("#ic-chart rect.bar-model")).to_have_count(24)
     sub = page.locator("#ic-sub")
     expect(sub).to_contain_text(
-        f"holdout（設計定案後才跑的驗證期）的月平均，近 24 個月（{XSS_KEY}）。"
+        f"20 日排名：holdout（設計定案後才跑的驗證期）的月平均，近 24 個月（{XSS_KEY}）。"
     )
     expect(sub).to_contain_text("LightGBM 有 21 個月高於 Ridge")
     expect(sub).not_to_contain_text("研究期")
@@ -426,6 +436,7 @@ def test_failed_model_requests_are_shown(page: Page, live_server: LiveServer, sc
 
     expect(page.locator("#model-table .error")).to_have_text("無法連線到伺服器。")
     expect(page.locator("#ic-chart .error")).to_have_text("無法連線到伺服器。")
+    expect(page.locator("#model-table .held-note")).to_have_count(0)
 
 
 def test_a_slot_without_matured_days_says_so(
@@ -458,3 +469,165 @@ def test_month_labels_and_model_names_are_escaped(
     expect(page.locator("#ic-chart img, #ic-legend img")).to_have_count(0)
     assert name in (page.locator("#ic-chart svg").get_attribute("aria-label") or "")
     assert page.evaluate("window.__x") is None
+
+
+AGREEMENT = Gate("agreement", False, 0.62, "相關 >= 0.7", 1842, "相關太低")
+AGREEMENT_TEXT = "與現役模型的預測相關（相關太低，實際 0.620，門檻 相關 >= 0.7，樣本 1,842 檔）"
+
+
+def held_back(seed: Seed, run_key: str, *held: tuple[int, Gate]) -> None:
+    """A rank promotion that swapped in the horizons not listed and held the listed ones."""
+    passing = Gate("gain_overlap", True, 8.0, "前 10 名重疊 >= 6", 10, "")
+    failing = dict(held)
+    results = [
+        SlotGates(
+            Slot("rank", horizon),
+            f"rank-n{horizon}",
+            "",
+            [passing, *([failing[horizon]] if horizon in failing else [])],
+        )
+        for horizon in (5, 20)
+    ]
+    came, kept = _slots(results, {result.slot for result in results if result.passed})
+    _note(seed.last_session, "rank", run_key, _failed(results), "", bool(came), came, kept)
+
+
+def held_text(seed: Seed, slot: str, run_key: str, gates: str) -> str:
+    return (
+        f"{slot}目前沒有上線中的模型：{run_key} 在 {seed.last_session.isoformat()} "
+        f"判定時沒過換模門檻，沒有換上。沒過的門檻：{gates}。"
+    )
+
+
+def test_a_horizon_with_no_live_model_says_why_under_the_table(
+    page: Page, live_server: LiveServer, scored: Seed
+) -> None:
+    take_ranking_offline(20)
+    held_back(
+        scored, XSS_KEY, (20, Gate("agreement", False, 0.62, "相關 >= 0.7", 1842, "<b>x</b>"))
+    )
+
+    page.goto(f"{live_server.url}/#models")
+
+    expect(page.locator("#model-table .trow")).to_have_count(5)
+    notes = page.locator("#model-table .held-note")
+    expect(notes).to_have_count(1)
+    expect(notes).to_have_text(
+        held_text(
+            scored,
+            "排名 20 日",
+            XSS_KEY,
+            "與現役模型的預測相關（<b>x</b>，實際 0.620，門檻 相關 >= 0.7，樣本 1,842 檔）",
+        )
+    )
+    expect(notes.locator("img, b")).to_have_count(0)
+    expect(page.locator("#model-table .scroll + .held-note")).to_have_count(1)
+
+
+def test_a_held_horizon_whose_older_model_still_serves_gets_no_note(
+    page: Page, live_server: LiveServer, scored: Seed
+) -> None:
+    held_back(scored, "rank-2026-12", (5, AGREEMENT))
+
+    page.goto(f"{live_server.url}/#models")
+
+    expect(page.locator("#model-table .trow")).to_have_count(6)
+    expect(page.locator("#model-table .held-note")).to_have_count(0)
+
+
+def test_with_no_model_live_the_held_horizons_are_still_explained(
+    page: Page, live_server: LiveServer, seeded: Seed
+) -> None:
+    held_back(seeded, "rank-2026-11", (5, AGREEMENT), (20, AGREEMENT))
+
+    page.goto(f"{live_server.url}/#models")
+
+    expect(page.locator("#model-table .placeholder")).to_have_text("模型尚未上線。")
+    notes = page.locator("#model-table .held-note")
+    expect(notes).to_have_count(2)
+    expect(notes.nth(0)).to_have_text(
+        held_text(seeded, "排名 20 日", "rank-2026-11", AGREEMENT_TEXT)
+    )
+    expect(notes.nth(1)).to_have_text(
+        held_text(seeded, "排名 5 日", "rank-2026-11", AGREEMENT_TEXT)
+    )
+
+
+def test_the_chart_draws_five_days_when_only_that_ranking_is_live(
+    page: Page, live_server: LiveServer, scored: Seed
+) -> None:
+    take_ranking_offline(20)
+    BacktestMetric.objects.bulk_create(
+        [
+            metric(
+                "lightgbm", "rank_ic", 0.01, "month", (start, start + timedelta(days=27)), horizon=5
+            )
+            for start in MONTHS
+        ]
+        + [
+            metric(
+                "lightgbm",
+                "rank_ic_days",
+                21.0,
+                "month",
+                (start, start + timedelta(days=27)),
+                horizon=5,
+            )
+            for start in MONTHS
+        ]
+    )
+    asked: list[str] = []
+    page.on("request", lambda request: asked.append(request.url))
+
+    page.goto(f"{live_server.url}/#models")
+
+    expect(page.locator("#ic-chart rect.bar-model")).to_have_count(24)
+    expect(page.locator("#ic-sub")).to_contain_text(
+        "5 日排名：walk-forward 研究期的月平均，近 24 個月（上線模型的研究，rank-serving）。"
+    )
+    charts = [url for url in asked if "/api/models/ic-monthly" in url]
+    assert len(charts) == 1
+    assert "horizon" not in charts[0]
+
+
+def test_a_model_held_only_by_its_group_is_said_to_have_passed_its_own_gates(
+    page: Page, live_server: LiveServer, scored: Seed
+) -> None:
+    group = ["quantile-h20", "vol-h20", "prob-h20"]
+    Prediction.objects.filter(run_id__in=group).delete()
+    ModelRun.objects.filter(pk__in=group).update(status="candidate")
+    gate = {
+        "name": "data_quality",
+        "reason": "2 天有 error",
+        "value": 2.0,
+        "threshold": "無 error",
+        "sample": 250,
+        "sample_unit": "days",
+    }
+    held = [
+        {"slot": f"{objective} 20 日", "objective": objective, "horizon": 20, "gates": gates}
+        for objective, gates in (("quantile", [gate]), ("volatility", []))
+    ]
+    DataQualityLog.objects.create(
+        date=scored.last_session,
+        check_name="model_promotion",
+        severity="warning",
+        detail={"scope": "interval", "run_key": "interval-2026-11", "held_slots": held},
+    )
+
+    page.goto(f"{live_server.url}/#models")
+
+    notes = page.locator("#model-table .held-note")
+    expect(notes).to_have_count(2)
+    expect(notes.nth(0)).to_have_text(
+        held_text(
+            scored,
+            "報酬區間 20 日",
+            "interval-2026-11",
+            "訓練窗內的資料品質（2 天有 error，實際 2，門檻 無 error，樣本 250 天）",
+        )
+    )
+    expect(notes.nth(1)).to_have_text(
+        f"波動率 20 日目前沒有上線中的模型：interval-2026-11 在 {scored.last_session.isoformat()} "
+        "判定時沒有換上：它自己的門檻都過了，同一組有模型沒過。"
+    )

@@ -899,15 +899,22 @@
       '<div class="muted">' + esc(researchText(row)) + '</div></div>' + notes;
   }
 
+  function heldHtml(entry) {
+    const slot = (OBJECTIVES[entry.objective] || entry.objective) + ' ' + Number(entry.horizon) + ' 日';
+    const gates = (entry.gates || []).map(gateText).join('、');
+    const why = gates ? '判定時沒過換模門檻，沒有換上。沒過的門檻：' + gates + '。' : '判定時沒有換上：它自己的門檻都過了，同一組有模型沒過。';
+    return '<p class="note held-note">' + esc(slot + '目前沒有上線中的模型：' + (entry.run_key || '最近一次重訓的模型') + ' 在 ' + entry.date + ' ' + why) + '</p>';
+  }
+
   async function renderModelTable() {
     const host = document.getElementById('model-table');
     try {
-      const { data } = await api.get('models');
+      const { data, meta } = await api.get('models');
       const spans = releaseSpans(data);
-      host.innerHTML = !data.length ? '<p class="placeholder">模型尚未上線。</p>' :
+      host.innerHTML = (!data.length ? '<p class="placeholder">模型尚未上線。</p>' :
         '<div class="scroll" style="margin-top:14px"><div class="table" style="min-width:1100px">' +
         '<div class="thead model-cols"><div>目標</div><div>模型</div><div>版本</div><div>訓練區間</div><div>近 6 個月成績</div><div>回測成績與 baseline</div></div>' +
-        data.map((row, i) => modelRowHtml(row, spans[i])).join('') + '</div></div>';
+        data.map((row, i) => modelRowHtml(row, spans[i])).join('') + '</div></div>') + ((meta || {}).not_live || []).map(heldHtml).join('');
     } catch (err) {
       host.innerHTML = errorBox(err);
     }
@@ -956,7 +963,7 @@
   async function renderIcChart() {
     const host = document.getElementById('ic-chart'), sub = document.getElementById('ic-sub'), legend = document.getElementById('ic-legend');
     try {
-      const { data, meta } = await api.get('models/ic-monthly', { horizon: 20, months: 24 });
+      const { data, meta } = await api.get('models/ic-monthly', { months: 24 });
       if (!data.length) {
         host.innerHTML = '<p class="placeholder">回測結果尚未產出。</p>';
         sub.textContent = 'walk-forward 研究期的月平均。';
@@ -965,7 +972,7 @@
       }
       const model = modelName(meta.model_type), baseline = modelName(meta.baseline);
       legend.innerHTML = '<span><i class="sw-sq" style="background:var(--model)"></i>' + esc(model) + '</span><span><i class="sw-sq" style="background:var(--ink-4)"></i>' + esc(baseline) + '</span>';
-      sub.textContent = (meta.source === 'holdout' ? 'holdout（設計定案後才跑的驗證期）的月平均，近 ' + data.length + ' 個月（' : 'walk-forward 研究期的月平均，近 ' + data.length + ' 個月（' + (IC_SOURCES[meta.source] || meta.source) + '，') + meta.run_key + '）。' +
+      sub.textContent = Number(meta.horizon) + ' 日排名：' + (meta.source === 'holdout' ? 'holdout（設計定案後才跑的驗證期）的月平均，近 ' + data.length + ' 個月（' : 'walk-forward 研究期的月平均，近 ' + data.length + ' 個月（' + (IC_SOURCES[meta.source] || meta.source) + '，') + meta.run_key + '）。' +
         model + ' 有 ' + meta.above_baseline + ' 個月高於 ' + baseline + '，負值月份 ' + meta.negative + ' 個；天數少於 ' + meta.min_days + ' 天的月份不計，以淡色表示。';
       drawIcChart(host, data, meta);
     } catch (err) {
@@ -1094,6 +1101,11 @@
   }
 
   function promotionLines(d) {
+    const held = Array.isArray(d.held_slots) ? d.held_slots : [];
+    if (d.promoted === true && !d.forced && held.length) {
+      const came = (Array.isArray(d.promoted_slots) ? d.promoted_slots : []).map(item => slotText(item.slot)).join('、');
+      return ['已換上 ' + (d.run_key || '') + ' 的' + came, ...held.map(item => slotText(item.slot) + '未換上：' + (item.gates || []).map(gateText).join('、'))];
+    }
     if (d.promoted === true && !d.forced) return ['已換上 ' + (d.run_key || '')];
     const head = (d.forced ? '強制換模：' + (d.reason || '沒有寫原因') : '換模門檻未過，續用現役模型') + (d.run_key ? '（' + d.run_key + '）' : '');
     return [head, ...(d.failed || []).map(item => slotText(item.slot) + (item.run_id ? '（' + item.run_id + '）' : '') + '：' + (item.gates || []).map(gateText).join('、'))];

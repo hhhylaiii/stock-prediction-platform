@@ -13,7 +13,7 @@ from apps.research.gates import SAMPLE_UNITS, Gate, SlotGates
 from apps.research.management.commands.build_features import EX_DATE_CHECK
 from apps.research.monitor import MODE_FIELDS, MODES, alert_problems
 from apps.research.predict import Slot
-from apps.research.promotion import Promoted, _failed, _note
+from apps.research.promotion import Promoted, _failed, _note, _slots
 from apps.research.runs import RunError
 from tests.e2e.conftest import XSS_NAME, Seed
 
@@ -392,6 +392,19 @@ def promotion_alert(
 
 def swapped_in(seed: Seed, run_key: str, back: int = 1, scope: str = "rank") -> None:
     _note(seed.sessions[-back], scope, run_key, [], "", promoted=True)
+
+
+def accepted(slot: Slot, run_id: str) -> SlotGates:
+    passing = Gate("gain_overlap", True, 8.0, "前 10 名重疊 >= 6", 10, "")
+    return SlotGates(slot, run_id, "serving-old", [passing])
+
+
+def judged(
+    seed: Seed, run_key: str, results: list[SlotGates], swapped: set[Slot], reason: str = ""
+) -> None:
+    """The row promote writes since each horizon is judged on its own."""
+    came, kept = _slots(results, swapped)
+    _note(seed.last_session, "rank", run_key, _failed(results), reason, bool(swapped), came, kept)
 
 
 def test_a_passed_promotion_reads_as_swapped_in_not_as_a_warning(
@@ -1100,3 +1113,58 @@ def test_a_retrain_says_why_each_scope_was_refused_or_failed(
         ]
     )
     expect(row.locator("i")).to_have_class("warn")
+
+
+RANK_PAIR = [
+    accepted(Slot("rank", 5), "rank-n5"),
+    refused(Slot("rank", 20), "rank-n20", AGREEMENT),
+]
+
+
+def test_a_partial_promotion_names_what_came_in_and_what_was_held(
+    page: Page, live_server: LiveServer, seeded: Seed
+) -> None:
+    judged(seeded, XSS_NAME, RANK_PAIR, {Slot("rank", 5)})
+
+    page.goto(f"{live_server.url}/#models")
+
+    promotion = page.locator("#model-checks .check").filter(has_text="換模")
+    expect(promotion.locator("i")).to_have_class("warn")
+    expect(promotion_lines(page)).to_have_count(2)
+    expect(promotion_lines(page).nth(0)).to_have_text(f"已換上 {XSS_NAME} 的排名 5 日")
+    expect(promotion_lines(page).nth(1)).to_have_text(f"排名 20 日未換上：{AGREEMENT_TEXT}")
+    expect(page.locator("#model-checks img")).to_have_count(0)
+    expect(page.locator("#model-checks")).not_to_contain_text("續用現役模型")
+
+
+def test_a_promotion_that_swapped_every_horizon_in_still_reads_as_one_line(
+    page: Page, live_server: LiveServer, seeded: Seed
+) -> None:
+    both = [accepted(Slot("rank", 5), "rank-n5"), accepted(Slot("rank", 20), "rank-n20")]
+    judged(seeded, "rank-2026-12", both, {Slot("rank", 5), Slot("rank", 20)})
+
+    page.goto(f"{live_server.url}/#models")
+
+    promotion = page.locator("#model-checks .check").filter(has_text="換模")
+    expect(promotion.locator("i")).not_to_have_class("warn")
+    expect(promotion_lines(page)).to_have_count(1)
+    expect(promotion_lines(page).first).to_have_text("已換上 rank-2026-12")
+
+
+def test_a_forced_or_a_refused_promotion_reads_as_before_with_the_new_lists(
+    page: Page, live_server: LiveServer, seeded: Seed
+) -> None:
+    judged(seeded, "rank-2026-11", RANK_PAIR, set())
+
+    page.goto(f"{live_server.url}/#models")
+
+    expect(promotion_lines(page)).to_have_count(2)
+    expect(promotion_lines(page).nth(0)).to_have_text("換模門檻未過，續用現役模型（rank-2026-11）")
+    expect(promotion_lines(page).nth(1)).to_have_text(f"排名 20 日（rank-n20）：{AGREEMENT_TEXT}")
+
+    judged(seeded, "rank-2026-11", RANK_PAIR, {Slot("rank", 5), Slot("rank", 20)}, "先上線觀察")
+    page.reload()
+
+    expect(promotion_lines(page)).to_have_count(2)
+    expect(promotion_lines(page).nth(0)).to_have_text("強制換模：先上線觀察（rank-2026-11）")
+    expect(promotion_lines(page).nth(1)).to_have_text(f"排名 20 日（rank-n20）：{AGREEMENT_TEXT}")
