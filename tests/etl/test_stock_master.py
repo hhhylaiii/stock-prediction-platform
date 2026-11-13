@@ -11,6 +11,7 @@ from apps.etl.stock_master import (
     DELISTING_COLUMNS,
     build_stock_master,
     check_listed_count,
+    suspended_codes,
     tpex_delistings,
     twse_delistings,
     unlisted_codes,
@@ -255,3 +256,118 @@ def test_codes_in_finmind_history_but_nowhere_else_are_listed(
 ) -> None:
     info = load_fixture("finmind/stock_info.json")["data"]
     assert unlisted_codes(info, master.reset_index()) == ["2891A", "9105"]
+
+
+def _seen(code: str, industry: str, market: str, day: str, name: str = "") -> dict[str, str]:
+    return {**_today(code, industry, market), "date": day, "stock_name": name or code}
+
+
+def _built(load_fixture: Callable[[str], Any], *rows: dict[str, str]) -> pd.DataFrame:
+    info = [*load_fixture("finmind/stock_info.json")["data"], *rows]
+    twse = twse_delistings(load_fixture("twse/reference/suspend_listing.json"))
+    tpex = tpex_delistings(load_fixture("tpex/delisted.json")["tables"][0])
+    return build_stock_master(info, twse, tpex).set_index("stock_id")
+
+
+@pytest.mark.parametrize(
+    ("row", "market"),
+    [
+        (_seen("1589", "電機機械", "twse", "2026-07-04", "永冠-KY"), Market.TWSE),
+        (_seen("4804", "觀光餐旅", "tpex", "2026-04-16", "大略-KY"), Market.TPEX),
+        (_seen("4207", "食品工業", "tpex", "2026-10-29", "環泰"), Market.TPEX),
+    ],
+    ids=["twse", "tpex", "days-ago"],
+)
+def test_a_halted_common_stock_on_no_delisting_list_stays_listed(
+    load_fixture: Callable[[str], Any], row: dict[str, str], market: str
+) -> None:
+    kept = _built(load_fixture, row).loc[row["stock_id"]]
+    assert (kept["name"], kept["market"], kept["industry"], kept["delist_date"]) == (
+        row["stock_name"],
+        market,
+        row["industry_category"],
+        None,
+    )
+
+
+def test_a_halted_stock_is_described_by_its_newest_rows(
+    load_fixture: Callable[[str], Any],
+) -> None:
+    rows = [
+        _seen("4804", "觀光事業", "twse", "2023-06-29", "大略"),
+        _seen("4804", "電子工業", "tpex", "2026-04-16", "大略-KY"),
+        _seen("4804", "觀光餐旅", "tpex", "2026-04-16", "大略-KY"),
+    ]
+    kept = _built(load_fixture, *rows).loc["4804"]
+    assert (kept["name"], kept["market"], kept["industry"]) == ("大略-KY", Market.TPEX, "觀光餐旅")
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        _seen("00793B", "上櫃指數股票型基金(ETF)", "tpex", "2026-09-30"),
+        _seen("020039", "指數投資證券(ETN)", "twse", "2026-10-14"),
+        _seen("01003T", "受益證券", "twse", "2026-05-06"),
+        _seen("2888A", "金融保險", "twse", "2025-07-24"),
+        _seen("912000", "存託憑證", "twse", "2026-06-01"),
+        _seen("9103", "存託憑證", "twse", "2024-12-04"),
+        _seen("9199", "其他", "twse", "2026-06-01"),
+        _seen("0061", "ETF", "twse", "2026-06-01"),
+    ],
+    ids=["bond-etf", "etn", "beneficiary", "preferred", "six-digit", "dr", "91-prefix", "etf"],
+)
+def test_other_securities_that_stop_being_listed_stay_out(
+    load_fixture: Callable[[str], Any], row: dict[str, str]
+) -> None:
+    info = [*load_fixture("finmind/stock_info.json")["data"], row]
+    master = _built(load_fixture, row)
+    assert row["stock_id"] not in master.index
+    assert row["stock_id"] in unlisted_codes(info, master.reset_index())
+
+
+def test_a_halted_stock_on_a_delisting_list_is_delisted(
+    load_fixture: Callable[[str], Any],
+) -> None:
+    info = [
+        *load_fixture("finmind/stock_info.json")["data"],
+        _seen("1589", "電機機械", "twse", "2026-07-04"),
+    ]
+    gone = pd.DataFrame(
+        [
+            {
+                "stock_id": "1589",
+                "name": "永冠",
+                "market": Market.TWSE,
+                "delist_date": date(2026, 8, 3),
+            }
+        ],
+        columns=DELISTING_COLUMNS,
+    )
+    master = build_stock_master(info, gone, tpex_delistings_empty()).set_index("stock_id")
+    assert master.loc["1589", "delist_date"] == date(2026, 8, 3)
+    assert suspended_codes(info, master.reset_index()) == ["2867", "2888", "3454"]
+
+
+def test_a_halted_stock_last_listed_on_both_markets_is_a_schema_change(
+    load_fixture: Callable[[str], Any],
+) -> None:
+    rows = [_seen("1589", "電機機械", market, "2026-07-04") for market in ("twse", "tpex")]
+    with pytest.raises(SchemaChangedError, match="1589 was last listed on both markets"):
+        _built(load_fixture, *rows)
+
+
+def test_halted_stocks_are_named_apart_from_the_unlisted(
+    load_fixture: Callable[[str], Any], master: pd.DataFrame
+) -> None:
+    row = _seen("1589", "電機機械", "twse", "2026-07-04")
+    info = [*load_fixture("finmind/stock_info.json")["data"], row]
+    built = _built(load_fixture, row).reset_index()
+    assert suspended_codes(info, built) == ["1589"]
+    assert unlisted_codes(info, built) == ["2891A", "9105"]
+    assert suspended_codes(info[:-1], master.reset_index()) == []
+
+
+def test_halted_stocks_add_to_the_rows(load_fixture: Callable[[str], Any]) -> None:
+    master = _built(load_fixture, _seen("1589", "電機機械", "twse", "2026-07-04"))
+    assert len(master) == 21
+    assert master["delist_date"].notna().sum() == 6

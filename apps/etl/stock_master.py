@@ -9,6 +9,7 @@ from apps.etl.adapters.twse import is_foreign_currency_etf
 from apps.etl.errors import SchemaChangedError
 from apps.etl.exchange_rows import stock_code
 from apps.etl.roc import parse_roc_date
+from apps.market.common_stock import is_common_stock
 from apps.market.models import Market
 
 TWSE_DELISTING_FIELDS = ["終止上市日期", "公司名稱", "上市編號"]
@@ -127,18 +128,56 @@ def _delisted(info: pd.DataFrame, delistings: pd.DataFrame, current: set[str]) -
     return pd.DataFrame(records, columns=MASTER_COLUMNS)
 
 
+def _halted(info: pd.DataFrame, taken: set[str]) -> pd.DataFrame:
+    """Common stocks FinMind stopped listing that no delisting list names stay listed.
+
+    A stock halted from trading drops off the snapshot without being delisted.
+    """
+    records = []
+    for code, rows in info.groupby("stock_id", sort=True):
+        newest = rows.loc[rows["date"] == rows["date"].max()]
+        industry = pick_industry(sorted(newest["industry_category"]))
+        if str(code).strip() in taken or not is_common_stock(str(code).strip(), industry):
+            continue
+        markets = set(newest["type"])
+        if len(markets) != 1:
+            raise SchemaChangedError(f"{code} was last listed on both markets: {sorted(markets)}")
+        records.append(
+            {
+                "stock_id": stock_code(code),
+                "name": str(newest["stock_name"].iloc[0]),
+                "market": INFO_MARKETS[markets.pop()],
+                "industry": industry,
+                "delist_date": None,
+            }
+        )
+    return pd.DataFrame(records, columns=MASTER_COLUMNS)
+
+
 def unlisted_codes(info_rows: Sequence[dict[str, Any]], master: pd.DataFrame) -> list[str]:
     """Codes FinMind once listed that are neither listed today nor on a delisting list."""
     history = set(_listed_info(info_rows)["stock_id"].astype(str).str.strip())
     return sorted(history - set(master["stock_id"]))
 
 
+def suspended_codes(info_rows: Sequence[dict[str, Any]], master: pd.DataFrame) -> list[str]:
+    """Codes the master keeps as listed although the newest snapshot no longer lists them."""
+    info = _listed_info(info_rows)
+    newest = info.loc[info["date"] == info["date"].max(), "stock_id"].astype(str).str.strip()
+    listed = master.loc[master["delist_date"].isna(), "stock_id"]
+    return sorted(set(listed) - set(newest))
+
+
 def build_stock_master(
     info_rows: Sequence[dict[str, Any]], twse: pd.DataFrame, tpex: pd.DataFrame
 ) -> pd.DataFrame:
-    """Latest listings plus officially delisted codes; a code listed today is never delisted."""
+    """Latest listings, officially delisted codes and halted common stocks.
+
+    A code listed today is never delisted; a delisting list outranks a halt.
+    """
     info = _listed_info(info_rows)
     current = _current(info)
     delisted = _delisted(info, pd.concat([twse, tpex], ignore_index=True), set(current["stock_id"]))
-    master = pd.concat([current, delisted], ignore_index=True)
+    halted = _halted(info, set(current["stock_id"]) | set(delisted["stock_id"]))
+    master = pd.concat([current, delisted, halted], ignore_index=True)
     return master.sort_values("stock_id", ignore_index=True)
