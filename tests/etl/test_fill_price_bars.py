@@ -11,6 +11,7 @@ from django.core.management.base import CommandError
 
 from apps.etl.adapters.tpex import TpexAdapter
 from apps.etl.models import EtlRun, RawTpex
+from apps.etl.price_fill import fill_price_bars
 from apps.etl.ratelimit import RateLimiter
 from apps.market.calendar import TradingDays
 from apps.market.models import DailyPrice, DividendEvent, Market, StockMaster
@@ -281,3 +282,27 @@ def test_a_failure_after_the_insert_leaves_no_bar_and_counts_none(
     assert not DailyPrice.objects.exists()
     run = EtlRun.objects.get()
     assert (run.status, run.rows) == ("failed", 0)
+
+
+@responses.activate
+@pytest.mark.usefixtures("quotes")
+def test_a_stock_delisted_later_can_still_be_filled() -> None:
+    _listed("6488", delist_date=date(2026, 10, 29))
+    _fill("6488")
+    assert DailyPrice.objects.filter(stock_id="6488", date=DAY).exists()
+
+
+@responses.activate
+@pytest.mark.usefixtures("quotes")
+@pytest.mark.parametrize(
+    ("source", "stocks", "reason"),
+    [("twse", ["2330"], "cannot fill 'twse'"), ("tpex", [], "no stock chosen")],
+    ids=["another-exchange", "no-stock"],
+)
+def test_the_function_refuses_what_the_command_never_passes(
+    october_2026: TradingDays, source: str, stocks: list[str], reason: str
+) -> None:
+    with pytest.raises(ValueError, match=reason):
+        fill_price_bars(source, DAY, stocks, october_2026)
+    assert len(responses.calls) == 0
+    assert not EtlRun.objects.exists()
