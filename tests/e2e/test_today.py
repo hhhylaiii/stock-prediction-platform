@@ -791,6 +791,8 @@ def test_today_opens_on_twenty_days_with_the_old_words_when_the_status_request_f
 ) -> None:
     take_ranking_offline(20)
     page.route("**/api/status", lambda route: route.abort())
+    page.clock.install()
+    page.clock.pause_at(timezone.now() + timedelta(seconds=5))
 
     page.goto(live_server.url)
 
@@ -821,10 +823,20 @@ def test_today_loads_while_the_status_request_hangs_and_follows_it_when_it_answe
 ) -> None:
     take_ranking_offline(20)
     held: list[Route] = []
+    asked: list[str] = []
     page.route("**/api/status", lambda route: held.append(route))
+    page.on("request", lambda request: asked.append(request.url))
+    page.clock.install()
+    page.clock.pause_at(timezone.now() + timedelta(seconds=5))
 
     page.goto(live_server.url)
 
+    assert page.locator("[data-h='20']").get_attribute("aria-pressed") == "true"
+    assert page.locator("[data-mkt='all']").get_attribute("aria-pressed") == "true"
+    page.clock.fast_forward(1400)
+    assert page.locator("#rows").text_content() == "載入中…"
+    assert not [url for url in asked if "/api/predictions?" in url]
+    page.clock.fast_forward(200)
     expect(page.locator("#today-empty")).to_have_text(
         f"預測資料尚未產出。排名{MODEL_REQUIRES}；上線後，這裡會列出全市場的排名。"
     )
@@ -943,3 +955,68 @@ def test_a_status_answer_for_a_page_the_reader_left_does_not_load_today(
     page.clock.fast_forward(5000)
     assert page.locator("[data-nav='stock']").get_attribute("aria-current") == "page"
     assert not [url for url in asked if "/api/predictions?" in url]
+
+
+def test_a_click_while_the_status_is_awaited_loads_the_table_once(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    held: list[Route] = []
+    asked: list[str] = []
+    page.route("**/api/status", lambda route: held.append(route))
+    page.on("request", lambda request: asked.append(request.url))
+    page.clock.install()
+    page.clock.pause_at(timezone.now() + timedelta(seconds=5))
+    page.goto(live_server.url)
+    page.locator("[data-h='5']").click()
+    expect(page.locator("#rows .trow").nth(0)).to_contain_text("9999")
+
+    held[0].continue_()
+
+    expect(page.locator("#status")).to_contain_text("收盤資料")
+    page.clock.fast_forward(5000)
+    assert page.evaluate("document.querySelectorAll('#rows .trow').length") == 20
+    tables = [url for url in asked if "/api/predictions?" in url]
+    assert len(tables) == 1
+    assert "horizon=5" in tables[0]
+
+
+def test_the_empty_page_follows_a_status_that_answers_after_the_reader_picked(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    take_ranking_offline(20)
+    held: list[Route] = []
+    asked: list[str] = []
+    page.route("**/api/status", lambda route: held.append(route))
+    page.on("request", lambda request: asked.append(request.url))
+    page.clock.install()
+    page.clock.pause_at(timezone.now() + timedelta(seconds=5))
+    page.goto(live_server.url)
+    page.locator("[data-h='20']").click()
+    expect(page.locator("#today-empty")).to_have_text(
+        f"預測資料尚未產出。排名{MODEL_REQUIRES}；上線後，這裡會列出全市場的排名。"
+    )
+
+    held[0].continue_()
+
+    expect(page.locator("#today-empty")).to_have_text(no_ranking_text(20, 5))
+    page.clock.fast_forward(5000)
+    assert page.locator("[data-h='20']").get_attribute("aria-pressed") == "true"
+    assert len([url for url in asked if "/api/predictions?" in url]) == 1
+
+
+def test_an_unpicked_page_returns_to_twenty_days_when_no_ranking_is_live_any_more(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    take_ranking_offline(20)
+    page.goto(live_server.url)
+    expect(page.locator("[data-h='5']")).to_have_attribute("aria-pressed", "true")
+    take_ranking_offline(5)
+    page.locator("[data-nav='models']").click()
+    expect(page.locator("#view-models")).to_be_visible()
+
+    page.locator("[data-nav='today']").click()
+
+    expect(page.locator("[data-h='20']")).to_have_attribute("aria-pressed", "true")
+    expect(page.locator("#today-empty")).to_have_text(
+        f"預測資料尚未產出。排名{MODEL_REQUIRES}；上線後，這裡會列出全市場的排名。"
+    )

@@ -116,8 +116,8 @@
   }
 
   function preferHorizon(available) {
-    if (state.picked || !available.length) return false;
-    const next = available.includes(DEFAULT_HORIZON) ? DEFAULT_HORIZON : Math.max(...available);
+    if (state.picked) return false;
+    const next = !available.length || available.includes(DEFAULT_HORIZON) ? DEFAULT_HORIZON : Math.max(...available);
     if (next === state.h) return false;
     state.h = next;
     state.page = 1;
@@ -274,6 +274,11 @@
     if (!meta.date && others.length) return '<div class="empty" id="today-empty">' + state.h + ' 日排名目前沒有上線中的模型，所以這一頁沒有資料；' + others.join('、') + ' 日排名有上線中的模型，可以切到 ' + others.join('、') + ' 日。' + NOT_LIVE_WHY + '</div>';
     if (!meta.date) return '<div class="empty" id="today-empty">預測資料尚未產出。排名' + MODEL_REQUIRES + '；上線後，這裡會列出全市場的排名。</div>';
     return '<div class="empty">沒有符合條件的股票。</div>';
+  }
+
+  function refreshEmpty() {
+    const empty = document.getElementById('today-empty');
+    if (empty) empty.outerHTML = emptyHtml({});
   }
 
   function lackingText(models, horizon, own) {
@@ -1273,13 +1278,13 @@
     const ticket = ++state.routeToken;
     const status = renderStatus();
     if (name === 'today') {
-      let shown = false;
+      controls();
+      state.watchCache = null;
+      const loads = state.todayToken;
       const show = () => {
         if (ticket !== state.routeToken) return;
         const moved = preferHorizon(state.ranked);
-        if (shown && !moved) return;
-        shown = true;
-        state.watchCache = null;
+        if (state.todayToken !== loads && !moved) { refreshEmpty(); return; }
         loadToday();
       };
       if (state.picked) show(); else setTimeout(show, STATUS_WAIT_MS);
