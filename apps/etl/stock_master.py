@@ -107,8 +107,10 @@ def _current(info: pd.DataFrame) -> pd.DataFrame:
 
 def _delisted(info: pd.DataFrame, delistings: pd.DataFrame, current: set[str]) -> pd.DataFrame:
     latest: dict[str, dict[str, Any]] = {}
+    left: dict[str, set[str]] = {}
     for record in delistings.sort_values("delist_date").to_dict("records"):
         latest[str(record["stock_id"])] = {str(key): value for key, value in record.items()}
+        left.setdefault(str(record["stock_id"]), set()).add(str(record["market"]))
     history: dict[str, list[dict[str, Any]]] = {}
     for record in info.to_dict("records"):
         row = {str(key): value for key, value in record.items()}
@@ -116,6 +118,8 @@ def _delisted(info: pd.DataFrame, delistings: pd.DataFrame, current: set[str]) -
     records = []
     for code in sorted(set(latest) - current):
         known = history.get(code, [])
+        if _only_changed_boards(code, known, left[code]):
+            continue
         records.append(
             {
                 "stock_id": code,
@@ -126,6 +130,19 @@ def _delisted(info: pd.DataFrame, delistings: pd.DataFrame, current: set[str]) -
             }
         )
     return pd.DataFrame(records, columns=MASTER_COLUMNS)
+
+
+def _only_changed_boards(code: str, known: list[dict[str, Any]], left: set[str]) -> bool:
+    """A common stock no list shows leaving the market it was last listed on only moved there.
+
+    The delisting lists also name the old market of a stock that changed boards.
+    """
+    if not known:
+        return False
+    newest = [row for row in known if row["date"] == known[0]["date"]]
+    last = {str(INFO_MARKETS[row["type"]]) for row in newest}
+    industry = pick_industry(sorted(str(row["industry_category"]) for row in newest))
+    return len(last) == 1 and not last & left and is_common_stock(code.strip(), industry)
 
 
 def _halted(info: pd.DataFrame, taken: set[str]) -> pd.DataFrame:

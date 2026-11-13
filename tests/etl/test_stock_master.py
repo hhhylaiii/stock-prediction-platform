@@ -313,8 +313,19 @@ def test_a_halted_stock_is_described_by_its_newest_rows(
         _seen("9103", "存託憑證", "twse", "2024-12-04"),
         _seen("9199", "其他", "twse", "2026-06-01"),
         _seen("0061", "ETF", "twse", "2026-06-01"),
+        _seen("1262", "存託憑證", "twse", "2026-06-01"),
     ],
-    ids=["bond-etf", "etn", "beneficiary", "preferred", "six-digit", "dr", "91-prefix", "etf"],
+    ids=[
+        "bond-etf",
+        "etn",
+        "beneficiary",
+        "preferred",
+        "six-digit",
+        "dr",
+        "91-prefix",
+        "etf",
+        "dr-industry",
+    ],
 )
 def test_other_securities_that_stop_being_listed_stay_out(
     load_fixture: Callable[[str], Any], row: dict[str, str]
@@ -371,3 +382,73 @@ def test_halted_stocks_add_to_the_rows(load_fixture: Callable[[str], Any]) -> No
     master = _built(load_fixture, _seen("1589", "電機機械", "twse", "2026-07-04"))
     assert len(master) == 21
     assert master["delist_date"].notna().sum() == 6
+
+
+def _stale(rows: list[dict[str, str]], code: str, market: str, day: str) -> list[dict[str, str]]:
+    return [
+        {**row, "date": day} if (row["stock_id"], row["type"]) == (code, market) else row
+        for row in rows
+    ]
+
+
+def test_a_halted_stock_that_once_changed_boards_stays_listed(
+    load_fixture: Callable[[str], Any],
+) -> None:
+    info = _stale(load_fixture("finmind/stock_info.json")["data"], "6446", "twse", "2026-10-29")
+    twse = twse_delistings(load_fixture("twse/reference/suspend_listing.json"))
+    tpex = tpex_delistings(load_fixture("tpex/delisted.json")["tables"][0])
+    master = build_stock_master(info, twse, tpex)
+    kept = master.set_index("stock_id").loc["6446"]
+    assert (kept["market"], kept["delist_date"], kept["industry"]) == (
+        Market.TWSE,
+        None,
+        "生技醫療業",
+    )
+    assert suspended_codes(info, master) == ["6446"]
+
+
+def _gone(*records: tuple[str, str, date]) -> pd.DataFrame:
+    rows = [
+        {"stock_id": code, "name": code, "market": market, "delist_date": day}
+        for code, market, day in records
+    ]
+    return pd.DataFrame(rows, columns=DELISTING_COLUMNS)
+
+
+def test_a_stock_delisted_again_after_changing_boards_keeps_its_last_delisting(
+    load_fixture: Callable[[str], Any],
+) -> None:
+    info = [
+        *load_fixture("finmind/stock_info.json")["data"],
+        _seen("1107", "其他", "twse", "2024-12-04"),
+    ]
+    gone = _gone(("1107", Market.TWSE, date(2007, 10, 20)), ("1107", Market.TPEX, date(2012, 6, 7)))
+    master = build_stock_master(info, gone, tpex_delistings_empty()).set_index("stock_id")
+    assert (master.loc["1107", "market"], master.loc["1107", "delist_date"]) == (
+        Market.TPEX,
+        date(2012, 6, 7),
+    )
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [
+        [_seen("2888A", "金融保險", "twse", "2025-07-24")],
+        [
+            _seen("1107", "其他", "twse", "2024-12-04"),
+            _seen("1107", "其他", "tpex", "2024-12-04"),
+        ],
+    ],
+    ids=["not-a-common-stock", "last-seen-on-both-markets"],
+)
+def test_a_delisting_on_another_market_still_counts_where_the_board_change_is_unsure(
+    load_fixture: Callable[[str], Any], rows: list[dict[str, str]]
+) -> None:
+    info = [*load_fixture("finmind/stock_info.json")["data"], *rows]
+    code = rows[0]["stock_id"]
+    gone = _gone((code, Market.TPEX, date(2012, 6, 7)))
+    master = build_stock_master(info, twse_delistings_empty(), gone).set_index("stock_id")
+    assert (master.loc[code, "market"], master.loc[code, "delist_date"]) == (
+        Market.TPEX,
+        date(2012, 6, 7),
+    )
