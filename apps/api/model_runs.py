@@ -1,12 +1,14 @@
 """The serving models with recent monitoring, research totals and the monthly rank IC chart."""
 
+import logging
 from collections import defaultdict
+from collections.abc import Iterable
 from datetime import date, timedelta
 from statistics import fmean, stdev
 from typing import Any
 
 from django.conf import settings
-from django.db.models import Q
+from django.db.models import Max, Q
 from django.utils import timezone
 from rest_framework.request import Request
 from rest_framework.response import Response
@@ -14,6 +16,8 @@ from rest_framework.response import Response
 from apps.api.envelope import envelope
 from apps.api.params import MonthlyIcQuery, parse
 from apps.api.serving import (
+    DEFAULT_HORIZON,
+    GATE_FIELDS,
     HOLDOUT_RELEASE,
     MONITOR_FIELDS,
     PROMOTION,
@@ -22,7 +26,6 @@ from apps.api.serving import (
     day_of,
     forced_gates,
     latest_days,
-    latest_served_date,
     months_before,
     release_of,
     runs_on,
@@ -30,9 +33,11 @@ from apps.api.serving import (
     served_monitor,
 )
 from apps.api.views import ReadOnlyView
+from apps.etl.models import DataQualityLog
 from apps.research.eval_report import RANK_METRICS
 from apps.research.holdout import PRODUCTION
 from apps.research.models import (
+    OUTPUT_HORIZONS,
     BacktestMetric,
     HoldoutRun,
     HoldoutScope,
@@ -42,6 +47,7 @@ from apps.research.models import (
     ModelStatus,
 )
 from apps.research.monitor import DEGRADED_WINDOW, PROMOTED_ON
+from apps.research.promotion import PROMOTION_CHECK
 
 PAGE_ORDER = (
     Slot(ModelObjective.RANK, 20),
@@ -59,6 +65,9 @@ MONTH_IC, MONTH_DAYS = RANK_METRICS[0], RANK_METRICS[-1]
 ENTRY_FIELDS = ("run_id", "run_key", "model_type", "version", "status", "train_start", "train_end")
 TOTAL_FIELDS = ("run_key", "model_type", "metric", "segment", "value", "period_start", "period_end")
 WINDOW_FIELDS = {"own_rows": int, "days": int, "mostly_predecessors": bool}
+HELD = "held_slots"
+
+logger = logging.getLogger(__name__)
 
 
 def serving_models() -> list[tuple[ServingRun, date]]:
@@ -217,6 +226,62 @@ def forced_promotion(params: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def latest_promotions() -> list[DataQualityLog]:
+    """Each scope's newest promotion row."""
+    newest = (
+        DataQualityLog.objects.filter(check_name=PROMOTION_CHECK)
+        .values("detail__scope")
+        .annotate(newest=Max("id"))
+        .values("newest")
+    )
+    return list(DataQualityLog.objects.filter(id__in=newest).order_by("id"))
+
+
+def held_gates(value: object) -> list[dict[str, Any]] | None:
+    """A held run's own failed gates by the served fields; None unless each one is named."""
+    if not isinstance(value, list):
+        return None
+    if not all(isinstance(gate, dict) and isinstance(gate.get("name"), str) for gate in value):
+        return None
+    return [{name: gate.get(name) for name in GATE_FIELDS} for gate in value]
+
+
+def held_entry(item: object) -> tuple[Slot, dict[str, Any]] | None:
+    """One held_slots item as the page reads it; None unless it names a page slot and its gates."""
+    if not isinstance(item, dict):
+        return None
+    objective, horizon = item.get("objective"), item.get("horizon")
+    gates = held_gates(item.get("gates"))
+    if not isinstance(objective, str) or type(horizon) is not int or gates is None:
+        return None
+    slot, run_id = Slot(objective, horizon), item.get("run_id")
+    if slot not in PAGE_ORDER:
+        return None
+    return slot, {"run_id": run_id if isinstance(run_id, str) else None, "gates": gates}
+
+
+def not_live(serving: Iterable[ServingRun]) -> list[dict[str, Any]]:
+    """Page slots with no serving run that their scope's newest promotion judged and held back."""
+    live = {Slot(run.objective, run.horizon) for run in serving}
+    found: dict[Slot, dict[str, Any]] = {}
+    for row in latest_promotions():
+        detail = row.detail if isinstance(row.detail, dict) else {}
+        items, run_key = detail.get(HELD, []), detail.get("run_key")
+        entries = [held_entry(item) for item in items] if isinstance(items, list) else [None]
+        if None in entries:
+            logger.warning("promotion row %s has unreadable held_slots; left out", row.id)
+        for slot, entry in filter(None, entries):
+            if slot not in live:
+                found[slot] = {
+                    "objective": slot.objective,
+                    "horizon": slot.horizon,
+                    "run_key": run_key if isinstance(run_key, str) else None,
+                    "date": row.date,
+                    **entry,
+                }
+    return [found[slot] for slot in PAGE_ORDER if slot in found]
+
+
 class ModelListView(ReadOnlyView):
     def get(self, request: Request) -> Response:
         models = serving_models()
@@ -249,12 +314,20 @@ class ModelListView(ReadOnlyView):
                     **research,
                 }
             )
-        return envelope(data)
+        return envelope(data, {"not_live": not_live(run for run, _ in models)})
 
 
-def chart_source(horizon: int) -> tuple[str | None, str | None, str | None]:
+def chart_slot(asked: int | None) -> tuple[int, date | None]:
+    """The charted horizon and its ranking's latest day; the default unless only another serves."""
+    days = latest_days([Slot(ModelObjective.RANK, horizon) for horizon in OUTPUT_HORIZONS])
+    served = {slot.horizon: day for slot, day in days.items()}
+    preferred = DEFAULT_HORIZON if not served or DEFAULT_HORIZON in served else max(served)
+    horizon = asked or preferred
+    return horizon, served.get(horizon)
+
+
+def chart_source(horizon: int, day: date | None) -> tuple[str | None, str | None, str | None]:
     """The serving rank run's research key by params, its own key, then the rank holdout."""
-    day = latest_served_date(horizon)
     slot = Slot(ModelObjective.RANK, horizon)
     run = None if day is None else runs_on(day, [slot]).get(slot)
     params: dict[str, Any] = {}
@@ -301,8 +374,8 @@ def monthly_rows(run_key: str, model_type: str, horizon: int) -> list[dict[str, 
 class MonthlyIcView(ReadOnlyView):
     def get(self, request: Request) -> Response:
         query = parse(MonthlyIcQuery, request)
-        horizon = query["horizon"]
-        run_key, model_type, source = chart_source(horizon)
+        horizon, day = chart_slot(query.get("horizon"))
+        run_key, model_type, source = chart_source(horizon, day)
         data = []
         if run_key is not None and model_type is not None:
             data = monthly_rows(run_key, model_type, horizon)[-query["months"] :]
