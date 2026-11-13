@@ -378,7 +378,11 @@ def test_a_build_inside_a_scheduled_step_runs_under_the_step_lock(
     one_bar: None, command: str, options: dict[str, Any]
 ) -> None:
     with research_lock("recent_features 2026-10-28"):
-        call_command(command, **options)
+        with CaptureQueriesContext(connection) as queries:
+            call_command(command, **options)
+        asked = [query["sql"] for query in queries.captured_queries]
+        assert asked
+        assert not [sql for sql in asked if "advisory" in sql or "application_name" in sql]
         assert "recent_features 2026-10-28" in label()
         assert holds_here()
     assert not holds_here()
