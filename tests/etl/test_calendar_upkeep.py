@@ -337,8 +337,12 @@ def test_a_refused_schedule_is_announced_whatever_the_level(
 
 @responses.activate
 def test_a_source_failure_still_records_the_reach(
-    sent: list[list[tuple[date, str, str]]],
+    sent: list[list[tuple[date, str, str]]], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    alerted: list[str] = []
+    monkeypatch.setattr(
+        "apps.etl.calendar_upkeep.report_swallowed", lambda exc, context: alerted.append(context)
+    )
     _calendar(date(2026, 10, 1), date(2026, 12, 31))
     responses.get(SCHEDULE_URL, status=403)
     today = date(2026, 11, 12)
@@ -347,6 +351,7 @@ def test_a_source_failure_still_records_the_reach(
     assert row.detail["extension"] == "failed"
     assert "403" in row.detail["reason"]
     assert not EtlRun.objects.exists()
+    assert alerted == []
 
 
 def test_an_unexpected_error_still_records_the_reach_without_its_message(
@@ -357,11 +362,17 @@ def test_an_unexpected_error_still_records_the_reach_without_its_message(
     def broken(today: date) -> None:
         raise RuntimeError("/srv/app/secret/path went missing")
 
+    alerted: list[tuple[str, str]] = []
     monkeypatch.setattr("apps.etl.calendar_upkeep.extend", broken)
+    monkeypatch.setattr(
+        "apps.etl.calendar_upkeep.report_swallowed",
+        lambda exc, context: alerted.append((type(exc).__name__, context)),
+    )
     today = date(2026, 11, 12)
     assert keep_up(today) == Extension.FAILED
     row = _reach(today)
     assert (row.detail["extension"], row.detail["reason"]) == ("failed", "RuntimeError")
+    assert alerted == [("RuntimeError", "trading_calendar extension")]
     assert "trading_calendar extension failed" in caplog.text
 
 
