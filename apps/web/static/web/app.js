@@ -192,6 +192,7 @@
     const labels = names.map(name => ORDER_LABELS[name]);
     const list = labels.length > 1 ? labels.slice(0, -1).join('、') + '或' + labels[labels.length - 1] : labels.join('');
     return '名次是排名模型排的相對強弱；預測報酬與預測價來自另一個報酬模型，兩個模型各自估計，名次在前的股票預測報酬也可能是負的。' +
+      '報酬模型驗收的是預測誤差，沒有驗過排序能力，所以依預測報酬排出的順序不像名次那樣經過驗證。' +
       (list ? '點表頭可以改依' + list + '排序。' : '');
   }
 
