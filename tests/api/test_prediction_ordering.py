@@ -268,6 +268,18 @@ def test_an_order_adds_no_query(client: Client, runs: Runs) -> None:
     assert set(counts.values()) == {default}
 
 
+@pytest.mark.parametrize("ordering", ["rank", "prev_rank"])
+def test_the_previous_session_is_looked_up_once_per_request(
+    client: Client, runs: Runs, ordering: str
+) -> None:
+    with CaptureQueriesContext(connection) as queries:
+        body = envelope_of(client.get("/api/predictions", {"ordering": ordering}))
+
+    calendar = [q for q in queries.captured_queries if 'FROM "trading_calendar"' in q["sql"]]
+    assert len(calendar) == 1
+    assert body["data"][0]["prev_rank"] is not None
+
+
 def test_two_thousand_stocks_answer_every_order_within_half_a_second(
     client: Client, db: None
 ) -> None:
