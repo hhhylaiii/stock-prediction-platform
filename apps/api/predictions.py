@@ -1,10 +1,13 @@
 """The daily prediction table: ranks merged with return, interval, volatility and probability."""
 
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
-from django.db.models import F, OuterRef, Q, QuerySet, Subquery
+from django.db.models import F, FloatField, OuterRef, Q, QuerySet, Subquery, Value
+from django.db.models.expressions import Combinable
+from django.db.models.functions import Cast, Coalesce
 from rest_framework.request import Request
 from rest_framework.response import Response
 
@@ -19,7 +22,6 @@ from apps.api.serving import (
     caveats,
     interval_alert,
     latest_served_date,
-    ranks_on,
     recent_means,
     roles_for,
     runs_on,
@@ -27,12 +29,14 @@ from apps.api.serving import (
 from apps.api.views import ReadOnlyView
 from apps.market.calendar import CalendarError, TradingDays
 from apps.market.models import DailyPrice, StockMaster
-from apps.research.models import FeatureDaily, ModelStatus, Prediction
+from apps.research.models import FeatureDaily, ModelObjective, ModelStatus, Prediction
 
 PRICE_DIGITS = 4
 RATIO_DIGITS = 6
 BASE_FIELDS = ("stock_id", "rank", "pct", "score", "in_universe", "close", "close_date")
 PART_FIELDS = ("run_id", "stock_id", "ret_pred", "q10", "q50", "q90", "vol_pred", "prob_up_5pct")
+RANK_ORDER = (F("rank").asc(nulls_last=True), F("score").desc(nulls_last=True), "stock_id")
+SORT_ROLES = {"ret_pred": "return", "price_pred": "return", "prob_up_5pct": "probability"}
 
 
 def rounded(value: float | None, digits: int) -> float | None:
@@ -112,13 +116,94 @@ def parts_of(
     return parts
 
 
-def previous_ranks(day: date, horizon: int, stock_ids: list[str]) -> dict[str, int | None]:
-    """Ranks on the session before the day; none when the calendar cannot tell."""
+def previous_session(day: date) -> date | None:
+    """The session before the day; None when the calendar cannot tell."""
     try:
-        previous = TradingDays.from_db().shift(day, -1)
+        return TradingDays.from_db().shift(day, -1)
     except CalendarError:
+        return None
+
+
+@dataclass(frozen=True)
+class PreviousRanks:
+    """The rank run that served the session before the day; run is None when none did."""
+
+    day: date | None = None
+    run: ServingRun | None = None
+
+
+def previous_rank_source(day: date | None, horizon: int) -> PreviousRanks:
+    previous = None if day is None else previous_session(day)
+    if previous is None:
+        return PreviousRanks()
+    slot = Slot(ModelObjective.RANK, horizon)
+    return PreviousRanks(previous, runs_on(previous, [slot]).get(slot))
+
+
+def previous_ranks(source: PreviousRanks, stock_ids: list[str]) -> dict[str, int | None]:
+    if source.run is None or source.day is None:
         return {}
-    return ranks_on(previous, horizon, stock_ids)
+    rows = Prediction.objects.filter(
+        run_id=source.run.run_id, date=source.day, horizon=source.run.horizon
+    )
+    return dict(rows.filter(stock_id__in=stock_ids).values_list("stock_id", "rank"))
+
+
+def column_of(run: ServingRun, day: date, value: Combinable) -> Combinable:
+    """One value of the run's row for the same stock on the day."""
+    rows = Prediction.objects.filter(
+        run_id=run.run_id, date=day, horizon=run.horizon, stock_id=OuterRef("stock_id")
+    )
+    return Subquery(rows.annotate(sort_value=value).values("sort_value")[:1])
+
+
+def orderable(
+    day: date | None, roles: dict[str, Slot], runs: dict[Slot, ServingRun], previous: PreviousRanks
+) -> list[str]:
+    """The columns that have something to sort by on the day, in table order."""
+    if day is None:
+        return []
+    serving = {role for role, slot in roles.items() if slot in runs}
+    names = ["close"]
+    if "return" in serving:
+        names += ["ret_pred", "price_pred"]
+    if "probability" in serving:
+        names.append("prob_up_5pct")
+    if previous.run is not None:
+        names.append("prev_rank")
+    return names
+
+
+def sort_key(
+    name: str,
+    day: date,
+    roles: dict[str, Slot],
+    runs: dict[Slot, ServingRun],
+    previous: PreviousRanks,
+) -> Combinable:
+    """The value an orderable column sorts by, worked out as its row shows it."""
+    if name == "close":
+        return F("close")
+    if name == "prev_rank" and previous.run is not None and previous.day is not None:
+        return column_of(previous.run, previous.day, F("rank"))
+    run = runs[roles[SORT_ROLES[name]]]
+    if name == "prob_up_5pct":
+        return column_of(run, day, F("prob_up_5pct"))
+    ret = column_of(run, day, Coalesce(F("ret_pred"), F("q50")))
+    if name == "ret_pred":
+        return ret
+    return Cast(F("close"), FloatField()) * (Value(1.0) + ret)
+
+
+def ordered(
+    rows: QuerySet[Prediction], ordering: str, key: Combinable | None
+) -> QuerySet[Prediction]:
+    """Rows by the key, blanks last either way, then in rank order."""
+    if key is None:
+        return rows.order_by(*RANK_ORDER)
+    value = F("sort_value")
+    first = value.desc(nulls_last=True) if ordering.startswith("-") else value.asc(nulls_last=True)
+    return rows.annotate(sort_value=key).order_by(first, *RANK_ORDER)
 
 
 def needs_tech_vol(
@@ -240,10 +325,12 @@ def merged_rows(
     roles: dict[str, Slot],
     runs: dict[Slot, ServingRun],
     page: list[dict[str, Any]],
+    previous: PreviousRanks | None = None,
 ) -> list[dict[str, Any]]:
     """Rank rows joined with every other role's row, priced on each stock's close."""
     if day is None or not page:
         return []
+    source = previous_rank_source(day, horizon) if previous is None else previous
     stock_ids = [row["stock_id"] for row in page]
     alert = band_alert(day, roles, runs)
     parts = parts_of(day, roles, runs, stock_ids)
@@ -255,7 +342,7 @@ def merged_rows(
     context = {
         "horizon": horizon,
         "quantile_alert": alert,
-        "prev_ranks": previous_ranks(day, horizon, stock_ids),
+        "prev_ranks": previous_ranks(source, stock_ids),
         "tech_vols": tech_vols(day, lacking),
     }
     masters = masters_of(stock_ids)
@@ -273,9 +360,15 @@ class PredictionListView(ReadOnlyView):
         roles = roles_for(horizon)
         runs = {} if day is None else runs_on(day, roles.values())
         base = rank_rows(day, horizon, roles, runs)
-        rows = with_closes(filtered(base, query), day or date.min).order_by(
-            F("rank").asc(nulls_last=True), F("score").desc(nulls_last=True), "stock_id"
+        previous = previous_rank_source(day, horizon)
+        columns = orderable(day, roles, runs, previous)
+        name = query["ordering"].lstrip("-")
+        key = (
+            sort_key(name, day, roles, runs, previous)
+            if day is not None and name in columns
+            else None
         )
+        rows = ordered(with_closes(filtered(base, query), day or date.min), query["ordering"], key)
         paginator = EnvelopePagination()
         page: list[dict[str, Any]] = (
             paginator.paginate_queryset(rows.values(*BASE_FIELDS), request, view=self) or []
@@ -288,9 +381,11 @@ class PredictionListView(ReadOnlyView):
             "degraded": degraded_roles(roles, runs),
             "interval_alert": day is not None and band_alert(day, roles, runs),
             "monitor": self.monitor(day, roles, runs),
+            "ordering": "rank" if key is None else query["ordering"],
+            "orderable": columns,
             **paginator.meta(),
         }
-        return envelope(merged_rows(day, horizon, roles, runs, page), meta)
+        return envelope(merged_rows(day, horizon, roles, runs, page, previous), meta)
 
     def monitor(
         self, day: date | None, roles: dict[str, Slot], runs: dict[Slot, ServingRun]

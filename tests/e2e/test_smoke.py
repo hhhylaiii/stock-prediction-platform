@@ -94,7 +94,7 @@ def test_today_view_says_predictions_are_pending(
     page.goto(live_server.url)
 
     expect(page.locator("#today-empty")).to_contain_text("預測資料尚未產出")
-    page.get_by_role("button", name="5 日").click()
+    page.get_by_role("button", name="5 日", exact=True).click()
     expect(page.locator("#ret-head")).to_have_text("5 日預測報酬")
     expect(page.locator("#prob-head")).to_have_text("跑贏大盤 5 個百分點機率（僅 20 日）")
     expect(page.locator("[data-nav=today]")).to_have_attribute("aria-current", "page")

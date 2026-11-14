@@ -96,7 +96,7 @@
     return out;
   }
 
-  const state = { h: DEFAULT_HORIZON, picked: false, ranked: [], mkt: 'all', q: '', watchOnly: false, watch: new Set(), stock: '2330', chart: 'candle', stockToken: 0, featureToken: 0, todayToken: 0, routeToken: 0, statusToken: 0, page: 1, watchCache: null };
+  const state = { h: DEFAULT_HORIZON, picked: false, ranked: [], mkt: 'all', q: '', ordering: 'rank', shownOrder: 'rank', orderable: null, watchOnly: false, watch: new Set(), stock: '2330', chart: 'candle', stockToken: 0, featureToken: 0, todayToken: 0, routeToken: 0, statusToken: 0, page: 1, watchCache: null };
   try { const c = localStorage.getItem('twp-chart'); if (c === 'line' || c === 'candle') state.chart = c; } catch (e) { state.chart = 'candle'; }
   try { const w = JSON.parse(localStorage.getItem('twp-watch') || '[]'); if (Array.isArray(w)) w.filter(c => STOCK_CODE.test(c)).forEach(c => state.watch.add(c)); } catch (e) { state.watch.clear(); }
   function saveWatch() { try { localStorage.setItem('twp-watch', JSON.stringify([...state.watch])); } catch (e) { return; } }
@@ -160,6 +160,11 @@
   const fallbackNoteEl = document.getElementById('fallback-note');
   const basisNoteEl = document.getElementById('basis-note');
   const modelNoteEl = document.getElementById('model-note');
+  const orderNoteEl = document.getElementById('order-note');
+  const todayTableEl = document.getElementById('today-table');
+  const firstHeadEl = document.getElementById('first-head');
+  const modelRankHeadEl = document.getElementById('model-rank-head');
+  const sortButtons = [...document.querySelectorAll('#today-table .sort[data-order]')].filter(b => b.dataset.order !== 'rank');
   const prevBtn = document.getElementById('prev-page');
   const nextBtn = document.getElementById('next-page');
   const RANGE_SPAN = { 5: [-8, 12], 20: [-16, 24] };
@@ -178,6 +183,18 @@
   const pctOf = (x, digits) => x === null || x === undefined ? '—' : sgn(x * 100, digits);
   const priceOf = x => x === null || x === undefined ? '—' : fmtPrice(x);
   const onFallbackBand = row => Boolean(row) && row.interval_source === 'tech_vol_20d';
+  const RANK_FIRST = new Set(['prev_rank']);
+  const firstOrder = name => (RANK_FIRST.has(name) ? '' : '-') + name;
+  const orderName = ordering => ordering.replace(/^-/, '');
+  const sortedView = () => state.shownOrder !== 'rank';
+  const ORDER_LABELS = { close: '收盤', ret_pred: '預測報酬', price_pred: '預測價', prob_up_5pct: '跑贏大盤機率', prev_rank: '昨日排名' };
+  function orderNoteText(names) {
+    const labels = names.map(name => ORDER_LABELS[name]);
+    const list = labels.length > 1 ? labels.slice(0, -1).join('、') + '或' + labels[labels.length - 1] : labels.join('');
+    return '名次是排名模型排的相對強弱；預測報酬與預測價來自另一個報酬模型，兩個模型各自估計，名次在前的股票預測報酬也可能是負的。' +
+      '報酬模型驗收的是預測誤差，沒有驗過排序能力，所以依預測報酬排出的順序不像名次那樣經過驗證。' +
+      (list ? '點表頭可以改依' + list + '排序。' : '');
+  }
 
   function controls() {
     document.querySelectorAll('[data-h]').forEach(b => b.setAttribute('aria-pressed', String(Number(b.dataset.h) === state.h)));
@@ -188,6 +205,20 @@
     watchOnlyBtn.hidden = state.watch.size === 0;
     watchOnlyBtn.textContent = '只看追蹤（' + state.watch.size + '）';
     watchOnlyBtn.setAttribute('aria-pressed', String(watchingOnly()));
+    sortControls();
+  }
+
+  function sortControls() {
+    const shown = state.shownOrder;
+    sortButtons.forEach(b => {
+      const name = b.dataset.order, active = shown !== 'rank' && orderName(shown) === name;
+      b.disabled = Boolean(state.orderable) && !state.orderable.has(name);
+      b.setAttribute('aria-pressed', String(active));
+      if (active) b.dataset.dir = shown === firstOrder(name) ? 'desc' : 'asc'; else delete b.dataset.dir;
+    });
+    todayTableEl.classList.toggle('sorted', sortedView());
+    firstHeadEl.textContent = sortedView() ? '位置' : '排名';
+    modelRankHeadEl.parentElement.hidden = !sortedView();
   }
   const watchingOnly = () => state.watchOnly && state.watch.size > 0;
 
@@ -203,9 +234,10 @@
       '<div class="muted small">' + priceOf(iv.low) + ' – ' + priceOf(iv.high) + (note ? '<span class="faint">（' + esc(note) + '）</span>' : '') + '</div>';
   }
 
-  function todayRowHtml(row) {
+  function todayRowHtml(row, position) {
+    const rank = '<div class="num rank">' + (row.rank === null ? '—' : row.rank) + '</div>';
     return '<a class="trow rank-cols" href="#stock-' + encodeURIComponent(row.stock_id) + '">' +
-      '<div class="num rank">' + (row.rank === null ? '—' : row.rank) + '</div>' +
+      (sortedView() ? '<div class="num pos">' + position + '</div>' + rank : rank) +
       '<div class="stockcell"><span class="muted">' + esc(row.stock_id) + '</span><span class="name">' + esc(row.name || '—') + '</span>' +
       (row.in_universe ? '' : '<span class="faint small">訓練範圍外</span>') + '</div>' +
       '<div class="faint small market">' + esc(row.market_label || '—') + '</div>' +
@@ -270,10 +302,28 @@
     const entries = (await watchedStocks()).map(stock => stock.horizons.find(entry => entry.horizon === state.h)).filter(Boolean);
     const q = state.q.trim().toLowerCase();
     const rows = entries.map(entry => entry.prediction)
-      .filter(row => row && (state.mkt === 'all' || row.market === state.mkt) && (!q || row.stock_id.toLowerCase().startsWith(q) || (row.name || '').toLowerCase().includes(q)))
-      .sort((a, b) => (a.rank === null) - (b.rank === null) || a.rank - b.rank);
+      .filter(row => row && (state.mkt === 'all' || row.market === state.mkt) && (!q || row.stock_id.toLowerCase().startsWith(q) || (row.name || '').toLowerCase().includes(q)));
     const latest = entries.filter(entry => entry.date).sort((a, b) => (a.date < b.date) - (a.date > b.date))[0];
-    return { rows: rows, meta: latest ? { date: latest.date, universe: latest.universe, models: latest.models, degraded: latest.degraded, interval_alert: latest.interval_alert } : {} };
+    const meta = latest ? { date: latest.date, universe: latest.universe, models: latest.models, degraded: latest.degraded, interval_alert: latest.interval_alert } : {};
+    meta.orderable = orderableOf(meta, rows);
+    meta.ordering = meta.orderable.includes(orderName(state.ordering)) ? state.ordering : 'rank';
+    return { rows: orderRows(rows, meta.ordering), meta: meta };
+  }
+
+  function orderableOf(meta, rows) {
+    if (!meta.date || !rows.length) return [];
+    const serving = new Set((meta.models || []).map(model => model.role));
+    return ['close', 'ret_pred', 'price_pred', 'prob_up_5pct', 'prev_rank'].filter(name =>
+      name === 'close' || (name === 'prob_up_5pct' ? state.h === 20 && serving.has('probability') : name === 'prev_rank' ? rows.some(row => has(row.prev_rank)) : serving.has('return')));
+  }
+
+  const blanksLast = (x, y) => !has(x) - !has(y);
+  const byRank = (a, b) => blanksLast(a.rank, b.rank) || (a.rank - b.rank) || blanksLast(a.score, b.score) || (b.score - a.score) || (a.stock_id < b.stock_id ? -1 : a.stock_id > b.stock_id ? 1 : 0);
+
+  function orderRows(rows, ordering) {
+    if (ordering === 'rank') return [...rows].sort(byRank);
+    const name = orderName(ordering), sign = ordering.startsWith('-') ? -1 : 1;
+    return [...rows].sort((a, b) => blanksLast(a[name], b[name]) || (has(a[name]) && has(b[name]) ? sign * (a[name] - b[name]) : 0) || byRank(a, b));
   }
 
   function emptyHtml(meta) {
@@ -316,6 +366,8 @@
     basisNoteEl.hidden = !rows.some(row => has(row.price_pred) || (state.h === 20 && Boolean(row.interval)));
     modelNoteEl.textContent = modelNoteText(meta, rows.length);
     modelNoteEl.hidden = !modelNoteEl.textContent;
+    orderNoteEl.textContent = meta.date && rows.length && serving.has('return') ? orderNoteText([...(state.orderable || [])]) : '';
+    orderNoteEl.hidden = !orderNoteEl.textContent;
   }
 
   function countText(meta, shown) {
@@ -323,7 +375,7 @@
     if (state.mkt !== 'all' || state.q.trim()) return '符合條件 ' + fmtInt(meta.total) + ' 檔';
     const first = (meta.page - 1) * meta.page_size + 1;
     const span = fmtInt(first) + '–' + fmtInt(first + shown - 1);
-    if (meta.total === meta.universe) return '第 ' + span + ' 名，共 ' + fmtInt(meta.total) + ' 檔';
+    if (meta.total === meta.universe) return '第 ' + span + (sortedView() ? ' 列' : ' 名') + '，共 ' + fmtInt(meta.total) + ' 檔';
     return '第 ' + span + ' 列，共 ' + fmtInt(meta.total) + ' 檔，其中 ' + fmtInt(meta.universe) + ' 檔在訓練範圍內';
   }
 
@@ -332,6 +384,7 @@
     const params = { horizon: state.h, page: state.page };
     if (state.mkt !== 'all') params.market = state.mkt;
     if (state.q.trim()) params.q = state.q.trim().slice(0, SEARCH_MAX);
+    if (state.ordering !== 'rank') params.ordering = state.ordering;
     const { data, meta } = await api.get('predictions', params);
     return { rows: data, meta: meta };
   }
@@ -373,7 +426,11 @@
     }
     if (token !== state.todayToken) return;
     const { rows, meta } = result;
-    rowsEl.innerHTML = rows.map(todayRowHtml).join('') || emptyHtml(meta);
+    state.shownOrder = meta.ordering || 'rank';
+    state.orderable = new Set(meta.orderable || []);
+    sortControls();
+    const offset = watchingOnly() ? 0 : ((meta.page || 1) - 1) * (meta.page_size || 0);
+    rowsEl.innerHTML = rows.map((row, n) => todayRowHtml(row, offset + n + 1)).join('') || emptyHtml(meta);
     todayMetaEl.textContent = todayMetaText(meta);
     showNotes(meta, rows);
     if (watchingOnly()) {
@@ -392,6 +449,12 @@
   document.querySelectorAll('[data-mkt]').forEach(b => b.addEventListener('click', () => { state.mkt = b.dataset.mkt; reloadToday(); }));
   qEl.addEventListener('input', () => { state.q = qEl.value; clearTimeout(searchTimer); searchTimer = setTimeout(reloadToday, 250); });
   watchOnlyBtn.addEventListener('click', () => { state.watchOnly = !state.watchOnly; state.watchCache = null; reloadToday(); });
+  sortButtons.forEach(b => b.addEventListener('click', () => {
+    const first = firstOrder(b.dataset.order);
+    state.ordering = state.shownOrder === first ? first.startsWith('-') ? first.slice(1) : '-' + first : first;
+    reloadToday();
+  }));
+  modelRankHeadEl.addEventListener('click', () => { state.ordering = 'rank'; reloadToday(); });
   prevBtn.addEventListener('click', () => { state.page -= 1; loadToday(); });
   nextBtn.addEventListener('click', () => { state.page += 1; loadToday(); });
 

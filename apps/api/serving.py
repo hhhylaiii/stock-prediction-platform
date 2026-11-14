@@ -288,18 +288,6 @@ def serving_run(row: dict[str, Any]) -> ServingRun:
     )
 
 
-def ranks_on(day: date, horizon: int, stock_ids: list[str]) -> dict[str, int | None]:
-    """Each stock's rank that day from the rank run that served the day."""
-    slot = Slot(ModelObjective.RANK, horizon)
-    run = runs_on(day, [slot]).get(slot)
-    if run is None:
-        return {}
-    rows = Prediction.objects.filter(
-        run_id=run.run_id, date=day, horizon=horizon, stock_id__in=stock_ids
-    ).values_list("stock_id", "rank")
-    return dict(rows)
-
-
 def months_before(day: date, count: int) -> date:
     """The same day count months earlier, clamped to that month's last day."""
     year, month = divmod(day.year * 12 + day.month - 1 - count, 12)
