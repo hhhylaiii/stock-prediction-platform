@@ -211,7 +211,31 @@ def test_no_serving_return_model_keeps_the_rank_order(
 def test_no_predictions_yet_answers_the_rank_order(client: Client, db: None) -> None:
     body = envelope_of(client.get("/api/predictions", {"ordering": "-close"}))
 
-    assert (body["data"], body["meta"]["ordering"]) == ([], "rank")
+    assert (body["data"], body["meta"]["ordering"], body["meta"]["orderable"]) == ([], "rank", [])
+
+
+@pytest.mark.parametrize(
+    ("horizon", "columns"),
+    [
+        ("20", ["close", "ret_pred", "price_pred", "prob_up_5pct", "prev_rank"]),
+        ("5", ["close", "ret_pred", "price_pred"]),
+    ],
+)
+def test_meta_lists_the_columns_that_can_be_ordered(
+    client: Client, runs: Runs, horizon: str, columns: list[str]
+) -> None:
+    meta = envelope_of(client.get("/api/predictions", {"horizon": horizon}))["meta"]
+
+    assert meta["orderable"] == columns
+
+
+def test_a_column_without_a_serving_source_is_not_orderable(client: Client, runs: Runs) -> None:
+    Prediction.objects.filter(run__in=[runs.quantile, runs.prob]).delete()
+    Prediction.objects.filter(run=runs.rank20, date=OCT_29).delete()
+
+    meta = envelope_of(client.get("/api/predictions", {"q": "nothing"}))["meta"]
+
+    assert (meta["orderable"], meta["total"]) == (["close"], 0)
 
 
 @pytest.mark.parametrize(
@@ -236,13 +260,12 @@ def query_count(client: Client, params: dict[str, str]) -> int:
     return len(queries)
 
 
-def test_an_order_adds_at_most_two_queries(client: Client, runs: Runs) -> None:
+def test_an_order_adds_no_query(client: Client, runs: Runs) -> None:
     default = query_count(client, {})
 
     counts = {ordering: query_count(client, {"ordering": ordering}) for ordering in ORDERINGS}
 
-    assert max(counts.values()) <= default + 2
-    assert counts["-ret_pred"] == default
+    assert set(counts.values()) == {default}
 
 
 def test_two_thousand_stocks_answer_every_order_within_half_a_second(

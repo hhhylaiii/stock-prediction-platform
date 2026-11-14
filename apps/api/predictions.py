@@ -1,6 +1,7 @@
 """The daily prediction table: ranks merged with return, interval, volatility and probability."""
 
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
@@ -21,7 +22,6 @@ from apps.api.serving import (
     caveats,
     interval_alert,
     latest_served_date,
-    ranks_on,
     recent_means,
     roles_for,
     runs_on,
@@ -124,10 +124,29 @@ def previous_session(day: date) -> date | None:
         return None
 
 
-def previous_ranks(day: date, horizon: int, stock_ids: list[str]) -> dict[str, int | None]:
-    """Ranks on the session before the day; none when the calendar cannot tell."""
-    previous = previous_session(day)
-    return {} if previous is None else ranks_on(previous, horizon, stock_ids)
+@dataclass(frozen=True)
+class PreviousRanks:
+    """The rank run that served the session before the day; run is None when none did."""
+
+    day: date | None = None
+    run: ServingRun | None = None
+
+
+def previous_rank_source(day: date | None, horizon: int) -> PreviousRanks:
+    previous = None if day is None else previous_session(day)
+    if previous is None:
+        return PreviousRanks()
+    slot = Slot(ModelObjective.RANK, horizon)
+    return PreviousRanks(previous, runs_on(previous, [slot]).get(slot))
+
+
+def previous_ranks(source: PreviousRanks, stock_ids: list[str]) -> dict[str, int | None]:
+    if source.run is None or source.day is None:
+        return {}
+    rows = Prediction.objects.filter(
+        run_id=source.run.run_id, date=source.day, horizon=source.run.horizon
+    )
+    return dict(rows.filter(stock_id__in=stock_ids).values_list("stock_id", "rank"))
 
 
 def column_of(run: ServingRun, day: date, value: Combinable) -> Combinable:
@@ -138,28 +157,36 @@ def column_of(run: ServingRun, day: date, value: Combinable) -> Combinable:
     return Subquery(rows.annotate(sort_value=value).values("sort_value")[:1])
 
 
-def previous_rank_column(day: date, horizon: int) -> Combinable | None:
-    """Ranks from the rank run that served the session before the day."""
-    previous = previous_session(day)
-    if previous is None:
-        return None
-    slot = Slot(ModelObjective.RANK, horizon)
-    run = runs_on(previous, [slot]).get(slot)
-    return None if run is None else column_of(run, previous, F("rank"))
+def orderable(
+    day: date | None, roles: dict[str, Slot], runs: dict[Slot, ServingRun], previous: PreviousRanks
+) -> list[str]:
+    """The columns that have something to sort by on the day, in table order."""
+    if day is None:
+        return []
+    serving = {role for role, slot in roles.items() if slot in runs}
+    names = ["close"]
+    if "return" in serving:
+        names += ["ret_pred", "price_pred"]
+    if "probability" in serving:
+        names.append("prob_up_5pct")
+    if previous.run is not None:
+        names.append("prev_rank")
+    return names
 
 
 def sort_key(
-    name: str, day: date, horizon: int, roles: dict[str, Slot], runs: dict[Slot, ServingRun]
-) -> Combinable | None:
-    """The value a column sorts by, worked out as its row shows it; None when nothing serves it."""
+    name: str,
+    day: date,
+    roles: dict[str, Slot],
+    runs: dict[Slot, ServingRun],
+    previous: PreviousRanks,
+) -> Combinable:
+    """The value an orderable column sorts by, worked out as its row shows it."""
     if name == "close":
         return F("close")
-    if name == "prev_rank":
-        return previous_rank_column(day, horizon)
-    role = SORT_ROLES[name]
-    run = runs.get(roles[role]) if role in roles else None
-    if run is None:
-        return None
+    if name == "prev_rank" and previous.run is not None and previous.day is not None:
+        return column_of(previous.run, previous.day, F("rank"))
+    run = runs[roles[SORT_ROLES[name]]]
     if name == "prob_up_5pct":
         return column_of(run, day, F("prob_up_5pct"))
     ret = column_of(run, day, Coalesce(F("ret_pred"), F("q50")))
@@ -298,10 +325,12 @@ def merged_rows(
     roles: dict[str, Slot],
     runs: dict[Slot, ServingRun],
     page: list[dict[str, Any]],
+    previous: PreviousRanks | None = None,
 ) -> list[dict[str, Any]]:
     """Rank rows joined with every other role's row, priced on each stock's close."""
     if day is None or not page:
         return []
+    source = previous_rank_source(day, horizon) if previous is None else previous
     stock_ids = [row["stock_id"] for row in page]
     alert = band_alert(day, roles, runs)
     parts = parts_of(day, roles, runs, stock_ids)
@@ -313,7 +342,7 @@ def merged_rows(
     context = {
         "horizon": horizon,
         "quantile_alert": alert,
-        "prev_ranks": previous_ranks(day, horizon, stock_ids),
+        "prev_ranks": previous_ranks(source, stock_ids),
         "tech_vols": tech_vols(day, lacking),
     }
     masters = masters_of(stock_ids)
@@ -331,8 +360,14 @@ class PredictionListView(ReadOnlyView):
         roles = roles_for(horizon)
         runs = {} if day is None else runs_on(day, roles.values())
         base = rank_rows(day, horizon, roles, runs)
+        previous = previous_rank_source(day, horizon)
+        columns = orderable(day, roles, runs, previous)
         name = query["ordering"].lstrip("-")
-        key = None if day is None or name == "rank" else sort_key(name, day, horizon, roles, runs)
+        key = (
+            sort_key(name, day, roles, runs, previous)
+            if day is not None and name in columns
+            else None
+        )
         rows = ordered(with_closes(filtered(base, query), day or date.min), query["ordering"], key)
         paginator = EnvelopePagination()
         page: list[dict[str, Any]] = (
@@ -347,9 +382,10 @@ class PredictionListView(ReadOnlyView):
             "interval_alert": day is not None and band_alert(day, roles, runs),
             "monitor": self.monitor(day, roles, runs),
             "ordering": "rank" if key is None else query["ordering"],
+            "orderable": columns,
             **paginator.meta(),
         }
-        return envelope(merged_rows(day, horizon, roles, runs, page), meta)
+        return envelope(merged_rows(day, horizon, roles, runs, page, previous), meta)
 
     def monitor(
         self, day: date | None, roles: dict[str, Slot], runs: dict[Slot, ServingRun]
