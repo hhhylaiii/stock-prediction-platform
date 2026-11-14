@@ -24,7 +24,7 @@ The UI is a single page with three views, switched by the `#` fragment of the UR
 | Stock (個股) | `/#stock-2330` | Candlestick or closing-price chart, how this prediction came about (feature contributions), past predictions against actual outcomes | Prices; the prediction blocks need a live model |
 | Models and data (模型與資料) | `/#models` | The live models, monthly rank IC against the baseline, today's data updates, data-quality and model-output checks, the data correction log | ETL records; the model blocks need a live model |
 
-Until a model is live, the prediction blocks show 「預測資料尚未產出」 ("predictions have not been produced yet") while the candlestick chart, ETL records and quality checks are shown as usual; a model goes live only after its holdout verdict passes, or after the user releases a verdict that fell short. Each horizon's ranking is dated on its own, and the pages say which models have no predictions, went live on a released verdict or were swapped in by force, how often the 80% interval held, and that predicted prices and price bands are on a dividend-adjusted basis. Which note appears when, and the API fields behind each, are listed in [docs/api.md](docs/api.md).
+Until a model is live, the prediction blocks show 「預測資料尚未產出」 ("predictions have not been produced yet") while the candlestick chart, ETL records and quality checks are shown as usual; a model goes live only after its holdout verdict passes, or after the user releases a verdict that fell short. What each page notes about missing, released or force-swapped models, the 80% interval and the dividend-adjusted prices, and the API fields behind each note, are in [docs/api.md](docs/api.md).
 
 ## Data and model pipeline
 

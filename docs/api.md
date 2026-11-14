@@ -1,8 +1,8 @@
 # Pages and API fields
 
-What the three views of the UI (see the view table in the [README](../README.md)) show when a model is not live, went live on a released verdict or was swapped in by force, and the API fields behind each note.
+Which notes the three views of the UI (see the view table in the [README](../README.md)) show and when, and the API fields behind each note.
 
-## When no model is live
+## When a model is not live
 
 - When no model is live yet, the prediction blocks show 「預測資料尚未產出」 ("predictions have not been produced yet"), while the candlestick chart, ETL records and quality checks are shown as usual.
 - A model goes live only after its holdout verdict passes, or after the user releases a verdict that fell short: the empty ranking says so, and when the ranking is live but another model has no predictions for the day, a note above the table names the columns left blank, and the stock page says the same under its forecast table for each horizon the stock has a prediction for, there also covering the volatility model.
@@ -16,7 +16,7 @@ What the three views of the UI (see the view table in the [README](../README.md)
 
 - The note beside the 20-day interval says how often the 80% interval held: first on the holdout, which ran once after the design was frozen, then over the research period.
 - When the interval model is not live and the band is instead estimated from the stock's last 20 days of volatility around the latest close, the note says so and gives how often that estimate held over the same two periods, naming the quarters where it fell short.
-- Both pages also say that predicted prices and price bands are on a dividend-adjusted basis: for a stock that goes ex-dividend within the horizon, the market price will be lower by about the cash dividend even when the predicted return is exactly right (ex-rights lowers it by the allotment ratio), and the pages do not deduct it.
+- The today and stock pages also say that predicted prices and price bands are on a dividend-adjusted basis: for a stock that goes ex-dividend within the horizon, the market price will be lower by about the cash dividend even when the predicted return is exactly right (ex-rights lowers it by the allotment ratio), and the pages do not deduct it.
 
 ## Horizons
 
