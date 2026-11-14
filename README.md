@@ -20,7 +20,7 @@ The UI is a single page with three views, switched by the `#` fragment of the UR
 
 | View | URL | Content | Data needed |
 | --- | --- | --- | --- |
-| Today's predictions (今日預測) | `/#today` | Market-wide 5-day and 20-day rankings and predicted returns, the 20-day 80% price interval and the probability that the 20-day return beats the market (the TAIEX total return index, dividends included) by more than 5 percentage points; supports search and a watchlist-only filter | A live model |
+| Today's predictions (今日預測) | `/#today` | Market-wide 5-day and 20-day rankings and predicted returns, the 20-day 80% price interval and the probability that the 20-day return beats the market (the TAIEX total return index, dividends included) by more than 5 percentage points; supports search, a watchlist-only filter and sorting by a column header | A live model |
 | Stock (個股) | `/#stock-2330` | Candlestick or closing-price chart, how this prediction came about (feature contributions), past predictions against actual outcomes | Prices; the prediction blocks need a live model |
 | Models and data (模型與資料) | `/#models` | The live models, monthly rank IC against the baseline, today's data updates, data-quality and model-output checks, the data correction log | ETL records; the model blocks need a live model |
 
@@ -55,7 +55,7 @@ Run `uv run python manage.py <command> -h` for the full options of any command.
 | After-the-fact monitoring | `monitor --date 2026-11-06` |
 | Phase 5 acceptance report | `phase5_report --out <dir>` |
 
-Every API endpoint is a read-only GET and responds with `{"success", "data", "error", "meta"}`: `/api/status`, `/api/predictions`, `/api/stocks?q=<code or name>` (at most 20 results), `/api/stocks/<code>` (plus `/prices`, `/predictions`, `/features`, `/history`), `/api/models`, `/api/models/ic-monthly`, `/api/etl/runs`, `/api/data-quality` (plus `/corrections`).
+Every API endpoint is a read-only GET and responds with `{"success", "data", "error", "meta"}`: `/api/status`, `/api/predictions` (`?ordering=` sorts by a shown column), `/api/stocks?q=<code or name>` (at most 20 results), `/api/stocks/<code>` (plus `/prices`, `/predictions`, `/features`, `/history`), `/api/models`, `/api/models/ic-monthly`, `/api/etl/runs`, `/api/data-quality` (plus `/corrections`).
 
 ## Layout
 
