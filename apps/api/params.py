@@ -28,11 +28,27 @@ class QualityQuery(serializers.Serializer[Any]):
     days = serializers.IntegerField(min_value=1, max_value=120, default=30)
 
 
+ORDERINGS = (
+    "rank",
+    "-close",
+    "close",
+    "-ret_pred",
+    "ret_pred",
+    "-price_pred",
+    "price_pred",
+    "-prob_up_5pct",
+    "prob_up_5pct",
+    "-prev_rank",
+    "prev_rank",
+)
+
+
 class PredictionQuery(serializers.Serializer[Any]):
     horizon = serializers.ChoiceField(choices=[5, 20], default=DEFAULT_HORIZON)
     date = serializers.DateField(required=False)
     market = serializers.ChoiceField(choices=Market.values, required=False)
     q = serializers.CharField(max_length=32, required=False, allow_blank=True)
+    ordering = serializers.ChoiceField(choices=ORDERINGS, default="rank")
 
 
 class StockSearchQuery(serializers.Serializer[Any]):

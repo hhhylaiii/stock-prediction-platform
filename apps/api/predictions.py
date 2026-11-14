@@ -4,7 +4,9 @@ from collections import defaultdict
 from datetime import date
 from typing import Any
 
-from django.db.models import F, OuterRef, Q, QuerySet, Subquery
+from django.db.models import F, FloatField, OuterRef, Q, QuerySet, Subquery, Value
+from django.db.models.expressions import Combinable
+from django.db.models.functions import Cast, Coalesce
 from rest_framework.request import Request
 from rest_framework.response import Response
 
@@ -27,12 +29,14 @@ from apps.api.serving import (
 from apps.api.views import ReadOnlyView
 from apps.market.calendar import CalendarError, TradingDays
 from apps.market.models import DailyPrice, StockMaster
-from apps.research.models import FeatureDaily, ModelStatus, Prediction
+from apps.research.models import FeatureDaily, ModelObjective, ModelStatus, Prediction
 
 PRICE_DIGITS = 4
 RATIO_DIGITS = 6
 BASE_FIELDS = ("stock_id", "rank", "pct", "score", "in_universe", "close", "close_date")
 PART_FIELDS = ("run_id", "stock_id", "ret_pred", "q10", "q50", "q90", "vol_pred", "prob_up_5pct")
+RANK_ORDER = (F("rank").asc(nulls_last=True), F("score").desc(nulls_last=True), "stock_id")
+SORT_ROLES = {"ret_pred": "return", "price_pred": "return", "prob_up_5pct": "probability"}
 
 
 def rounded(value: float | None, digits: int) -> float | None:
@@ -112,13 +116,67 @@ def parts_of(
     return parts
 
 
+def previous_session(day: date) -> date | None:
+    """The session before the day; None when the calendar cannot tell."""
+    try:
+        return TradingDays.from_db().shift(day, -1)
+    except CalendarError:
+        return None
+
+
 def previous_ranks(day: date, horizon: int, stock_ids: list[str]) -> dict[str, int | None]:
     """Ranks on the session before the day; none when the calendar cannot tell."""
-    try:
-        previous = TradingDays.from_db().shift(day, -1)
-    except CalendarError:
-        return {}
-    return ranks_on(previous, horizon, stock_ids)
+    previous = previous_session(day)
+    return {} if previous is None else ranks_on(previous, horizon, stock_ids)
+
+
+def column_of(run: ServingRun, day: date, value: Combinable) -> Combinable:
+    """One value of the run's row for the same stock on the day."""
+    rows = Prediction.objects.filter(
+        run_id=run.run_id, date=day, horizon=run.horizon, stock_id=OuterRef("stock_id")
+    )
+    return Subquery(rows.annotate(sort_value=value).values("sort_value")[:1])
+
+
+def previous_rank_column(day: date, horizon: int) -> Combinable | None:
+    """Ranks from the rank run that served the session before the day."""
+    previous = previous_session(day)
+    if previous is None:
+        return None
+    slot = Slot(ModelObjective.RANK, horizon)
+    run = runs_on(previous, [slot]).get(slot)
+    return None if run is None else column_of(run, previous, F("rank"))
+
+
+def sort_key(
+    name: str, day: date, horizon: int, roles: dict[str, Slot], runs: dict[Slot, ServingRun]
+) -> Combinable | None:
+    """The value a column sorts by, worked out as its row shows it; None when nothing serves it."""
+    if name == "close":
+        return F("close")
+    if name == "prev_rank":
+        return previous_rank_column(day, horizon)
+    role = SORT_ROLES[name]
+    run = runs.get(roles[role]) if role in roles else None
+    if run is None:
+        return None
+    if name == "prob_up_5pct":
+        return column_of(run, day, F("prob_up_5pct"))
+    ret = column_of(run, day, Coalesce(F("ret_pred"), F("q50")))
+    if name == "ret_pred":
+        return ret
+    return Cast(F("close"), FloatField()) * (Value(1.0) + ret)
+
+
+def ordered(
+    rows: QuerySet[Prediction], ordering: str, key: Combinable | None
+) -> QuerySet[Prediction]:
+    """Rows by the key, blanks last either way, then in rank order."""
+    if key is None:
+        return rows.order_by(*RANK_ORDER)
+    value = F("sort_value")
+    first = value.desc(nulls_last=True) if ordering.startswith("-") else value.asc(nulls_last=True)
+    return rows.annotate(sort_value=key).order_by(first, *RANK_ORDER)
 
 
 def needs_tech_vol(
@@ -273,9 +331,9 @@ class PredictionListView(ReadOnlyView):
         roles = roles_for(horizon)
         runs = {} if day is None else runs_on(day, roles.values())
         base = rank_rows(day, horizon, roles, runs)
-        rows = with_closes(filtered(base, query), day or date.min).order_by(
-            F("rank").asc(nulls_last=True), F("score").desc(nulls_last=True), "stock_id"
-        )
+        name = query["ordering"].lstrip("-")
+        key = None if day is None or name == "rank" else sort_key(name, day, horizon, roles, runs)
+        rows = ordered(with_closes(filtered(base, query), day or date.min), query["ordering"], key)
         paginator = EnvelopePagination()
         page: list[dict[str, Any]] = (
             paginator.paginate_queryset(rows.values(*BASE_FIELDS), request, view=self) or []
@@ -288,6 +346,7 @@ class PredictionListView(ReadOnlyView):
             "degraded": degraded_roles(roles, runs),
             "interval_alert": day is not None and band_alert(day, roles, runs),
             "monitor": self.monitor(day, roles, runs),
+            "ordering": "rank" if key is None else query["ordering"],
             **paginator.meta(),
         }
         return envelope(merged_rows(day, horizon, roles, runs, page), meta)
