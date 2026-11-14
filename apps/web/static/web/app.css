@@ -66,7 +66,7 @@ a.trow:hover{background:var(--hover);color:var(--ink)}
 .table.sorted .rank-cols{grid-template-columns:40px 64px minmax(150px,1fr) 56px 92px 112px 92px 150px 130px 140px 72px}
 .sort{padding:0;border:0;background:transparent;color:inherit;font-size:inherit;text-align:inherit}
 .sort:hover:not(:disabled){color:var(--ink)}
-.sort:disabled{cursor:default}
+.sort:disabled{cursor:default;color:var(--ink-4)}
 .sort[aria-pressed="true"]{color:var(--ink)}
 .sort[data-dir="desc"]::after{content:" ▼"}
 .sort[data-dir="asc"]::after{content:" ▲"}

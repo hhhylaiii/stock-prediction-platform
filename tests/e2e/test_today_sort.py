@@ -19,7 +19,7 @@ ORDER_NOTE_20 = (
 ORDER_NOTE_5 = (
     "名次是排名模型排的相對強弱；預測報酬與預測價來自另一個報酬模型，兩個模型各自估計，"
     "名次在前的股票預測報酬也可能是負的。"
-    "點表頭可以改依收盤、預測報酬、預測價或昨日排名排序。"
+    "點表頭可以改依收盤、預測報酬或預測價排序。"
 )
 
 
@@ -173,12 +173,16 @@ def test_the_probability_and_previous_rank_headers_need_their_columns(
     expect(sort_button(page, "prob_up_5pct")).to_be_enabled()
     expect(sort_button(page, "prev_rank")).to_be_enabled()
 
-    page.get_by_role("button", name="5 日").click()
+    page.get_by_role("button", name="5 日", exact=True).click()
 
     expect(page.locator("#ret-head")).to_have_text("5 日預測報酬")
     expect(sort_button(page, "prob_up_5pct")).to_be_disabled()
     expect(sort_button(page, "prev_rank")).to_be_disabled()
     expect(sort_button(page, "ret_pred")).to_be_enabled()
+    color = "e => getComputedStyle(e).color"
+    assert sort_button(page, "prev_rank").evaluate(color) != sort_button(page, "close").evaluate(
+        color
+    )
 
 
 def test_a_horizon_without_the_column_shows_the_rank_order_and_keeps_the_choice(
@@ -190,7 +194,7 @@ def test_a_horizon_without_the_column_shows_the_rank_order_and_keeps_the_choice(
     expect(sort_button(page, "prob_up_5pct")).to_have_attribute("data-dir", "desc")
     by_probability = api_codes(page, live_server, ordering="-prob_up_5pct")
 
-    page.get_by_role("button", name="5 日").click()
+    page.get_by_role("button", name="5 日", exact=True).click()
 
     expect(page.locator("#ret-head")).to_have_text("5 日預測報酬")
     expect(page.locator("#first-head")).to_have_text("排名")
@@ -199,7 +203,7 @@ def test_a_horizon_without_the_column_shows_the_rank_order_and_keeps_the_choice(
         api_codes(page, live_server, horizon=5)[:20]
     )
 
-    page.get_by_role("button", name="20 日").click()
+    page.get_by_role("button", name="20 日", exact=True).click()
 
     expect(sort_button(page, "prob_up_5pct")).to_have_attribute("data-dir", "desc")
     expect(page.locator("#rows .trow .stockcell .muted")).to_have_text(by_probability[:20])
@@ -247,7 +251,7 @@ def test_the_note_says_the_rank_and_the_return_come_from_two_models(
 
     expect(page.locator("#order-note")).to_have_text(ORDER_NOTE_20)
 
-    page.get_by_role("button", name="5 日").click()
+    page.get_by_role("button", name="5 日", exact=True).click()
 
     expect(page.locator("#order-note")).to_have_text(ORDER_NOTE_5)
 
@@ -263,3 +267,20 @@ def test_no_return_model_leaves_out_the_note_and_the_return_headers(
     expect(sort_button(page, "ret_pred")).to_be_disabled()
     expect(sort_button(page, "price_pred")).to_be_disabled()
     expect(sort_button(page, "close")).to_be_enabled()
+
+
+def test_the_sorted_table_fits_a_1440_wide_window(
+    page: Page, live_server: LiveServer, returns: Seed
+) -> None:
+    page.set_viewport_size({"width": 1440, "height": 900})
+    page.goto(live_server.url)
+    expect(page.locator("#rows .trow")).to_have_count(20)
+
+    sort_button(page, "prev_rank").click()
+
+    expect(page.locator("#first-head")).to_have_text("位置")
+    width, visible = page.locator("#view-today .scroll").evaluate(
+        "e => [e.scrollWidth, e.clientWidth]"
+    )
+    assert width <= visible
+    expect(sort_button(page, "prev_rank")).to_be_in_viewport()

@@ -83,7 +83,7 @@ def test_today_names_the_models_that_went_live_on_a_released_holdout(
     )
     expect(meta).not_to_contain_text(RELEASE_REASON)
 
-    page.get_by_role("button", name="5 日").click()
+    page.get_by_role("button", name="5 日", exact=True).click()
 
     expect(page.locator("#rows .trow").nth(0)).to_contain_text("9999")
     expect(meta).to_contain_text("涵蓋 25 檔")
@@ -122,7 +122,7 @@ def test_five_days_names_only_the_released_models_it_shows(
     page.goto(live_server.url)
     expect(page.locator("#rows .trow")).to_have_count(20)
 
-    page.get_by_role("button", name="5 日").click()
+    page.get_by_role("button", name="5 日", exact=True).click()
 
     meta = page.locator("#today-meta")
     expect(meta).to_contain_text(
@@ -169,7 +169,7 @@ def test_five_days_reads_the_five_day_models(
     page.goto(live_server.url)
     expect(page.locator("#rows .trow")).to_have_count(20)
 
-    page.get_by_role("button", name="5 日").click()
+    page.get_by_role("button", name="5 日", exact=True).click()
 
     first = page.locator("#rows .trow").nth(0)
     expect(first).to_contain_text("9999")
@@ -215,7 +215,7 @@ def test_a_day_without_the_band_and_odds_models_says_which_columns_wait(
     expect(page.locator("#band-note")).to_be_hidden()
     expect(page.locator("#fallback-note")).to_be_hidden()
 
-    page.get_by_role("button", name="5 日").click()
+    page.get_by_role("button", name="5 日", exact=True).click()
 
     expect(page.locator("#rows .trow").nth(0)).to_contain_text("9999")
     expect(page.locator("#model-note")).to_be_hidden()
@@ -241,14 +241,14 @@ def test_a_day_on_the_fallback_band_says_how_often_it_held_in_the_holdout(
     expect(page.locator("#band-note + #fallback-note + #basis-note + #model-note")).to_have_count(1)
     expect(page.locator("#basis-note")).to_be_visible()
 
-    page.get_by_role("button", name="5 日").click()
+    page.get_by_role("button", name="5 日", exact=True).click()
 
     expect(page.locator("#rows .trow").nth(0)).to_contain_text("9999")
     expect(page.locator("#model-note")).to_contain_text("這一期沒有絕對報酬模型的預測")
     expect(page.locator("#fallback-note")).to_be_hidden()
     expect(page.locator("#basis-note")).to_be_hidden()
 
-    page.get_by_role("button", name="20 日").click()
+    page.get_by_role("button", name="20 日", exact=True).click()
 
     expect(page.locator("#fallback-note")).to_have_text(FALLBACK_NOTE)
     expect(page.locator("#fallback-note")).to_be_visible()
@@ -348,13 +348,13 @@ def test_five_days_without_the_return_model_says_so(
     page.goto(live_server.url)
     expect(page.locator("#rows .trow")).to_have_count(20)
 
-    page.get_by_role("button", name="5 日").click()
+    page.get_by_role("button", name="5 日", exact=True).click()
 
     expect(page.locator("#model-note")).to_have_text(
         f"這一期沒有絕對報酬模型的預測：預測報酬、預測價留空。{ONLINE}"
     )
 
-    page.get_by_role("button", name="20 日").click()
+    page.get_by_role("button", name="20 日", exact=True).click()
 
     expect(page.locator("#band-note")).to_be_visible()
     expect(page.locator("#model-note")).to_be_hidden()
@@ -381,7 +381,7 @@ def test_a_request_that_fails_after_a_good_one_clears_both_notes(
     expect(page.locator("#model-note")).to_be_visible()
     page.route("**/api/predictions?**", lambda route: route.abort())
 
-    page.get_by_role("button", name="5 日").click()
+    page.get_by_role("button", name="5 日", exact=True).click()
 
     expect(page.locator("#rows .error")).to_have_text("無法連線到伺服器。")
     expect(page.locator("#band-note")).to_be_hidden()
@@ -555,7 +555,7 @@ def test_watch_only_follows_the_horizon_and_the_search(
     requests: list[str] = []
     page.on("request", lambda request: requests.append(request.url))
 
-    page.get_by_role("button", name="5 日").click()
+    page.get_by_role("button", name="5 日", exact=True).click()
 
     expect(page.locator("#today-meta")).to_contain_text("Ridge 2026-09")
     page.locator("#q").fill("zzz")
@@ -599,8 +599,8 @@ def test_watch_only_shares_the_requests_still_in_flight(
     expect(page.locator("#rows .trow")).to_have_count(20)
 
     page.locator("#watch-only").click()
-    page.get_by_role("button", name="5 日").click()
-    page.get_by_role("button", name="20 日").click()
+    page.get_by_role("button", name="5 日", exact=True).click()
+    page.get_by_role("button", name="20 日", exact=True).click()
     page.wait_for_timeout(300)
 
     assert len(held) == 1
@@ -702,7 +702,7 @@ def test_the_prices_are_said_to_include_dividends_on_both_horizons(
     expect(note).to_be_visible()
     expect(page.locator("#fallback-note + #basis-note + #model-note")).to_have_count(1)
 
-    page.get_by_role("button", name="5 日").click()
+    page.get_by_role("button", name="5 日", exact=True).click()
 
     expect(page.locator("#rows .trow").nth(0)).to_contain_text("9999")
     expect(page.locator("#rows .trow").nth(1)).to_contain_text("1,149")
@@ -722,7 +722,7 @@ def test_a_band_without_a_predicted_price_still_gets_the_basis_note(
     expect(page.locator("#model-note")).to_contain_text("預測報酬、預測價")
     expect(page.locator("#basis-note")).to_be_visible()
 
-    page.get_by_role("button", name="5 日").click()
+    page.get_by_role("button", name="5 日", exact=True).click()
 
     expect(rows.nth(0)).to_contain_text("9999")
     expect(page.locator("#model-note")).to_contain_text("這一期沒有絕對報酬模型的預測")

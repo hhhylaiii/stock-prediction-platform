@@ -187,8 +187,13 @@
   const firstOrder = name => (RANK_FIRST.has(name) ? '' : '-') + name;
   const orderName = ordering => ordering.replace(/^-/, '');
   const sortedView = () => state.shownOrder !== 'rank';
-  const orderNoteText = horizon => '名次是排名模型排的相對強弱；預測報酬與預測價來自另一個報酬模型，兩個模型各自估計，名次在前的股票預測報酬也可能是負的。' +
-    '點表頭可以改依收盤、預測報酬、預測價' + (horizon === 20 ? '、跑贏大盤機率' : '') + '或昨日排名排序。';
+  const ORDER_LABELS = { close: '收盤', ret_pred: '預測報酬', price_pred: '預測價', prob_up_5pct: '跑贏大盤機率', prev_rank: '昨日排名' };
+  function orderNoteText(names) {
+    const labels = names.map(name => ORDER_LABELS[name]);
+    const list = labels.length > 1 ? labels.slice(0, -1).join('、') + '或' + labels[labels.length - 1] : labels.join('');
+    return '名次是排名模型排的相對強弱；預測報酬與預測價來自另一個報酬模型，兩個模型各自估計，名次在前的股票預測報酬也可能是負的。' +
+      (list ? '點表頭可以改依' + list + '排序。' : '');
+  }
 
   function controls() {
     document.querySelectorAll('[data-h]').forEach(b => b.setAttribute('aria-pressed', String(Number(b.dataset.h) === state.h)));
@@ -360,7 +365,7 @@
     basisNoteEl.hidden = !rows.some(row => has(row.price_pred) || (state.h === 20 && Boolean(row.interval)));
     modelNoteEl.textContent = modelNoteText(meta, rows.length);
     modelNoteEl.hidden = !modelNoteEl.textContent;
-    orderNoteEl.textContent = meta.date && rows.length && serving.has('return') ? orderNoteText(state.h) : '';
+    orderNoteEl.textContent = meta.date && rows.length && serving.has('return') ? orderNoteText([...(state.orderable || [])]) : '';
     orderNoteEl.hidden = !orderNoteEl.textContent;
   }
 
