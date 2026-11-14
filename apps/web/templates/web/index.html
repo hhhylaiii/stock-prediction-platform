@@ -48,18 +48,20 @@
 <input type="search" id="q" placeholder="搜尋代號或名稱" aria-label="搜尋代號或名稱" autocomplete="off" maxlength="32">
 </label>
 </div>
+<p class="note" id="order-note" hidden></p>
 <p class="note" id="band-note" hidden></p>
 <p class="note" id="fallback-note" hidden></p>
 <p class="note" id="basis-note" hidden></p>
 <p class="note" id="model-note" hidden></p>
 
 <div class="scroll" style="margin-top:8px">
-<div class="table">
+<div class="table" id="today-table">
 <div class="thead rank-cols">
-<div>排名</div><div>股票</div><div>市場</div><div class="right">收盤</div>
-<div class="right" id="ret-head">20 日預測報酬</div><div class="right">預測價</div>
+<div id="first-head">排名</div><div class="right" hidden><button type="button" class="sort" data-order="rank" id="model-rank-head" aria-label="回到模型名次">模型名次</button></div>
+<div>股票</div><div>市場</div><div class="right"><button type="button" class="sort" data-order="close" aria-label="依收盤排序">收盤</button></div>
+<div class="right"><button type="button" class="sort" data-order="ret_pred" id="ret-head" aria-label="依預測報酬排序">20 日預測報酬</button></div><div class="right"><button type="button" class="sort" data-order="price_pred" aria-label="依預測價排序">預測價</button></div>
 <div style="grid-column:span 2" id="band-head">80% 預測區間（價格）</div>
-<div class="right" id="prob-head">跑贏大盤 5 個百分點機率</div><div class="right">昨日排名</div>
+<div class="right"><button type="button" class="sort" data-order="prob_up_5pct" id="prob-head" aria-label="依跑贏大盤機率排序">跑贏大盤 5 個百分點機率</button></div><div class="right"><button type="button" class="sort" data-order="prev_rank" aria-label="依昨日排名排序">昨日排名</button></div>
 </div>
 <div id="today-goto" class="goto" hidden></div>
 <div id="rows"><div class="empty">載入中…</div></div>
