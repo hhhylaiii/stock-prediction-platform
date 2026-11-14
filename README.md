@@ -55,7 +55,7 @@ Run `uv run python manage.py <command> -h` for the full options of any command.
 | After-the-fact monitoring | `monitor --date 2026-11-06` |
 | Phase 5 acceptance report | `phase5_report --out <dir>` |
 
-Every API endpoint is a read-only GET and responds with `{"success", "data", "error", "meta"}`: `/api/status`, `/api/predictions` (`?ordering=` sorts by a shown column), `/api/stocks?q=<code or name>` (at most 20 results), `/api/stocks/<code>` (plus `/prices`, `/predictions`, `/features`, `/history`), `/api/models`, `/api/models/ic-monthly`, `/api/etl/runs`, `/api/data-quality` (plus `/corrections`).
+Every API endpoint is a read-only GET and responds with `{"success", "data", "error", "meta"}`: `/api/status`, `/api/predictions` (`?ordering=` sorts by a shown column; see [docs/api.md](docs/api.md)), `/api/stocks?q=<code or name>` (at most 20 results), `/api/stocks/<code>` (plus `/prices`, `/predictions`, `/features`, `/history`), `/api/models`, `/api/models/ic-monthly`, `/api/etl/runs`, `/api/data-quality` (plus `/corrections`).
 
 ## Layout
 
