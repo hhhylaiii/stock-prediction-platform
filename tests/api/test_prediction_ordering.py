@@ -299,13 +299,21 @@ def test_two_thousand_stocks_answer_every_order_within_half_a_second(
             for n, code in enumerate(codes)
         },
     )
+    add_predictions(
+        add_model_run("prob-h20", "classification"),
+        OCT_30,
+        20,
+        {code: {"prob_up_5pct": n / 2500} for n, code in enumerate(codes)},
+    )
     client.get("/api/predictions", {"ordering": "-close"})
+    highest_first = {"-close", "-ret_pred", "-price_pred", "-prob_up_5pct", "prev_rank"}
 
-    for ordering in ("-close", "-ret_pred", "-price_pred", "prev_rank"):
+    for ordering in ORDERINGS:
         started = time.perf_counter()
         response = client.get("/api/predictions", {"ordering": ordering})
         elapsed = time.perf_counter() - started
 
         body = envelope_of(response)
-        assert (body["meta"]["ordering"], body["data"][0]["stock_id"]) == (ordering, "10999")
+        first = "10999" if ordering in highest_first else "9000"
+        assert (body["meta"]["ordering"], body["data"][0]["stock_id"]) == (ordering, first)
         assert elapsed < 0.5, ordering
