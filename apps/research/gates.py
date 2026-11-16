@@ -2,7 +2,7 @@
 
 import math
 from collections.abc import Iterable
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import asdict, dataclass, field
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -17,7 +17,7 @@ from apps.research.lgbm_runs import MODEL
 from apps.research.metrics.ic import daily_rank_ic, research_ic
 from apps.research.models import ModelObjective, ModelRun, ModelStatus, Prediction
 from apps.research.predict import Slot, serving_run
-from apps.research.prediction_cache import fold_path, load_fold_predictions
+from apps.research.prediction_cache import fold_from_record, fold_path, load_fold_predictions
 from apps.research.production import GATES, SHADOW, shadow_key
 from apps.research.relative_up import RELATIVE_LABEL
 from apps.research.runs import PRODUCTION, RunError
@@ -83,12 +83,7 @@ def _number(value: float | None) -> float | None:
 
 
 def _fold(run: ModelRun) -> Fold:
-    """The fold a run recorded in its params, dates parsed back."""
-    stored: dict[str, Any] = {
-        name: date.fromisoformat(value) if isinstance(value, str) else value
-        for name, value in run.params["fold"].items()
-    }
-    return Fold(**{item.name: stored[item.name] for item in fields(Fold)})
+    return fold_from_record(run.params["fold"])
 
 
 def _column(run: ModelRun) -> str:

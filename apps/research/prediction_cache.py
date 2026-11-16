@@ -4,9 +4,10 @@ import json
 import os
 import tempfile
 from collections.abc import Iterable, Mapping
-from dataclasses import asdict
+from dataclasses import asdict, fields
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 import pyarrow as pa
@@ -76,6 +77,15 @@ def fold_record(fold: Fold) -> dict[str, object]:
         name: value.isoformat() if isinstance(value, date) else value
         for name, value in asdict(fold).items()
     }
+
+
+def fold_from_record(record: Mapping[str, Any]) -> Fold:
+    """The fold a run recorded in its params, dates parsed back."""
+    stored: dict[str, Any] = {
+        name: date.fromisoformat(value) if isinstance(value, str) else value
+        for name, value in record.items()
+    }
+    return Fold(**{item.name: stored[item.name] for item in fields(Fold)})
 
 
 def _check(fold: Fold, predictions: pd.DataFrame) -> None:

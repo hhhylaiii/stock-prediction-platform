@@ -16,19 +16,21 @@ RETURN = "fwd_ret_open"
 RELATIVE_LABEL = "fwd_up_5pct_vs_taiex_tr"
 
 
-def _later(calendar: TradingDays, day: date) -> date | None:
+def _later(calendar: TradingDays, day: date, sessions: int) -> date | None:
     try:
-        return calendar.shift(day, VOL_DAYS)
+        return calendar.shift(day, sessions)
     except OutsideCalendarError:
         return None
 
 
-def market_returns(calendar: TradingDays, days: Iterable[date]) -> pd.Series:
-    """TAIEX_TR close VOL_DAYS sessions after each day over its close that day; NaN without both."""
+def market_returns(
+    calendar: TradingDays, days: Iterable[date], sessions: int = VOL_DAYS
+) -> pd.Series:
+    """TAIEX_TR close sessions after each day over its close that day; NaN without both."""
     chosen = sorted(set(days))
     if not chosen:
         return pd.Series(dtype="float64")
-    ends = {day: _later(calendar, day) for day in chosen}
+    ends = {day: _later(calendar, day, sessions) for day in chosen}
     reach = max([day for day in ends.values() if day is not None], default=chosen[-1])
     rows = IndexDaily.objects.filter(index_id=MARKET, date__range=(chosen[0], reach))
     closes = {day: float(close) for day, close in rows.values_list("date", "close")}
