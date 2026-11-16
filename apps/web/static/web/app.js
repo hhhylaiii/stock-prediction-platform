@@ -63,6 +63,13 @@
   const SCOPES = { rank: '排名', return: '絕對報酬', interval: '區間與機率' };
   const MODEL_REQUIRES = '模型要在 holdout 判定達標之後才會上線，判定未達標或明顯退化時要經使用者放行';
   const NOT_LIVE_WHY = '模型要通過 holdout 判定（未達標或明顯退化時要經使用者放行）與每月重訓的換模門檻（沒過時要經使用者強制換上）才會上線，沒上線的原因見<a href="#models">模型頁</a>。';
+  const INTERVAL_HOLDOUT = 'interval-holdout-20261112';
+  const UNRELEASED_MODELS = '報酬區間、波動率與跑贏大盤機率（20 日）目前沒有上線中的模型：這三個模型屬於「區間與機率」那一組，holdout（2025 年 1 月至 2026 年 11 月，只跑一次）的絕對門檻都達標（20 日區間的總覆蓋率 75.0%），但逐摺平均的覆蓋率 70.9% 低於研究期最差的連續 8 摺 73.4%，判定「明顯退化」；使用者 2026-11-12 決定先不放行（之後可以再放行），所以沒有建正式模型。';
+  const UNRELEASED_EMPTY = '20 日的預測報酬、預測價、模型的 80% 區間與跑贏大盤機率來自「區間與機率」那一組模型，這組也沒有上線：holdout 判定「明顯退化」，使用者 2026-11-12 決定先不放行。';
+  const UNRELEASED_WHY = '這幾個模型屬於「區間與機率」那一組，holdout 判定「明顯退化」，使用者 2026-11-12 決定先不放行；原因列在模型頁。';
+  const UNRELEASED_STOCK = '20 日排名目前沒有上線中的模型，這一列留空；' + UNRELEASED_EMPTY + '原因列在模型頁。';
+  const intervalHeld = meta => ((meta || {}).unreleased || []).some(entry => entry.run_key === INTERVAL_HOLDOUT);
+  const rankServed = entry => ((entry || {}).models || []).some(model => model.role === 'rank');
   const DEFAULT_HORIZON = 20;
   const STATUS_WAIT_MS = 1500;
   const SEVERITY = { info: ['通過', 'in'], warning: ['警告', 'warn'], error: ['錯誤', 'warn'] };
@@ -96,7 +103,7 @@
     return out;
   }
 
-  const state = { h: DEFAULT_HORIZON, picked: false, ranked: [], mkt: 'all', q: '', ordering: 'rank', shownOrder: 'rank', orderable: null, watchOnly: false, watch: new Set(), stock: '2330', chart: 'candle', stockToken: 0, featureToken: 0, todayToken: 0, routeToken: 0, statusToken: 0, page: 1, watchCache: null };
+  const state = { h: DEFAULT_HORIZON, picked: false, ranked: [], mkt: 'all', q: '', ordering: 'rank', shownOrder: 'rank', orderable: null, watchOnly: false, intervalHeld: false, watch: new Set(), stock: '2330', chart: 'candle', stockToken: 0, featureToken: 0, todayToken: 0, routeToken: 0, statusToken: 0, page: 1, watchCache: null };
   try { const c = localStorage.getItem('twp-chart'); if (c === 'line' || c === 'candle') state.chart = c; } catch (e) { state.chart = 'candle'; }
   try { const w = JSON.parse(localStorage.getItem('twp-watch') || '[]'); if (Array.isArray(w)) w.filter(c => STOCK_CODE.test(c)).forEach(c => state.watch.add(c)); } catch (e) { state.watch.clear(); }
   function saveWatch() { try { localStorage.setItem('twp-watch', JSON.stringify([...state.watch])); } catch (e) { return; } }
@@ -330,8 +337,9 @@
     if (state.q.trim()) return '<div class="empty">今日預測裡沒有符合「' + esc(state.q.trim()) + '」的股票。試試代號或公司名稱的一部分。</div>';
     if (watchingOnly()) return '<div class="empty">追蹤的股票沒有這一期的預測。</div>';
     const others = state.ranked.filter(horizon => horizon !== state.h);
-    if (!meta.date && others.length) return '<div class="empty" id="today-empty">' + state.h + ' 日排名目前沒有上線中的模型，所以這一頁沒有資料；' + others.join('、') + ' 日排名有上線中的模型，可以切到 ' + others.join('、') + ' 日。' + NOT_LIVE_WHY + '</div>';
-    if (!meta.date) return '<div class="empty" id="today-empty">預測資料尚未產出。排名' + MODEL_REQUIRES + '；上線後，這裡會列出全市場的排名。</div>';
+    const held = state.h === 20 && state.intervalHeld ? UNRELEASED_EMPTY : '';
+    if (!meta.date && others.length) return '<div class="empty" id="today-empty">' + state.h + ' 日排名目前沒有上線中的模型，所以這一頁沒有資料；' + others.join('、') + ' 日排名有上線中的模型，可以切到 ' + others.join('、') + ' 日。' + NOT_LIVE_WHY + held + '</div>';
+    if (!meta.date) return '<div class="empty" id="today-empty">預測資料尚未產出。排名' + MODEL_REQUIRES + '；上線後，這裡會列出全市場的排名。' + held + '</div>';
     return '<div class="empty">沒有符合條件的股票。</div>';
   }
 
@@ -356,7 +364,8 @@
   function modelNoteText(meta, shown) {
     if (!meta.date || !shown) return '';
     const lacking = lackingText(meta.models, state.h);
-    return lacking ? '這一期' + lacking + MODEL_REQUIRES + '；上線中的模型列在模型頁。' : '';
+    const why = state.h === 20 && intervalHeld(meta) ? UNRELEASED_WHY : MODEL_REQUIRES + '；上線中的模型列在模型頁。';
+    return lacking ? '這一期' + lacking + why : '';
   }
 
   function showNotes(meta, rows) {
@@ -426,6 +435,7 @@
     }
     if (token !== state.todayToken) return;
     const { rows, meta } = result;
+    state.intervalHeld = intervalHeld(meta);
     state.shownOrder = meta.ordering || 'rank';
     state.orderable = new Set(meta.orderable || []);
     sortControls();
@@ -596,7 +606,7 @@
     return { names: ranks.map(item => item.h + ' 日 ' + nameOf(item.model)), trained: ranks.map(item => item.h + ' 日訓練資料到 ' + item.model.train_end).join('、') };
   }
 
-  function forecastsHtml(data) {
+  function forecastsHtml(data, meta) {
     const entries = [...data.horizons].sort((a, b) => a.horizon - b.horizon);
     const based = [...entries].reverse().filter(entry => entry.prediction && entry.prediction.close !== null);
     if (!based.length) return waiting;
@@ -611,14 +621,19 @@
     const builds = rankBuilds(entries);
     const degraded = entries.some(entry => (entry.degraded || []).length);
     const caveats = caveatText(entries.flatMap(entry => shownModels(entry.models, entry.horizon)));
-    const lacking = entries.filter(entry => entry.prediction).map(entry => [entry.horizon, lackingText(entry.models, entry.horizon, entry.prediction)])
-      .filter(([, text]) => text).map(([horizon, text]) => horizon + ' 日' + text).join('');
+    const lackingRows = entries.filter(entry => entry.prediction).map(entry => [entry.horizon, lackingText(entry.models, entry.horizon, entry.prediction)])
+      .filter(([, text]) => text);
+    const lacking = lackingRows.map(([horizon, text]) => horizon + ' 日' + text).join('');
+    const held = intervalHeld(meta);
+    const heldWhy = held && lackingRows.length > 0 && lackingRows.every(([horizon]) => horizon === 20);
+    const blankTwenty = held && !twenty.prediction && !rankServed(twenty);
     const priced = entries.some(entry => entry.prediction && has(entry.prediction.price_pred)) || Boolean(twenty.prediction && twenty.prediction.interval);
     return '<p class="sub">排名、報酬與區間機率各由自己的模型產出；排名模型多用了幾個籌碼與除息日特徵，其餘特徵相同。價格以 ' + basis + ' 換算。' + (priced ? '<span class="basis-note">' + BASIS_STOCK + '</span>' : '') + '</p><div class="list">' +
       '<div class="thead h-cols" style="padding-top:10px"><div>期間</div><div class="right">預測報酬</div><div class="right">預測價</div><div class="right">80% 區間</div><div class="right prob-head" title="' + esc(PROB_TIP) + '">' + PROB_HEAD + '</div></div>' +
       entries.map(forecastRowHtml).join('') + '</div>' + (quantileBand ? '<p class="note band-note">' + BAND_NOTE + '</p>' : '') +
       (fallbackBand ? '<p class="note fallback-note">' + FALLBACK_NOTE + '</p>' : '') +
-      (lacking ? '<p class="note model-note">' + lacking + MODEL_REQUIRES + '；<a href="#models">上線中的模型列在模型頁</a>。</p>' : '') +
+      (lacking ? '<p class="note model-note">' + lacking + (heldWhy ? UNRELEASED_WHY : MODEL_REQUIRES + '；<a href="#models">上線中的模型列在模型頁</a>。') + '</p>' : '') +
+      (blankTwenty ? '<p class="note unreleased-note">' + UNRELEASED_STOCK + '</p>' : '') +
       '<div class="pair"><div><div class="faint tiny">預測 20 日波動（年化）</div><div class="v">' + (vol === null || vol === undefined ? '—' : (vol * 100).toFixed(1) + '%') + '</div>' +
       (realised === null ? '' : '<div class="muted tiny">過去 60 日實際為 ' + (realised * 100).toFixed(1) + '%</div>') + '</div>' +
       '<div><div class="faint tiny">排名模型版本</div><div style="font-size:15px;font-weight:500;line-height:1.6">' + (builds.names.map(esc).join('<br>') || '—') + '</div>' +
@@ -748,9 +763,13 @@
       const ready = new Set(forecasts.value.data.horizons.filter(entry => entry.prediction).map(entry => entry.horizon));
       const buttons = [...document.querySelectorAll('#stock-seg [data-sh]')];
       buttons.forEach(b => { b.disabled = !ready.has(Number(b.dataset.sh)); });
-      const missing = buttons.filter(b => b.disabled).map(b => b.dataset.sh + ' 日');
+      const missing = buttons.filter(b => b.disabled).map(b => Number(b.dataset.sh));
+      const entryOfH = h => forecasts.value.data.horizons.find(entry => entry.horizon === h);
+      const offline = missing.filter(h => !rankServed(entryOfH(h))).map(h => h + ' 日');
+      const pending = missing.filter(h => rankServed(entryOfH(h))).map(h => h + ' 日');
+      const parts = [pending.length ? pending.join('、') + '預測尚未產出' : '', offline.length ? offline.join('、') + '排名目前沒有上線中的模型' : ''].filter(Boolean);
       const none = s.delist_date ? '已下市，沒有預測' : '預測產出後可切換 5 日／20 日';
-      document.getElementById('stock-seg-hint').textContent = !ready.size ? none : missing.length ? missing.join('、') + '預測尚未產出' : '';
+      document.getElementById('stock-seg-hint').textContent = !ready.size ? none : parts.join('；');
     };
     const drawHorizon = () => {
       controls();
@@ -770,7 +789,7 @@
     later.forecasts.then(result => {
       if (token !== state.stockToken) return;
       forecasts = result;
-      document.querySelector('#forecasts .body').innerHTML = result.status === 'rejected' ? errorBox(result.reason) : forecastsHtml(result.value.data);
+      document.querySelector('#forecasts .body').innerHTML = result.status === 'rejected' ? errorBox(result.reason) : forecastsHtml(result.value.data, result.value.meta);
       showSeg();
       const ready = result.status === 'fulfilled' ? result.value.data.horizons.filter(entry => entry.prediction).map(entry => entry.horizon) : [];
       if (!stockEl.hidden && preferHorizon(ready)) { drawHorizon(); return; }
@@ -990,7 +1009,8 @@
       host.innerHTML = (!data.length ? '<p class="placeholder">模型尚未上線。</p>' :
         '<div class="scroll" style="margin-top:14px"><div class="table" style="min-width:1100px">' +
         '<div class="thead model-cols"><div>目標</div><div>模型</div><div>版本</div><div>訓練區間</div><div>近 6 個月成績</div><div>回測成績與 baseline</div></div>' +
-        data.map((row, i) => modelRowHtml(row, spans[i])).join('') + '</div></div>') + ((meta || {}).not_live || []).map(heldHtml).join('');
+        data.map((row, i) => modelRowHtml(row, spans[i])).join('') + '</div></div>') + ((meta || {}).not_live || []).map(heldHtml).join('') +
+        (intervalHeld(meta) ? '<p class="note unreleased-note">' + UNRELEASED_MODELS + '</p>' : '');
     } catch (err) {
       host.innerHTML = errorBox(err);
     }
