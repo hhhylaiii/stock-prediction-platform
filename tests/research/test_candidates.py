@@ -1,6 +1,7 @@
 import math
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import date
 from io import StringIO
 from pathlib import Path
@@ -27,6 +28,7 @@ from apps.research.candidates import (
     measure,
     relative_labels,
 )
+from apps.research.gbdt import bag_seeds
 from apps.research.holdout import HoldoutError
 from apps.research.lock import ResearchBusyError
 from apps.research.models import (
@@ -55,6 +57,7 @@ from tests.research.run_panels import (
 
 pytestmark = pytest.mark.django_db
 AS_OF = date(2016, 11, 30)
+TODAY = date(2016, 12, 1)
 RANK_SLOT = Slot(ModelObjective.RANK, 5)
 RANK_RUN = "rank-2016-11.lightgbm.h5.f000"
 
@@ -96,6 +99,7 @@ def served(run_panel: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Claimed holdouts, TAIEX_TR closes and serving rank and return runs on one production fold."""
     monkeypatch.setattr(lgbm_runs, "MAX_ROUNDS", 60)
     monkeypatch.setattr(candidates, "BAGS", 2)
+    monkeypatch.setattr(candidates.timezone, "localdate", lambda: TODAY)
     store_taiex()
     use_designs(
         monkeypatch, CONFIG, **{"return": Design(CONFIG, target=TargetVariant(market=False))}
@@ -152,6 +156,21 @@ def test_c1_freezes_the_rank_ridge_of_the_serving_fold(served: Path) -> None:
     np.testing.assert_allclose(frozen.predict(train), direct.predict(train))
 
 
+def test_a_cross_validation_score_without_a_value_is_kept_as_null(
+    served: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fit = candidates.fit_ridge
+
+    def gapped(*args: Any) -> Any:
+        fitted = fit(*args)
+        return replace(fitted, scores={**fitted.scores, 0.1: math.nan})
+
+    monkeypatch.setattr(candidates, "fit_ridge", gapped)
+    row = freeze("C1", served)
+    row.refresh_from_db()
+    assert row.recipe["cv"]["0.1"] is None
+
+
 def test_c2_fits_the_return_design_on_the_relative_label(
     served: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -177,18 +196,21 @@ def test_c2_fits_the_return_design_on_the_relative_label(
         2,
         _return_features(),
     )
+    assert (row.recipe["lightgbm"]["seed"], row.recipe["bag_seeds"]) == (0, bag_seeds(0, 2))
     assert row.path == "shadow/c2/return-2016-11/g1.pkl"
 
 
 def test_measuring_writes_no_row_and_the_same_data_refits_to_the_same_file(
     served: Path, tmp_path: Path
 ) -> None:
-    for name in ("C1", "C2"):
-        once = measure(name, served, tmp_path / "a")
-        again = measure(name, served, tmp_path / "b")
-        assert once.sha256 == again.sha256 == file_sha256(once.path)
-        assert once.seconds >= 0
-        assert once.peak_mb > 0
+    first = [measure(name, served, tmp_path / "a") for name in ("C1", "C2")]
+    again = [measure(name, served, tmp_path / "b") for name in ("C1", "C2")]
+    assert [found.path.name for found in first] == ["c1.pkl", "c2.pkl"]
+    assert [found.sha256 for found in first] == [found.sha256 for found in again]
+    assert [found.sha256 for found in first] == [file_sha256(found.path) for found in first]
+    assert first[0].sha256 != first[1].sha256
+    assert all(found.seconds >= 0 for found in first)
+    assert all(found.peak_mb > 0 for found in first)
     assert not ShadowArtifact.objects.exists()
     assert not (Path(settings.MODEL_DIR) / "shadow").exists()
 
@@ -206,7 +228,7 @@ def test_a_second_freeze_on_the_same_run_needs_replace_and_keeps_the_first(serve
 
 def test_the_first_signal_follows_the_latest_written_prediction(served: Path) -> None:
     calendar = panel_calendar()
-    assert first_signal(RANK_SLOT, AS_OF, calendar) == calendar.shift(AS_OF, 1)
+    assert first_signal(RANK_SLOT, AS_OF, calendar, TODAY) == calendar.shift(AS_OF, 1)
     later = calendar.shift(AS_OF, 3)
     Prediction.objects.create(
         run_id=RANK_RUN,
@@ -216,8 +238,14 @@ def test_the_first_signal_follows_the_latest_written_prediction(served: Path) ->
         score=0.1,
         in_universe=True,
     )
-    assert first_signal(RANK_SLOT, AS_OF, calendar) == calendar.shift(later, 1)
+    assert first_signal(RANK_SLOT, AS_OF, calendar, TODAY) == calendar.shift(later, 1)
     assert freeze("C1", served).first_signal == calendar.shift(later, 1)
+
+
+def test_the_first_signal_never_reaches_back_before_the_freeze(served: Path) -> None:
+    calendar = panel_calendar()
+    assert first_signal(RANK_SLOT, AS_OF, calendar, date(2016, 12, 8)) == date(2016, 12, 8)
+    assert first_signal(RANK_SLOT, AS_OF, calendar, date(2016, 12, 10)) == date(2016, 12, 12)
 
 
 def test_a_candidate_without_a_serving_run_is_refused(served: Path) -> None:

@@ -1,11 +1,12 @@
 """Shadow candidates C1 and C2 (holding-shadow-prereg.md §7): their fits, files and freezes."""
 
 import hashlib
+import math
 import os
 import pickle
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from time import monotonic
 from typing import Any
@@ -111,7 +112,9 @@ def _ridge(serving: Serving, directory: Path) -> Fitted:
         "label": RANK_LABEL,
         "features": features,
         "penalty": fit.penalty,
-        "cv": {str(penalty): score for penalty, score in fit.scores.items()},
+        "cv": {
+            str(key): value if math.isfinite(value) else None for key, value in fit.scores.items()
+        },
         "feature_hash": read.feature_hash,
         "label_hash": digest,
     }
@@ -196,11 +199,14 @@ def artifact_path(name: str, run_key: str, generation: int) -> str:
     return str(folder / f"g{generation}{MODEL_SUFFIX}")
 
 
-def first_signal(slot: Slot, as_of: date, calendar: TradingDays) -> date:
-    """The first trading day after as_of whose slot predictions are not written yet."""
+def first_signal(slot: Slot, as_of: date, calendar: TradingDays, today: date) -> date:
+    """The first trading day from today on, after as_of, whose slot predictions are unwritten."""
     rows = Prediction.objects.filter(run__objective=slot.objective, horizon=slot.horizon)
     latest = rows.aggregate(last=Max("date"))["last"]
-    return calendar.shift(as_of if latest is None else max(latest, as_of), 1)
+    unwritten = calendar.shift(as_of if latest is None else max(latest, as_of), 1)
+    return max(
+        unwritten, calendar.shift(calendar.latest_on_or_before(today - timedelta(days=1)), 1)
+    )
 
 
 def _recipe(fitted: Fitted, seconds: float, peak: float) -> dict[str, Any]:
@@ -214,7 +220,7 @@ def measure(name: str, directory: Path, output: Path) -> Measured:
     began = monotonic()
     fitted = chosen.fit(found, directory)
     seconds, peak = round(monotonic() - began, 1), round(peak_rss_mb(), 1)
-    path = output / Path(artifact_path(name, found.run.run_key, 1)).name
+    path = output / f"{name.lower()}{MODEL_SUFFIX}"
     temporary = Path(pickle_beside(path, fitted.model))
     os.replace(temporary, path)
     return Measured(path, file_sha256(path), seconds, peak, _recipe(fitted, seconds, peak))
@@ -250,7 +256,9 @@ def freeze(name: str, directory: Path, replace: bool = False) -> ShadowArtifact:
                     path=relative,
                     sha256=file_sha256(temporary),
                     recipe=_recipe(fitted, seconds, peak),
-                    first_signal=first_signal(chosen.slot, found.as_of, TradingDays.from_db()),
+                    first_signal=first_signal(
+                        chosen.slot, found.as_of, TradingDays.from_db(), timezone.localdate()
+                    ),
                     frozen_at=timezone.now(),
                 )
                 os.replace(temporary, path)
