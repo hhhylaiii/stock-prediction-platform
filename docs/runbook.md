@@ -137,15 +137,17 @@ docker compose logs -f worker
 這是研究紀錄，不是投資建議；規則見 `docs/reports/phase4/holding-shadow-prereg.md`。頁面與 API 都不讀這兩張表。
 
 - 06:00 的 chain 最後跑 `shadow`，排在換模之後、還原因子重建之前。每本帳依序先結算前一個訊號日的成交（`holding_book_day`、`holding_book_action` 的 `fill`），再寫 D 的名單（`list`）。帳本列在 `apps/research/shadow.py` 的 `BOOKS`，目前只有 `H70N30-C0`，從 2026-11-16 起。成交要等成交日的價格到齊、訊號日的 5 日 `untradable_t1` 也都結算；等不到就停在那天，下一天的名單也不寫，由下一個早上接著補。
-- 兩張表只新增：同一天重跑不會多寫，也不會改已記的列。名單在成交日 09:00 之後才寫的、成交在成交日的下一個交易日 09:00 之後才寫的，都標 `backfilled`。
+- 兩張表只新增：同一天重跑不會多寫，也不會改已記的列。名單在成交日 09:00 之後才寫的、成交在成交日的下一個交易日 09:00 之後才寫的，都標 `backfilled`；所以一次補好幾天時，09:00 前跑完的早上寫的最新一份名單和最新一筆成交不標。fill 的 `status` 是 `traded` 代表照名單結算（當天有分數），不代表一定有買賣；有沒有成交看 `paid`、`traded` 兩欄。
 - 每天寫一列 `research_shadow`（`date` 是 D）。成功是 info，`detail.books` 列出各帳本這次寫了哪些名單、哪些成交、停在哪天。遇到下列情況時記在 `detail.notes`，那天改記 warning 並告警：
-  - `predictions_rewritten`：名單寫好之後，那天的預測被改過；成交照原名單算。
+  - `predictions_rewritten`：名單寫好之後、成交之前，那天的預測被改過；成交照原名單算。成交之後才改的（例如手動 `predict --date` 或從較早日期 `promote`）不會記，用 `holding_sim --source prediction` 對帳時以名單列為準。
   - `in_universe_without_score`：universe 裡有股票沒有分數（正常不會發生）；名單照寫。
   - `trade_date_moved`：名單寫好之後，原本的成交日被日曆改成休市；成交記在日曆上實際的下一個交易日。
   - `no_taiex_tr`：成交日或前一天的 `TAIEX_TR` 收盤還沒進來，那天的 `index_return` 記成 NULL。整理報表時，大盤報酬直接從 `index_daily` 重算，帳本列不回頭補。
 - 失敗時（任何錯誤，或整步超過 60 秒）整段回滾，這次一列都不寫，記一列 `research_shadow` warning 並告警，`detail` 帶出 `book`、卡住的 `signal_date` 與 `error`。chain 照常收尾，當天的預測與重訓不受影響。下一個早上從同一天重試，直到修好；問題沒解決前，每天告警一次。
-- 已記的列有錯時不改、不刪：在 `BOOKS` 開一個新的帳本代號（例如 `H70N30-C0.2`），由下一個早上從起點重新補記（全部標 `backfilled`），舊帳本留著。日曆把兩個已結算日子之間的某天改成開市時，帳本會停在那天並告警（`the calendar opened a day under the book`），同樣照這條處理。
-- `shadow` 排在完成紀錄之前，所以算進重訓「06:00 到 09:00 之間跑完」的時間；最壞情況會多約 65 秒（60 秒預算加上計算）。
+- 研究鎖被別的指令佔住時，`shadow` 不等也不重試：直接跳過，記一列 `research_shadow` warning（`ResearchBusyError`），chain 照常收尾。跳過那天的名單由下一個早上補寫，會標 `backfilled`。
+- 所有帳本在同一個 transaction 裡推進：任何一本卡住，其他本這次也一列都不寫。
+- 已記的列有錯時不改、不刪：把 `BOOKS` 裡舊的代號換成新的代號（例如 `H70N30-C0` 換成 `H70N30-C0.2`），部署後由下一個早上從起點重新補記，除了當天寫的最新名單與最新成交，其餘都標 `backfilled`。舊帳本的列留在表裡，不再推進；不要讓兩個代號同時留在 `BOOKS`，否則卡住的舊帳本會讓新帳本也寫不進去。日曆把兩個已結算日子之間的某天改成開市時，帳本會停在那天並告警（`the calendar opened a day under the book`），同樣照這條處理。
+- `shadow` 排在完成紀錄之前，所以算進重訓「06:00 到 09:00 之間跑完」的時間；最壞情況會多約 65 秒（60 秒預算加上計算，不等研究鎖）。
 
 ### 線上特徵覆蓋率檢查
 
