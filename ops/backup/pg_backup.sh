@@ -42,6 +42,7 @@ alert() {
 }
 
 fail() {
+    trap '' HUP INT TERM
     context="step=$1 status=$2 seconds=$(elapsed)"
     log "failed $context"
     alert "$context"
@@ -97,5 +98,6 @@ if ! mv -- "$partial" "$backup_dir/$name"; then
     fail rename 1
 fi
 partial=''
+trap - HUP INT TERM
 prune
 log "end ok file=$name bytes=$bytes seconds=$(elapsed)"

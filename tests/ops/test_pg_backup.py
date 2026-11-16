@@ -21,7 +21,9 @@ n=$(ls "$FAKE_CALLS" | wc -l | tr -d ' ')
 for arg in "$@"; do printf '%s\\0' "$arg"; done > "$FAKE_CALLS/$((n + 1))"
 pwd -P > "$FAKE_CWDS/$((n + 1))"
 case " $* " in
-  *" worker "*) exit "${FAKE_ALERT_STATUS:-0}" ;;
+  *" worker "*)
+    if [ -n "${FAKE_ALERT_SLEEP:-}" ]; then sleep "$FAKE_ALERT_SLEEP"; fi
+    exit "${FAKE_ALERT_STATUS:-0}" ;;
   *" db "*)
     if [ -n "${FAKE_DUMP_SLEEP:-}" ]; then sleep "$FAKE_DUMP_SLEEP"; fi
     if [ "${FAKE_DUMP_EMPTY:-}" != 1 ]; then printf 'PGDMP-fake'; fi
@@ -171,6 +173,8 @@ def test_an_unreadable_keep_count_stops_before_dumping(run: Run, keep: str) -> N
     assert result.returncode != 0
     assert all("db" not in call for call in run.docker_calls())
     assert run.dumps() == []
+    [alert] = run.alert_calls()
+    assert _context(alert).startswith("step=keep_count status=1 seconds=")
 
 
 def test_the_alert_calls_the_workers_task_failure_report(
@@ -228,6 +232,27 @@ def test_a_stopped_run_removes_its_partial_file_and_alerts(run: Run) -> None:
     assert "failed step=signal status=1 seconds=" in run.log()
     [alert] = run.alert_calls()
     assert _context(alert).startswith("step=signal status=1 seconds=")
+
+
+def test_a_stop_while_alerting_does_not_fail_twice(run: Run) -> None:
+    process = subprocess.Popen(
+        ["/bin/sh", str(SCRIPT)],
+        cwd=REPO,
+        env=run.env(FAKE_DUMP_STATUS="1", FAKE_ALERT_SLEEP="2"),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    deadline = time.monotonic() + 20
+    while not (run.calls / "2").exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert run.alert_calls(), "the alert never started"
+
+    process.send_signal(signal.SIGTERM)
+
+    assert process.wait(timeout=30) != 0
+    assert run.log().count(" failed ") == 1
+    assert len(run.alert_calls()) == 1
+    assert "alert handed to the worker" in run.log()
 
 
 def test_the_launchd_job_runs_the_script_at_three_with_docker_on_its_path() -> None:
