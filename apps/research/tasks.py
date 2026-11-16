@@ -37,6 +37,7 @@ from apps.research.production import DESIGNS, build_run, shadow_key
 from apps.research.promotion import PROMOTION_CHECK, Promoted, first_day, promote
 from apps.research.resources import free_percent, peak_rss_mb
 from apps.research.runs import PRODUCTION
+from apps.research.shadow import SHADOW_CHECK, record_books
 
 logger = logging.getLogger(__name__)
 EVENING_CHECK = "research_evening"
@@ -170,6 +171,17 @@ def _promote(day: date) -> str:
     return "; ".join([*done, *(f"{key}: failed, see {PROMOTE_CHECK}" for key in failed)])
 
 
+def _shadow(day: date) -> str:
+    """The shadow books' rows; never raises, so it cannot hold up the finish or a retrain."""
+    try:
+        outcome = record_books(day)
+        _record(day, SHADOW_CHECK, outcome.severity, outcome.detail)
+    except Exception as error:
+        logger.error("research shadow %s failed to record: %s", day, error)
+        return f"failed to record ({type(error).__name__}), see the worker log"
+    return outcome.summary
+
+
 def _taken(since: date) -> dict[str, list[Any]]:
     """Every content a rebuild took each adj_factor note in at, by the note's pk."""
     rows = DataQualityLog.objects.filter(
@@ -282,6 +294,7 @@ STEPS: dict[str, Callable[[date], str]] = {
     "predict": _predict,
     "monitor": _monitor,
     "promote": _promote,
+    "shadow": _shadow,
 }
 
 
@@ -571,6 +584,6 @@ def morning(self: Task[Any, Any], day: str | None = None) -> str:
     made_up = ("labels", *MORNING_STEPS, "recent_features")
     steps = MORNING_STEPS if _finished(session, EVENING_CHECK) else made_up
     last = ("promote",) if _pending(session) else ()
-    names = _with_rebuild((*steps, *last))
+    names = _with_rebuild((*steps, *last, "shadow"))
     _start(MORNING_CHECK, session, names, {} if landed else {"us_close": US_CLOSE_MISSING})
     return "started"
