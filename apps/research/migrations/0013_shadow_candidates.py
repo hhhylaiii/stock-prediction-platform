@@ -106,7 +106,6 @@ class Migration(migrations.Migration):
                 (
                     "serving_run",
                     models.ForeignKey(
-                        db_index=False,
                         on_delete=django.db.models.deletion.PROTECT,
                         related_name="shadow_scores",
                         to="research.modelrun",

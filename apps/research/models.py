@@ -713,7 +713,7 @@ class ShadowScore(models.Model):
     date = models.DateField()
     stock_id = models.CharField(max_length=10)
     serving_run = models.ForeignKey(
-        ModelRun, on_delete=models.PROTECT, db_index=False, related_name="shadow_scores"
+        ModelRun, on_delete=models.PROTECT, related_name="shadow_scores"
     )
     generation = models.PositiveSmallIntegerField()
     score = models.FloatField(null=True, blank=True)
