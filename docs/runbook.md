@@ -142,7 +142,7 @@ docker compose logs -f worker
   - `predictions_rewritten`：名單寫好之後，那天的預測被改過；成交照原名單算。
   - `in_universe_without_score`：universe 裡有股票沒有分數（正常不會發生）；名單照寫。
   - `trade_date_moved`：名單寫好之後，原本的成交日被日曆改成休市；成交記在日曆上實際的下一個交易日。
-  - `no_taiex_tr`：成交日或前一天的 `TAIEX_TR` 收盤還沒進來，那天的 `index_return` 記成 NULL；之後要比較時，直接從 `index_daily` 重算。
+  - `no_taiex_tr`：成交日或前一天的 `TAIEX_TR` 收盤還沒進來，那天的 `index_return` 記成 NULL。整理報表時，大盤報酬直接從 `index_daily` 重算，帳本列不回頭補。
 - 失敗時（任何錯誤，或整步超過 60 秒）整段回滾，這次一列都不寫，記一列 `research_shadow` warning 並告警，`detail` 帶出 `book`、卡住的 `signal_date` 與 `error`。chain 照常收尾，當天的預測與重訓不受影響。下一個早上從同一天重試，直到修好；問題沒解決前，每天告警一次。
 - 已記的列有錯時不改、不刪：在 `BOOKS` 開一個新的帳本代號（例如 `H70N30-C0.2`），由下一個早上從起點重新補記（全部標 `backfilled`），舊帳本留著。日曆把兩個已結算日子之間的某天改成開市時，帳本會停在那天並告警（`the calendar opened a day under the book`），同樣照這條處理。
 - `shadow` 排在完成紀錄之前，所以算進重訓「06:00 到 09:00 之間跑完」的時間；最壞情況會多約 65 秒（60 秒預算加上計算）。
