@@ -1,6 +1,6 @@
 """Inputs of the holding books: cached research scores or stored predictions, prices and flags."""
 
-from bisect import bisect_right
+from bisect import bisect_left
 from collections.abc import Sequence
 from datetime import date
 
@@ -111,11 +111,11 @@ def _blocked(days: list[date], stocks: list[str]) -> Mask:
 
 
 def _delisted(days: list[date], stocks: list[str]) -> npt.NDArray[np.int64]:
-    """Index of the first day after each stock's delist_date; len(days) without one."""
+    """Index of the day after the first day on or after each delist_date; past the end without."""
     rows = StockMaster.objects.filter(stock_id__in=stocks, delist_date__isnull=False)
     dates = {stock: day for stock, day in rows.values_list("stock_id", "delist_date") if day}
     return np.array(
-        [bisect_right(days, dates[stock]) if stock in dates else len(days) for stock in stocks],
+        [bisect_left(days, dates[stock]) + 1 if stock in dates else len(days) for stock in stocks],
         dtype=np.int64,
     )
 

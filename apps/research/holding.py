@@ -65,8 +65,8 @@ NO_COSTS = Costs(0.0, 0.0)
 class Market:
     """Day by stock grids, stocks sorted by id; opens and closes are adjusted, NaN when absent.
 
-    blocked is untradable_t1 on the signal day; delisted is the first day index after each
-    stock's delist_date (len(days) without one).
+    blocked is untradable_t1 on the signal day; delisted is the first day a stuck exit may
+    settle, the day after the first signal day on or after delist_date (len(days) without one).
     """
 
     days: list[date]

@@ -246,7 +246,7 @@ def test_the_market_grids_adjust_prices_and_mark_flags_by_day_and_stock() -> Non
     assert np.argwhere(~grid.in_universe[:5]).tolist() == [[1, 0]]
     assert np.isnan(grid.score[5:]).all()
     assert DAYS[5] == date(2016, 1, 11)
-    assert grid.delisted.tolist() == [7, 10, 5]
+    assert grid.delisted.tolist() == [7, 10, 6]
     assert np.argwhere(grid.limit_down_open).tolist() == [[8, 1]]
 
 
