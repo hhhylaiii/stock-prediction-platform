@@ -19,6 +19,7 @@ from apps.api.predictions import (
 )
 from apps.api.serving import latest_served_date, roles_for, runs_on
 from apps.api.stocks import require_stock
+from apps.api.unreleased import unreleased
 from apps.api.views import ReadOnlyView
 from apps.research.models import OUTPUT_HORIZONS, FeatureDaily
 
@@ -69,5 +70,6 @@ class StockPredictionsView(ReadOnlyView):
                 "stock_id": stock_id,
                 "horizons": entries,
                 "realized_vol": realized_vol(stock_id, anchor),
-            }
+            },
+            {"unreleased": unreleased()},
         )

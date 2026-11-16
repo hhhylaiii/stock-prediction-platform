@@ -138,6 +138,11 @@ def test_a_model_built_on_a_released_holdout_names_the_verdict_and_not_the_reaso
     assert RELEASE_REPORT not in body
 
 
+def params_read(sql: str) -> bool:
+    """A read of the release in run params, not the holdout_release table behind meta.unreleased."""
+    return HOLDOUT_RELEASE in sql and '"holdout_run"' not in sql
+
+
 def test_the_released_verdict_is_read_once_per_request_not_per_prediction_row(
     client: Client, runs: Runs
 ) -> None:
@@ -146,7 +151,7 @@ def test_the_released_verdict_is_read_once_per_request_not_per_prediction_row(
     with CaptureQueriesContext(connection) as queries:
         body = envelope_of(client.get("/api/predictions"))
 
-    reading = [query["sql"] for query in queries if HOLDOUT_RELEASE in query["sql"]]
+    reading = [query["sql"] for query in queries if params_read(query["sql"])]
     assert verdicts_of(body)["rank"] == FAILED
     assert len(reading) == 1
     assert '"prediction"' not in reading[0]
@@ -202,7 +207,7 @@ def test_a_run_released_and_forced_carries_both_from_one_read(client: Client, ru
         DEGRADED,
         ["agreement", "shadow_oos"],
     )
-    reading = [query["sql"] for query in queries if HOLDOUT_RELEASE in query["sql"]]
+    reading = [query["sql"] for query in queries if params_read(query["sql"])]
     assert len(reading) == 1
     assert f"'{PROMOTION}'" in reading[0]
 
@@ -576,7 +581,7 @@ def test_predictions_query_count_on_the_tech_vol_path(
         for day in (OCT_29, OCT_30)
     )
 
-    with django_assert_max_num_queries(14):
+    with django_assert_max_num_queries(15):
         response = client.get("/api/predictions")
 
     body = envelope_of(response)
