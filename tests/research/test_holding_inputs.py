@@ -151,11 +151,8 @@ def test_stored_scores_read_only_the_rank_five_day_rows() -> None:
 
     scores = stored_scores(DAYS[0], DAYS[1]).sort_values("stock_id", ignore_index=True)
 
-    assert scores.columns.tolist() == [*SCORE_COLUMNS, "run_id"]
-    assert scores.values.tolist() == [
-        [DAYS[0], "1000", True, 0.4, "rank.h5"],
-        [DAYS[1], "1001", False, 0.1, "rank.h5"],
-    ]
+    assert scores.columns.tolist() == SCORE_COLUMNS
+    assert scores.values.tolist() == [[DAYS[0], "1000", True, 0.4], [DAYS[1], "1001", False, 0.1]]
 
 
 def stock(stock_id: str, **fields: object) -> None:

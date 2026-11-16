@@ -24,6 +24,7 @@ KEYS = ["date", "stock_id"]
 SCORE_COLUMNS = [*KEYS, "in_universe", "score"]
 HOLDOUT_RULES = frozenset({(0.70, 30), (0.90, 30), (0.90, 100)})
 INDEX = IndexId.TAIEX_TR
+SHADOW_START = date(2026, 11, 16)
 
 
 class HoldoutRuleError(ValueError):
@@ -59,11 +60,11 @@ def cached_scores(run_key: str, folds: Sequence[int], until: date) -> pd.DataFra
 
 
 def stored_scores(start: date, end: date) -> pd.DataFrame:
-    """Rank 5-day prediction rows of the signal days, with the run that wrote each."""
+    """Rank 5-day prediction rows of the signal days."""
     rows = Prediction.objects.filter(
         run__objective=ModelObjective.RANK, horizon=HORIZON, date__range=(start, end)
-    ).values_list(*SCORE_COLUMNS, "run_id")
-    frame = pd.DataFrame(list(rows), columns=[*SCORE_COLUMNS, "run_id"])
+    ).values_list(*SCORE_COLUMNS)
+    frame = pd.DataFrame(list(rows), columns=SCORE_COLUMNS)
     return frame.astype({"score": "float64", "in_universe": "bool"})
 
 

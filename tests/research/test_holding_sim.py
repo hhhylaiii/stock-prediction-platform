@@ -71,6 +71,7 @@ def fed(monkeypatch: pytest.MonkeyPatch, calendar_rows: list[date]) -> dict[str,
     monkeypatch.setattr(holding_sim, "latest_price_date", lambda: calendar_rows[19])
     monkeypatch.setattr(holding_sim, "holds_holdout", lambda key, model, index: index >= 44)
     monkeypatch.setattr(holding_inputs, "holds_holdout", lambda key, model, index: index >= 44)
+    monkeypatch.setattr(holding_sim, "SHADOW_START", calendar_rows[0])
     return asked
 
 
@@ -96,10 +97,14 @@ def test_the_research_book_prints_its_summary_counts_and_years(fed: dict[str, An
     assert "net_mo" in text
     assert "sells 2, settled 0, stuck days 0, sells opening at limit down 0" in text
     assert "\n2016 " in text
+    assert "has no close" not in text
+
+
+PREDICTION = ["--source", "prediction", "--start", "2016-01-04"]
 
 
 def test_the_list_shows_the_last_day_keeps_and_entries(fed: dict[str, Any]) -> None:
-    text = run(*RESEARCH, "--end", "2016-01-29", "--size", "2", "--list")
+    text = run(*PREDICTION, "--size", "2", "--list")
 
     listed = text.split("list of 2016-01-29:")[1].strip().splitlines()
     assert listed[0].split() == ["stock_id", "action", "priority", "score", "pct"]
@@ -114,7 +119,7 @@ def test_a_last_day_without_predictions_says_so_instead_of_listing(
     unscored = book_market(calendar_rows, score)
     monkeypatch.setattr(holding_sim, "load_market", lambda frame, end, calendar: unscored)
 
-    text = run(*RESEARCH, "--end", "2016-01-29", "--list")
+    text = run(*PREDICTION, "--list")
 
     assert "no prediction on 2016-01-29; the book holds still" in text
     assert "list of" not in text
@@ -128,9 +133,53 @@ def test_stored_predictions_default_to_the_latest_price_day(fed: dict[str, Any])
     assert text.splitlines()[0].startswith("H70/N30 known, prediction 2016-01-04..2016-01-29")
 
 
-def test_stored_predictions_need_a_first_signal_day(fed: dict[str, Any]) -> None:
-    with pytest.raises(CommandError, match="--start is required"):
-        run("--source", "prediction")
+def test_stored_predictions_start_on_the_first_shadow_signal_day_by_default(
+    fed: dict[str, Any],
+) -> None:
+    run("--source", "prediction")
+
+    assert fed["start"] == date(2016, 1, 4)
+
+
+def test_stored_predictions_before_the_first_shadow_signal_day_are_refused(
+    fed: dict[str, Any], monkeypatch: pytest.MonkeyPatch, calendar_rows: list[date]
+) -> None:
+    monkeypatch.setattr(holding_sim, "SHADOW_START", calendar_rows[5])
+
+    with pytest.raises(CommandError, match="first signal day 2016-01-11"):
+        run(*PREDICTION)
+
+
+def test_the_first_signal_day_alone_still_prints_its_list(
+    fed: dict[str, Any], monkeypatch: pytest.MonkeyPatch, calendar_rows: list[date]
+) -> None:
+    one = book_market(calendar_rows, np.arange(1.0, 11.0)[None, :])
+    monkeypatch.setattr(holding_sim, "load_market", lambda frame, end, calendar: one)
+
+    text = run(*PREDICTION, "--size", "2", "--list")
+
+    assert "no trade yet; the first signal day is the last day" in text
+    listed = text.split("list of 2016-01-04:")[1].strip().splitlines()
+    assert [line.split()[:3] for line in listed[1:]] == [
+        ["1009", "buy", "1"],
+        ["1008", "buy", "2"],
+    ]
+
+
+def test_the_research_source_refuses_a_list(fed: dict[str, Any]) -> None:
+    with pytest.raises(CommandError, match="use --source prediction"):
+        run(*RESEARCH, "--end", "2016-01-29", "--list")
+
+
+def test_days_without_a_taiex_tr_close_are_counted(
+    fed: dict[str, Any], monkeypatch: pytest.MonkeyPatch, calendar_rows: list[date]
+) -> None:
+    levels = pd.Series(100.0, index=calendar_rows[:17])
+    monkeypatch.setattr(holding_sim, "index_levels", lambda start, end: levels)
+
+    text = run(*RESEARCH, "--end", "2016-01-29")
+
+    assert "TAIEX_TR has no close on 3 of 20 days; carried over" in text
 
 
 @pytest.mark.parametrize(

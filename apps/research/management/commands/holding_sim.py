@@ -1,4 +1,4 @@
-"""Read-only holding book on cached research scores or stored predictions (H0 rules)."""
+"""Read-only holding book on cached scores or stored predictions (holding-shadow-prereg.md)."""
 
 from argparse import ArgumentParser
 from dataclasses import dataclass
@@ -23,6 +23,8 @@ from apps.research.holding import (
     simulate,
 )
 from apps.research.holding_inputs import (
+    INDEX,
+    SHADOW_START,
     HoldoutRuleError,
     cached_scores,
     check_holdout_rule,
@@ -72,6 +74,8 @@ def research_inputs(options: dict[str, Any], rule: Rule) -> Inputs:
     if not run_key:
         raise CommandError("--run-key is required for the research source")
     folds = fold_range(options["folds"])
+    if options["list"]:
+        raise CommandError("--list reads stored predictions; use --source prediction")
     until = required_date(options["until"], "--until")
     end = required_date(options["end"], "--end")
     if end <= until:
@@ -88,7 +92,9 @@ def research_inputs(options: dict[str, Any], rule: Rule) -> Inputs:
 
 def prediction_inputs(options: dict[str, Any]) -> Inputs:
     """Stored rank 5-day predictions from --start, valued through the latest price day."""
-    start = required_date(options["start"], "--start")
+    start = as_date(options["start"], "--start") or SHADOW_START
+    if start < SHADOW_START:
+        raise CommandError(f"the shadow book starts on its first signal day {SHADOW_START}")
     latest = latest_price_date()
     if latest is None:
         raise CommandError("daily_price is empty")
@@ -115,7 +121,6 @@ def last_list(market: Market, book: Book, rule: Rule) -> pd.DataFrame:
         book.held,
         market.score[last],
         market.in_universe[last],
-        market.blocked[last],
         market.stocks,
         rule,
     )
@@ -163,19 +168,14 @@ class Command(BaseCommand):
         label: str,
         options: dict[str, Any],
     ) -> None:
-        if len(book.daily) < 2:
-            raise CommandError("the book never traded; there is nothing to summarise")
-        pd.set_option("display.width", 250)
         days = market.days
-        universe = universe_returns(market)
-        index = index_returns(index_levels(days[0], days[-1]), days)
-        row = summarise(book.daily, days, universe, index)
-        table = pd.DataFrame([row], index=[rule.name], columns=SUMMARY_COLUMNS).round(2)
         self.stdout.write(f"{rule.name} {settle.value}, {label}, valued {days[0]}..{days[-1]}")
-        self.stdout.write(table.to_string())
-        self.stdout.write(counts(book))
-        if options["by_year"]:
-            self.stdout.write(by_year(book.daily, days, universe, index).round(2).to_string())
+        if len(book.daily) >= 2:
+            self._summary(market, book, rule, options["by_year"])
+        elif not options["list"]:
+            raise CommandError("the book never traded; there is nothing to summarise")
+        else:
+            self.stdout.write("no trade yet; the first signal day is the last day")
         if options["list"]:
             listed = last_list(market, book, rule)
             if listed.empty:
@@ -183,3 +183,19 @@ class Command(BaseCommand):
             else:
                 self.stdout.write(f"list of {days[-1]}:")
                 self.stdout.write(listed.to_string(index=False))
+
+    def _summary(self, market: Market, book: Book, rule: Rule, years: bool) -> None:
+        pd.set_option("display.width", 250)
+        days = market.days
+        levels = index_levels(days[0], days[-1])
+        absent = len(set(days) - set(levels.index))
+        if absent:
+            self.stdout.write(f"{INDEX} has no close on {absent} of {len(days)} days; carried over")
+        universe = universe_returns(market)
+        index = index_returns(levels, days)
+        row = summarise(book.daily, days, universe, index)
+        table = pd.DataFrame([row], index=[rule.name], columns=SUMMARY_COLUMNS).round(2)
+        self.stdout.write(table.to_string())
+        self.stdout.write(counts(book))
+        if years:
+            self.stdout.write(by_year(book.daily, days, universe, index).round(2).to_string())
