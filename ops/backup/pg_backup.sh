@@ -35,7 +35,7 @@ elapsed() {
 alert() {
     if docker compose exec -T -e "PG_BACKUP_CONTEXT=$1" worker \
         python manage.py shell -c "$alert_code" >> "$log_file" 2>&1; then
-        log "alert sent"
+        log "alert handed to the worker; a webhook miss is logged above"
     else
         log "alert not sent: the worker did not run the report"
     fi
@@ -65,11 +65,11 @@ prune() {
         done
 }
 
+cd -- "$repo" || fail repo 1
 if ! mkdir -p -- "$backup_dir"; then
     log_file=/dev/null
     fail folder 1
 fi
-cd -- "$repo" || fail repo 1
 case $keep in
     '' | *[!0-9]*) fail keep_count 1 ;;
 esac
