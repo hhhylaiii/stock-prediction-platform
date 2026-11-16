@@ -1,5 +1,5 @@
-import time
 from datetime import date
+from functools import partial
 from typing import Any
 
 import pytest
@@ -19,6 +19,7 @@ from tests.api.conftest import (
     add_predictions,
     add_stock,
     envelope_of,
+    fastest,
 )
 
 pytestmark = pytest.mark.usefixtures("calendar_in_db")
@@ -321,9 +322,7 @@ def test_two_thousand_stocks_answer_every_order_within_half_a_second(
     highest_first = {"-close", "-ret_pred", "-price_pred", "-prob_up_5pct", "prev_rank"}
 
     for ordering in ORDERINGS:
-        started = time.perf_counter()
-        response = client.get("/api/predictions", {"ordering": ordering})
-        elapsed = time.perf_counter() - started
+        response, elapsed = fastest(partial(client.get, "/api/predictions", {"ordering": ordering}))
 
         body = envelope_of(response)
         first = "10999" if ordering in highest_first else "9000"

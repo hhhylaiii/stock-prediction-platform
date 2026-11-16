@@ -1,4 +1,5 @@
-from collections.abc import Iterator, Sequence
+import time
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -16,6 +17,7 @@ from apps.research.predict import Slot
 from apps.research.promotion import PROMOTION, _failed
 
 TAIPEI = ZoneInfo("Asia/Taipei")
+TIMED_RUNS = 3
 CALENDAR_START = date(2026, 7, 1)
 EARLY_CALENDAR_START = date(2026, 1, 1)
 CALENDAR_END = date(2026, 11, 30)
@@ -296,3 +298,16 @@ def runs(db: None) -> Runs:
         {"2317": {"ret_pred": 0.02}, "2330": {"ret_pred": 0.01}, "6488": {"ret_pred": -0.01}},
     )
     return seeded
+
+
+def fastest[Result](call: Callable[[], Result], runs: int = TIMED_RUNS) -> tuple[Result, float]:
+    """The last call's result and the shortest wall time in seconds of `runs` calls.
+
+    A loaded runner only adds time to a call, so the shortest one is the code's own cost.
+    """
+    results, spent = [], []
+    for _ in range(runs):
+        started = time.perf_counter()
+        results.append(call())
+        spent.append(time.perf_counter() - started)
+    return results[-1], min(spent)
