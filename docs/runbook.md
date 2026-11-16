@@ -77,6 +77,8 @@ docker compose logs -f worker
 | 週六 10:00 | `etl.weekly_holding` | 集保股權分散表，抓最近一個已結束的週（週一才醒來也是抓上週），日期用那週最後一個交易日；漏跑時由週六之後第一個交易日（週六本身是交易日就是當天）的 `etl_runs` 列出 | — |
 | 每月 15 日 10:00 | `etl.business_signal` | data.gov.tw 景氣燈號；晚跑時 run 記在當月的排程日；漏跑時由排程日當天或之後第一個交易日的 `etl_runs` 列出 | M 月的資料在 M+2 月 15 日寫入，並以那天為 announce_date；國發會約每月 27 日發布上月，年假會延後 |
 
+表上都是 worker 裡的排程。主機的 launchd 另外每天 03:00 備份資料庫，見下方「例行備份」。
+
 ### 研究閘門
 
 研究層 23:00、06:00 的任務要先確認 `apps.etl.tasks.ready_for_research(day)`：`etl_complete(day)` 且 `should_run_prediction(day)`。
@@ -865,6 +867,7 @@ info 的列不送，唯一例外是 `calendar_reach` 在延伸成功、或級別
 - 什麼會發：
   - Celery 判定失敗的任務：沒被接住的例外，重試用完之後才算；worker 子行程被殺或超時也算。
   - 任務自己接住、照常結束的非預期例外，Celery 看到的是成功，所以由程式自己報：`apps/etl/tasks.py` 的 `_failed`（例如景氣燈號在日曆用完那天、或程式錯誤）、15:10 補抓裡某個資料集的步驟（`apps/etl/catchup.py` 的 `_failure`）、15:10 的交易日曆延伸（`apps/etl/calendar_upkeep.py` 的 `keep_up`）。這幾處的 `context` 是資料集或步驟的標籤，不是參數。手動跑 `manage.py catchup` 遇到非來源錯誤時也會發，任務名稱是 `etl`。
+  - 主機每天 03:00 的資料庫備份失敗，任務名稱是 `ops.pg_backup`，見「例行備份」。
 - 什麼不發：重試中的任務；來源自己的錯誤（還沒公布、連不上、格式改變、被限流），這些照舊由 22:50 的 `etl_runs` 列出；研究排程（23:00、06:00）遇到日期超出日曆時自己寫一列 warning 就正常結束（見「交易日曆延伸」最後一小節），不算任務失敗。
 - 去重：同一個任務名稱、同一天、同一種例外類別只發第一次，之後只累計。資料庫的 `OperationalError` 與 `InterfaceError` 不分任務、不分類別，整天合成一則，`text` 會寫 `database error`、第一個撞到的任務，以及 `one alert a day covers every task`；這兩種類別也包含鎖死、連線數用完這類資料庫還活著的錯誤。webhook 沒送成功（逾時、非 2xx）的那一則不算發過，下一次失敗會再送：webhook 掛著不回的期間，每次失敗都會再試一次、各等到 `ALERT_TIMEOUT`（預設 10 秒），15:10 的補抓遇到共用的程式錯誤時最多晚幾分鐘收尾；重送的那一則 `first_at` 是送出那一次的時間，當天第一次的時間看 `data_quality_log` 那一列。去重記在 Redis（36 小時過期），預設就是 broker，不用設定；Redis 連不上就每次都發。要另指一個 Redis 時才在 `.env` 設 `TASK_ALERT_REDIS_URL`：`.env` 會整份帶進容器，位址要寫容器裡連得到的服務名（例如 `redis://redis:6379/0`），寫 `localhost` 會連到容器自己、等於沒有去重；設成空字串是關掉去重。
 - 內容只有例外的類別名稱，不含訊息與 traceback（別人的錯誤訊息可能帶網址或主機路徑）；唯一例外是交易日曆的錯誤，訊息是日期範圍。`text` 是任務名稱、類別（日曆錯誤加訊息）與 `context`，只顯示 `text` 的管道也看得到是哪個批次或資料集。細節看 worker 的 log。
@@ -982,3 +985,66 @@ launchctl load ~/Library/LaunchAgents/tw.stock-prediction-platform.caffeinate-mo
 - launchd 不知道交易日：週末補行交易日當天要手動執行一次 `caffeinate -i -t 39600`，隔天清晨再執行 `caffeinate -i -t 5400`。
 - 想讓 Mac 從睡眠中自己醒來，可以加 `sudo pmset repeat wakeorpoweron MTWRFS 05:10:00`（只能設一組時間）。
 - 移除：`launchctl unload ~/Library/LaunchAgents/tw.stock-prediction-platform.caffeinate-*.plist` 後刪掉檔案。
+
+## 例行備份
+
+主機的 launchd 每天 03:00 跑 `ops/backup/pg_backup.sh`，把整個資料庫 `pg_dump -Fc` 成一個檔，放在 `~/Backups/stock-prediction-platform/`，留最近 7 份。
+
+- 時段：在 22:50 品質檢查、23:00 研究鏈之後，05:30 美股收盤、06:00 研究鏈之前，碰不到每月重訓（06:00 起）。`pg_dump` 只拿 ACCESS SHARE 鎖，不擋 ETL 與研究的寫入；被擋的只有改表結構的動作（migration），部署不要排在 03:00 前後。
+- 連線：從 repo 根目錄 `docker compose exec -T db` 跑 `pg_dump`，帳號與庫名在 db 容器裡讀 `POSTGRES_USER`、`POSTGRES_DB`。主機上不經手連線字串或密碼，也不讀 `.env`。
+- 寫檔：先寫成同目錄的 `.pg-<日期>-<時間>.dump.partial`；`pg_dump` 結束碼是 0、檔案也大於 0 bytes，才改名成 `pg-YYYYmmdd-HHMMSS.dump`。
+- 保留：成功之後依檔名只留最新的 7 份 `pg-*.dump`，目錄裡的其他檔案不動。失敗時不刪任何舊檔，只刪這次的暫存檔，以 1 結束。
+- log：`~/Backups/stock-prediction-platform/pg_backup.log`。每次先寫 `start`；成功寫 `end ok file=… bytes=… seconds=…`，失敗寫 `failed step=… status=… seconds=…`。`pg_dump` 自己的錯誤訊息也只在這裡。
+- 告警：失敗時透過 worker 裡既有的任務失敗告警發一則（見「告警」的「任務失敗」），`text` 是 `task failed: ops.pg_backup (PgBackupFailed) step=pg_dump status=1 seconds=42`，同一天只發一次。告警程式另外盡力記當天那一列 `task_failure`（warning，會算進頁首的警告數，不擋研究閘門）。送出去的只有步驟、結束碼、秒數，不含路徑與錯誤訊息。
+- `step` 的意思：`folder` 建不了備份目錄，`repo` 進不了 repo 目錄，`keep_count` 是 `PG_BACKUP_KEEP` 不是正整數，`pg_dump` 是 `pg_dump` 或 `docker compose exec` 失敗（含 Docker 沒開），`empty_dump` 是結束碼為 0 但檔案是空的，`rename` 是改名失敗，`signal` 是被中止（例如關機）。
+- 可調：`PG_BACKUP_DIR`（預設 `~/Backups/stock-prediction-platform`）、`PG_BACKUP_KEEP`（預設 7）。
+
+### 安裝
+
+腳本要放在正式容器所在的那份 checkout：`docker compose` 用目錄名當專案名，在別的 worktree 跑，會找不到正式的 db 容器而失敗。plist 寫的是 `$HOME/Project/stock-prediction-platform`，checkout 在別處就改 plist 複本裡那一行。
+
+```bash
+cp ops/launchd/tw.stock-prediction-platform.pg-backup.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/tw.stock-prediction-platform.pg-backup.plist
+```
+
+- 第一次在 repo 根目錄手動跑一次 `sh ops/backup/pg_backup.sh`，記下秒數與檔案大小，確認 7 份放得下。
+- 移除：`launchctl unload ~/Library/LaunchAgents/tw.stock-prediction-platform.pg-backup.plist` 後刪掉檔案；已經寫好的備份檔不會被動到。
+
+### 看最近一次有沒有成功
+
+```bash
+d=~/Backups/stock-prediction-platform; ls -l "$d" | grep " pg-$(date +%Y%m%d)-.*\.dump$" && tail -n 1 "$d/pg_backup.log" || { echo "今天沒有備份檔"; tail -n 5 "$d/pg_backup.log"; }
+```
+
+- 03:00 之後才有當天的檔。印出「今天沒有備份檔」時看後面的 log：有 `failed` 是跑了但失敗；最後一列是前一天的 `end ok`，表示今天根本沒跑（排程沒載入、Mac 關著，或 03:00 睡著還沒醒）。
+- launchd 有沒有跑、結束碼是多少：`launchctl print gui/$(id -u)/tw.stock-prediction-platform.pg-backup | grep -E 'state|last exit code'`。
+- 檔案讀不讀得懂（只讀目錄，不還原資料）：`docker compose exec -T db pg_restore --list < ~/Backups/stock-prediction-platform/pg-YYYYmmdd-HHMMSS.dump | head`。
+
+### 還原到一次性容器（不碰正式的 db）
+
+```bash
+docker run -d --name twp-restore -e POSTGRES_HOST_AUTH_METHOD=trust \
+  -v "$HOME/Backups/stock-prediction-platform:/backup:ro" postgres:16
+docker exec twp-restore sh -c 'until pg_isready -h 127.0.0.1 -U postgres; do sleep 1; done'
+docker exec twp-restore createdb -U postgres twp
+docker exec twp-restore pg_restore -U postgres -d twp --no-owner --no-privileges -j 4 /backup/pg-YYYYmmdd-HHMMSS.dump
+docker exec twp-restore psql -U postgres -d twp -c "select max(date), count(*) from daily_price"
+docker rm -f -v twp-restore
+```
+
+- 這個容器不開對外的 port，只能用 `docker exec` 進去；備份目錄唯讀掛載。資料放在容器自己的匿名 volume，`docker rm -f -v` 會一起刪掉。要有大約和正式庫一樣大的空間（15 GB 起）。
+- `pg_isready` 要帶 `-h 127.0.0.1`：映像第一次初始化時會先起一個只聽 socket 的暫時 server，只看 socket 會在它重開前就判成好了。
+- `--no-owner --no-privileges` 讓表都屬於 `postgres`，不用先建 `twp` 這個角色。
+- 拿備份蓋回正式的 db 不在這份流程裡，要做之前先問使用者。
+
+### 限制
+
+- 備份和資料庫在同一台 Mac、同一顆硬碟：防得了誤刪、資料寫壞、升級失敗，防不了硬碟壞掉或整台機器遺失。要防這種，得另外把檔案複製到外接碟或別台機器（目前沒做）。
+- Mac 關機或睡著時不會跑。睡著時 launchd 在醒來後補跑一次，錯過幾次都只補一次，可能撞上 05:15 之後的排程，只會多吃 IO；關機錯過的不補。
+- 排程本身沒跑（plist 沒載入、被移除、Mac 關著）不會有任何告警。
+- Docker Desktop 或 worker 沒在跑時告警發不出去，唯一的痕跡是 log 裡的 `alert not sent` 和備份目錄裡沒有當天的檔，用上面那行檢查。
+- 週末失敗時，`task_failure` 那一列的日期落在非交易日，品質頁與 `/api/status` 看不到，Discord 照發。
+- 被 `kill -9` 或斷電時，暫存檔 `.pg-*.dump.partial` 會留下，之後不會自動清，看到就手動刪。正常關機或 `launchctl unload` 送的是 SIGTERM，腳本會在手上的指令結束後刪掉暫存檔、記成 `signal` 失敗（關機時告警多半發不出去）。
+- 備份檔是整個資料庫的完整內容（含 raw 層），不要放進公開或雲端同步分享的資料夾。
+- 未驗：真資料上一次要跑多久、檔案多大，第一次實跑時記下來補在這裡。
