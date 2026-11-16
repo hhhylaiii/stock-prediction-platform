@@ -339,6 +339,35 @@ def test_a_day_without_any_score_trades_nothing() -> None:
     assert (book.daily["held"].iloc[1:] == 1).all()
 
 
+def test_a_day_without_any_score_still_values_the_book_at_its_closes() -> None:
+    prices = flat(6, 2)
+    prices[3:, 0] = 11.0
+    score = ranked(6, [2, 1])
+    score[2] = NAN
+
+    book = simulate(market(prices, prices, score), Rule.parse("H70", 1), NO_COSTS)
+
+    values = book.daily.set_index("date")["value"]
+    assert values[DAYS[3]] == pytest.approx(1.1)
+    assert values[DAYS[5]] == pytest.approx(1.1)
+
+
+def test_a_day_with_scores_but_no_universe_name_trades_and_lists_nothing() -> None:
+    prices = flat(6, 2)
+    universe = np.ones((6, 2), dtype=bool)
+    universe[2] = False
+    grid = market(prices, prices, ranked(6, [2, 1]), in_universe=universe)
+
+    book = simulate(grid, Rule.parse("H70", 1), NO_COSTS)
+
+    assert book.actions["action"].eq(SELL).sum() == 0
+    assert (book.daily["held"].iloc[1:] == 1).all()
+    listed = order_list(
+        np.array([True, False]), grid.score[2], universe[2], grid.stocks, Rule.parse("H70", 1)
+    )
+    assert listed.empty
+
+
 def test_a_holding_without_a_score_on_a_scored_day_leaves() -> None:
     prices = flat(6, 2)
     score = ranked(6, [2, 1])
