@@ -5,7 +5,7 @@ from datetime import date
 import numpy as np
 import pandas as pd
 
-from apps.research.holding import Market, Matrix
+from apps.research.holding import Market, Mask, Matrix
 from apps.research.metrics.stats import newey_west_t
 
 MONTH_DAYS = 21
@@ -30,16 +30,21 @@ SUMMARY_COLUMNS = [
 
 def universe_returns(market: Market) -> Matrix:
     """Mean close-to-close return of the day before's universe; carried closes, 0 when empty."""
-    marks = market.marks
+    out = np.zeros(len(market.days))
+    out[1:] = mean_returns(market.marks, market.in_universe)
+    return out
+
+
+def mean_returns(marks: Matrix, in_universe: Mask) -> Matrix:
+    """Each next row's mean return over the row's universe stocks marked on both; 0 for none."""
     before, after = marks[:-1], marks[1:]
-    counted = market.in_universe[:-1] & np.isfinite(before) & np.isfinite(after)
+    counted = in_universe[:-1] & np.isfinite(before) & np.isfinite(after)
     change = np.zeros(after.shape)
     np.divide(after, before, out=change, where=counted & (before > 0))
     sums = np.where(counted, change - 1, 0.0).sum(axis=1)
     counts = counted.sum(axis=1)
-    out = np.zeros(len(market.days))
-    out[1:] = np.divide(sums, counts, out=np.zeros(len(sums)), where=counts > 0)
-    return out
+    means: Matrix = np.divide(sums, counts, out=np.zeros(len(sums)), where=counts > 0)
+    return means
 
 
 def index_returns(levels: pd.Series, days: list[date]) -> Matrix:

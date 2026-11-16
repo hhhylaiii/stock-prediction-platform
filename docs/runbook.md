@@ -73,7 +73,7 @@ docker compose logs -f worker
 | 22:50 | `etl.check_quality` | 五項品質檢查，另寫一列 `etl_runs`，列出當天沒完成的 dataset，以及這晚負責的排程工作哪些沒有成功的 run，一起送告警（見下方研究閘門） | — |
 | 23:00 | `research.evening` | 研究閘門通過後依序重算最近 60 個交易日的特徵、最近 81 個交易日的 label，見下方「研究排程」 | `RESEARCH_SCHEDULE_ENABLED` 打開才跑 |
 | 05:30 | `etl.us_close` | 前一個台股交易日的費半、TSM ADR、美元台幣，每個交易日只跑一次，寫一列 `data_quality_log`（`us_close`）：費半、TSM 早於那天、或美元台幣早於再前一個交易日，就是 warning | 美元台幣在倫敦 23:59 才收盤，05:30 本來就只有前一天 |
-| 06:00 | `research.morning` | 前一個交易日 D：等 D 的 `us_close`，再依序重算 D 的特徵、`predict`、`monitor`，見下方「研究排程」 | 同上 |
+| 06:00 | `research.morning` | 前一個交易日 D：等 D 的 `us_close`，再依序重算 D 的特徵、`predict`、`monitor`，最後記影子帳本，見下方「研究排程」「影子帳本」 | 同上 |
 | 週六 10:00 | `etl.weekly_holding` | 集保股權分散表，抓最近一個已結束的週（週一才醒來也是抓上週），日期用那週最後一個交易日；漏跑時由週六之後第一個交易日（週六本身是交易日就是當天）的 `etl_runs` 列出 | — |
 | 每月 15 日 10:00 | `etl.business_signal` | data.gov.tw 景氣燈號；晚跑時 run 記在當月的排程日；漏跑時由排程日當天或之後第一個交易日的 `etl_runs` 列出 | M 月的資料在 M+2 月 15 日寫入，並以那天為 announce_date；國發會約每月 27 日發布上月，年假會延後 |
 
@@ -95,7 +95,7 @@ docker compose logs -f worker
 `.env` 設 `RESEARCH_SCHEDULE_ENABLED=true` 才跑；預設關閉，`research.evening`、`research.morning`、`research.retrain` 觸發了也直接結束（正式 run 上線後再打開）。
 
 - 23:00（`RESEARCH_AT_EVENING`，要晚於 22:50 的品質檢查）：當天是交易日、`ready_for_research` 通過時，用一條 Celery chain 依序跑 `build_features --end D --recent 60`、`build_labels --end D --recent 81`（SPEC §6 步驟 6：每天重算最近 60 個交易日，catch-up 回補、來源更正與還原因子改寫都由這裡補上；label 多 21 天，涵蓋前看窗口跨進這 60 天的那些）。閘門沒過就 30 分鐘後重試，最多 6 次（同 ETL），用完寫 warning；重試帶著 D，過了午夜仍是 D 的工作。
-- 06:00（`RESEARCH_AT_MORNING`，要晚於 05:30 的 `us_close`）：D 是今天之前最後一個交易日，閘門沒過就不預測、寫 warning。D 的 `us_close` 還沒寫就 5 分鐘後再看，最多 6 次（`RESEARCH_US_CLOSE_COUNTDOWN`、`RESEARCH_US_CLOSE_RETRIES`）；等不到照跑，市場特徵沿用前一個美股收盤，完成紀錄記 warning。chain 依序跑：`build_features --date D`（只算 D）→ 特徵覆蓋率檢查（見「線上特徵覆蓋率檢查」）→ `predict` → `monitor`，前一步成功才跑下一步；D 的 23:00 沒有成功時，改成補上 23:00 的兩步：先跑 81 天 label，`monitor` 之後再跑 60 天特徵（預測不用等它，也不受它失敗影響）。
+- 06:00（`RESEARCH_AT_MORNING`，要晚於 05:30 的 `us_close`）：D 是今天之前最後一個交易日，閘門沒過就不預測、寫 warning。D 的 `us_close` 還沒寫就 5 分鐘後再看，最多 6 次（`RESEARCH_US_CLOSE_COUNTDOWN`、`RESEARCH_US_CLOSE_RETRIES`）；等不到照跑，市場特徵沿用前一個美股收盤，完成紀錄記 warning。chain 依序跑：`build_features --date D`（只算 D）→ 特徵覆蓋率檢查（見「線上特徵覆蓋率檢查」）→ `predict` → `monitor` →（有待換模的 build 時）`promote` → `shadow`（見「影子帳本」），前一步成功才跑下一步；D 的 23:00 沒有成功時，改成補上 23:00 的兩步：先跑 81 天 label，`monitor` 之後再跑 60 天特徵（預測不用等它，也不受它失敗影響）。
 - 每條 chain 跑完寫一列 `data_quality_log`（`research_evening`、`research_morning`，`date` 是 D）：成功是 info，`detail.steps` 依序列出每一步的輸出；有一步失敗是 warning，`detail` 寫哪一步、錯誤與已完成的步驟，後面的步驟不跑，並送告警。D 已經有 info 那列就不重跑，所以週六早上跑過週五後，週日、週一早上不會重複；失敗的 D 會在下一個早上（還是同一個 D 時，例如週末）重跑。
 - 每月重訓：每月前 5 個交易日裡，第一條在 06:00 到 09:00（`RESEARCH_AT_MORNING` 到 `RESEARCH_RETRAIN_BEFORE`）之間跑完的早上 chain（D，info 或缺美股收盤的 warning 都算）之後排一個 `research.retrain(D)`；不在這段時間跑完的（例如中午補跑、深夜才醒來補觸發）留給下一個早上，以免重訓壓到 15:10 的 ETL 或隔天 06:00 的預測。`retrain` 每次開始（含記憶體不足後的重試）也只在這段時間內動工，否則不寫列直接結束，留給下一個早上重排。每月一次：那個月已有 `research_retrain` 列就不排，排重了也不會重跑。前 5 個交易日都沒排成時，第 6 個交易日起第一條跑完的 chain 寫一列 warning（三個 scope 都是 `no morning chain finished before the cutoff ...`）並告警，當月不再自動重訓，要的話手動 `build_run` 再 `promote`。月中第一次打開開關時也會記這一列。
   - 開始前看可用記憶體（worker 容器讀 `/proc/meminfo`）：低於 `RESEARCH_RETRAIN_MIN_FREE`（50%）就 30 分鐘後再看，最多 6 次（`RESEARCH_RETRAIN_COUNTDOWN`、`RESEARCH_RETRAIN_RETRIES`），用完記 warning、全部拒建；重試到 09:00 之後就照上一條停下。讀不到就照跑。
@@ -131,6 +131,23 @@ docker compose logs -f worker
 - 打開開關前，先在真資料上手動跑一次 `build_run`、一次 `build_features --recent 60`，量時間與記憶體（上面手動操作要避開的時段照量到的時間調整：23:00 的閘門重試到 02:00 才開 chain 時，60 天特徵可能跑過 02:30）；重訓一旦跑過午夜，23:00 的 chain 與 ETL 的批次會因為早於排定時間被略過。
 - 打開開關時延長 `ops/launchd` 的 caffeinate：傍晚那次（15:00 起 `-t 39600`，到 02:00）改成 `-t 46800`（到 04:00），清晨那次（05:15 起 `-t 5400`）改成 `-t 9900`（到 08:00）。23:00 的閘門最晚重試到 02:00 才開始 chain，06:00 的 chain 最多等美股收盤 30 分鐘，每一步搶不到鎖還能再等 60 分鐘。
 - 上線前的日子要用 `predict --date D` 回填時（Phase 5 demo、驗收），先照「每日除權息、減資、面額變更」用 `fetch --source twse|tpex --dataset dividend_event` 補那段日子，否則研究閘門不會過。
+
+### 影子帳本
+
+這是研究紀錄，不是投資建議；規則見 `docs/reports/phase4/holding-shadow-prereg.md`。頁面與 API 都不讀這兩張表。
+
+- 06:00 的 chain 最後跑 `shadow`，排在換模之後、還原因子重建之前。每本帳依序先結算前一個訊號日的成交（`holding_book_day`、`holding_book_action` 的 `fill`），再寫 D 的名單（`list`）。帳本列在 `apps/research/shadow.py` 的 `BOOKS`，目前只有 `H70N30-C0`，從 2026-11-16 起。成交要等成交日的價格到齊、訊號日的 5 日 `untradable_t1` 也都結算；等不到就停在那天，下一天的名單也不寫，由下一個早上接著補。
+- 兩張表只新增：同一天重跑不會多寫，也不會改已記的列。名單在成交日 09:00 之後才寫的、成交在成交日的下一個交易日 09:00 之後才寫的，都標 `backfilled`；所以一次補好幾天時，09:00 前跑完的早上寫的最新一份名單和最新一筆成交不標。fill 的 `status` 是 `traded` 代表照名單結算（當天有分數），不代表一定有買賣；有沒有成交看 `paid`、`traded` 兩欄。
+- 每天寫一列 `research_shadow`（`date` 是 D）。成功是 info，`detail.books` 列出各帳本這次寫了哪些名單、哪些成交、停在哪天。遇到下列情況時記在 `detail.notes`，那天改記 warning 並告警：
+  - `predictions_rewritten`：名單寫好之後、成交之前，那天的預測被改過；成交照原名單算。成交之後才改的（例如手動 `predict --date` 或從較早日期 `promote`）不會記，用 `holding_sim --source prediction` 對帳時以名單列為準。
+  - `in_universe_without_score`：universe 裡有股票沒有分數（正常不會發生）；名單照寫。
+  - `trade_date_moved`：名單寫好之後，原本的成交日被日曆改成休市；成交記在日曆上實際的下一個交易日。
+  - `no_taiex_tr`：成交日或前一天的 `TAIEX_TR` 收盤還沒進來，那天的 `index_return` 記成 NULL。整理報表時，大盤報酬直接從 `index_daily` 重算，帳本列不回頭補。
+- 失敗時（任何錯誤，或整步超過 60 秒）整段回滾，這次一列都不寫，記一列 `research_shadow` warning 並告警，`detail` 帶出 `book`、卡住的 `signal_date` 與 `error`。chain 照常收尾，當天的預測與重訓不受影響。下一個早上從同一天重試，直到修好；問題沒解決前，每天告警一次。
+- 研究鎖被別的指令佔住時，`shadow` 不等也不重試：直接跳過，記一列 `research_shadow` warning（`ResearchBusyError`），chain 照常收尾。跳過那天的名單由下一個早上補寫，會標 `backfilled`。
+- 所有帳本在同一個 transaction 裡推進：任何一本卡住，其他本這次也一列都不寫。
+- 已記的列有錯時不改、不刪：把 `BOOKS` 裡舊的代號換成新的代號（例如 `H70N30-C0` 換成 `H70N30-C0.2`），部署後由下一個早上從起點重新補記，除了當天寫的最新名單與最新成交，其餘都標 `backfilled`。舊帳本的列留在表裡，不再推進；不要讓兩個代號同時留在 `BOOKS`，否則卡住的舊帳本會讓新帳本也寫不進去。日曆把兩個已結算日子之間的某天改成開市時，帳本會停在那天並告警（`the calendar opened a day under the book`），同樣照這條處理。
+- `shadow` 排在完成紀錄之前，所以算進重訓「06:00 到 09:00 之間跑完」的時間；最壞情況會多約 65 秒（60 秒預算加上計算，不等研究鎖）。
 
 ### 線上特徵覆蓋率檢查
 
@@ -957,6 +974,8 @@ uv run python manage.py monitor --date <受影響的到期日，逐日>
 ```
 
 D 離今天不超過 60 個交易日時，每晚的鏈會自己改正特徵（label 是 81 個交易日），仍建議手動跑一次並確認筆數。
+
+影子帳本不用重建：成交日被改成休市時，成交自動改記到下一個交易日（`trade_date_moved`）；兩個已結算日子之間多出開市日時，帳本會停下並告警，要開新的帳本代號（見「影子帳本」）。
 
 ### 日曆不夠長時研究層留下的紀錄
 

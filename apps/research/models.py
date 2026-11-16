@@ -522,3 +522,131 @@ class BacktestMetric(models.Model):
 
     def __str__(self) -> str:
         return f"{self.run_key} {self.model_type} {self.metric} {self.grain} {self.period_start}"
+
+
+class BookPhase(models.TextChoices):
+    LIST = "list", "名單"
+    FILL = "fill", "成交"
+
+
+class BookStatus(models.TextChoices):
+    LISTED = "listed", "有名單"
+    NO_PREDICTION = "no_prediction", "當天無預測"
+    TRADED = "traded", "照名單結算"
+    IDLE = "idle", "只估值"
+
+
+class BookAction(models.TextChoices):
+    SELL = "sell", "賣出"
+    KEEP = "keep", "續抱"
+    BUY = "buy", "買進"
+    BACKUP = "backup", "備位"
+    SETTLE = "settle", "結算"
+    STUCK = "stuck", "賣不掉"
+
+
+LIST_STATUSES = [BookStatus.LISTED.value, BookStatus.NO_PREDICTION.value]
+FILL_STATUSES = [BookStatus.TRADED.value, BookStatus.IDLE.value]
+
+
+class HoldingBookDay(models.Model):
+    """A shadow book's list before a trade day's open or its fill after the close; never edited.
+
+    A wrong book is corrected by a new book name filled again from its start; the old rows stay.
+    """
+
+    pk = models.CompositePrimaryKey("book", "signal_date", "phase")
+    book = models.CharField(max_length=32)
+    signal_date = models.DateField()
+    phase = models.CharField(max_length=4, choices=BookPhase.choices)
+    trade_date = models.DateField()
+    status = models.CharField(max_length=16, choices=BookStatus.choices)
+    run_id = models.CharField(max_length=128, blank=True, default="")
+    universe = models.JSONField(default=list)
+    held_before = models.PositiveIntegerField(null=True, blank=True)
+    sells = models.PositiveIntegerField(null=True, blank=True)
+    buys = models.PositiveIntegerField(null=True, blank=True)
+    backups = models.PositiveIntegerField(null=True, blank=True)
+    value = models.FloatField(null=True, blank=True)
+    cash = models.FloatField(null=True, blank=True)
+    paid = models.FloatField(null=True, blank=True)
+    traded = models.FloatField(null=True, blank=True)
+    held = models.PositiveIntegerField(null=True, blank=True)
+    universe_return = models.FloatField(null=True, blank=True)
+    index_return = models.FloatField(null=True, blank=True)
+    backfilled = models.BooleanField(default=False)
+    recorded_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        db_table = "holding_book_day"
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(phase=BookPhase.LIST, status__in=LIST_STATUSES)
+                | models.Q(phase=BookPhase.FILL, status__in=FILL_STATUSES),
+                name="holding_book_day_status_of_phase",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(trade_date__gt=models.F("signal_date")),
+                name="holding_book_day_trades_after_signal",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(phase=BookPhase.LIST, held_before__isnull=False)
+                | models.Q(
+                    phase=BookPhase.FILL,
+                    value__isnull=False,
+                    cash__isnull=False,
+                    paid__isnull=False,
+                    traded__isnull=False,
+                    held__isnull=False,
+                ),
+                name="holding_book_day_phase_fields",
+            ),
+            models.CheckConstraint(
+                condition=finite(
+                    "value", "cash", "paid", "traded", "universe_return", "index_return"
+                ),
+                name="holding_book_day_finite",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.book} {self.signal_date} {self.phase}"
+
+
+class HoldingBookAction(models.Model):
+    """One stock's line of a shadow book's list or fill; fill values are at the trade close."""
+
+    pk = models.CompositePrimaryKey("book", "signal_date", "stock_id", "phase")
+    book = models.CharField(max_length=32)
+    signal_date = models.DateField()
+    trade_date = models.DateField()
+    stock_id = models.CharField(max_length=10)
+    phase = models.CharField(max_length=4, choices=BookPhase.choices)
+    action = models.CharField(max_length=8, choices=BookAction.choices)
+    priority = models.PositiveIntegerField(default=0)
+    score = models.FloatField(null=True, blank=True)
+    pct = models.FloatField(null=True, blank=True)
+    run_id = models.CharField(max_length=128, blank=True, default="")
+    amount = models.FloatField(null=True, blank=True)
+    value = models.FloatField(null=True, blank=True)
+    cost = models.FloatField(null=True, blank=True)
+    limit_down_open = models.BooleanField(null=True, blank=True)
+    recorded_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        db_table = "holding_book_action"
+        indexes = [
+            models.Index(fields=["book", "trade_date", "phase"], name="holding_book_action_trade"),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                condition=finite("score", "pct", "amount", "value", "cost"),
+                name="holding_book_action_finite",
+            ),
+            models.CheckConstraint(
+                condition=unit_interval("pct"), name="holding_book_action_pct_unit"
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.book} {self.signal_date} {self.stock_id} {self.phase} {self.action}"

@@ -1,7 +1,7 @@
 """Inputs of the holding books: cached research scores or stored predictions, prices and flags."""
 
 from bisect import bisect_left
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from datetime import date
 
 import numpy as np
@@ -126,12 +126,18 @@ def _prices(calendar: TradingDays, days: list[date], stocks: list[str]) -> pd.Da
     return panel.assign(limit_down_open=opened_down)
 
 
-def load_market(scores: pd.DataFrame, end: date, calendar: TradingDays) -> Market:
-    """Grids of the scored stocks from the first signal day through end."""
+def load_market(
+    scores: pd.DataFrame,
+    end: date,
+    calendar: TradingDays,
+    start: date | None = None,
+    extra: Collection[str] = (),
+) -> Market:
+    """Grids of the scored and extra stocks from start, or the first signal day, through end."""
     if scores.empty:
         raise ValueError("there are no scores to hold")
-    days = list(calendar.between(scores["date"].min(), end))
-    stocks = sorted(set(scores["stock_id"]))
+    days = list(calendar.between(start or scores["date"].min(), end))
+    stocks = sorted(set(scores["stock_id"]) | set(extra))
     prices = _prices(calendar, days, stocks)
     return Market(
         days=days,

@@ -37,6 +37,7 @@ from apps.research.production import DESIGNS, build_run, shadow_key
 from apps.research.promotion import PROMOTION_CHECK, Promoted, first_day, promote
 from apps.research.resources import free_percent, peak_rss_mb
 from apps.research.runs import PRODUCTION
+from apps.research.shadow import SHADOW_CHECK, Outcome, busy, record_books
 
 logger = logging.getLogger(__name__)
 EVENING_CHECK = "research_evening"
@@ -170,6 +171,35 @@ def _promote(day: date) -> str:
     return "; ".join([*done, *(f"{key}: failed, see {PROMOTE_CHECK}" for key in failed)])
 
 
+def _shadow(day: date) -> str:
+    """The shadow books' rows; never raises, so it cannot hold up the finish or a retrain."""
+    try:
+        outcome = record_books(day)
+        if _kept(day, outcome):
+            return f"{outcome.summary}; kept the day's earlier {SHADOW_CHECK} row"
+        _record(day, SHADOW_CHECK, outcome.severity, outcome.detail)
+    except Exception as error:
+        logger.error("research shadow %s failed to record: %s", day, error)
+        return f"failed to record ({type(error).__name__}), see the worker log"
+    return outcome.summary
+
+
+def _skip_shadow(day: date, error: ResearchBusyError) -> str:
+    """A busy lock skips the shadow books at once, so the finish and a retrain never wait."""
+    outcome = busy(error)
+    try:
+        _record(day, SHADOW_CHECK, outcome.severity, outcome.detail)
+    except Exception as failure:
+        logger.error("research shadow %s failed to record: %s", day, failure)
+    return f"skipped, the research lock is busy; {outcome.summary}"
+
+
+def _kept(day: date, outcome: Outcome) -> bool:
+    """A rerun that wrote nothing and noted nothing leaves the day's first row, notes and all."""
+    quiet = not outcome.wrote and outcome.severity == Severity.INFO
+    return quiet and DataQualityLog.objects.filter(date=day, check_name=SHADOW_CHECK).exists()
+
+
 def _taken(since: date) -> dict[str, list[Any]]:
     """Every content a rebuild took each adj_factor note in at, by the note's pk."""
     rows = DataQualityLog.objects.filter(
@@ -282,6 +312,7 @@ STEPS: dict[str, Callable[[date], str]] = {
     "predict": _predict,
     "monitor": _monitor,
     "promote": _promote,
+    "shadow": _shadow,
 }
 
 
@@ -347,12 +378,17 @@ def _start(check: str, day: date, names: tuple[str, ...], extra: dict[str, str])
 
 @shared_task(bind=True, max_retries=None, name="research.step")
 def step(self: Task[Any, Any], done: list[Done], name: str, check: str, day: str) -> list[Done]:
-    """One chain step under the research lock; a busy lock retries, a failure stops the chain."""
+    """One chain step under the research lock; a busy lock retries, a failure stops the chain.
+
+    The shadow step never waits: a busy lock skips it.
+    """
     session = date.fromisoformat(day)
     try:
         with research_lock(f"{name} {day}"):
             summary = STEPS[name](session)
     except ResearchBusyError as error:
+        if name == "shadow":
+            return [*done, {"step": name, "result": _skip_shadow(session, error)}]
         if self.request.retries < settings.RESEARCH_LOCK_RETRIES:
             raise self.retry(exc=error, countdown=settings.RESEARCH_LOCK_COUNTDOWN) from error
         _failed(check, session, name, error, done)
@@ -571,6 +607,6 @@ def morning(self: Task[Any, Any], day: str | None = None) -> str:
     made_up = ("labels", *MORNING_STEPS, "recent_features")
     steps = MORNING_STEPS if _finished(session, EVENING_CHECK) else made_up
     last = ("promote",) if _pending(session) else ()
-    names = _with_rebuild((*steps, *last))
+    names = _with_rebuild((*steps, *last, "shadow"))
     _start(MORNING_CHECK, session, names, {} if landed else {"us_close": US_CLOSE_MISSING})
     return "started"

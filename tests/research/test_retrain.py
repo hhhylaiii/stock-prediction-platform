@@ -22,6 +22,7 @@ from tests.research.test_tasks import (
     TAIPEI,
     WEDNESDAY,
     Severity,
+    busy_lock,
     calendar_rows,
     fast,
     gate,
@@ -419,9 +420,26 @@ def test_a_morning_among_the_first_sessions_of_its_month_queues_its_retrain(
 
     tasks.morning.apply().get()
 
-    assert steps(ran) == ["features", "coverage", "predict", "monitor"]
+    assert steps(ran) == ["features", "coverage", "predict", "monitor", "shadow"]
     assert queued == [session.isoformat()]
     assert not DataQualityLog.objects.filter(check_name=tasks.RETRAIN_CHECK).exists()
+
+
+def test_a_busy_lock_at_the_shadow_step_still_queues_the_month_s_retrain(
+    now: Callable[[date, time], None],
+    gate: list[bool],
+    ran: list[tuple[str, date, bool]],
+    queued: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    morning_of(FIRST, now)
+    monkeypatch.setattr(tasks, "research_lock", busy_lock(1, only="shadow"))
+
+    tasks.morning.apply().get()
+
+    assert steps(ran) == ["features", "coverage", "predict", "monitor"]
+    assert marker(FIRST, tasks.SHADOW_CHECK).severity == Severity.WARNING
+    assert queued == [FIRST.isoformat()]
 
 
 def test_a_morning_done_after_the_cutoff_leaves_the_retrain_to_the_next_one(
@@ -503,7 +521,7 @@ def test_last_month_s_retrain_neither_stops_this_month_s_nor_adds_a_promote_step
 
     tasks.morning.apply().get()
 
-    assert steps(ran) == ["features", "coverage", "predict", "monitor"]
+    assert steps(ran) == ["features", "coverage", "predict", "monitor", "shadow"]
     assert queued == [FIRST.isoformat()]
 
 
@@ -540,8 +558,8 @@ def test_the_morning_after_a_retrain_promotes_its_untried_builds_under_the_lock(
 
     tasks.morning.apply().get()
 
-    assert ran[-1] == ("promote", day, True)
-    assert steps(ran) == ["features", "coverage", "predict", "monitor", "promote"]
+    assert ran[-2:] == [("promote", day, True), ("shadow", day, True)]
+    assert steps(ran) == ["features", "coverage", "predict", "monitor", "promote", "shadow"]
 
 
 def test_no_promote_step_once_every_build_was_tried(
@@ -556,7 +574,7 @@ def test_no_promote_step_once_every_build_was_tried(
 
     tasks.morning.apply().get()
 
-    assert steps(ran) == ["features", "coverage", "predict", "monitor"]
+    assert steps(ran) == ["features", "coverage", "predict", "monitor", "shadow"]
 
 
 def test_the_promote_step_swaps_each_untried_build_from_today_or_its_later_first_day(

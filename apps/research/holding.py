@@ -21,6 +21,7 @@ BUY, SELL, SETTLE, STUCK = "buy", "sell", "settle", "stuck"
 KEEP, BACKUP = "keep", "backup"
 Matrix = npt.NDArray[np.float64]
 Mask = npt.NDArray[np.bool_]
+Signal = tuple[Matrix, Matrix, Mask]
 
 
 class Settle(StrEnum):
@@ -199,19 +200,29 @@ def settle_days(market: Market, settle: Settle, traded: Mask) -> Mask:
     return at > last[None, :]
 
 
-def _day(market: Market, pct: Matrix, marks: Matrix, traded: Mask, settles: Mask, t: int) -> Day:
-    signal = t - 1
+def trade_day(
+    market: Market, signal: Signal, marks: Matrix, traded: Mask, settles: Mask, t: int
+) -> Day:
+    """Day t traded on the day before's score, percentile and scored mask."""
+    score, pct, scored = signal
+    before = t - 1
     return Day(
-        score=market.score[signal],
-        pct=pct[signal],
-        scored=market.in_universe[signal] & np.isfinite(market.score[signal]),
-        blocked=market.blocked[signal],
+        score=score,
+        pct=pct,
+        scored=scored,
+        blocked=market.blocked[before],
         traded=traded[t],
-        open_ratio=_ratio(market.opens[t], marks[signal]),
-        close_ratio=_ratio(marks[t], marks[signal], fill=1.0),
+        open_ratio=_ratio(market.opens[t], marks[before]),
+        close_ratio=_ratio(marks[t], marks[before], fill=1.0),
         intraday=_ratio(market.closes[t], market.opens[t]),
         settle=settles[t],
     )
+
+
+def _day(market: Market, pct: Matrix, marks: Matrix, traded: Mask, settles: Mask, t: int) -> Day:
+    score = market.score[t - 1]
+    scored = market.in_universe[t - 1] & np.isfinite(score)
+    return trade_day(market, (score, pct[t - 1], scored), marks, traded, settles, t)
 
 
 def _actions(market: Market, t: int, moves: Moves, values: Matrix) -> list[tuple[object, ...]]:

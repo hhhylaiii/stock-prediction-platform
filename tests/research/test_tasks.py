@@ -366,10 +366,17 @@ def test_the_morning_chain_rebuilds_features_then_predicts_then_monitors(
         ("coverage", WEDNESDAY, True),
         ("predict", WEDNESDAY, True),
         ("monitor", WEDNESDAY, True),
+        ("shadow", WEDNESDAY, True),
     ]
     done = marker(WEDNESDAY, tasks.MORNING_CHECK)
     assert done.severity == Severity.INFO
-    assert done.detail["steps"] == [ok("features"), ok("coverage"), ok("predict"), ok("monitor")]
+    assert done.detail["steps"] == [
+        ok("features"),
+        ok("coverage"),
+        ok("predict"),
+        ok("monitor"),
+        ok("shadow"),
+    ]
     assert sent == []
 
 
@@ -382,7 +389,15 @@ def test_the_morning_makes_up_the_evening_around_its_own_steps(
 
     tasks.morning.apply().get()
 
-    assert steps(ran) == ["labels", "features", "coverage", "predict", "monitor", "recent_features"]
+    assert steps(ran) == [
+        "labels",
+        "features",
+        "coverage",
+        "predict",
+        "monitor",
+        "recent_features",
+        "shadow",
+    ]
 
 
 def test_the_morning_after_friday_runs_on_saturday_and_not_again_until_tuesday(
@@ -395,7 +410,7 @@ def test_the_morning_after_friday_runs_on_saturday_and_not_again_until_tuesday(
         tasks.morning.apply().get()
 
     assert {day for _, day, _ in ran} == {FRIDAY}
-    assert steps(ran) == ["features", "coverage", "predict", "monitor"]
+    assert steps(ran) == ["features", "coverage", "predict", "monitor", "shadow"]
 
 
 def test_a_failed_morning_is_redone_the_next_morning_of_the_same_session(
@@ -408,7 +423,7 @@ def test_a_failed_morning_is_redone_the_next_morning_of_the_same_session(
 
     tasks.morning.apply().get()
 
-    assert steps(ran) == ["features", "coverage", "predict", "monitor"]
+    assert steps(ran) == ["features", "coverage", "predict", "monitor", "shadow"]
     assert marker(FRIDAY, tasks.MORNING_CHECK).severity == Severity.INFO
 
 
@@ -423,7 +438,7 @@ def test_the_morning_waits_for_the_us_close_and_then_runs_without_it_with_a_warn
 
     tasks.morning.apply().get()
 
-    assert steps(ran) == ["features", "coverage", "predict", "monitor"]
+    assert steps(ran) == ["features", "coverage", "predict", "monitor", "shadow"]
     done = marker(WEDNESDAY, tasks.MORNING_CHECK)
     assert done.severity == Severity.WARNING
     assert done.detail["us_close"] == tasks.US_CLOSE_MISSING
@@ -532,8 +547,34 @@ def test_a_step_that_finds_the_lock_busy_retries_until_it_is_free(
 
     tasks.morning.apply().get()
 
-    assert steps(ran) == ["features", "coverage", "predict", "monitor"]
+    assert steps(ran) == ["features", "coverage", "predict", "monitor", "shadow"]
     assert marker(WEDNESDAY, tasks.MORNING_CHECK).severity == Severity.INFO
+
+
+def test_a_busy_lock_skips_the_shadow_books_at_once_and_the_morning_still_finishes(
+    now: Callable[[date, time], None],
+    gate: list[bool],
+    ran: list[tuple[str, date, bool]],
+    monkeypatch: pytest.MonkeyPatch,
+    sent: list[tuple[date, str, str]],
+) -> None:
+    record(WEDNESDAY, tasks.EVENING_CHECK)
+    record(WEDNESDAY, US_CLOSE_CHECK)
+    now(WEDNESDAY + timedelta(days=1), time(6, 0))
+    monkeypatch.setattr(tasks, "research_lock", busy_lock(1, only="shadow"))
+
+    tasks.morning.apply().get()
+
+    assert steps(ran) == ["features", "coverage", "predict", "monitor"]
+    done = marker(WEDNESDAY, tasks.MORNING_CHECK)
+    assert done.severity == Severity.INFO
+    skipped = done.detail["steps"][-1]
+    assert skipped["step"] == "shadow"
+    assert skipped["result"].startswith("skipped, the research lock is busy; failed, see")
+    shadow = marker(WEDNESDAY, tasks.SHADOW_CHECK)
+    assert shadow.severity == Severity.WARNING
+    assert shadow.detail["error"].startswith("ResearchBusyError: the research lock is held by")
+    assert (WEDNESDAY, tasks.SHADOW_CHECK, Severity.WARNING) in sent
 
 
 def test_a_later_step_that_waits_for_the_lock_keeps_the_steps_done_before_it(
@@ -549,9 +590,15 @@ def test_a_later_step_that_waits_for_the_lock_keeps_the_steps_done_before_it(
 
     tasks.morning.apply().get()
 
-    assert steps(ran) == ["features", "coverage", "predict", "monitor"]
+    assert steps(ran) == ["features", "coverage", "predict", "monitor", "shadow"]
     done = marker(WEDNESDAY, tasks.MORNING_CHECK)
-    assert done.detail["steps"] == [ok("features"), ok("coverage"), ok("predict"), ok("monitor")]
+    assert done.detail["steps"] == [
+        ok("features"),
+        ok("coverage"),
+        ok("predict"),
+        ok("monitor"),
+        ok("shadow"),
+    ]
 
 
 def test_a_step_that_never_gets_the_lock_fails_the_chain(
@@ -696,7 +743,7 @@ def test_a_coverage_check_that_cannot_run_warns_and_the_chain_goes_on(
 
     tasks.morning.apply().get()
 
-    assert steps(ran) == ["features", "predict", "monitor"]
+    assert steps(ran) == ["features", "predict", "monitor", "shadow"]
     failed = marker(WEDNESDAY, tasks.COVERAGE_CHECK)
     assert (failed.severity, failed.detail) == (Severity.WARNING, {"error": shown})
     done = marker(WEDNESDAY, tasks.MORNING_CHECK)
@@ -845,7 +892,7 @@ def test_the_morning_after_the_calendar_s_last_day_still_runs_that_session(
     assert tasks.morning.apply().get() == "started"
 
     assert {day for _, day, _ in ran} == {LAST_COVERED}
-    assert steps(ran) == ["features", "coverage", "predict", "monitor"]
+    assert steps(ran) == ["features", "coverage", "predict", "monitor", "shadow"]
 
 
 def test_a_switched_off_or_early_run_past_the_calendar_writes_nothing(
