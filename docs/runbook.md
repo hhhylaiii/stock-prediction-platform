@@ -991,14 +991,15 @@ launchctl load ~/Library/LaunchAgents/tw.stock-prediction-platform.caffeinate-mo
 
 主機的 launchd 每天 03:00 跑 `ops/backup/pg_backup.sh`，把整個資料庫 `pg_dump -Fc` 成一個檔，放在 `~/Backups/stock-prediction-platform/`，留最近 7 份。
 
-- 時段：在 22:50 品質檢查、23:00 研究鏈之後，05:30 美股收盤、06:00 研究鏈之前，碰不到每月重訓（06:00 起）。`pg_dump` 只拿 ACCESS SHARE 鎖，不擋 ETL 與研究的寫入；被擋的只有改表結構的動作（migration），部署不要排在 03:00 前後。
+- 時段：在 22:50 品質檢查、23:00 研究鏈之後，05:30 美股收盤、06:00 研究鏈之前，碰不到每月重訓（06:00 起）。`pg_dump` 只拿 ACCESS SHARE 鎖，不擋 ETL 與研究的寫入；被擋的只有改表結構的動作（migration），部署不要排在 03:00 前後。`pg_dump` 在 db 容器裡用 `timeout` 包住，最多跑 `PG_BACKUP_TIMEOUT` 秒（預設 5400，也就是 04:30 前一定結束），每張表等鎖最多 60 秒（`--lock-wait-timeout=60s`）；超過就照失敗處理，不會拖到 05:30、06:00 的排程，也不會一直抓著快照。
 - 連線：從 repo 根目錄 `docker compose exec -T db` 跑 `pg_dump`，帳號與庫名在 db 容器裡讀 `POSTGRES_USER`、`POSTGRES_DB`。主機上不經手連線字串或密碼，也不讀 `.env`。
+- 權限：腳本以 `umask 077` 執行，自己建的備份目錄是 700，dump 與 log 是 600，只有本人讀得到；已經存在的目錄與 log 保持原本的權限。
 - 寫檔：先寫成同目錄的 `.pg-<日期>-<時間>.dump.partial`；`pg_dump` 結束碼是 0、檔案也大於 0 bytes，才改名成 `pg-YYYYmmdd-HHMMSS.dump`。
 - 保留：成功之後依檔名只留最新的 7 份 `pg-*.dump`，目錄裡的其他檔案不動。失敗時不刪任何舊檔，只刪這次的暫存檔，以 1 結束。
 - log：`~/Backups/stock-prediction-platform/pg_backup.log`。開始 dump 前寫 `start`（保留數檢查沒過時只有 `failed` 那一列；備份目錄本身建不了時 log 也寫不進去，只剩告警與 `launchctl print` 的 `last exit code`）；成功寫 `end ok file=… bytes=… seconds=…`，失敗寫 `failed step=… status=… seconds=…`。`pg_dump` 自己的錯誤訊息也只在這裡。
 - 告警：失敗時透過 worker 裡既有的任務失敗告警發一則（見「告警」的「任務失敗」），`text` 是 `task failed: ops.pg_backup (PgBackupFailed) step=pg_dump status=1 seconds=42`，同一天只發一次。log 的 `alert handed to the worker` 只表示 worker 跑完了這段程式；webhook 沒送到時，同一份 log 的上方會有 worker 印的 `task failure alert webhook failed`。告警程式另外盡力記當天那一列 `task_failure`（warning，會算進頁首的警告數，不擋研究閘門）。送出去的只有步驟、結束碼、秒數，不含路徑與錯誤訊息。
-- `step` 的意思：`folder` 建不了備份目錄（例如 `PG_BACKUP_DIR` 指到沒掛上的外接碟），`repo` 進不了 repo 目錄（只有腳本被搬走時才會發生，這一步的告警多半發不出去），`keep_count` 是 `PG_BACKUP_KEEP` 不是正整數，`pg_dump` 是 `pg_dump` 或 `docker compose exec` 失敗（含 Docker 沒開），`empty_dump` 是結束碼為 0 但檔案是空的，`rename` 是改名失敗，`signal` 是被中止（例如關機）。
-- 可調：`PG_BACKUP_DIR`（預設 `~/Backups/stock-prediction-platform`）、`PG_BACKUP_KEEP`（預設 7）。排程跑的要寫進 `~/Library/LaunchAgents` 那份 plist 複本的 `EnvironmentVariables`，shell 裡 export 的不會帶進 launchd。
+- `step` 的意思：`folder` 建不了備份目錄（例如 `PG_BACKUP_DIR` 指到沒掛上的外接碟），`repo` 進不了 repo 目錄（只有腳本被搬走時才會發生，這一步的告警多半發不出去），`keep_count`、`time_limit` 是 `PG_BACKUP_KEEP`、`PG_BACKUP_TIMEOUT` 不是正整數，`dump_timeout`（結束碼 124）是超過時間上限，`pg_dump` 是 `pg_dump` 或 `docker compose exec` 失敗（含 Docker 沒開；等鎖超過 60 秒也是這一種，log 裡會有 `canceling statement due to statement timeout` 與那句 `LOCK TABLE`），`empty_dump` 是結束碼為 0 但檔案是空的，`rename` 是改名失敗，`signal` 是被中止（例如關機）。
+- 可調：`PG_BACKUP_DIR`（預設 `~/Backups/stock-prediction-platform`）、`PG_BACKUP_KEEP`（預設 7）、`PG_BACKUP_TIMEOUT`（秒，預設 5400）。排程跑的要寫進 `~/Library/LaunchAgents` 那份 plist 複本的 `EnvironmentVariables`，shell 裡 export 的不會帶進 launchd。
 
 ### 安裝
 
@@ -1009,7 +1010,7 @@ cp ops/launchd/tw.stock-prediction-platform.pg-backup.plist ~/Library/LaunchAgen
 launchctl load ~/Library/LaunchAgents/tw.stock-prediction-platform.pg-backup.plist
 ```
 
-- 第一次在 repo 根目錄手動跑一次 `sh ops/backup/pg_backup.sh`，記下秒數與檔案大小，確認 8 份放得下（保留的 7 份加上正在寫的那份：新檔寫完、改名之後才刪最舊的）。
+- 第一次在 repo 根目錄手動跑一次 `sh ops/backup/pg_backup.sh`，記下秒數與檔案大小（秒數接近 5400 就調高 `PG_BACKUP_TIMEOUT`，但要在 05:30 之前結束），確認 8 份放得下（保留的 7 份加上正在寫的那份：新檔寫完、改名之後才刪最舊的）。
 - 再用 launchd 的環境跑一次（工作目錄是 `/`、PATH 只有 plist 裡那一行，手動跑測不到這些差異）：`launchctl kickstart gui/$(id -u)/tw.stock-prediction-platform.pg-backup`，跑完用下一小節那行檢查。
 - 移除：`launchctl unload ~/Library/LaunchAgents/tw.stock-prediction-platform.pg-backup.plist` 後刪掉檔案；已經寫好的備份檔不會被動到。
 
@@ -1022,7 +1023,7 @@ d=~/Backups/stock-prediction-platform; ls -l "$d" | grep " pg-$(date +%Y%m%d)-.*
 - 03:00 之後才有當天的檔；改過 `PG_BACKUP_DIR` 的話，把 `d=` 換成那個目錄。印出「今天沒有備份檔」時看後面的 log：
   - 有今天的 `failed`：跑了但失敗。
   - 最後一列是前一天的 `end ok`：今天根本沒跑（排程沒載入、Mac 關著、03:00 睡著還沒醒），或備份目錄本身建不了（見上方 log 那一條）。
-  - 最後一列是今天的 `start`，而且下一條的 `launchctl print` 看到 `state = running`：還在跑，或卡住了（腳本沒有時間上限；卡住時 launchd 不會再起下一次）。確定卡住就用 `launchctl kill TERM gui/$(id -u)/tw.stock-prediction-platform.pg-backup` 中止。
+  - 最後一列是今天的 `start`，而且下一條的 `launchctl print` 看到 `state = running`：還在跑，或卡住了（時間上限只管容器裡的 `pg_dump`，Docker 本身卡住時不受管；卡住時 launchd 不會再起下一次）。確定卡住就用 `launchctl kill TERM gui/$(id -u)/tw.stock-prediction-platform.pg-backup` 中止。
 - launchd 有沒有跑、結束碼是多少：`launchctl print gui/$(id -u)/tw.stock-prediction-platform.pg-backup | grep -E 'state|last exit code'`。
 - 檔案讀不讀得懂（只讀目錄，不還原資料）：`docker compose exec -T db pg_restore --list < ~/Backups/stock-prediction-platform/pg-YYYYmmdd-HHMMSS.dump | head`。
 
