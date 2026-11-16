@@ -1,65 +1,127 @@
 # Phase 5 驗收報告
 
-狀態：部分完成。SPEC §9 Phase 5 的驗收條件是「API 回傳最新交易日的預測排名、預測價格、價格區間、上漲機率與特徵；回應時間 500 毫秒內」。twp 目前還沒有任何模型與預測，所以預測類端點先用 seed 量。Phase 4 的 4.7 正式 run 要等 4.9 holdout 之後才建（協調 2026-11-07），S5 在那之後用「待辦」一節的指令重量再勾。
+狀態：已在 twp 上量完，待使用者判定。2026-11-17 07:06 在 twp 跑 `phase5_report`：通過 8 項、未通過 0 項、未上線 6 項，未上線的全是 20 日。照使用者 2026-11-16 同意的作法，報告把每一項分成通過、未通過、未上線三種，驗收與否由使用者看表決定。
 
-## 驗收條件
+| 項目 | 內容 |
+| --- | --- |
+| 驗收條件 | SPEC §9 Phase 5（`docs/SPEC.md:393`）：「API 回傳最新交易日的預測排名、預測價格、價格區間、上漲機率與特徵；回應時間 500 毫秒內」 |
+| twp 結果 | 通過 8、未通過 0、未上線 6（全是 20 日）；26 條路徑全部 200，最大 p95 88.0 ms |
+| 使用者判定 | 待使用者判定 |
 
-| 條件 | 結果 | 證據 |
+## 結論
+
+- 5 日：最新交易日 2026-11-16 的排名、預測價格、價格區間與特徵都齊全，universe 979 檔一檔不缺；2330 的個股頁與特徵齊全。
+- 5 日的價格區間來自近 20 日波動估計（`tech_vol_20d`，不是模型的預測），979 檔都是。波動率模型屬於還沒放行的區間一組，所以用的是備援。依規格，5 日的價格區間只由 API 提供，頁面不展示（`docs/SPEC.md:22`）。
+- 20 日：排名、預測價格、價格區間、上漲機率都未上線。原因是使用者的兩個決定，不是程式缺陷：
+  - 排名 20 日：`rank-2026-11` 沒過每月重訓門檻 (3)，影子模型最近 6 個月 OOS 的 rank IC 是 −0.013（門檻 > 0，樣本 105 天）。使用者 2026-11-13 決定不強制換模，換模改成依期間分組判定（`docs/SPEC.md:337`）。20 日排名要等下一次每月重訓過門檻，或使用者決定強制換模。
+  - 區間與機率（分位數、波動率、分類模型，同屬 20 日一組）：holdout 判定「明顯退化」，覆蓋率的逐摺平均 0.7092 低於下界 0.7340。使用者 2026-11-12 決定先不放行（`docs/SPEC.md:313`）。20 日的預測價格取分位數模型的 q50（`docs/SPEC.md:20`），價格區間與上漲機率也來自這一組（`docs/SPEC.md:22`），所以三項都沒有來源。
+- 上漲機率只有 20 日（`docs/SPEC.md:22`），所以目前沒有任何端點回傳上漲機率。三個頁面都寫明了這一點和原因。
+- 回應時間：13 個端點的 26 條路徑全部 200，最大 p95 88.0 ms（`/api/predictions?horizon=5&ordering=-close`），門檻是 500 ms。帶 `horizon=20` 的路徑回的是空表，耗時只代表沒有資料時的速度；20 日有資料時的速度看 seed 那一節。
+
+## 量測當下
+
+- 時間：2026-11-17 07:05:51 到 07:06:12，共 21 秒。資料庫 `twp`，唯讀交易。指令由使用者送出、協調執行，指令見「量測方法」。
+- 服務中的程式：第 8 版映像 `36a6971e7b31`（develop `e0ceec3`），2026-11-16 19:58 上線。跑報告的工作目錄在 develop `9a8199f`，和 `e0ceec3` 的 `apps`、`config`、`manage.py`、套件與 Docker 檔相同。
+- 服務中的模型：排名 5 日 `rank-2026-11.lightgbm.h5.f000`（holdout 判定「明顯退化」，使用者 2026-11-12 決定放行，2026-11-13 記錄放行後建模），以及絕對報酬 5 日 `return-2026-11.lightgbm.h5.f000`（holdout 判定「達標」）。
+- 跑之前四個容器的 CPU 都低於 1%，記憶體 free 46%，沒有還原或備份在跑。跑完後 `etl_run`、`data_quality_log` 的最大 id 和跑之前相同。
+- 已知警告：2026-11-16 的資料品質有 1 項 warning（`statement_type_mismatch`：3592 的 2026-Q3 財報，資料庫存的是個別報表，來源給的是合併報表），頁首顯示「品質檢查通過（1 項警告）」。這筆在驗收後的財報修正處理，最晚 2026-11-20。
+- 截圖：三個視圖在 2026-11-17 07:06 截好，repo 轉 private 後補上。repo 現在仍放 seed 截圖。
+
+## 驗收檢查
+
+
+| 條件 | 結果 | 實際值 |
 | --- | --- | --- |
-| 11 個唯讀端點都回 200 | 通過 | 下面兩張表 |
-| 資料類端點在 twp 真資料上 500 ms 內 | 通過 | 表一，最大值 31.4 ms |
-| 預測、模型類端點 500 ms 內 | 暫定通過（seed） | 表二，最大值 40.8 ms；4.7 之後要在 twp 上重量 |
-| 三個視圖可用 | 通過（seed） | 截圖一到三 |
-| S5 勾選 | 待辦 | 見最後一節 |
+| 最新交易日有預測 | 通過 | price_date 2026-11-16，prediction_date 2026-11-16，未上線的期間 20 日 |
+| 20 日排名 | 未上線 | 未上線：排名 20 日沒有上線中的模型：rank-2026-11 沒過換模門檻：影子模型最近 6 個月 OOS（未達門檻，實際 -0.013，門檻 rank IC > 0，樣本 105 天） |
+| 20 日預測價格 | 未上線 | 未上線：排名 20 日沒有上線中的模型：rank-2026-11 沒過換模門檻：影子模型最近 6 個月 OOS（未達門檻，實際 -0.013，門檻 rank IC > 0，樣本 105 天）；報酬區間 20 日沒有上線中的模型，也沒有換模紀錄 |
+| 20 日價格區間 | 未上線 | 未上線：排名 20 日沒有上線中的模型：rank-2026-11 沒過換模門檻：影子模型最近 6 個月 OOS（未達門檻，實際 -0.013，門檻 rank IC > 0，樣本 105 天） |
+| 20 日跑贏大盤機率 | 未上線 | 未上線：排名 20 日沒有上線中的模型：rank-2026-11 沒過換模門檻：影子模型最近 6 個月 OOS（未達門檻，實際 -0.013，門檻 rank IC > 0，樣本 105 天）；跑贏大盤機率 20 日沒有上線中的模型，也沒有換模紀錄 |
+| 5 日排名 | 通過 | 缺 0 檔；date 2026-11-16，979 檔，universe 979 |
+| 5 日預測價格 | 通過 | 缺 0 檔 |
+| 5 日價格區間 | 通過 | 缺 0 檔；來源 近 20 日波動估計（不是模型的預測） 979 檔 |
+| 2330 個股頁 20 日 | 未上線 | 未上線：排名 20 日沒有上線中的模型：rank-2026-11 沒過換模門檻：影子模型最近 6 個月 OOS（未達門檻，實際 -0.013，門檻 rank IC > 0，樣本 105 天） |
+| 2330 個股頁 5 日 | 通過 | 齊全 |
+| 2330 的 20 日特徵 | 未上線 | 未上線：排名 20 日沒有上線中的模型：rank-2026-11 沒過換模門檻：影子模型最近 6 個月 OOS（未達門檻，實際 -0.013，門檻 rank IC > 0，樣本 105 天） |
+| 2330 的 5 日特徵 | 通過 | date 2026-11-16，5 項貢獻，5 項有原始值 |
+| 13 個端點的 26 條路徑都回 200 | 通過 | 全部 200 |
+| p95 都在 500 ms 內 | 通過 | 最大 p95 88.0 ms（`/api/predictions?horizon=5&ordering=-close`） |
+
+通過 8 項、未通過 0 項、未上線 6 項。
+
+## 資料量
+
+2026-11-17 07:06 量測當下：
+
+- stock_master 3,071 檔。
+- daily_price 7,363,894 列，到 2026-11-16；2330 有 4,133 列。
+- feature_daily 6,750,491 列，到 2026-11-16；2330 的 label_daily 有 8,266 列。
+- model_run 3943 筆：active 2、candidate 3941。
+- prediction 9,922 列，3 個預測日，到 2026-11-16；prediction_contrib 23,814 列。
+- model_monitor 0 列，backtest_metric 4,156 列。
+- etl_run 825 筆，data_quality_log 24,260 筆。
+
+`model_monitor` 是 0 列，因為線上預測還沒有到期的 5 日 label；第一批 label 到期後才開始監控。同樣原因，2330 的 5 日歷史也是 0 筆。
+
+## 端點耗時
+
+| 端點 | 狀態 | 中位數 ms | p95 ms | 最大 ms |
+| --- | --- | --- | --- | --- |
+| `/api/stocks/2330` | 200 | 1.2 | 1.5 | 2.7 |
+| `/api/stocks/2330/prices` | 200 | 5.2 | 12.8 | 26.7 |
+| `/api/stocks/2330/predictions` | 200 | 61.5 | 70.3 | 71.1 |
+| `/api/stocks/2330/features` | 200 | 1.6 | 2.0 | 2.9 |
+| `/api/stocks/2330/history` | 200 | 10.8 | 12.8 | 14.0 |
+| `/api/stocks?q=2330` | 200 | 1.2 | 1.4 | 1.5 |
+| `/api/status` | 200 | 36.7 | 39.0 | 40.5 |
+| `/api/predictions` | 200 | 3.3 | 5.1 | 5.9 |
+| `/api/models` | 200 | 39.0 | 40.9 | 41.6 |
+| `/api/models/ic-monthly` | 200 | 21.5 | 24.8 | 26.0 |
+| `/api/etl/runs` | 200 | 3.1 | 6.8 | 9.1 |
+| `/api/data-quality` | 200 | 13.1 | 37.0 | 38.7 |
+| `/api/data-quality/corrections` | 200 | 13.3 | 15.1 | 16.1 |
+| `/api/predictions?horizon=5` | 200 | 61.9 | 67.5 | 71.7 |
+| `/api/stocks/2330/features?horizon=5` | 200 | 24.8 | 27.1 | 28.5 |
+| `/api/stocks/2330/history?horizon=5` | 200 | 11.9 | 22.0 | 25.0 |
+| `/api/models/ic-monthly?horizon=5` | 200 | 22.8 | 27.6 | 27.7 |
+| `/api/predictions?horizon=5&ordering=-close` | 200 | 78.5 | 88.0 | 93.8 |
+| `/api/predictions?horizon=5&ordering=-ret_pred` | 200 | 64.7 | 81.6 | 83.4 |
+| `/api/predictions?horizon=5&ordering=-price_pred` | 200 | 72.3 | 85.2 | 88.7 |
+| `/api/predictions?horizon=5&ordering=-prev_rank` | 200 | 63.9 | 84.6 | 138.6 |
+| `/api/predictions?horizon=20&ordering=-close` | 200 | 3.3 | 4.9 | 6.0 |
+| `/api/predictions?horizon=20&ordering=-ret_pred` | 200 | 3.0 | 3.1 | 3.2 |
+| `/api/predictions?horizon=20&ordering=-price_pred` | 200 | 3.0 | 3.9 | 3.9 |
+| `/api/predictions?horizon=20&ordering=-prob_up_5pct` | 200 | 3.4 | 4.5 | 4.7 |
+| `/api/predictions?horizon=20&ordering=-prev_rank` | 200 | 3.0 | 3.7 | 4.4 |
+
+- 20 日沒有上線中的排名模型：帶 `horizon=20` 的路徑，以及不帶期間的預測表、特徵與歷史回的是空表，耗時只代表沒有資料時的速度。
 
 ## 量測方法
 
-- 指令：`manage.py measure_api --repeat 20`。在同一個 process 裡用 Django 的 test client 打每個端點：先打一次暖機，不計入；再連打 20 次，記中位數、p95、最大值。
-- 量到的時間包含 view、查詢與序列化，不含網路與 gunicorn。
-- `manage.py phase5_report` 用同一套量法，另外透過 API 逐條檢查驗收條件、記下資料量，寫成一份 markdown。
-- 環境：本機 macOS、Docker 的 PostgreSQL 16。twp 那一輪是在 2026-11-05 15:54 量的，正好在 ETL 時段內。
-- 表一在 #72 的 commit「fix: keep negative monthly ic bars inside the chart」上量測，當時已含 #64、#65。截圖在加深 seed 之後截，當時已含 #68。表二在 #104 的分支上用 `phase5_report` 重量，分支以 develop 977c31b 為底，已含 #76。
-
-twp 那一輪用唯讀交易連線，任何寫入都會被資料庫拒絕。throttle 每個 process 各自計數，預設 300/min；表一量 11 個端點時，`--repeat 20` 共 231 次（13 個端點時是 273 次），用不到調高；現在量 26 條路徑，共 546 次，超過預設，所以下面的指令把 `API_THROTTLE_RATE` 調高。期間沒有上線中的排名模型時，報告的耗時表下面會註明哪些路徑回的是空表。指令會記下每一次呼叫的狀態碼，只要有一次不同，狀態欄就會寫成像 `200/429×3` 的樣子：
+- 指令：`manage.py phase5_report`。在同一個 process 裡用 Django 的 test client 打 13 個端點的 26 條路徑：13 個端點本身，預設 20 日的四個端點另量 5 日，預測表另量兩個期間各種由高到低的排序（5 日沒有機率，少一種）。每條先打一次暖機，不計入；再連打 20 次，記中位數、p95、最大值。量到的時間包含 view、查詢與序列化，不含網路與 gunicorn。
+- 接著透過 API 逐條檢查驗收條件：排名、價格、區間、機率依期間逐頁看全市場 universe 內的股票；個股頁與特徵依期間看 `--stock`（預設 2330），特徵至少要有一項原始值。
+- 每一項的結果是通過、未通過、未上線三種之一。那一項讀的模型不在 `/api/models` 的服務中清單時記未上線，實際值寫出缺的模型，以及 `meta.not_live` 裡它沒過的換模門檻；這種項目不算通過也不算失敗。
+- 唯讀交易連線，任何寫入都會被資料庫拒絕。throttle 每個 process 各自計數，預設 300/min；26 條路徑共 546 次，加上逐頁讀預測，會超過預設，所以指令把 `API_THROTTLE_RATE` 調高。`DJANGO_ENV_FILE=/dev/null` 讓它不讀 `.env`，連的是預設的本機 twp。
+- 沒有未通過才截圖，三個視圖都等資料載完才截。`--views` 用的 Playwright 只在 dev 依賴裡，所以在主機上跑。
+- 環境：本機 macOS、Docker 的 PostgreSQL 16；跑報告的 process 在主機上，經 5432 埠連 db 容器。
 
 ```bash
-DATABASE_URL=<twp 的連線字串> PGOPTIONS='-c default_transaction_read_only=on' \
-  API_THROTTLE_RATE=100000/min uv run python manage.py measure_api --repeat 20
+DJANGO_ENV_FILE=/dev/null PGOPTIONS='-c default_transaction_read_only=on' \
+  API_THROTTLE_RATE=100000/min uv run python manage.py phase5_report \
+  --out docs/reports/phase5/twp.md --views http://127.0.0.1:8000
 ```
 
-seed 那一輪與截圖由一支 `slow` 測試產生。沒有設 `ACCEPTANCE_OUT` 時這支測試會略過，CI 不跑。它在 seed 上跑 `phase5_report`（和下面的指令一樣把 `API_THROTTLE_RATE` 調到 100000/min：26 條路徑各 21 次，加上逐頁讀預測，會超過預設的 300/min），不能有未通過的檢查，報告寫到輸出目錄的 `seed.md`，表二就是從這份抄來的；這個檔不入庫。截圖和 twp 那一輪用同一個函式：
+報告寫到 `docs/reports/phase5/twp.md`，這個檔不入庫，本文的表格是從它抄來的。
+
+seed 那一輪與 seed 截圖由一支 `slow` 測試產生。沒有設 `ACCEPTANCE_OUT` 時這支測試會略過，CI 不跑。它在 seed 上跑同一個 `phase5_report`，不能有未通過的檢查，報告寫到輸出目錄的 `seed.md`：
 
 ```bash
 ACCEPTANCE_OUT=docs/reports/phase5 uv run pytest tests/e2e/test_acceptance_capture.py
 ```
 
-## 表一：twp 真資料
+2026-11-05 在 twp 上量過一次（當時還沒有模型與預測，最大值 31.4 ms），被這次取代，數字見 git 歷史。
 
-twp 的資料量（2026-11-05 量測當下）：
-
-- stock_master 3,065 檔。
-- daily_price 7,349,318 列，到 2026-11-05；2330 有 4,126 列。
-- etl_run 213 筆，data_quality_log 98 筆。
-- feature_daily 6,736,842 列；2330 的 label_daily 有 8,250 列。
-- model_run、prediction、backtest_metric 都是 0 筆。
-
-| 端點 | 資料 | 狀態 | 中位數 ms | p95 ms | 最大 ms |
-| --- | --- | --- | --- | --- | --- |
-| `/api/stocks/2330` | 真資料 | 200 | 1.1 | 1.4 | 1.4 |
-| `/api/stocks/2330/prices` | 真資料 | 200 | 5.6 | 11.1 | 31.4 |
-| `/api/status` | 真資料，預測部分為空 | 200 | 4.5 | 7.4 | 8.0 |
-| `/api/etl/runs` | 真資料 | 200 | 3.8 | 5.2 | 6.9 |
-| `/api/data-quality` | 真資料 | 200 | 4.0 | 6.9 | 9.9 |
-| `/api/stocks/2330/predictions` | 真資料，沒有預測 | 200 | 3.0 | 4.5 | 4.7 |
-| `/api/stocks/2330/features` | 真資料，沒有預測 | 200 | 1.3 | 1.7 | 2.2 |
-| `/api/stocks/2330/history` | 真資料，沒有預測 | 200 | 10.7 | 14.3 | 14.7 |
-| `/api/predictions` | 真資料，沒有預測 | 200 | 1.1 | 1.3 | 1.8 |
-| `/api/models` | 真資料，沒有模型 | 200 | 0.7 | 0.8 | 0.8 |
-| `/api/models/ic-monthly` | 真資料，沒有研究結果 | 200 | 1.1 | 1.3 | 1.3 |
-
-後六列只代表「沒有資料時」的速度，不能當驗收依據。驗收看表二。
-
-## 表二：seed 資料
+## seed 資料：三類模型與兩個期間都上線時
 
 seed 的內容是 e2e 的基本資料再放大：
 
@@ -79,7 +141,7 @@ seed 的內容是 e2e 的基本資料再放大：
 | `/api/models` | seed | 200 | 19.4 | 26.1 | 27.4 |
 | `/api/models/ic-monthly` | seed | 200 | 4.4 | 5.5 | 5.6 |
 
-表二列出會讀預測表的端點。同一輪的其他端點中位數都在 3 ms 內：stocks、prices、etl/runs、data-quality。同一輪的檢查確認 11 個端點都是 200，p95 都在 500 ms 內，其餘驗收檢查也都通過。各次執行的數字會有變動：中位數大致穩定，最大值受單次延遲影響，兩次執行之間可能差到一倍。
+上表列出會讀預測表的端點。同一輪的其他端點中位數都在 3 ms 內：stocks、prices、etl/runs、data-quality。同一輪的檢查確認 11 個端點都是 200，p95 都在 500 ms 內，其餘驗收檢查也都通過。各次執行的數字會有變動：中位數大致穩定，最大值受單次延遲影響，兩次執行之間可能差到一倍。
 
 ## 預測表變深之後
 
@@ -115,22 +177,11 @@ seed 的內容是 e2e 的基本資料再放大：
 
 ## 待辦
 
-- [ ] 4.9 之後、4.7 在 twp 產出真預測時，在主機上跑下面這個指令，把數字抄進本報告後勾 S5。
-  - 先確認 web 映像含最新的頁面（見最後兩條）：`--views` 截的是正在跑的 web。
-  - 它會量 13 個端點的 26 條路徑：13 個端點本身（2026-11-07 加上 `/api/data-quality/corrections` 與 `/api/stocks?q=`）；預設 20 日的四個端點另量 5 日；預測表另量兩個期間各種由高到低的排序（5 日沒有機率，少一種）。接著透過 API 逐條檢查驗收條件、記下資料量，寫成 `docs/reports/phase5/twp.md`（不入庫）。
-  - 排名、價格、區間、機率依期間逐頁看全市場 universe 內的股票；個股頁與特徵依期間看 `--stock`（預設 2330），特徵至少要有一項原始值。
-  - 每一項的結果是「通過」「未通過」「未上線」三種之一。那一項讀的模型不在 `/api/models` 的服務中清單時記「未上線」，實際值寫出缺的模型，以及 `meta.not_live` 裡它沒過的換模門檻；這種項目不算通過也不算失敗，表格下面一行列出三種各幾項。讀不到 `/api/models` 時，每一項都當作模型在服務來判。
-  - 沒有「未通過」才截圖。每頁等資料區塊都載完（不剩「載入中」）才截，三張都截到才搬進 `docs/reports/phase5/`，蓋掉現在的 seed 截圖；中途失敗時一張都不動。
-  - 有一條未通過時，報告照樣寫出，指令以非 0 結束並列出未通過的條目。
-  - `--views` 用的 Playwright 只在 dev 依賴裡，容器內沒有，所以要在主機上跑。
-
-  ```bash
-  DATABASE_URL=<twp 的連線字串> PGOPTIONS='-c default_transaction_read_only=on' \
-    API_THROTTLE_RATE=100000/min uv run python manage.py phase5_report \
-    --out docs/reports/phase5/twp.md --views http://127.0.0.1:8000
-  ```
-
+- [ ] 使用者判定 S5。
+- [ ] repo 轉 private 後，把 2026-11-17 07:06 的三張 twp 截圖放進 `docs/reports/phase5/`，取代 seed 截圖。
+- [ ] 20 日排名上線，或區間一組放行之後，在 twp 上重跑 `phase5_report`，補 20 日各項。
 - [ ] 上線 6 個月後，在 twp 上用 `phase5_report`（不加 `--views`）再量一次，確認預測表變深之後仍在 500 ms 內。
+- [x] 2026-11-17 07:06 在 twp 上跑 `phase5_report`：通過 8、未通過 0、未上線 6，結果見本文。當時服務中的是第 8 版映像 `36a6971e7b31`（develop `e0ceec3`，2026-11-16 19:58 上線）。
 - [x] web 與 worker 在 2026-11-07 23:18 和 prod 設定一起重建（主 repo 33863dc，映像 `sha256:d6f3a4502c2b`）。這兩個映像都停在 33863dc，缺 #130–#133（含 #131 的晚間 60 日重算與 #133 的櫃買借券容忍值）。
 - [x] web 與 worker 在 2026-11-08 12:05 換上 develop 51f2c71 的映像（`sha256:56577996c1fa`），帶上 #130–#143。
   - 映像缺 #144、#145：這兩支在 build 之後、換上之前合併，只改主機上跑的 `revenue_company` 回補，worker 的排程不受影響。
