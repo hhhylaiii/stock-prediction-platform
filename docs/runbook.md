@@ -156,10 +156,10 @@ docker compose logs -f worker
 候選 C1（Ridge 與 C0 的排名平均）、C2（5 日相對 `TAIEX_TR` 報酬）的定義見 `docs/reports/phase4/holding-shadow-prereg.md` 第 7 節；配方在 `apps/research/candidates.py`。
 
 - `shadow_train --candidate C1`（或 `C2`）在所屬 slot 上線中的 run（C1 跟排名 5 日、C2 跟報酬 5 日）記下的 production 摺上訓練，模型檔寫到 `MODEL_DIR/shadow/<c1|c2>/<run_key>/g<代數>.pkl`，再寫一列 `shadow_artifact`（模型檔 sha256、訓練窗、配方、`first_signal`）。寫進這一列就算凍結。
-- `first_signal` 是凍結當下還沒有那個 slot 預測的第一個交易日（而且晚於 run 的 `as_of`），所以一定早於它第一次打分的預測寫入。
-- 整段持研究鎖；鎖被佔住時立刻報錯、不寫任何東西。是寫 twp 的重工作：不在 15:00–23:00、不和 06:00 的 chain 同時跑。
+- `first_signal` 取兩者較晚的一天：凍結當下還沒有那個 slot 預測的第一個交易日（而且晚於 run 的 `as_of`），以及凍結當天或之後的第一個交易日。所以凍結一定早於它第一次打分的預測寫入；研究鏈之前漏跑、事後才補寫預測的那幾天，在凍結日之前的不打分。
+- 整段持研究鎖（和 chain 的每一步、`predict`、`build_features`、`build_labels` 同一把），鎖被佔住時立刻報錯、不寫任何東西。每月重訓不取研究鎖（見「研究排程」），擋不住它：手動凍結不要和重訓同時跑，當月 `research_retrain` 那列寫進來之前都當作重訓還在跑。是寫 twp 的重工作，時段和 holdout 一樣避開 15:30 的價格批次、23:00 起的研究 chain（等 `research_evening` 那列寫進來）、06:00 到 08:00 的早上 chain。
 - 同一個上線 run 已經凍結過時拒跑；要換（例如模型檔遺失）加 `--replace`，寫下一代。舊的列和模型檔留著，已記的分數不改。
-- `--output <資料夾>` 只訓練、把模型檔寫進那個資料夾並印出秒數、峰值記憶體與 sha256，不取鎖、不寫資料庫，可以在主機上用唯讀連線量測。
+- `--output <資料夾>` 只訓練、把模型檔寫成那個資料夾裡的 `c1.pkl`／`c2.pkl`，並印出秒數、峰值記憶體與 sha256，不取鎖、不寫資料庫，可以在主機上用唯讀連線量測。不取鎖，所以時段照上一條避開：讀到一半特徵或 label 被重寫時會報「changed while reading」或「labels changed while fitting」，量到的秒數與記憶體也會被同時跑的工作干擾。
 - 模型檔不在每日資料庫備份裡。同樣的資料重訓會得到同一個 sha256，但每晚重算最近 60 個交易日的特徵、還原因子重建都會改到訓練窗裡的資料，所以檔案遺失後重訓通常得不到原來的 sha256，只能用 `--replace` 寫下一代。
 
 ### 線上特徵覆蓋率檢查
