@@ -1,6 +1,6 @@
 import math
-import time
 from datetime import date
+from functools import partial
 from typing import Any
 
 import pytest
@@ -10,7 +10,7 @@ from django.test.utils import CaptureQueriesContext
 from pytest_django import DjangoAssertNumQueries
 
 from apps.api.serving import HOLDOUT_RELEASE, warn_unreadable
-from apps.market.models import TradingCalendar
+from apps.market.models import DailyPrice, StockMaster, TradingCalendar
 from apps.research.holdout import DEGRADED, FAILED, PASSED, PRODUCTION
 from apps.research.models import FeatureDaily, ModelMonitor, ModelRun, Prediction
 from apps.research.promotion import PROMOTION
@@ -29,7 +29,9 @@ from tests.api.conftest import (
     add_model_run,
     add_predictions,
     add_stock,
+    analyze,
     envelope_of,
+    fastest,
     forced_params,
     release_params,
     sessions_until,
@@ -585,6 +587,19 @@ def test_predictions_query_count_on_the_tech_vol_path(
     )
 
 
+def test_a_search_costs_the_same_queries_however_many_rows_match(
+    client: Client, runs: Runs
+) -> None:
+    counts = []
+    for text, matched in (("2330", 1), ("2", 2)):
+        with CaptureQueriesContext(connection) as queries:
+            body = envelope_of(client.get("/api/predictions", {"q": text}))
+        assert body["meta"]["total"] == matched
+        counts.append(len(queries))
+
+    assert counts[0] == counts[1]
+
+
 def test_two_thousand_stocks_answer_within_half_a_second(client: Client, db: None) -> None:
     codes = [f"{9000 + n}" for n in range(2000)]
     for code in codes:
@@ -611,11 +626,10 @@ def test_two_thousand_stocks_answer_within_half_a_second(client: Client, db: Non
         20,
         {code: {"q10": -0.1, "q50": 0.0, "q90": 0.1, "ret_pred": 0.0} for code in codes},
     )
+    analyze(StockMaster, DailyPrice, ModelRun, Prediction)
     client.get("/api/predictions")
 
-    started = time.perf_counter()
-    response = client.get("/api/predictions", {"q": "股9"})
-    elapsed = time.perf_counter() - started
+    response, elapsed = fastest(partial(client.get, "/api/predictions", {"q": "股9"}))
 
     assert response.status_code == 200
     assert envelope_of(response)["meta"]["total"] == 1000

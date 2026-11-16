@@ -1,4 +1,5 @@
-from collections.abc import Iterator, Sequence
+import time
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -7,6 +8,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 from django.core.cache import cache
+from django.db import connection, models
 
 from apps.market.models import DailyPrice, Market, StockMaster, TradingCalendar
 from apps.research.gates import Gate, SlotGates
@@ -16,6 +18,7 @@ from apps.research.predict import Slot
 from apps.research.promotion import PROMOTION, _failed
 
 TAIPEI = ZoneInfo("Asia/Taipei")
+TIMED_RUNS = 3
 CALENDAR_START = date(2026, 7, 1)
 EARLY_CALENDAR_START = date(2026, 1, 1)
 CALENDAR_END = date(2026, 11, 30)
@@ -296,3 +299,23 @@ def runs(db: None) -> Runs:
         {"2317": {"ret_pred": 0.02}, "2330": {"ret_pred": 0.01}, "6488": {"ret_pred": -0.01}},
     )
     return seeded
+
+
+def fastest[Result](call: Callable[[], Result]) -> tuple[Result, float]:
+    """The last call's result and the shortest wall time in seconds of `TIMED_RUNS` calls.
+
+    A loaded runner only adds time to a call, so the shortest one is the code's own cost.
+    """
+    results, spent = [], []
+    for _ in range(TIMED_RUNS):
+        started = time.perf_counter()
+        results.append(call())
+        spent.append(time.perf_counter() - started)
+    return results[-1], min(spent)
+
+
+def analyze(*tables: type[models.Model]) -> None:
+    """Planner statistics for the rows this test inserted, as autovacuum keeps on live tables."""
+    with connection.cursor() as cursor:
+        for table in tables:
+            cursor.execute(f"ANALYZE {connection.ops.quote_name(table._meta.db_table)}")
