@@ -1,9 +1,11 @@
 #!/bin/sh
 set -u
+umask 077
 
 repo=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd -P)
 backup_dir=${PG_BACKUP_DIR:-"$HOME/Backups/stock-prediction-platform"}
 keep=${PG_BACKUP_KEEP-7}
+dump_limit=${PG_BACKUP_TIMEOUT-5400}
 log_file="$backup_dir/pg_backup.log"
 started=$(date +%s)
 partial=''
@@ -49,6 +51,13 @@ fail() {
     exit 1
 }
 
+positive() {
+    case $1 in
+        '' | *[!0-9]*) return 1 ;;
+    esac
+    [ "$1" -gt 0 ]
+}
+
 cleanup() {
     if [ -n "$partial" ]; then
         rm -f -- "$partial"
@@ -71,22 +80,22 @@ if ! mkdir -p -- "$backup_dir"; then
     log_file=/dev/null
     fail folder 1
 fi
-case $keep in
-    '' | *[!0-9]*) fail keep_count 1 ;;
-esac
-if [ "$keep" -lt 1 ]; then
-    fail keep_count 1
-fi
+positive "$keep" || fail keep_count 1
+positive "$dump_limit" || fail time_limit 1
 
 name="pg-$(date +%Y%m%d-%H%M%S).dump"
 partial="$backup_dir/.$name.partial"
 trap cleanup EXIT
 trap 'fail signal 1' HUP INT TERM
-log "start $name keep=$keep"
+log "start $name keep=$keep time_limit=$dump_limit"
 
-docker compose exec -T db sh -c 'exec pg_dump -Fc -U "$POSTGRES_USER" -d "$POSTGRES_DB"' \
+docker compose exec -T -e "PG_BACKUP_TIMEOUT=$dump_limit" db sh -c \
+    'exec timeout "$PG_BACKUP_TIMEOUT" pg_dump --lock-wait-timeout=60s -Fc -U "$POSTGRES_USER" -d "$POSTGRES_DB"' \
     > "$partial" 2>> "$log_file"
 status=$?
+if [ "$status" -eq 124 ]; then
+    fail dump_timeout 124
+fi
 if [ "$status" -ne 0 ]; then
     fail pg_dump "$status"
 fi

@@ -13,7 +13,11 @@ from apps.etl import task_alerts
 REPO = Path(__file__).resolve().parents[2]
 SCRIPT = REPO / "ops" / "backup" / "pg_backup.sh"
 PLIST = REPO / "ops" / "launchd" / "tw.stock-prediction-platform.pg-backup.plist"
-DUMP_COMMAND = 'exec pg_dump -Fc -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+DUMP_COMMAND = (
+    'exec timeout "$PG_BACKUP_TIMEOUT" pg_dump --lock-wait-timeout=60s'
+    ' -Fc -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+)
+LOCK_ERROR = "pg_dump: error: query failed: ERROR:  canceling statement due to statement timeout"
 FAKE_BYTES = b"PGDMP-fake"
 OLD = [f"pg-202601{day:02d}-030000.dump" for day in range(1, 9)]
 FAKE_DOCKER = """#!/bin/sh
@@ -27,6 +31,7 @@ case " $* " in
   *" db "*)
     if [ -n "${FAKE_DUMP_SLEEP:-}" ]; then sleep "$FAKE_DUMP_SLEEP"; fi
     if [ "${FAKE_DUMP_EMPTY:-}" != 1 ]; then printf 'PGDMP-fake'; fi
+    if [ -n "${FAKE_DUMP_STDERR:-}" ]; then printf '%s\\n' "$FAKE_DUMP_STDERR" >&2; fi
     exit "${FAKE_DUMP_STATUS:-0}" ;;
 esac
 exit 99
@@ -111,10 +116,23 @@ def test_success_renames_the_finished_dump_into_the_default_folder(run: Run) -> 
     assert len(names) == 1
     assert (folder / names[0]).read_bytes() == FAKE_BYTES
     assert run.leftovers(folder) == []
-    assert run.docker_calls() == [["compose", "exec", "-T", "db", "sh", "-c", DUMP_COMMAND]]
+    assert run.docker_calls() == [
+        ["compose", "exec", "-T", "-e", "PG_BACKUP_TIMEOUT=5400", "db", "sh", "-c", DUMP_COMMAND]
+    ]
     log = run.log(folder)
     assert "start" in log
     assert f"end ok file={names[0]} bytes={len(FAKE_BYTES)} seconds=" in log
+
+
+def test_only_the_owner_can_read_the_folder_the_dump_and_the_log(run: Run) -> None:
+    result = run(PG_BACKUP_DIR="")
+
+    folder = run.home / "Backups" / "stock-prediction-platform"
+    assert result.returncode == 0, result.stdout + result.stderr
+    [name] = run.dumps(folder)
+    assert folder.stat().st_mode & 0o777 == 0o700
+    assert (folder / name).stat().st_mode & 0o777 == 0o600
+    assert (folder / "pg_backup.log").stat().st_mode & 0o777 == 0o600
 
 
 def test_success_keeps_only_the_newest_seven_dumps(run: Run) -> None:
@@ -146,6 +164,37 @@ def test_a_failed_dump_keeps_every_old_file_and_exits_non_zero(run: Run) -> None
     assert _context(alert).startswith("step=pg_dump status=1 seconds=")
 
 
+def test_a_dump_over_the_time_limit_fails_and_keeps_every_old_file(run: Run) -> None:
+    _old_files(run)
+
+    result = run(FAKE_DUMP_STATUS="124", PG_BACKUP_TIMEOUT="60")
+
+    assert result.returncode != 0
+    [dump] = [call for call in run.docker_calls() if "db" in call]
+    assert "PG_BACKUP_TIMEOUT=60" in dump
+    assert [name for name in run.dumps() if name != "pg-manual.dump"] == OLD
+    assert run.leftovers() == []
+    assert "failed step=dump_timeout status=124 seconds=" in run.log()
+    [alert] = run.alert_calls()
+    assert _context(alert).startswith("step=dump_timeout status=124 seconds=")
+
+
+def test_a_dump_that_waits_too_long_for_a_lock_fails_without_sending_the_error(
+    run: Run,
+) -> None:
+    _old_files(run)
+
+    result = run(FAKE_DUMP_STATUS="1", FAKE_DUMP_STDERR=LOCK_ERROR)
+
+    assert result.returncode != 0
+    assert [name for name in run.dumps() if name != "pg-manual.dump"] == OLD
+    assert run.leftovers() == []
+    assert LOCK_ERROR in run.log()
+    [alert] = run.alert_calls()
+    assert _context(alert).startswith("step=pg_dump status=1 seconds=")
+    assert all("lock" not in arg for arg in alert[:-1])
+
+
 def test_an_empty_dump_is_a_failure_that_keeps_every_old_file(run: Run) -> None:
     _old_files(run)
 
@@ -175,6 +224,16 @@ def test_an_unreadable_keep_count_stops_before_dumping(run: Run, keep: str) -> N
     assert run.dumps() == []
     [alert] = run.alert_calls()
     assert _context(alert).startswith("step=keep_count status=1 seconds=")
+
+
+@pytest.mark.parametrize("limit", ["0", "ninety", ""])
+def test_an_unreadable_time_limit_stops_before_dumping(run: Run, limit: str) -> None:
+    result = run(PG_BACKUP_TIMEOUT=limit)
+
+    assert result.returncode != 0
+    assert all("db" not in call for call in run.docker_calls())
+    [alert] = run.alert_calls()
+    assert _context(alert).startswith("step=time_limit status=1 seconds=")
 
 
 def test_the_alert_calls_the_workers_task_failure_report(
