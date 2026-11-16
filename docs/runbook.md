@@ -984,6 +984,7 @@ launchctl load ~/Library/LaunchAgents/tw.stock-prediction-platform.caffeinate-mo
 - 晚上那支週一到週五 15:00 執行 `caffeinate -i -t 39600`（到 02:00，涵蓋 22:40 那批的重試）；清晨那支週二到週六 05:15 執行 `caffeinate -i -t 5400`。
 - launchd 不知道交易日：週末補行交易日當天要手動執行一次 `caffeinate -i -t 39600`，隔天清晨再執行 `caffeinate -i -t 5400`。
 - 想讓 Mac 從睡眠中自己醒來，可以加 `sudo pmset repeat wakeorpoweron MTWRFS 05:10:00`（只能設一組時間）。
+- 03:00 的例行備份不在上面兩支 caffeinate 的時段裡，只靠第 1 項；沒做到的話，Mac 睡著時備份會等醒來才補跑（見「例行備份」的限制）。
 - 移除：`launchctl unload ~/Library/LaunchAgents/tw.stock-prediction-platform.caffeinate-*.plist` 後刪掉檔案。
 
 ## 例行備份
@@ -994,7 +995,7 @@ launchctl load ~/Library/LaunchAgents/tw.stock-prediction-platform.caffeinate-mo
 - 連線：從 repo 根目錄 `docker compose exec -T db` 跑 `pg_dump`，帳號與庫名在 db 容器裡讀 `POSTGRES_USER`、`POSTGRES_DB`。主機上不經手連線字串或密碼，也不讀 `.env`。
 - 寫檔：先寫成同目錄的 `.pg-<日期>-<時間>.dump.partial`；`pg_dump` 結束碼是 0、檔案也大於 0 bytes，才改名成 `pg-YYYYmmdd-HHMMSS.dump`。
 - 保留：成功之後依檔名只留最新的 7 份 `pg-*.dump`，目錄裡的其他檔案不動。失敗時不刪任何舊檔，只刪這次的暫存檔，以 1 結束。
-- log：`~/Backups/stock-prediction-platform/pg_backup.log`。開始 dump 前寫 `start`（目錄、保留數這些前置檢查沒過時只有 `failed` 那一列）；成功寫 `end ok file=… bytes=… seconds=…`，失敗寫 `failed step=… status=… seconds=…`。`pg_dump` 自己的錯誤訊息也只在這裡。
+- log：`~/Backups/stock-prediction-platform/pg_backup.log`。開始 dump 前寫 `start`（保留數檢查沒過時只有 `failed` 那一列；備份目錄本身建不了時 log 也寫不進去，只剩告警與 `launchctl print` 的 `last exit code`）；成功寫 `end ok file=… bytes=… seconds=…`，失敗寫 `failed step=… status=… seconds=…`。`pg_dump` 自己的錯誤訊息也只在這裡。
 - 告警：失敗時透過 worker 裡既有的任務失敗告警發一則（見「告警」的「任務失敗」），`text` 是 `task failed: ops.pg_backup (PgBackupFailed) step=pg_dump status=1 seconds=42`，同一天只發一次。log 的 `alert handed to the worker` 只表示 worker 跑完了這段程式；webhook 沒送到時，同一份 log 的上方會有 worker 印的 `task failure alert webhook failed`。告警程式另外盡力記當天那一列 `task_failure`（warning，會算進頁首的警告數，不擋研究閘門）。送出去的只有步驟、結束碼、秒數，不含路徑與錯誤訊息。
 - `step` 的意思：`folder` 建不了備份目錄（例如 `PG_BACKUP_DIR` 指到沒掛上的外接碟），`repo` 進不了 repo 目錄（只有腳本被搬走時才會發生，這一步的告警多半發不出去），`keep_count` 是 `PG_BACKUP_KEEP` 不是正整數，`pg_dump` 是 `pg_dump` 或 `docker compose exec` 失敗（含 Docker 沒開），`empty_dump` 是結束碼為 0 但檔案是空的，`rename` 是改名失敗，`signal` 是被中止（例如關機）。
 - 可調：`PG_BACKUP_DIR`（預設 `~/Backups/stock-prediction-platform`）、`PG_BACKUP_KEEP`（預設 7）。排程跑的要寫進 `~/Library/LaunchAgents` 那份 plist 複本的 `EnvironmentVariables`，shell 裡 export 的不會帶進 launchd。
@@ -1008,7 +1009,7 @@ cp ops/launchd/tw.stock-prediction-platform.pg-backup.plist ~/Library/LaunchAgen
 launchctl load ~/Library/LaunchAgents/tw.stock-prediction-platform.pg-backup.plist
 ```
 
-- 第一次在 repo 根目錄手動跑一次 `sh ops/backup/pg_backup.sh`，記下秒數與檔案大小，確認 7 份放得下。
+- 第一次在 repo 根目錄手動跑一次 `sh ops/backup/pg_backup.sh`，記下秒數與檔案大小，確認 8 份放得下（保留的 7 份加上正在寫的那份：新檔寫完、改名之後才刪最舊的）。
 - 再用 launchd 的環境跑一次（工作目錄是 `/`、PATH 只有 plist 裡那一行，手動跑測不到這些差異）：`launchctl kickstart gui/$(id -u)/tw.stock-prediction-platform.pg-backup`，跑完用下一小節那行檢查。
 - 移除：`launchctl unload ~/Library/LaunchAgents/tw.stock-prediction-platform.pg-backup.plist` 後刪掉檔案；已經寫好的備份檔不會被動到。
 
@@ -1018,7 +1019,10 @@ launchctl load ~/Library/LaunchAgents/tw.stock-prediction-platform.pg-backup.pli
 d=~/Backups/stock-prediction-platform; ls -l "$d" | grep " pg-$(date +%Y%m%d)-.*\.dump$" && tail -n 1 "$d/pg_backup.log" || { echo "今天沒有備份檔"; tail -n 5 "$d/pg_backup.log"; }
 ```
 
-- 03:00 之後才有當天的檔。印出「今天沒有備份檔」時看後面的 log：有 `failed` 是跑了但失敗；最後一列是前一天的 `end ok`，表示今天根本沒跑（排程沒載入、Mac 關著，或 03:00 睡著還沒醒）。
+- 03:00 之後才有當天的檔；改過 `PG_BACKUP_DIR` 的話，把 `d=` 換成那個目錄。印出「今天沒有備份檔」時看後面的 log：
+  - 有今天的 `failed`：跑了但失敗。
+  - 最後一列是前一天的 `end ok`：今天根本沒跑（排程沒載入、Mac 關著、03:00 睡著還沒醒），或備份目錄本身建不了（見上方 log 那一條）。
+  - 最後一列是今天的 `start`，而且下一條的 `launchctl print` 看到 `state = running`：還在跑，或卡住了（腳本沒有時間上限；卡住時 launchd 不會再起下一次）。確定卡住就用 `launchctl kill TERM gui/$(id -u)/tw.stock-prediction-platform.pg-backup` 中止。
 - launchd 有沒有跑、結束碼是多少：`launchctl print gui/$(id -u)/tw.stock-prediction-platform.pg-backup | grep -E 'state|last exit code'`。
 - 檔案讀不讀得懂（只讀目錄，不還原資料）：`docker compose exec -T db pg_restore --list < ~/Backups/stock-prediction-platform/pg-YYYYmmdd-HHMMSS.dump | head`。
 
@@ -1044,7 +1048,7 @@ docker rm -f -v twp-restore
 - 備份和資料庫在同一台 Mac、同一顆硬碟：防得了誤刪、資料寫壞、升級失敗，防不了硬碟壞掉或整台機器遺失。要防這種，得另外把檔案複製到外接碟或別台機器（目前沒做）。
 - Mac 關機或睡著時不會跑。睡著時 launchd 在醒來後補跑一次，錯過幾次都只補一次，可能撞上 05:15 之後的排程，只會多吃 IO；關機錯過的不補。
 - 排程本身沒跑（plist 沒載入、被移除、Mac 關著）不會有任何告警。
-- Docker Desktop 或 worker 沒在跑時告警發不出去，唯一的痕跡是 log 裡的 `alert not sent` 和備份目錄裡沒有當天的檔，用上面那行檢查。
+- Docker Desktop 或 worker 沒在跑時告警發不出去，唯一的痕跡是 log 裡的 `alert not sent` 和備份目錄裡沒有當天的檔，用上面那行檢查。備份目錄本身建不了時連 log 都沒有，只剩 `launchctl print` 的 `last exit code`。
 - 週末失敗時，`task_failure` 那一列的日期落在非交易日，品質頁與 `/api/status` 看不到，Discord 照發。
 - 被 `kill -9` 或斷電時，暫存檔 `.pg-*.dump.partial` 會留下，之後不會自動清，看到就手動刪。正常關機或 `launchctl unload` 送的是 SIGTERM：腳本要等手上的 `pg_dump` 結束才會刪暫存檔、記成 `signal`，但 launchd 只等一小段時間（`ExitTimeOut`，用系統預設，長度沒實測過）就送 SIGKILL，dump 跑得比這久時暫存檔照樣留下、也不會有 `signal` 那一列。
 - 備份檔是整個資料庫的完整內容（含 raw 層），不要放進公開或雲端同步分享的資料夾。
