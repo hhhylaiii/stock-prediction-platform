@@ -64,12 +64,13 @@
   const MODEL_REQUIRES = '模型要在 holdout 判定達標之後才會上線，判定未達標或明顯退化時要經使用者放行';
   const NOT_LIVE_WHY = '模型要通過 holdout 判定（未達標或明顯退化時要經使用者放行）與每月重訓的換模門檻（沒過時要經使用者強制換上）才會上線，沒上線的原因見<a href="#models">模型頁</a>。';
   const INTERVAL_HOLDOUT = 'interval-holdout-20261112';
-  const UNRELEASED_MODELS = '報酬區間、波動率與跑贏大盤機率（20 日）目前沒有上線中的模型：這三個模型屬於「區間與機率」那一組，holdout（2025 年 1 月至 2026 年 11 月，只跑一次）的絕對門檻都達標（20 日區間的總覆蓋率 75.0%），但逐摺平均的覆蓋率 70.9% 低於研究期最差的連續 8 摺 73.4%，判定「明顯退化」；使用者 2026-11-12 決定先不放行（之後可以再放行），所以沒有建正式模型。';
-  const UNRELEASED_EMPTY = '20 日的預測報酬、預測價、模型的 80% 區間與跑贏大盤機率來自「區間與機率」那一組模型，這組也沒有上線：holdout 判定「明顯退化」，使用者 2026-11-12 決定先不放行。';
+  const UNRELEASED_MODELS = '報酬區間、波動率與跑贏大盤機率（20 日）目前沒有上線中的模型：這三個模型屬於「區間與機率」那一組，holdout（2025 年起，到 2026-11-11 已到期的預測，只跑一次）的絕對門檻都達標（20 日區間的總覆蓋率 75.0%，門檻 70% 到 90%），但逐摺平均的覆蓋率 70.9% 低於研究期最差的連續 8 摺 73.4%，判定「明顯退化」；使用者 2026-11-12 決定先不放行（之後可以再放行），所以沒有建正式模型。';
+  const UNRELEASED_EMPTY = '20 日的預測報酬、預測價、模型的 80% 區間、預測波動與跑贏大盤機率來自「區間與機率」那一組模型，這組也沒有上線：holdout 判定「明顯退化」，使用者 2026-11-12 決定先不放行。';
   const UNRELEASED_WHY = '這幾個模型屬於「區間與機率」那一組，holdout 判定「明顯退化」，使用者 2026-11-12 決定先不放行；原因列在模型頁。';
   const UNRELEASED_STOCK = '20 日排名目前沒有上線中的模型，這一列留空；' + UNRELEASED_EMPTY + '原因列在模型頁。';
   const intervalHeld = meta => ((meta || {}).unreleased || []).some(entry => entry.run_key === INTERVAL_HOLDOUT);
   const rankServed = entry => ((entry || {}).models || []).some(model => model.role === 'rank');
+  const linkModels = text => text.replace('原因列在模型頁。', '原因列在<a href="#models">模型頁</a>。');
   const DEFAULT_HORIZON = 20;
   const STATUS_WAIT_MS = 1500;
   const SEVERITY = { info: ['通過', 'in'], warning: ['警告', 'warn'], error: ['錯誤', 'warn'] };
@@ -298,7 +299,7 @@
     const promise = Promise.allSettled([...state.watch].map(code => api.get('stocks/' + code + '/predictions'))).then(settled => {
       const failed = settled.find(result => result.status === 'rejected' && result.reason.status !== 404);
       if (failed) throw failed.reason;
-      return settled.filter(result => result.status === 'fulfilled').map(result => result.value.data);
+      return settled.filter(result => result.status === 'fulfilled').map(result => ({ ...result.value.data, unreleased: (result.value.meta || {}).unreleased || [] }));
     });
     state.watchCache = { key: key, promise: promise };
     promise.catch(() => { if (state.watchCache && state.watchCache.promise === promise) state.watchCache = null; });
@@ -306,12 +307,14 @@
   }
 
   async function watchedToday() {
-    const entries = (await watchedStocks()).map(stock => stock.horizons.find(entry => entry.horizon === state.h)).filter(Boolean);
+    const stocks = await watchedStocks();
+    const entries = stocks.map(stock => stock.horizons.find(entry => entry.horizon === state.h)).filter(Boolean);
     const q = state.q.trim().toLowerCase();
     const rows = entries.map(entry => entry.prediction)
       .filter(row => row && (state.mkt === 'all' || row.market === state.mkt) && (!q || row.stock_id.toLowerCase().startsWith(q) || (row.name || '').toLowerCase().includes(q)));
     const latest = entries.filter(entry => entry.date).sort((a, b) => (a.date < b.date) - (a.date > b.date))[0];
     const meta = latest ? { date: latest.date, universe: latest.universe, models: latest.models, degraded: latest.degraded, interval_alert: latest.interval_alert } : {};
+    meta.unreleased = stocks.length ? stocks[0].unreleased : [];
     meta.orderable = orderableOf(meta, rows);
     meta.ordering = meta.orderable.includes(orderName(state.ordering)) ? state.ordering : 'rank';
     return { rows: orderRows(rows, meta.ordering), meta: meta };
@@ -575,11 +578,11 @@
       '<div class="section" id="history"><div class="sechead"><h2>過去對本股的 ' + HISTORY_HORIZON + ' 日預測，與實際結果</h2><span class="muted small"></span></div><div class="body">' + loading + '</div></div>';
   }
 
-  function rankHtml(entry, status) {
+  function rankHtml(entry, status, anyRanked) {
     if (status === 'pending') return '—<small> 載入中…</small>';
     if (status === 'rejected') return '—<small> 讀取失敗</small>';
     const p = entry && entry.prediction;
-    if (!p) return '—<small> 尚未產出</small>';
+    if (!p) return anyRanked && !rankServed(entry) ? '—<small> 排名未上線</small>' : '—<small> 尚未產出</small>';
     if (p.rank === null) return '—<small> 訓練範圍外</small>';
     return '第 ' + p.rank + ' 名<small> / ' + fmtInt(entry.universe) + '</small>';
   }
@@ -632,8 +635,8 @@
       '<div class="thead h-cols" style="padding-top:10px"><div>期間</div><div class="right">預測報酬</div><div class="right">預測價</div><div class="right">80% 區間</div><div class="right prob-head" title="' + esc(PROB_TIP) + '">' + PROB_HEAD + '</div></div>' +
       entries.map(forecastRowHtml).join('') + '</div>' + (quantileBand ? '<p class="note band-note">' + BAND_NOTE + '</p>' : '') +
       (fallbackBand ? '<p class="note fallback-note">' + FALLBACK_NOTE + '</p>' : '') +
-      (lacking ? '<p class="note model-note">' + lacking + (heldWhy ? UNRELEASED_WHY : MODEL_REQUIRES + '；<a href="#models">上線中的模型列在模型頁</a>。') + '</p>' : '') +
-      (blankTwenty ? '<p class="note unreleased-note">' + UNRELEASED_STOCK + '</p>' : '') +
+      (lacking ? '<p class="note model-note">' + lacking + (heldWhy ? linkModels(UNRELEASED_WHY) : MODEL_REQUIRES + '；<a href="#models">上線中的模型列在模型頁</a>。') + '</p>' : '') +
+      (blankTwenty ? '<p class="note unreleased-note">' + linkModels(UNRELEASED_STOCK) + '</p>' : '') +
       '<div class="pair"><div><div class="faint tiny">預測 20 日波動（年化）</div><div class="v">' + (vol === null || vol === undefined ? '—' : (vol * 100).toFixed(1) + '%') + '</div>' +
       (realised === null ? '' : '<div class="muted tiny">過去 60 日實際為 ' + (realised * 100).toFixed(1) + '%</div>') + '</div>' +
       '<div><div class="faint tiny">排名模型版本</div><div style="font-size:15px;font-weight:500;line-height:1.6">' + (builds.names.map(esc).join('<br>') || '—') + '</div>' +
@@ -757,7 +760,10 @@
       if (prices.status === 'rejected') host.innerHTML = errorBox(prices.reason);
       else drawPriceChart(host, s, bars, state.chart, fan);
     };
-    const showRank = () => { document.querySelector('#stock-rank .v').innerHTML = rankHtml(entryOf(), forecasts.status); };
+    const showRank = () => {
+      const anyRanked = forecasts.status === 'fulfilled' && forecasts.value.data.horizons.some(rankServed);
+      document.querySelector('#stock-rank .v').innerHTML = rankHtml(entryOf(), forecasts.status, anyRanked);
+    };
     const showSeg = () => {
       if (forecasts.status !== 'fulfilled') return;
       const ready = new Set(forecasts.value.data.horizons.filter(entry => entry.prediction).map(entry => entry.horizon));

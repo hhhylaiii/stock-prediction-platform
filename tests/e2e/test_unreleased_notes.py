@@ -22,13 +22,13 @@ INTERVAL_RUNS = ["quantile-h20", "vol-h20", "prob-h20"]
 UNRELEASED_MODELS = (
     "報酬區間、波動率與跑贏大盤機率（20 日）目前沒有上線中的模型："
     "這三個模型屬於「區間與機率」那一組，"
-    "holdout（2025 年 1 月至 2026 年 11 月，只跑一次）的絕對門檻都達標"
-    "（20 日區間的總覆蓋率 75.0%），"
+    "holdout（2025 年起，到 2026-11-11 已到期的預測，只跑一次）的絕對門檻都達標"
+    "（20 日區間的總覆蓋率 75.0%，門檻 70% 到 90%），"
     "但逐摺平均的覆蓋率 70.9% 低於研究期最差的連續 8 摺 73.4%，判定「明顯退化」；"
     "使用者 2026-11-12 決定先不放行（之後可以再放行），所以沒有建正式模型。"
 )
 UNRELEASED_EMPTY = (
-    "20 日的預測報酬、預測價、模型的 80% 區間與跑贏大盤機率來自「區間與機率」那一組模型，"
+    "20 日的預測報酬、預測價、模型的 80% 區間、預測波動與跑贏大盤機率來自「區間與機率」那一組模型，"
     "這組也沒有上線：holdout 判定「明顯退化」，使用者 2026-11-12 決定先不放行。"
 )
 UNRELEASED_WHY = (
@@ -132,6 +132,23 @@ def test_today_twenty_with_a_ranking_gives_the_interval_reason(
     settled(page)
 
 
+def test_watch_only_keeps_the_interval_reason(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    hold_interval_back()
+    page.add_init_script("localStorage.setItem('twp-watch', JSON.stringify(['2330']))")
+
+    open_twenty(page, live_server)
+    page.locator("#watch-only").click()
+
+    expect(page.locator("#count")).to_have_text("追蹤中的 1 檔")
+    expect(page.locator("#model-note")).to_have_text(
+        "這一期沒有報酬區間、跑贏大盤機率模型的預測：預測報酬、預測價、跑贏大盤機率留空，"
+        f"價格區間改用波動估計。{UNRELEASED_WHY}"
+    )
+    settled(page)
+
+
 def test_the_stock_page_names_a_horizon_without_a_ranking_model(
     page: Page, live_server: LiveServer, valued: Seed
 ) -> None:
@@ -141,8 +158,14 @@ def test_the_stock_page_names_a_horizon_without_a_ranking_model(
     page.goto(f"{live_server.url}/#stock-2330")
 
     expect(page.locator("#stock-seg-hint")).to_have_text("20 日排名目前沒有上線中的模型")
-    expect(page.locator("#forecasts .unreleased-note")).to_have_text(UNRELEASED_STOCK)
+    note = page.locator("#forecasts .unreleased-note")
+    expect(note).to_have_text(UNRELEASED_STOCK)
+    expect(note.locator("a")).to_have_text("模型頁")
+    expect(note.locator("a")).to_have_attribute("href", "#models")
     expect(page.locator("#forecasts .model-note")).to_have_count(0)
+    page.locator("#stock-seg [data-sh='20']").evaluate("b => b.disabled = false")
+    page.locator("#stock-seg [data-sh='20']").click()
+    expect(page.locator(".stockhead .kpi .v")).to_have_text("— 排名未上線")
     settled(page)
 
 
@@ -153,11 +176,13 @@ def test_the_stock_page_gives_the_interval_reason_once_twenty_ranks(
 
     page.goto(f"{live_server.url}/#stock-2330")
 
-    expect(page.locator("#forecasts .model-note")).to_have_text(
+    note = page.locator("#forecasts .model-note")
+    expect(note).to_have_text(
         "20 日沒有報酬區間、波動率、跑贏大盤機率模型的預測："
         "預測報酬、預測價、預測 20 日波動、跑贏大盤機率留空，"
         f"價格區間改用波動估計。{UNRELEASED_WHY}"
     )
+    expect(note.locator("a")).to_have_attribute("href", "#models")
     expect(page.locator("#forecasts .unreleased-note")).to_have_count(0)
     settled(page)
 
@@ -233,4 +258,31 @@ def test_an_empty_five_day_page_does_not_name_the_twenty_day_models(
     page.locator("#view-today [data-h='5']").click()
 
     expect(page.locator("#today-empty")).to_have_text(no_ranking_text(5, 20))
+    settled(page)
+
+
+def test_the_hint_names_a_five_day_horizon_without_a_ranking_model(
+    page: Page, live_server: LiveServer, valued: Seed
+) -> None:
+    take_ranking_offline(5)
+
+    page.goto(f"{live_server.url}/#stock-2330")
+
+    expect(page.locator("#stock-seg-hint")).to_have_text("5 日排名目前沒有上線中的模型")
+    settled(page)
+
+
+def test_with_no_ranking_at_all_the_twenty_day_page_still_names_the_interval_models(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    take_ranking_offline(5)
+    take_ranking_offline(20)
+    hold_interval_back()
+
+    page.goto(live_server.url)
+
+    expect(page.locator("#today-empty")).to_have_text(
+        "預測資料尚未產出。排名模型要在 holdout 判定達標之後才會上線，"
+        "判定未達標或明顯退化時要經使用者放行；上線後，這裡會列出全市場的排名。" + UNRELEASED_EMPTY
+    )
     settled(page)

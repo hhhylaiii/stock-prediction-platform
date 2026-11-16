@@ -833,7 +833,7 @@ def test_a_horizon_picked_on_today_is_kept_on_the_stock_page(
     expect(page.locator("#stock-seg-hint")).to_have_text("20 日排名目前沒有上線中的模型")
     expect(page.locator("#stock-seg [data-sh='20']")).to_have_attribute("aria-pressed", "true")
     expect(page.locator(".stockhead .kpi")).to_contain_text("20 日預測排名")
-    expect(page.locator(".stockhead .kpi .v")).to_contain_text("尚未產出")
+    expect(page.locator(".stockhead .kpi .v")).to_have_text("— 排名未上線")
 
 
 def test_each_horizon_s_ranking_model_is_named_when_they_are_not_one_build(
