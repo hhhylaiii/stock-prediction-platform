@@ -12,7 +12,8 @@ from apps.market.calendar import TradingDays
 from apps.market.models import DailyPrice, IndexDaily, StockMaster, TradingCalendar
 from apps.research import shadow, tasks
 from apps.research.holding import Rule, simulate
-from apps.research.holding_inputs import load_market, stored_scores
+from apps.research.holding_inputs import index_levels, load_market, stored_scores
+from apps.research.holding_report import index_returns, universe_returns
 from apps.research.models import (
     BookPhase,
     BookStatus,
@@ -165,6 +166,14 @@ def test_mornings_one_by_one_equal_one_simulation_of_the_same_predictions(
         got = [getattr(row, column) for row in rows]
         assert got == pytest.approx(list(daily[column]), rel=1e-12, abs=1e-15)
     assert [row.held for row in rows] == list(daily["held"])
+    grid = load_market(stored_scores(FIRST, last), last, TradingDays.from_db())
+    levels = index_levels(FIRST, last)
+    assert [row.universe_return for row in rows] == pytest.approx(
+        list(universe_returns(grid)[1:]), rel=1e-12, abs=1e-15
+    )
+    assert [row.index_return for row in rows] == pytest.approx(
+        list(index_returns(levels, grid.days)[1:]), rel=1e-12
+    )
     moved = HoldingBookAction.objects.filter(book="T", phase=BookPhase.FILL).exclude(action="keep")
     stored = sorted(
         (
@@ -258,17 +267,38 @@ def test_a_fill_follows_its_list_after_the_predictions_are_rewritten(
     mornings(market[:3], clock)
     rewritten = Prediction.objects.filter(date=market[2])
     rewritten.update(score=-F("score"))
+    rewritten.filter(stock_id="1007").update(in_universe=False)
 
     warned = mornings(market[3:4], clock)[0]
 
     rewritten.update(score=-F("score"))
+    rewritten.filter(stock_id="1007").update(in_universe=True)
     mornings(market[:4], clock, {"R": Spec(RULE, FIRST)})
     note = warned.detail["notes"][0]
     assert (warned.severity, note["signal_date"]) == ("warning", "2026-11-18")
     assert note["predictions_rewritten"]["scores_changed"] > 0
+    assert note["predictions_rewritten"]["universe_removed"] == 1
     for phase in (BookPhase.LIST, BookPhase.FILL):
         assert lines("T", market[2], phase) == lines("R", market[2], phase)
-    assert fills("T")[2].value == fills("R")[2].value
+    rewrote, kept = fills("T")[2], fills("R")[2]
+    assert (rewrote.value, rewrote.universe_return) == (kept.value, kept.universe_return)
+
+
+def test_a_held_stock_whose_predictions_are_all_gone_still_fills_and_leaves(
+    market: list[date], clock: dict[str, datetime]
+) -> None:
+    mornings(market[:3], clock)
+    held = HoldingBookAction.objects.filter(book="T", signal_date=market[1], phase=BookPhase.FILL)
+    assert GONE in set(held.values_list("stock_id", flat=True))
+    Prediction.objects.filter(stock_id=GONE).delete()
+
+    outcome = mornings(market[3:4], clock)[0]
+
+    assert outcome.detail["books"]["T"]["filled"] == ["2026-11-18"]
+    listed = HoldingBookAction.objects.get(
+        book="T", signal_date=market[3], phase=BookPhase.LIST, stock_id=GONE
+    )
+    assert (listed.action, listed.score, listed.pct) == ("sell", None, None)
 
 
 def test_a_universe_stock_without_a_score_is_noted_and_the_list_still_written(

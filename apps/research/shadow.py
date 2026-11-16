@@ -376,16 +376,15 @@ def _write_list(
     return header, [note]
 
 
-def _signal(header: HoldingBookDay, lines: list[HoldingBookAction], inputs: Inputs) -> Signal:
-    """The list's scores and percentiles on the grid; nothing is scored on a day without them."""
+def _signal(lines: list[HoldingBookAction], inputs: Inputs) -> Signal:
+    """The list's scores and percentiles on the grid; a day without predictions lists none."""
     count = len(inputs.market.stocks)
     score, pct = np.full(count, np.nan), np.full(count, np.nan)
     for line in lines:
         k = inputs.column[line.stock_id]
         score[k] = np.nan if line.score is None else line.score
         pct[k] = np.nan if line.pct is None else line.pct
-    listed = header.status == BookStatus.LISTED
-    return score, pct, np.isfinite(pct) & listed
+    return score, pct, np.isfinite(pct)
 
 
 def _write_fill(
@@ -403,9 +402,7 @@ def _write_fill(
     values = np.zeros(len(market.stocks))
     for stock, value in ledger.values.items():
         values[inputs.column[stock]] = value
-    day = trade_day(
-        market, _signal(header, lines, inputs), inputs.marks, inputs.traded, inputs.settles, t
-    )
+    day = trade_day(market, _signal(lines, inputs), inputs.marks, inputs.traded, inputs.settles, t)
     result = step(ledger.cash, values, held, day, rule, FULL_COSTS)
     universe = inputs.mask(list(header.universe))
     now = timezone.now()
