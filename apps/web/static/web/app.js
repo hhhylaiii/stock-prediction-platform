@@ -1288,8 +1288,8 @@
     predictions_rewritten: v => '預測被改寫過：universe 新增 ' + fmtInt((asObject(v) || {}).universe_added || 0) + ' 檔、移除 ' +
       fmtInt((asObject(v) || {}).universe_removed || 0) + ' 檔，分數變動 ' + fmtInt((asObject(v) || {}).scores_changed || 0) + ' 檔',
     in_universe_without_score: v => fmtInt(Number(v) || 0) + ' 檔在 universe 內卻沒有分數',
-    trade_date_moved: v => '成交日有變動：名單 ' + shadowDay((asObject(v) || {}).listed) + '、成交 ' + shadowDay((asObject(v) || {}).filled),
-    no_taiex_tr: v => '缺加權報酬指數 ' + shadowDays(v)
+    trade_date_moved: v => '成交日改期：名單記 ' + shadowDay((asObject(v) || {}).listed) + '，實際 ' + shadowDay((asObject(v) || {}).filled) + '（交易日曆更正）',
+    no_taiex_tr: v => '寫入時還沒有加權報酬指數 ' + shadowDays(v) + ' 的收盤，大盤報酬留空'
   };
   const NOTE_FIELDS = ['book', 'signal_date', 'first'];
 

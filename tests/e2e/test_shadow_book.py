@@ -91,9 +91,12 @@ def test_a_written_shadow_book_says_which_days_it_wrote(
         ({"in_universe_without_score": 1, "first": ["1001"]}, "1 檔在 universe 內卻沒有分數"),
         (
             {"trade_date_moved": {"listed": "2026-11-19", "filled": "2026-11-20"}},
-            "成交日有變動：名單 11/19、成交 11/20",
+            "成交日改期：名單記 11/19，實際 11/20（交易日曆更正）",
         ),
-        ({"no_taiex_tr": ["2026-11-19"]}, "缺加權報酬指數 11/19"),
+        (
+            {"no_taiex_tr": ["2026-11-19"]},
+            "寫入時還沒有加權報酬指數 11/19 的收盤，大盤報酬留空",
+        ),
         ({"brand_new": {"x": 1}, "first": ["1001"]}, "其他備註 brand_new"),
     ],
 )
