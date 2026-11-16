@@ -26,10 +26,10 @@ from apps.research.holding_inputs import (
     INDEX,
     SHADOW_START,
     HoldoutRuleError,
-    cached_scores,
-    check_holdout_rule,
     index_levels,
+    labels_settled,
     load_market,
+    research_scores,
     stored_scores,
 )
 from apps.research.holding_report import (
@@ -39,10 +39,8 @@ from apps.research.holding_report import (
     summarise,
     universe_returns,
 )
-from apps.research.holdout import SPEC_HOLDOUT_START
 from apps.research.labels import latest_price_date
-from apps.research.lgbm_runs import MODEL
-from apps.research.prediction_cache import MissingFoldsError, holds_holdout
+from apps.research.prediction_cache import MissingFoldsError
 
 RESEARCH, PREDICTION = "research", "prediction"
 
@@ -80,18 +78,15 @@ def research_inputs(options: dict[str, Any], rule: Rule) -> Inputs:
     end = required_date(options["end"], "--end")
     if end <= until:
         raise CommandError("--end must be after --until so the last signal can trade")
-    check_holdout_rule(run_key, folds, rule)
-    if end >= SPEC_HOLDOUT_START and not any(holds_holdout(run_key, MODEL, k) for k in folds):
-        raise CommandError(
-            f"--end {end} reaches the holdout period from {SPEC_HOLDOUT_START}; "
-            "research folds stay before it"
-        )
     label = f"{run_key} folds {folds[0]}-{folds[-1]}"
-    return Inputs(cached_scores(run_key, folds, until), end, label)
+    return Inputs(research_scores(run_key, folds, until, end, rule), end, label)
 
 
-def prediction_inputs(options: dict[str, Any]) -> Inputs:
-    """Stored rank 5-day predictions from --start, valued through the latest price day."""
+def prediction_inputs(options: dict[str, Any], calendar: TradingDays) -> Inputs:
+    """Stored rank 5-day predictions from --start, valued through the latest price day.
+
+    The last trade day needs the day before's untradable_t1, which the evening labels settle.
+    """
     start = as_date(options["start"], "--start") or SHADOW_START
     if start < SHADOW_START:
         raise CommandError(f"the shadow book starts on its first signal day {SHADOW_START}")
@@ -100,6 +95,12 @@ def prediction_inputs(options: dict[str, Any]) -> Inputs:
         raise CommandError("daily_price is empty")
     until = as_date(options["until"], "--until") or latest
     end = as_date(options["end"], "--end") or latest
+    before = calendar.shift(end, -1)
+    if before >= start and not labels_settled(before):
+        raise CommandError(
+            f"untradable_t1 of {before} is not settled until the labels are rebuilt on "
+            f"{end}'s prices; pass --end {before} or run again after the evening labels"
+        )
     scores = stored_scores(start, until)
     return Inputs(scores, end, f"prediction {start}..{until}")
 
@@ -148,11 +149,12 @@ class Command(BaseCommand):
     def handle(self, *args: Any, **options: Any) -> None:
         try:
             rule = Rule.parse(options["rule"], options["size"])
+            calendar = TradingDays.from_db()
             if options["source"] == PREDICTION:
-                chosen = prediction_inputs(options)
+                chosen = prediction_inputs(options, calendar)
             else:
                 chosen = research_inputs(options, rule)
-            market = load_market(chosen.scores, chosen.end, TradingDays.from_db())
+            market = load_market(chosen.scores, chosen.end, calendar)
         except (ValueError, CalendarError, MissingFoldsError, HoldoutRuleError) as error:
             raise CommandError(str(error)) from error
         settle = Settle(options["settle"])
@@ -179,7 +181,7 @@ class Command(BaseCommand):
         if options["list"]:
             listed = last_list(market, book, rule)
             if listed.empty:
-                self.stdout.write(f"no prediction on {days[-1]}; the book holds still")
+                self.stdout.write(f"no prediction stored for {days[-1]}; the book holds still")
             else:
                 self.stdout.write(f"list of {days[-1]}:")
                 self.stdout.write(listed.to_string(index=False))

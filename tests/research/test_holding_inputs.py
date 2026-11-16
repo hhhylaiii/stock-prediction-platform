@@ -16,10 +16,11 @@ from apps.research.holding import Rule
 from apps.research.holding_inputs import (
     SCORE_COLUMNS,
     HoldoutRuleError,
-    cached_scores,
     check_holdout_rule,
     index_levels,
+    labels_settled,
     load_market,
+    research_scores,
     stored_scores,
 )
 from apps.research.models import LabelDaily, ModelRun, Prediction
@@ -36,6 +37,8 @@ NAN = math.nan
 CALENDAR = weekday_calendar(date(2016, 1, 4), date(2016, 3, 31))
 DAYS = list(CALENDAR.between(date(2016, 1, 4), date(2016, 3, 31)))
 KEY = "rank-test"
+H70 = Rule.parse("H70", 30)
+HOLDOUT_END = date(2026, 11, 11)
 
 
 @pytest.fixture
@@ -64,7 +67,7 @@ def test_cached_scores_stack_folds_through_the_last_signal_day(cache: Path) -> N
     write_fold(1, DAYS[0:3])
     write_fold(2, DAYS[3:6])
 
-    scores = cached_scores(KEY, [1, 2], DAYS[4])
+    scores = research_scores(KEY, [1, 2], DAYS[4], DAYS[5], H70)
 
     assert scores.columns.tolist() == SCORE_COLUMNS
     assert sorted(set(scores["date"])) == DAYS[0:5]
@@ -77,14 +80,14 @@ def test_cached_scores_refuse_a_day_two_folds_score(cache: Path) -> None:
     write_fold(2, DAYS[2:5])
 
     with pytest.raises(ValueError, match="more than one fold"):
-        cached_scores(KEY, [1, 2], DAYS[4])
+        research_scores(KEY, [1, 2], DAYS[4], DAYS[5], H70)
 
 
 def test_cached_scores_name_the_missing_folds(cache: Path) -> None:
     write_fold(1, DAYS[0:3])
 
     with pytest.raises(MissingFoldsError) as raised:
-        cached_scores(KEY, [1, 2, 3], DAYS[4])
+        research_scores(KEY, [1, 2, 3], DAYS[4], DAYS[5], H70)
 
     assert "2" in str(raised.value)
     assert "3" in str(raised.value)
@@ -104,7 +107,7 @@ def test_the_three_rules_of_the_one_holdout_pass_may_rerun_on_holdout_folds(
 ) -> None:
     monkeypatch.setattr(holding_inputs, "holds_holdout", lambda key, model, index: index >= 44)
 
-    check_holdout_rule(KEY, [43, 44], Rule.parse(name, slots))
+    check_holdout_rule(KEY, [44, 45], Rule.parse(name, slots), HOLDOUT_END)
 
 
 @pytest.mark.parametrize(("name", "slots"), [("H50", 30), ("H70", 100), ("H80", 30)])
@@ -113,9 +116,40 @@ def test_any_other_rule_is_refused_on_holdout_folds(
 ) -> None:
     monkeypatch.setattr(holding_inputs, "holds_holdout", lambda key, model, index: index >= 44)
 
-    with pytest.raises(HoldoutRuleError, match=r"folds \[44\]"):
-        check_holdout_rule(KEY, [43, 44], Rule.parse(name, slots))
-    check_holdout_rule(KEY, [8, 43], Rule.parse(name, slots))
+    with pytest.raises(HoldoutRuleError, match=r"folds \[44, 45\] .* only H70/N30"):
+        check_holdout_rule(KEY, [44, 45], Rule.parse(name, slots), HOLDOUT_END)
+    check_holdout_rule(KEY, [8, 43], Rule.parse(name, slots), date(2024, 12, 31))
+
+
+def test_research_and_holdout_folds_are_never_run_together(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(holding_inputs, "holds_holdout", lambda key, model, index: index >= 44)
+
+    with pytest.raises(HoldoutRuleError, match=r"folds \[44\] .* run them apart"):
+        check_holdout_rule(KEY, [43, 44], H70, HOLDOUT_END)
+
+
+def test_research_folds_may_not_price_into_the_holdout_period(cache: Path) -> None:
+    write_fold(1, DAYS[0:3])
+
+    with pytest.raises(HoldoutRuleError, match="before the holdout period from 2025-01-01"):
+        research_scores(KEY, [1], DAYS[2], date(2025, 1, 2), H70)
+    assert len(research_scores(KEY, [1], DAYS[2], date(2024, 12, 31), H70)) == 6
+
+
+def test_labels_settle_once_no_row_of_the_day_waits_for_the_next_prices() -> None:
+    assert labels_settled(DAYS[0]) is False
+    LabelDaily.objects.bulk_create(
+        [
+            LabelDaily(stock_id="1000", date=DAYS[0], horizon=5, untradable_t1=False),
+            LabelDaily(stock_id="1001", date=DAYS[0], horizon=5, untradable_t1=True),
+            LabelDaily(stock_id="1000", date=DAYS[1], horizon=5, untradable_t1=False),
+            LabelDaily(stock_id="1001", date=DAYS[1], horizon=5, untradable_t1=None),
+            LabelDaily(stock_id="1001", date=DAYS[0], horizon=20, untradable_t1=None),
+        ]
+    )
+
+    assert labels_settled(DAYS[0]) is True
+    assert labels_settled(DAYS[1]) is False
 
 
 def make_run(run_id: str, objective: str) -> ModelRun:
@@ -180,7 +214,9 @@ def bars(stock_id: str, days: list[date], opens: list[float], adj: float = 1.0) 
 def test_the_market_grids_adjust_prices_and_mark_flags_by_day_and_stock() -> None:
     stock("1000", list_date=DAYS[0], delist_date=DAYS[6])
     stock("1001", list_date=DAYS[0])
+    stock("1002", list_date=DAYS[0], delist_date=date(2016, 1, 9))
     bars("1000", DAYS[0:6], [10.0] * 6)
+    bars("1002", DAYS[0:5], [10.0] * 5)
     bars("1001", DAYS[0:10], [10.0] * 8 + [9.0, 10.0], adj=2.0)
     LabelDaily.objects.bulk_create(
         [
@@ -193,14 +229,14 @@ def test_the_market_grids_adjust_prices_and_mark_flags_by_day_and_stock() -> Non
         [
             {"date": day, "stock_id": name, "in_universe": (n, name) != (1, "1000"), "score": n}
             for n, day in enumerate(DAYS[0:5])
-            for name in ("1000", "1001")
+            for name in ("1000", "1001", "1002")
         ]
     )
 
     grid = load_market(scores, DAYS[9], CALENDAR)
 
     assert grid.days == DAYS[0:10]
-    assert grid.stocks == ["1000", "1001"]
+    assert grid.stocks == ["1000", "1001", "1002"]
     assert np.isnan(grid.closes[6:, 0]).all()
     assert grid.closes[:6, 0].tolist() == [10.0] * 6
     assert grid.closes[:, 1].tolist() == [20.0] * 10
@@ -209,7 +245,8 @@ def test_the_market_grids_adjust_prices_and_mark_flags_by_day_and_stock() -> Non
     assert np.argwhere(grid.blocked).tolist() == [[3, 1]]
     assert np.argwhere(~grid.in_universe[:5]).tolist() == [[1, 0]]
     assert np.isnan(grid.score[5:]).all()
-    assert grid.delisted.tolist() == [7, 10]
+    assert DAYS[5] == date(2016, 1, 11)
+    assert grid.delisted.tolist() == [7, 10, 5]
     assert np.argwhere(grid.limit_down_open).tolist() == [[8, 1]]
 
 

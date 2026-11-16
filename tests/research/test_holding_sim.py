@@ -64,13 +64,13 @@ def fed(monkeypatch: pytest.MonkeyPatch, calendar_rows: list[date]) -> dict[str,
         return book_market(calendar_rows, score)
 
     levels = pd.Series(100.0, index=calendar_rows)
-    monkeypatch.setattr(holding_sim, "cached_scores", scores)
+    monkeypatch.setattr(holding_inputs, "_cached_scores", scores)
     monkeypatch.setattr(holding_sim, "stored_scores", stored)
     monkeypatch.setattr(holding_sim, "load_market", market)
     monkeypatch.setattr(holding_sim, "index_levels", lambda start, end: levels)
     monkeypatch.setattr(holding_sim, "latest_price_date", lambda: calendar_rows[19])
-    monkeypatch.setattr(holding_sim, "holds_holdout", lambda key, model, index: index >= 44)
     monkeypatch.setattr(holding_inputs, "holds_holdout", lambda key, model, index: index >= 44)
+    monkeypatch.setattr(holding_sim, "labels_settled", lambda day: True)
     monkeypatch.setattr(holding_sim, "SHADOW_START", calendar_rows[0])
     return asked
 
@@ -121,7 +121,7 @@ def test_a_last_day_without_predictions_says_so_instead_of_listing(
 
     text = run(*PREDICTION, "--list")
 
-    assert "no prediction on 2016-01-29; the book holds still" in text
+    assert "no prediction stored for 2016-01-29; the book holds still" in text
     assert "list of" not in text
 
 
@@ -190,7 +190,8 @@ def test_days_without_a_taiex_tr_close_are_counted(
         ([*RESEARCH[:3], "8-x", *RESEARCH[4:], "--end", "2016-01-29"], "look like 8-43"),
         ([*RESEARCH[:3], "43-8", *RESEARCH[4:], "--end", "2016-01-29"], "runs backwards"),
         ([*RESEARCH, "--end", "2016-01-28"], "after --until"),
-        ([*RESEARCH, "--end", "2025-01-02"], "reaches the holdout period"),
+        ([*RESEARCH, "--end", "2025-01-02"], "before the holdout period"),
+        ([*RESEARCH[:3], "8-44", *RESEARCH[4:], "--end", "2016-01-29"], "run them apart"),
         ([*RESEARCH[:3], "8-44", *RESEARCH[4:], "--end", "2016-01-29", "--rule", "H50"], "44"),
         ([*RESEARCH, "--end", "2016-01-29", "--rule", "P5"], "rule must look like"),
     ],
@@ -200,6 +201,33 @@ def test_bad_or_forbidden_requests_are_refused(
 ) -> None:
     with pytest.raises(CommandError, match=message):
         run(*args)
+
+
+def test_stored_predictions_wait_for_the_labels_of_the_day_before_the_last(
+    fed: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asked: list[date] = []
+
+    def unsettled(day: date) -> bool:
+        asked.append(day)
+        return False
+
+    monkeypatch.setattr(holding_sim, "labels_settled", unsettled)
+
+    with pytest.raises(CommandError, match="untradable_t1 of 2016-01-28 is not settled"):
+        run(*PREDICTION)
+
+    assert asked == [date(2016, 1, 28)]
+
+
+def test_a_one_day_prediction_book_needs_no_settled_labels(
+    fed: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(holding_sim, "labels_settled", lambda day: False)
+
+    text = run("--source", "prediction", "--start", "2016-01-29", "--list")
+
+    assert "list of 2016-01-29:" in text
 
 
 def test_holdout_folds_may_price_on_holdout_days_for_the_three_rules(fed: dict[str, Any]) -> None:

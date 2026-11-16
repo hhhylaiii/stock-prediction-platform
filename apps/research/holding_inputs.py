@@ -12,6 +12,7 @@ import pyarrow.parquet as pq
 from apps.market.calendar import TradingDays
 from apps.market.models import IndexDaily, IndexId, StockMaster
 from apps.research.holding import Market, Mask, Rule
+from apps.research.holdout import SPEC_HOLDOUT_START
 from apps.research.lgbm_runs import MODEL
 from apps.research.models import LabelDaily, ModelObjective, Prediction
 from apps.research.panel import load_price_panel
@@ -31,17 +32,32 @@ class HoldoutRuleError(ValueError):
     """A rule the one holdout pass never ran, asked for on holdout folds."""
 
 
-def check_holdout_rule(run_key: str, folds: Sequence[int], rule: Rule) -> None:
-    """Refuse holdout folds for every rule but H70/N30, H90/N30 and H90/N100."""
+def check_holdout_rule(run_key: str, folds: Sequence[int], rule: Rule, end: date) -> None:
+    """Holdout folds only alone and for H70/N30, H90/N30, H90/N100; research folds price before."""
     held = [index for index in folds if holds_holdout(run_key, MODEL, index)]
+    if held and len(held) < len(folds):
+        raise HoldoutRuleError(f"folds {held} of {run_key} are holdout folds; run them apart")
     if held and (rule.exit_below, rule.slots) not in HOLDOUT_RULES:
         raise HoldoutRuleError(
             f"folds {held} of {run_key} are holdout folds; only H70/N30, H90/N30 and H90/N100 "
             "may be rerun there"
         )
+    if not held and end >= SPEC_HOLDOUT_START:
+        raise HoldoutRuleError(
+            f"research folds price before the holdout period from {SPEC_HOLDOUT_START}, "
+            f"not through {end}"
+        )
 
 
-def cached_scores(run_key: str, folds: Sequence[int], until: date) -> pd.DataFrame:
+def research_scores(
+    run_key: str, folds: Sequence[int], until: date, end: date, rule: Rule
+) -> pd.DataFrame:
+    """Cached fold scores through until, after the holdout checks for a book valued to end."""
+    check_holdout_rule(run_key, folds, rule, end)
+    return _cached_scores(run_key, folds, until)
+
+
+def _cached_scores(run_key: str, folds: Sequence[int], until: date) -> pd.DataFrame:
     """LightGBM 5-day scores and universe flags of cached folds, signal days through until."""
     absent = [index for index in folds if not fold_path(run_key, MODEL, index).exists()]
     if absent:
@@ -66,6 +82,12 @@ def stored_scores(start: date, end: date) -> pd.DataFrame:
     ).values_list(*SCORE_COLUMNS)
     frame = pd.DataFrame(list(rows), columns=SCORE_COLUMNS)
     return frame.astype({"score": "float64", "in_universe": "bool"})
+
+
+def labels_settled(day: date) -> bool:
+    """Whether the day's 5-day labels exist and none still waits for the next day's prices."""
+    rows = LabelDaily.objects.filter(date=day, horizon=HORIZON)
+    return rows.exists() and not rows.filter(untradable_t1__isnull=True).exists()
 
 
 def _wide(frame: pd.DataFrame, column: str, days: list[date], stocks: list[str]) -> pd.DataFrame:
