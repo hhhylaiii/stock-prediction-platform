@@ -15,6 +15,7 @@ from apps.research.holding import (
     SETTLE,
     STUCK,
     Book,
+    Costs,
     Market,
     Matrix,
     Rule,
@@ -155,7 +156,7 @@ def halted_exit() -> tuple[Matrix, Matrix, np.ndarray]:
     """1000 is bought, leaves the universe on day 3 and has no trade on days 4 and 5."""
     opens, closes = flat(9, 2), flat(9, 2)
     opens[4:6, 0] = closes[4:6, 0] = NAN
-    opens[6:, 0] = 12.0
+    opens[6:, 0] = 11.0
     closes[6:, 0] = 12.0
     universe = np.ones((9, 2), dtype=bool)
     universe[3:, 0] = False
@@ -177,9 +178,9 @@ def test_an_exit_without_a_trade_waits_at_its_last_close_and_sells_when_it_trade
     assert done(book, 6, BUY) == ["1001"]
     values = book.daily.set_index("date")["value"]
     assert values[DAYS[5]] == pytest.approx(1.0)
-    assert values[DAYS[6]] == pytest.approx(1.2)
+    assert values[DAYS[6]] == pytest.approx(1.1)
     sale = book.actions[book.actions["action"] == SELL].iloc[0]
-    assert sale["amount"] == pytest.approx(1.2)
+    assert sale["amount"] == pytest.approx(1.1)
     assert bool(sale["limit_down_open"]) is True
     assert sale["signal_date"] == DAYS[5]
 
@@ -209,6 +210,8 @@ def test_live_settlement_waits_for_the_day_after_delisting() -> None:
     paid = book.daily.set_index("date")["paid"][DAYS[7]]
     bought = book.actions[book.actions["action"] == BUY]["amount"].iloc[-1]
     assert paid == pytest.approx(settled["amount"] * SELL_COST + bought * BUY_COST)
+    assert bought == pytest.approx(settled["amount"] * (1 - SELL_COST) / (1 + BUY_COST))
+    assert book.daily.set_index("date")["value"][DAYS[7]] == pytest.approx(bought)
 
 
 def test_live_settlement_never_closes_a_name_that_was_not_delisted() -> None:
@@ -234,16 +237,95 @@ def test_percentiles_rank_only_universe_names_with_a_score_and_average_ties() ->
 
 
 def test_an_out_of_universe_score_never_pushes_holdings_below_the_exit() -> None:
-    prices = flat(4, 4)
-    score = ranked(4, [1, 2, 3, 4])
-    score[1:, 0] = 100.0
-    universe = np.ones((4, 4), dtype=bool)
+    prices = flat(4, 3)
+    universe = np.ones((4, 3), dtype=bool)
     universe[:, 0] = False
 
-    book = simulate(market(prices, prices, score, in_universe=universe), Rule.parse("H70", 1))
+    book = simulate(
+        market(prices, prices, ranked(4, [100, 1, 2]), in_universe=universe), Rule.parse("H70", 1)
+    )
 
-    assert done(book, 1, BUY) == ["1003"]
+    assert done(book, 1, BUY) == ["1002"]
     assert book.actions["action"].eq(SELL).sum() == 0
+
+
+def test_a_stuck_exit_keeps_its_slot_so_the_cash_of_a_sale_fills_one_slot() -> None:
+    opens, closes = flat(7, 4), flat(7, 4)
+    opens[4:6, 0] = closes[4:6, 0] = NAN
+    score = ranked(7, [4, 3, 2, 1])
+    score[3:] = [NAN, 1, 4, 3]
+    universe = np.ones((7, 4), dtype=bool)
+    universe[3:, 0] = False
+    rule = Rule(exit_below=0.5, slots=2, entry_at=0.5)
+
+    book = simulate(market(opens, closes, score, in_universe=universe), rule, NO_COSTS)
+
+    assert done(book, 1, BUY) == ["1000", "1001"]
+    assert done(book, 4, STUCK) == ["1000"]
+    assert done(book, 4, SELL) == ["1001"]
+    assert done(book, 4, BUY) == ["1002"]
+    bought = book.actions[book.actions["date"] == DAYS[4]].set_index("action")["amount"]
+    assert bought[BUY] == pytest.approx(bought[SELL])
+
+
+def test_a_name_sold_at_the_open_is_not_bought_back_at_the_same_open() -> None:
+    prices = flat(4, 10)
+    score = ranked(4, list(range(1, 11)))
+    score[1:, 8], score[1:, 9] = 10.0, 9.0
+    blocked = np.zeros((4, 10), dtype=bool)
+    blocked[1:, 8] = True
+
+    book = simulate(market(prices, prices, score, blocked=blocked), Rule.parse("H95", 1))
+
+    assert done(book, 1, BUY) == ["1009"]
+    assert done(book, 2, SELL) == ["1009"]
+    assert done(book, 2, BUY) == []
+
+
+def test_a_day_trades_only_with_a_close_and_an_open_above_zero() -> None:
+    opens = np.array([[10.0, NAN, 0.0, 10.0]])
+    closes = np.array([[10.0, 10.0, 10.0, NAN]])
+
+    assert market(opens, closes, np.ones((1, 4))).traded.tolist() == [[True, False, False, False]]
+
+
+def units_book(grid: Market, rule: Rule, costs: Costs) -> list[float]:
+    """The research script's ledger: units times the adjusted close, one read of the prices."""
+    pct = percentiles(grid.score, grid.in_universe)
+    marks, traded = grid.marks, grid.traded
+    units, cash, values = np.zeros(len(grid.stocks)), 1.0, [1.0]
+    for t in range(1, len(grid.days)):
+        s = t - 1
+        scored = grid.in_universe[s] & np.isfinite(grid.score[s])
+        out = (units > 0) & ~(pct[s] >= rule.exit_below) & traded[t]
+        cash += float((units[out] * grid.opens[t, out]).sum()) * (1 - costs.sell)
+        units[out] = 0.0
+        free = rule.slots - int((units > 0).sum())
+        can = scored & (pct[s] >= rule.entry_at) & (units == 0) & ~grid.blocked[s] & traded[t]
+        picks = np.flatnonzero(can)
+        picks = picks[np.argsort(-grid.score[s, picks], kind="stable")][: max(free, 0)]
+        if len(picks):
+            each = cash / free
+            units[picks] = each / (grid.opens[t, picks] * (1 + costs.buy))
+            cash -= each * len(picks)
+        values.append(cash + float(np.nansum(units * marks[t])))
+    return values
+
+
+def test_rolling_values_forward_by_price_ratios_equals_units_times_the_price() -> None:
+    rng = np.random.default_rng(11)
+    closes = 10 * np.cumprod(1 + rng.normal(0, 0.03, (80, 12)), axis=0)
+    opens = closes * (1 + rng.normal(0, 0.01, (80, 12)))
+    opens[20:24, 3] = closes[20:24, 3] = NAN
+    grid = market(opens, closes, rng.normal(size=(80, 12)))
+    rule = Rule(exit_below=0.5, slots=4, entry_at=0.75)
+
+    book = simulate(grid, rule, FULL_COSTS)
+
+    assert book.actions["action"].eq(SELL).sum() > 20
+    assert book.daily["value"].tolist() == pytest.approx(
+        units_book(grid, rule, FULL_COSTS), rel=1e-12
+    )
 
 
 def test_a_day_without_any_score_trades_nothing() -> None:
@@ -294,9 +376,7 @@ def test_the_list_names_sells_keeps_then_buys_in_priority_with_backups() -> None
     stocks = [str(1000 + k) for k in range(10)]
     rule = Rule(exit_below=0.7, slots=2, entry_at=0.8)
 
-    everyone, nobody = np.ones(10, dtype=bool), np.zeros(10, dtype=bool)
-
-    listed = order_list(held, np.arange(1.0, 11.0), everyone, nobody, stocks, rule)
+    listed = order_list(held, np.arange(1.0, 11.0), np.ones(10, dtype=bool), stocks, rule)
 
     assert listed[["stock_id", "action", "priority"]].values.tolist() == [
         ["1000", SELL, 0],
@@ -312,9 +392,7 @@ def test_the_list_is_empty_on_a_day_without_scores() -> None:
     stocks = ["1000", "1001"]
     nothing = np.array([NAN, NAN])
 
-    everyone, nobody = np.ones(2, dtype=bool), np.zeros(2, dtype=bool)
-
-    listed = order_list(held, nothing, everyone, nobody, stocks, Rule.parse("H70", 1))
+    listed = order_list(held, nothing, np.ones(2, dtype=bool), stocks, Rule.parse("H70", 1))
 
     assert listed.empty
     assert isinstance(listed, pd.DataFrame)

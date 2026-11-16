@@ -1,4 +1,4 @@
-"""Continuous holding books on daily scores, next-open trades and costs on what trades (H0)."""
+"""Continuous holding books, next-open trades, costs on trades (holding-shadow-prereg.md)."""
 
 import re
 from dataclasses import dataclass
@@ -124,7 +124,6 @@ class Stepped:
     paid: float
     traded: float
     moves: Moves
-    acted: bool
 
 
 @dataclass(frozen=True)
@@ -155,13 +154,13 @@ def _idle(held: Mask) -> Moves:
     return Moves(none, none, none, none, zero, zero)
 
 
-def _entries(kept: Mask, cash: float, day: Day, rule: Rule) -> tuple[Mask, float]:
-    """Names bought and the cash each gets: best scores first, ties in stock order."""
+def _entries(kept: Mask, held: Mask, cash: float, day: Day, rule: Rule) -> tuple[Mask, float]:
+    """Names not held at the open bought with the cash: best scores first, ties in stock order."""
     chosen = np.zeros_like(kept)
     free = rule.slots - int(kept.sum())
     if free <= 0 or cash <= CASH_FLOOR:
         return chosen, 0.0
-    can = day.scored & (day.pct >= rule.entry_at) & ~kept & ~day.blocked & day.traded
+    can = day.scored & (day.pct >= rule.entry_at) & ~held & ~day.blocked & day.traded
     picks = np.flatnonzero(can)
     picks = picks[np.argsort(-day.score[picks], kind="stable")][:free]
     chosen[picks] = True
@@ -172,7 +171,7 @@ def step(cash: float, values: Matrix, held: Mask, day: Day, rule: Rule, costs: C
     """One trade day: exits at the open, entries with the cash, then the close."""
     if not day.scored.any():
         kept = np.where(held, values * day.close_ratio, 0.0)
-        return Stepped(cash, kept, held, 0.0, 0.0, _idle(held), acted=False)
+        return Stepped(cash, kept, held, 0.0, 0.0, _idle(held))
     leave = held & ~(day.pct >= rule.exit_below)
     sold = leave & day.traded
     settled = leave & ~day.traded & day.settle
@@ -180,7 +179,7 @@ def step(cash: float, values: Matrix, held: Mask, day: Day, rule: Rule, costs: C
     gross = float(proceeds.sum())
     cash += gross * (1 - costs.sell)
     kept = held & ~(sold | settled)
-    bought, each = _entries(kept, cash, day, rule)
+    bought, each = _entries(kept, held, cash, day, rule)
     entered = np.where(bought, each / (1 + costs.buy), 0.0)
     cash -= each * int(bought.sum())
     closing = np.where(kept, values * day.close_ratio, 0.0)
@@ -188,27 +187,26 @@ def step(cash: float, values: Matrix, held: Mask, day: Day, rule: Rule, costs: C
     moves = Moves(sold, settled, leave & ~(sold | settled), bought, proceeds, entered)
     paid = gross * costs.sell + float(entered.sum()) * costs.buy
     traded = gross + float(entered.sum())
-    return Stepped(cash, closing, kept | bought, paid, traded, moves, acted=True)
+    return Stepped(cash, closing, kept | bought, paid, traded, moves)
 
 
-def settle_days(market: Market, settle: Settle) -> Mask:
+def settle_days(market: Market, settle: Settle, traded: Mask) -> Mask:
     """Days on which each stock's stuck exit may close at its last close."""
     at = np.arange(len(market.days))[:, None]
     if settle == Settle.LIVE:
         return at >= market.delisted[None, :]
-    traded = market.traded
     last = np.where(traded, at, -1).max(axis=0)
     return at > last[None, :]
 
 
-def _day(market: Market, pct: Matrix, marks: Matrix, settles: Mask, t: int) -> Day:
+def _day(market: Market, pct: Matrix, marks: Matrix, traded: Mask, settles: Mask, t: int) -> Day:
     signal = t - 1
     return Day(
         score=market.score[signal],
         pct=pct[signal],
         scored=market.in_universe[signal] & np.isfinite(market.score[signal]),
         blocked=market.blocked[signal],
-        traded=market.traded[t],
+        traded=traded[t],
         open_ratio=_ratio(market.opens[t], marks[signal]),
         close_ratio=_ratio(marks[t], marks[signal], fill=1.0),
         intraday=_ratio(market.closes[t], market.opens[t]),
@@ -242,14 +240,15 @@ def simulate(
 ) -> Book:
     """Daily book from the first scored signal day at value 1.0, cash only, through the last day."""
     pct = percentiles(market.score, market.in_universe)
-    marks, settles = market.marks, settle_days(market, settle)
+    marks, traded = market.marks, market.traded
+    settles = settle_days(market, settle, traded)
     names = len(market.stocks)
     cash, values, held = 1.0, np.zeros(names), np.zeros(names, dtype=bool)
     rows: list[tuple[object, ...]] = []
     actions: list[tuple[object, ...]] = []
     started = -1
     for t in range(1, len(market.days)):
-        day = _day(market, pct, marks, settles, t)
+        day = _day(market, pct, marks, traded, settles, t)
         if started < 0 and day.scored.any():
             started = t
             rows.append((market.days[t - 1], 1.0, 1.0, 0.0, 0.0, 0))
@@ -264,7 +263,7 @@ def simulate(
 
 
 def order_list(
-    held: Mask, score: Matrix, in_universe: Mask, blocked: Mask, stocks: list[str], rule: Rule
+    held: Mask, score: Matrix, in_universe: Mask, stocks: list[str], rule: Rule
 ) -> pd.DataFrame:
     """A signal day's list before the next open: sells, keeps, then entries in priority order.
 
@@ -276,7 +275,7 @@ def order_list(
     pct = percentiles(score[None, :], in_universe[None, :])[0]
     leave = held & ~(pct >= rule.exit_below)
     kept = held & ~leave
-    can = scored & (pct >= rule.entry_at) & ~held & ~blocked
+    can = scored & (pct >= rule.entry_at) & ~held
     picks = np.flatnonzero(can)
     picks = picks[np.argsort(-score[picks], kind="stable")]
     free = max(rule.slots - int(kept.sum()), 0)
