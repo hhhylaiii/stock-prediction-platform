@@ -1,4 +1,4 @@
-"""Time the thirteen read-only API endpoints in process and print a markdown table."""
+"""Time the read-only API endpoints, their 5-day reads and sorted tables, in process."""
 
 import math
 import statistics
@@ -13,6 +13,10 @@ from django.core.management.base import BaseCommand, CommandParser
 from django.test import Client
 
 from apps.api.ops import CORRECTIONS_CACHE_KEY
+from apps.api.params import ORDERINGS
+from apps.api.predictions import SORT_ROLES
+from apps.api.serving import roles_for
+from apps.research.models import OUTPUT_HORIZONS
 
 ENDPOINTS = (
     "/api/stocks/{stock}",
@@ -29,6 +33,26 @@ ENDPOINTS = (
     "/api/data-quality",
     "/api/data-quality/corrections",
 )
+SHORT = min(OUTPUT_HORIZONS)
+BY_HORIZON = (
+    "/api/predictions",
+    "/api/stocks/{stock}/features",
+    "/api/stocks/{stock}/history",
+    "/api/models/ic-monthly",
+)
+
+
+def sorted_paths() -> tuple[str, ...]:
+    """The prediction table under each descending ordering its horizon has a model for."""
+    return tuple(
+        f"/api/predictions?horizon={horizon}&ordering={ordering}"
+        for horizon in sorted(OUTPUT_HORIZONS)
+        for ordering in ORDERINGS
+        if ordering.startswith("-") and SORT_ROLES.get(ordering[1:], "rank") in roles_for(horizon)
+    )
+
+
+PATHS = (*ENDPOINTS, *(f"{path}?horizon={SHORT}" for path in BY_HORIZON), *sorted_paths())
 CACHED = {"/api/data-quality/corrections": CORRECTIONS_CACHE_KEY}
 HEADER = ("| 端點 | 狀態 | 中位數 ms | p95 ms | 最大 ms |", "| --- | --- | --- | --- | --- |")
 
@@ -63,10 +87,10 @@ def timed(client: Client, path: str, repeat: int) -> tuple[str, list[float]]:
 
 
 def measure(client: Client, stock: str, repeat: int) -> list[Timing]:
-    """One timing per endpoint, at least one repeat each."""
+    """One timing per path, at least one repeat each."""
     repeat = max(1, repeat)
     timings = []
-    for template in ENDPOINTS:
+    for template in PATHS:
         path = template.format(stock=stock)
         status, spent = timed(client, path, repeat)
         p95 = sorted(spent)[math.ceil(0.95 * repeat) - 1]
@@ -75,7 +99,7 @@ def measure(client: Client, stock: str, repeat: int) -> list[Timing]:
 
 
 class Command(BaseCommand):
-    help = f"Time each API endpoint in process; the throttle allows {settings.API_THROTTLE_RATE}."
+    help = f"Time each API path in process; the throttle allows {settings.API_THROTTLE_RATE}."
 
     def add_arguments(self, parser: CommandParser) -> None:
         parser.add_argument("--stock", default="2330")

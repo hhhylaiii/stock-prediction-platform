@@ -4,7 +4,7 @@ import json
 import shutil
 import tempfile
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -16,7 +16,8 @@ from django.db.models import Max, Model
 from django.test import Client
 from django.utils import timezone
 
-from apps.api.management.commands.measure_api import ENDPOINTS, HEADER, Timing, measure
+from apps.api.management.commands.measure_api import ENDPOINTS, HEADER, PATHS, Timing, measure
+from apps.api.serving import DEFAULT_HORIZON, Slot, roles_for
 from apps.etl.models import DataQualityLog, EtlRun
 from apps.market.models import DailyPrice, StockMaster
 from apps.research.models import (
@@ -38,11 +39,35 @@ THROTTLED = 429
 VIEW_TIMEOUT_MS = 15_000
 LOADING = "載入中"
 SHOWN_VIEW = "section.view:not([hidden])"
+FAN = "#price-chart path.fan-median"
 VIEWS = (
     ("today.png", "#today", ("#rows .trow",)),
-    ("stock.png", "#stock-{stock}", ("#price-chart rect.candle", "#price-chart path.fan-median")),
+    ("stock.png", "#stock-{stock}", ("#price-chart rect.candle", FAN)),
     ("models.png", "#models", ("#model-table .trow",)),
 )
+
+PASSED, FAILED, NOT_LIVE = "通過", "未通過", "未上線"
+OBJECTIVE_NAMES = {
+    "rank": "排名",
+    "regression": "絕對報酬",
+    "quantile": "報酬區間",
+    "volatility": "波動率",
+    "classification": "跑贏大盤機率",
+}
+GATE_NAMES = {
+    "agreement": "與現役模型的預測相關",
+    "gain_overlap": "與現役模型的重要特徵重疊",
+    "shadow_oos": "影子模型最近 6 個月 OOS",
+    "data_quality": "訓練窗內的資料品質",
+}
+SAMPLE_UNITS = {"stocks": " 檔", "features": " 個特徵", "days": " 天"}
+BAND_SOURCES = {
+    "quantile": "報酬區間模型",
+    "volatility": "波動率模型",
+    "tech_vol_20d": "近 20 日波動估計（不是模型的預測）",
+    "None": "沒有區間",
+}
+HORIZONS = sorted(OUTPUT_HORIZONS, reverse=True)
 
 Row = dict[str, Any]
 
@@ -50,8 +75,12 @@ Row = dict[str, Any]
 @dataclass(frozen=True)
 class Check:
     name: str
-    passed: bool
+    result: str
     detail: str
+
+
+def judged(name: str, passed: bool, detail: str) -> Check:
+    return Check(name, PASSED if passed else FAILED, detail)
 
 
 def fetch(client: Client, path: str) -> dict[str, Any]:
@@ -82,6 +111,75 @@ def likely(row: Row) -> bool:
     return row.get("prob_up_5pct") is not None
 
 
+FIELDS: tuple[tuple[str, tuple[str, ...], Callable[[Row], bool]], ...] = (
+    ("排名", ("rank",), ranked),
+    ("預測價格", ("rank", "return"), priced),
+    ("價格區間", ("rank",), banded),
+    ("跑贏大盤機率", ("rank", "probability"), likely),
+)
+
+
+def gate_text(gate: dict[str, Any]) -> str:
+    """A failed gate worded as the models page words it."""
+    value, sample, threshold = gate.get("value"), gate.get("sample"), gate.get("threshold")
+    parts = [
+        str(gate["reason"]) if gate.get("reason") else "",
+        f"實際 {value:,}" if isinstance(value, int) else "",
+        f"實際 {value:.3f}" if isinstance(value, float) else "",
+        f"門檻 {threshold}" if threshold not in (None, "") else "",
+        f"樣本 {sample:,}{SAMPLE_UNITS.get(str(gate.get('sample_unit')), '')}"
+        if isinstance(sample, int)
+        else "",
+    ]
+    shown = [part for part in parts if part]
+    name = str(gate.get("name"))
+    return GATE_NAMES.get(name, name) + (f"（{'，'.join(shown)}）" if shown else "")
+
+
+@dataclass(frozen=True)
+class Live:
+    """The page slots /api/models lists as serving; None when unreadable, so every one counts."""
+
+    serving: frozenset[Slot] | None
+    held: dict[Slot, dict[str, Any]]
+
+    def missing(self, slots: Iterable[Slot]) -> list[Slot]:
+        wanted = list(dict.fromkeys(slots))
+        return [] if self.serving is None else [s for s in wanted if s not in self.serving]
+
+    def why(self, slot: Slot) -> str:
+        objective = str(slot.objective)
+        name = f"{OBJECTIVE_NAMES.get(objective, objective)} {slot.horizon} 日沒有上線中的模型"
+        entry = self.held.get(slot)
+        if entry is None:
+            return name + "，也沒有換模紀錄"
+        gates = "、".join(gate_text(gate) for gate in entry.get("gates") or [])
+        if not gates:
+            return (
+                f"{name}：{entry.get('run_key')} 沒有換上；它自己的門檻都過了，是同一組有模型沒過"
+            )
+        return f"{name}：{entry.get('run_key')} 沒過換模門檻：{gates}"
+
+    def not_live(self, name: str, missing: list[Slot]) -> Check:
+        return Check(name, NOT_LIVE, "未上線：" + "；".join(self.why(slot) for slot in missing))
+
+
+def live_models(client: Client) -> Live:
+    body = fetch(client, "/api/models")
+    rows, meta = body.get("data"), body.get("meta") or {}
+    if body.get("success") is not True or not isinstance(rows, list):
+        return Live(None, {})
+    entries = meta.get("not_live") or []
+    held = {Slot(entry["objective"], entry["horizon"]): entry for entry in entries}
+    return Live(frozenset(Slot(row["objective"], row["horizon"]) for row in rows), held)
+
+
+def needed(horizon: int, needs: tuple[str, ...]) -> list[Slot] | None:
+    """The slots a field reads at the horizon; None when the horizon has no such field."""
+    roles = roles_for(horizon)
+    return [roles[role] for role in needs] if all(role in roles for role in needs) else None
+
+
 @dataclass(frozen=True)
 class Table:
     rows: list[Row]
@@ -94,7 +192,7 @@ class Table:
     def check(self, name: str, test: Callable[[Row], bool], extra: str = "") -> Check:
         missing = self.gaps(test)
         detail = f"缺 {missing} 檔" if self.fresh else "沒有最新交易日的表"
-        return Check(name, self.fresh and not missing, detail + extra)
+        return judged(name, self.fresh and not missing, detail + extra)
 
 
 def served(client: Client, horizon: int, day: str | None) -> Table:
@@ -116,54 +214,73 @@ def served(client: Client, horizon: int, day: str | None) -> Table:
     return Table(rows, fresh, f"date {first.get('date')}，{len(rows)} 檔，universe {universe}")
 
 
-def table_checks(client: Client, day: str | None) -> list[Check]:
-    long, short = served(client, 20, day), served(client, 5, day)
-    sources = Counter(str(row.get("interval_source")) for row in long.rows)
-    source_text = "、".join(f"{name} {n}" for name, n in sorted(sources.items())) or "無"
-    return [
-        long.check("20 日排名", ranked, f"；{long.head}"),
-        long.check("20 日預測價格", priced),
-        long.check("20 日價格區間", banded, f"；來源 {source_text}"),
-        long.check("20 日跑贏大盤機率", likely),
-        short.check(
-            "5 日排名、預測價格與區間",
-            lambda row: ranked(row) and priced(row) and banded(row),
-            f"；{short.head}",
-        ),
-    ]
-
-
-def whole(entry: Row) -> bool:
-    """Rank, price and band on every horizon, plus the odds on the 20-day one."""
-    row = entry.get("prediction")
-    if not row or not (ranked(row) and priced(row) and banded(row)):
-        return False
-    return entry.get("horizon") != 20 or likely(row)
-
-
-def stock_checks(client: Client, stock: str, day: str | None) -> list[Check]:
-    forecast = fetch(client, f"/api/stocks/{stock}/predictions")
-    entries = (forecast.get("data") or {}).get("horizons") or []
-    done = sorted(
-        entry["horizon"]
-        for entry in entries
-        if day is not None and entry.get("date") == day and whole(entry)
+def sources_of(table: Table) -> str:
+    """Where each row's band comes from, named as the pages name it, with its stock count."""
+    sources = Counter(str(row.get("interval_source")) for row in table.rows)
+    return (
+        "、".join(f"{BAND_SOURCES.get(name, name)} {n:,} 檔" for name, n in sorted(sources.items()))
+        or "無"
     )
-    features = fetch(client, f"/api/stocks/{stock}/features")
+
+
+def table_checks(client: Client, day: str | None, live: Live) -> list[Check]:
+    """Each field of each horizon's table, unless a model it reads is not serving."""
+    checks = []
+    for horizon in HORIZONS:
+        table = served(client, horizon, day)
+        extras = {"排名": f"；{table.head}", "價格區間": f"；來源 {sources_of(table)}"}
+        for label, needs, test in FIELDS:
+            slots = needed(horizon, needs)
+            if slots is None:
+                continue
+            name, missing = f"{horizon} 日{label}", live.missing(slots)
+            if missing:
+                checks.append(live.not_live(name, missing))
+            else:
+                checks.append(table.check(name, test, extras.get(label, "")))
+    return checks
+
+
+def page_check(stock: str, horizon: int, entry: Row, day: str | None, live: Live) -> Check:
+    """The stock page's horizon carries every field whose models serve."""
+    name = f"{stock} 個股頁 {horizon} 日"
+    missing = live.missing([roles_for(horizon)["rank"]])
+    if missing:
+        return live.not_live(name, missing)
+    fields = [(label, needed(horizon, needs), test) for label, needs, test in FIELDS]
+    shown = [(label, test) for label, slots, test in fields if slots and not live.missing(slots)]
+    off = [label for label, slots, _ in fields if slots and live.missing(slots)]
+    note = f"；未上線的欄位 {'、'.join(off)}" if off else ""
+    row = entry.get("prediction") or {}
+    if day is None or entry.get("date") != day or not row:
+        return judged(name, False, f"沒有最新交易日的預測（date {entry.get('date')}）{note}")
+    lacking = [label for label, test in shown if not test(row)]
+    return judged(name, not lacking, ("缺 " + "、".join(lacking) if lacking else "齊全") + note)
+
+
+def feature_check(client: Client, stock: str, horizon: int, day: str | None, live: Live) -> Check:
+    name = f"{stock} 的 {horizon} 日特徵"
+    missing = live.missing([roles_for(horizon)["rank"]])
+    if missing:
+        return live.not_live(name, missing)
+    features = fetch(client, f"/api/stocks/{stock}/features?horizon={horizon}")
     items = (features.get("data") or {}).get("items") or []
     feature_day = (features.get("meta") or {}).get("date")
     valued = sum(item.get("value") is not None for item in items)
+    return judged(
+        name,
+        day is not None and feature_day == day and valued > 0,
+        f"date {feature_day}，{len(items)} 項貢獻，{valued} 項有原始值",
+    )
+
+
+def stock_checks(client: Client, stock: str, day: str | None, live: Live) -> list[Check]:
+    forecast = fetch(client, f"/api/stocks/{stock}/predictions")
+    entries = (forecast.get("data") or {}).get("horizons") or []
+    by_horizon = {entry.get("horizon"): entry for entry in entries}
     return [
-        Check(
-            f"{stock} 個股頁兩個期間",
-            done == sorted(OUTPUT_HORIZONS),
-            "齊全的期間 " + ("、".join(map(str, done)) or "無"),
-        ),
-        Check(
-            f"{stock} 的特徵",
-            day is not None and feature_day == day and valued > 0,
-            f"date {feature_day}，{len(items)} 項貢獻，{valued} 項有原始值",
-        ),
+        *(page_check(stock, h, by_horizon.get(h) or {}, day, live) for h in HORIZONS),
+        *(feature_check(client, stock, h, day, live) for h in HORIZONS),
     ]
 
 
@@ -171,12 +288,12 @@ def timing_checks(timings: list[Timing]) -> list[Check]:
     odd = [f"`{timing.path}` {timing.status}" for timing in timings if timing.status != "200"]
     slowest = max(timings, key=lambda timing: timing.p95)
     return [
-        Check(
-            f"{len(ENDPOINTS)} 個端點都回 200",
-            not odd and len(timings) == len(ENDPOINTS),
+        judged(
+            f"{len(ENDPOINTS)} 個端點的 {len(PATHS)} 條路徑都回 200",
+            not odd and len(timings) == len(PATHS),
             "、".join(odd) or "全部 200",
         ),
-        Check(
+        judged(
             f"p95 都在 {LIMIT_MS} ms 內",
             slowest.p95 < LIMIT_MS,
             f"最大 p95 {slowest.p95:.1f} ms（`{slowest.path}`）",
@@ -184,20 +301,36 @@ def timing_checks(timings: list[Timing]) -> list[Check]:
     ]
 
 
-def acceptance_checks(client: Client, stock: str, timings: list[Timing]) -> list[Check]:
-    status = fetch(client, "/api/status").get("data") or {}
+def fresh_check(status: dict[str, Any], live: Live) -> Check:
+    """Every horizon whose rank model serves has caught up; horizons without one are named."""
     day, predicted = status.get("price_date"), status.get("prediction_date")
     horizons = status.get("horizons") or []
-    behind = [f"{entry['horizon']} 日" for entry in horizons if not entry["ready"]]
+    serving = [e for e in horizons if not live.missing([roles_for(e["horizon"])["rank"]])]
+    behind = [f"{entry['horizon']} 日" for entry in serving if not entry["ready"]]
+    off = [f"{entry['horizon']} 日" for entry in horizons if entry not in serving]
+    return judged(
+        "最新交易日有預測",
+        day is not None and bool(serving) and not behind,
+        f"price_date {day}，prediction_date {predicted}"
+        + (f"，沒跟上的期間 {'、'.join(behind)}" if behind else "")
+        + (f"，未上線的期間 {'、'.join(off)}" if off else ""),
+    )
+
+
+def fan_drawn(live: Live) -> bool:
+    """Whether the stock page draws a median line on the horizon it opens on."""
+    ranked = [h for h in OUTPUT_HORIZONS if not live.missing([roles_for(h)["rank"]])]
+    shown = DEFAULT_HORIZON if not ranked or DEFAULT_HORIZON in ranked else max(ranked)
+    return not live.missing([roles_for(shown)["return"]])
+
+
+def acceptance_checks(client: Client, stock: str, timings: list[Timing], live: Live) -> list[Check]:
+    status = fetch(client, "/api/status").get("data") or {}
+    day = status.get("price_date")
     return [
-        Check(
-            "最新交易日有預測",
-            day is not None and bool(horizons) and not behind,
-            f"price_date {day}，prediction_date {predicted}"
-            + (f"，沒跟上的期間 {'、'.join(behind)}" if behind else ""),
-        ),
-        *table_checks(client, day),
-        *stock_checks(client, stock, day),
+        fresh_check(status, live),
+        *table_checks(client, day, live),
+        *stock_checks(client, stock, day, live),
         *timing_checks(timings),
     ]
 
@@ -227,7 +360,20 @@ def volume(stock: str) -> list[str]:
     ]
 
 
-def report_text(stock: str, checks: list[Check], timings: list[Timing]) -> str:
+def empty_notes(live: Live) -> list[str]:
+    """Which timed paths read an empty table, because their horizon has no ranking model."""
+    notes = []
+    for horizon in HORIZONS:
+        if live.missing([roles_for(horizon)["rank"]]):
+            unset = "，以及不帶期間的預測表、特徵與歷史" if horizon == DEFAULT_HORIZON else ""
+            notes.append(
+                f"- {horizon} 日沒有上線中的排名模型：帶 `horizon={horizon}` 的路徑{unset}"
+                "回的是空表，耗時只代表沒有資料時的速度。"
+            )
+    return notes
+
+
+def report_text(stock: str, checks: list[Check], timings: list[Timing], live: Live) -> str:
     lines = [
         "# S5 重量測",
         "",
@@ -242,12 +388,19 @@ def report_text(stock: str, checks: list[Check], timings: list[Timing]) -> str:
         "",
         "| 條件 | 結果 | 實際值 |",
         "| --- | --- | --- |",
-        *(f"| {c.name} | {'通過' if c.passed else '未通過'} | {c.detail} |" for c in checks),
+        *(f"| {c.name} | {c.result} | {c.detail} |" for c in checks),
+        "",
+        "、".join(
+            f"{result} {sum(c.result == result for c in checks)} 項"
+            for result in (PASSED, FAILED, NOT_LIVE)
+        )
+        + "。",
         "",
         "## 端點耗時",
         "",
         *HEADER,
         *(timing.line() for timing in timings),
+        *(["", *empty_notes(live)] if empty_notes(live) else []),
     ]
     return "\n".join(lines) + "\n"
 
@@ -269,20 +422,25 @@ def wait_for(page: "Page", name: str, ready: tuple[str, ...], timeout_ms: float)
 
 
 def capture_views(
-    page: "Page", base_url: str, stock: str, out_dir: Path, timeout_ms: float = VIEW_TIMEOUT_MS
+    page: "Page",
+    base_url: str,
+    stock: str,
+    out_dir: Path,
+    timeout_ms: float = VIEW_TIMEOUT_MS,
+    fan: bool = True,
 ) -> list[Path]:
     """Screenshot every view once drawn; out_dir gets all three or none of them."""
     page.set_viewport_size({"width": 1440, "height": 900})
     with tempfile.TemporaryDirectory() as scratch:
         for name, anchor, ready in VIEWS:
             page.goto(f"{base_url.rstrip('/')}/{anchor.format(stock=stock)}")
-            wait_for(page, name, ready, timeout_ms)
+            wait_for(page, name, tuple(s for s in ready if fan or s != FAN), timeout_ms)
             page.screenshot(path=Path(scratch) / name, full_page=True)
         out_dir.mkdir(parents=True, exist_ok=True)
         return [Path(shutil.move(Path(scratch) / name, out_dir / name)) for name, _, _ in VIEWS]
 
 
-def browse(base_url: str, stock: str, out_dir: Path) -> list[Path]:
+def browse(base_url: str, stock: str, out_dir: Path, fan: bool = True) -> list[Path]:
     """Capture the views in a headless Chromium; only the dev install has Playwright."""
     try:
         from playwright.sync_api import sync_playwright
@@ -293,7 +451,7 @@ def browse(base_url: str, stock: str, out_dir: Path) -> list[Path]:
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
         try:
-            return capture_views(browser.new_page(), base_url, stock, out_dir)
+            return capture_views(browser.new_page(), base_url, stock, out_dir, fan=fan)
         finally:
             browser.close()
 
@@ -313,13 +471,14 @@ class Command(BaseCommand):
         out, stock = options["out"], options["stock"]
         client = Client(HTTP_HOST="localhost", raise_request_exception=False)
         timings = measure(client, stock, options["repeat"])
-        checks = acceptance_checks(client, stock, timings)
-        text = report_text(stock, checks, timings)
+        live = live_models(client)
+        checks = acceptance_checks(client, stock, timings, live)
+        text = report_text(stock, checks, timings, live)
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(text)
         self.stdout.write(text, ending="")
-        failed = [check.name for check in checks if not check.passed]
+        failed = [check.name for check in checks if check.result == FAILED]
         if failed:
             raise CommandError("未通過：" + "、".join(failed))
         if options["views"]:
-            browse(options["views"], stock, out.parent)
+            browse(options["views"], stock, out.parent, fan=fan_drawn(live))
