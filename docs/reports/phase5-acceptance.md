@@ -27,7 +27,7 @@ DATABASE_URL=<twp 的連線字串> PGOPTIONS='-c default_transaction_read_only=o
   API_THROTTLE_RATE=100000/min uv run python manage.py measure_api --repeat 20
 ```
 
-seed 那一輪與截圖由一支 `slow` 測試產生。沒有設 `ACCEPTANCE_OUT` 時這支測試會略過，CI 不跑。它在 seed 上跑 `phase5_report`（和下面的指令一樣把 `API_THROTTLE_RATE` 調到 100000/min：13 個端點各 21 次，加上逐頁讀預測，會超過預設的 300/min），每條檢查都要通過，報告寫到輸出目錄的 `seed.md`，表二就是從這份抄來的；這個檔不入庫。截圖和 twp 那一輪用同一個函式：
+seed 那一輪與截圖由一支 `slow` 測試產生。沒有設 `ACCEPTANCE_OUT` 時這支測試會略過，CI 不跑。它在 seed 上跑 `phase5_report`（和下面的指令一樣把 `API_THROTTLE_RATE` 調到 100000/min：26 條路徑各 21 次，加上逐頁讀預測，會超過預設的 300/min），每條檢查都要通過，報告寫到輸出目錄的 `seed.md`，表二就是從這份抄來的；這個檔不入庫。截圖和 twp 那一輪用同一個函式：
 
 ```bash
 ACCEPTANCE_OUT=docs/reports/phase5 uv run pytest tests/e2e/test_acceptance_capture.py
@@ -117,9 +117,10 @@ seed 的內容是 e2e 的基本資料再放大：
 
 - [ ] 4.9 之後、4.7 在 twp 產出真預測時，在主機上跑下面這個指令，把數字抄進本報告後勾 S5。
   - 先確認 web 映像含最新的頁面（見最後兩條）：`--views` 截的是正在跑的 web。
-  - 它會量 13 個端點（2026-11-07 加上 `/api/data-quality/corrections` 與 `/api/stocks?q=`）、透過 API 逐條檢查驗收條件、記下資料量，寫成 `docs/reports/phase5/twp.md`（不入庫）。
-  - 排名、價格、區間、機率逐頁看全市場 universe 內的股票；個股頁與特徵看 `--stock`（預設 2330），特徵至少要有一項原始值。
-  - 每條都通過才截圖。每頁等資料區塊都載完（不剩「載入中」）才截，三張都截到才搬進 `docs/reports/phase5/`，蓋掉現在的 seed 截圖；中途失敗時一張都不動。
+  - 它會量 13 個端點的 26 條路徑：13 個端點本身（2026-11-07 加上 `/api/data-quality/corrections` 與 `/api/stocks?q=`）；預設 20 日的四個端點另量 5 日；預測表另量兩個期間各種由高到低的排序（5 日沒有機率，少一種）。接著透過 API 逐條檢查驗收條件、記下資料量，寫成 `docs/reports/phase5/twp.md`（不入庫）。
+  - 排名、價格、區間、機率依期間逐頁看全市場 universe 內的股票；個股頁與特徵依期間看 `--stock`（預設 2330），特徵至少要有一項原始值。
+  - 每一項的結果是「通過」「未通過」「未上線」三種之一。那一項讀的模型不在 `/api/models` 的服務中清單時記「未上線」，實際值寫出缺的模型，以及 `meta.not_live` 裡它沒過的換模門檻；這種項目不算通過也不算失敗，表格下面一行列出三種各幾項。讀不到 `/api/models` 時，每一項都當作模型在服務來判。
+  - 沒有「未通過」才截圖。每頁等資料區塊都載完（不剩「載入中」）才截，三張都截到才搬進 `docs/reports/phase5/`，蓋掉現在的 seed 截圖；中途失敗時一張都不動。
   - 有一條未通過時，報告照樣寫出，指令以非 0 結束並列出未通過的條目。
   - `--views` 用的 Playwright 只在 dev 依賴裡，容器內沒有，所以要在主機上跑。
 
