@@ -37,7 +37,7 @@ from apps.research.production import DESIGNS, build_run, shadow_key
 from apps.research.promotion import PROMOTION_CHECK, Promoted, first_day, promote
 from apps.research.resources import free_percent, peak_rss_mb
 from apps.research.runs import PRODUCTION
-from apps.research.shadow import SHADOW_CHECK, record_books
+from apps.research.shadow import SHADOW_CHECK, Outcome, record_books
 
 logger = logging.getLogger(__name__)
 EVENING_CHECK = "research_evening"
@@ -175,11 +175,19 @@ def _shadow(day: date) -> str:
     """The shadow books' rows; never raises, so it cannot hold up the finish or a retrain."""
     try:
         outcome = record_books(day)
+        if _kept(day, outcome):
+            return f"{outcome.summary}; kept the day's earlier {SHADOW_CHECK} row"
         _record(day, SHADOW_CHECK, outcome.severity, outcome.detail)
     except Exception as error:
         logger.error("research shadow %s failed to record: %s", day, error)
         return f"failed to record ({type(error).__name__}), see the worker log"
     return outcome.summary
+
+
+def _kept(day: date, outcome: Outcome) -> bool:
+    """A rerun that wrote nothing and noted nothing leaves the day's first row, notes and all."""
+    quiet = not outcome.wrote and outcome.severity == Severity.INFO
+    return quiet and DataQualityLog.objects.filter(date=day, check_name=SHADOW_CHECK).exists()
 
 
 def _taken(since: date) -> dict[str, list[Any]]:

@@ -29,6 +29,8 @@ pytestmark = pytest.mark.django_db
 FIRST = date(2026, 11, 16)
 STOCKS = [str(1000 + k) for k in range(20)]
 GONE = "1019"
+DROPPED = "1018"
+FORCED = {0: 8.0, 1: 8.0, 2: 8.0, 3: 8.0, 4: 8.0, 5: -9.0}
 QUIET = 6
 BLOCKED = ("1003", 4)
 RULE = Rule.parse("H70", 3)
@@ -77,10 +79,14 @@ def market(days: list[date]) -> list[date]:
         close = 50.0
         for n, day in enumerate(days):
             opened = close * (1 + rng.uniform(-0.02, 0.02))
+            if (stock, n) == (DROPPED, QUIET):
+                opened = close * 0.88
             close = opened * (1 + rng.uniform(-0.04, 0.04))
             if stock != GONE or n <= 5:
                 bars.append(price(stock, day, opened, close))
                 score = 9.0 if stock == GONE else float(rng.normal())
+                if stock == DROPPED:
+                    score = FORCED.get(n, score)
                 if n != QUIET:
                     predictions.append(
                         Prediction(
@@ -191,6 +197,23 @@ def test_mornings_one_by_one_equal_one_simulation_of_the_same_predictions(
     assert [line[:3] for line in stored] == [line[:3] for line in expected]
     assert [line[3] for line in stored] == pytest.approx([line[3] for line in expected], rel=1e-12)
     assert {line[2] for line in stored} >= {"buy", "sell", "stuck", "settle"}
+    sells = moved.filter(action="sell").order_by("signal_date", "stock_id")
+    opened_down = book.actions[book.actions["action"] == "sell"].sort_values(
+        ["signal_date", "stock_id"]
+    )
+    assert [row.limit_down_open for row in sells] == list(opened_down["limit_down_open"])
+    assert sells.get(stock_id=DROPPED, signal_date=market[5]).limit_down_open is True
+    for row in rows:
+        costs = HoldingBookAction.objects.filter(
+            book="T", signal_date=row.signal_date, phase=BookPhase.FILL, cost__isnull=False
+        ).values_list("cost", flat=True)
+        assert sum(cost or 0.0 for cost in costs) == pytest.approx(row.paid, rel=1e-12, abs=1e-15)
+    listed = HoldingBookDay.objects.filter(book="T", phase=BookPhase.LIST)
+    run_ids = dict(listed.values_list("signal_date", "run_id"))
+    fill_lines = HoldingBookAction.objects.filter(book="T", phase=BookPhase.FILL)
+    assert {row.run_id for row in rows} == {"rank.h5", ""}
+    assert all(row.run_id == run_ids[row.signal_date] for row in rows)
+    assert all(line.run_id == run_ids[line.signal_date] for line in fill_lines)
 
 
 def test_each_list_counts_its_lines_and_a_quiet_day_lists_nothing_and_only_values(
@@ -430,3 +453,77 @@ def test_a_held_stock_outside_the_grid_is_an_error(market: list[date]) -> None:
     assert inputs.mask(["1000", "1002"]).nonzero()[0].tolist() == [0, 2]
     with pytest.raises(ValueError, match=r"without a prediction row since 2026-11-16: \['9999'\]"):
         inputs.mask(["1000", "9999"])
+
+
+def close_day(day: date) -> None:
+    """The calendar now says the day was closed, and nothing traded on it."""
+    TradingCalendar.objects.filter(date=day).update(is_trading_day=False)
+    for model in (DailyPrice, Prediction, LabelDaily, IndexDaily):
+        model.objects.filter(date=day).delete()
+
+
+def test_a_trade_day_closed_after_its_list_moves_the_fill_to_the_next_trading_day(
+    market: list[date], clock: dict[str, datetime]
+) -> None:
+    mornings(market[:3], clock)
+    close_day(market[3])
+
+    outcome = mornings(market[4:5], clock)[0]
+
+    assert outcome.detail["notes"] == [
+        {
+            "book": "T",
+            "signal_date": "2026-11-18",
+            "trade_date_moved": {"listed": "2026-11-19", "filled": "2026-11-20"},
+        }
+    ]
+    moved = fills("T")[2]
+    assert (moved.trade_date, moved.backfilled) == (market[4], False)
+    mornings([*market[:3], market[4]], clock, {"R": Spec(RULE, FIRST)})
+    for phase in (BookPhase.LIST, BookPhase.FILL):
+        assert lines("T", market[2], phase) == lines("R", market[2], phase)
+    assert [row.value for row in fills("T")] == [row.value for row in fills("R")]
+
+
+def test_a_day_opened_under_the_book_stops_it_and_names_the_day(
+    market: list[date], clock: dict[str, datetime]
+) -> None:
+    close_day(market[2])
+    mornings([*market[:2], *market[3:5]], clock)
+    TradingCalendar.objects.filter(date=market[2]).update(is_trading_day=True)
+    counts = (HoldingBookDay.objects.count(), HoldingBookAction.objects.count())
+
+    outcome = record_books(market[4], BOOK)
+
+    assert outcome.detail["signal_date"] == "2026-11-18"
+    assert "already listed 2026-11-20: the calendar opened a day" in outcome.detail["error"]
+    assert (HoldingBookDay.objects.count(), HoldingBookAction.objects.count()) == counts
+
+
+def test_a_missing_taiex_tr_close_leaves_the_index_return_empty_and_noted(
+    market: list[date], clock: dict[str, datetime]
+) -> None:
+    IndexDaily.objects.filter(date=market[3]).delete()
+
+    outcomes = mornings(market[:5], clock)
+
+    assert [row.index_return is None for row in fills()] == [False, False, True, True]
+    assert outcomes[3].detail["notes"] == [
+        {"book": "T", "signal_date": "2026-11-18", "no_taiex_tr": ["2026-11-19"]}
+    ]
+    assert outcomes[4].detail["notes"][0]["no_taiex_tr"] == ["2026-11-19"]
+
+
+def test_a_quiet_rerun_keeps_the_day_s_first_row_and_its_notes(
+    market: list[date], clock: dict[str, datetime], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(tasks, "dispatch", lambda rows: None)
+    Prediction.objects.filter(date=FIRST, stock_id="1001").update(score=None)
+    tasks.STEPS["shadow"](FIRST)
+
+    again = tasks.STEPS["shadow"](FIRST)
+
+    assert again.endswith("; kept the day's earlier research_shadow row")
+    row = DataQualityLog.objects.get(date=FIRST, check_name=SHADOW_CHECK)
+    assert row.severity == "warning"
+    assert row.detail["notes"][0]["first"] == ["1001"]

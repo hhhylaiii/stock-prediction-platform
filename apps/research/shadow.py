@@ -47,7 +47,7 @@ from apps.research.holding_inputs import (
     load_market,
     stored_scores,
 )
-from apps.research.holding_report import index_returns, mean_returns
+from apps.research.holding_report import mean_returns
 from apps.research.models import (
     BookPhase,
     BookStatus,
@@ -102,6 +102,7 @@ class Outcome:
     severity: str
     detail: dict[str, Any]
     summary: str
+    wrote: bool = False
 
 
 class ShadowTimeoutError(RuntimeError):
@@ -153,8 +154,9 @@ class Inputs:
         return {stock: k for k, stock in enumerate(self.market.stocks)}
 
     @cached_property
-    def index(self) -> Matrix:
-        return index_returns(index_levels(self.start, self.session), self.market.days)
+    def levels(self) -> dict[date, float]:
+        levels = index_levels(self.start, self.session)
+        return dict(zip(levels.index, levels.to_numpy(dtype=float).tolist(), strict=True))
 
     def mask(self, stocks: list[str]) -> Mask:
         """The stocks as a mask over the grid's columns; a stock outside it is an error."""
@@ -209,7 +211,8 @@ def record_books(session: date, books: Mapping[str, Spec] = BOOKS) -> Outcome:
     shown = "; ".join(f"{name}: {progress.said()}" for name, progress in done.items())
     warned = f", {len(notes)} notes, see {SHADOW_CHECK}" if notes else ""
     severity = Severity.WARNING if notes else Severity.INFO
-    return Outcome(severity, detail, f"{shown or 'no book due'}{warned}; {seconds} s")
+    wrote = any(got.listed or got.filled for got in done.values())
+    return Outcome(severity, detail, f"{shown or 'no book due'}{warned}; {seconds} s", wrote)
 
 
 def _failed(
@@ -273,6 +276,7 @@ def _advance(book: str, spec: Spec, session: date, inputs: Inputs) -> Progress:
             continue
         trade = inputs.calendar.shift(signal, 1)
         try:
+            _check_order(signal, lists)
             if signal not in lists:
                 lists[signal], note = _write_list(book, spec.rule, signal, trade, ledger, inputs)
                 listed.append(signal.isoformat())
@@ -285,6 +289,16 @@ def _advance(book: str, spec: Spec, session: date, inputs: Inputs) -> Progress:
         done.append(signal.isoformat())
         notes += note
     return Progress(listed, done, None, notes)
+
+
+def _check_order(signal: date, lists: Mapping[date, HoldingBookDay]) -> None:
+    """The first day without a fill is the last listed; else the calendar opened a day under it."""
+    later = [day for day in lists if day > signal]
+    if later:
+        raise ValueError(
+            f"{signal} has no fill but the book already listed {max(later)}: the calendar "
+            "opened a day under the book; start a new book name"
+        )
 
 
 def _ledger(book: str) -> Ledger:
@@ -390,9 +404,13 @@ def _signal(lines: list[HoldingBookAction], inputs: Inputs) -> Signal:
 def _write_fill(
     book: str, rule: Rule, header: HoldingBookDay, ledger: Ledger, inputs: Inputs
 ) -> tuple[Ledger, list[dict[str, Any]]]:
-    """The trade day after the stored list: its sells, settlements, buys and closing values."""
+    """The next trading day after the stored list: its sells, settlements, buys and values.
+
+    The trade day comes from the calendar now; one closed since the list was written moves it.
+    """
     market, at = inputs.market, inputs.at[header.signal_date]
     t = at + 1
+    trade = market.days[t]
     lines = list(
         HoldingBookAction.objects.filter(
             book=book, signal_date=header.signal_date, phase=BookPhase.LIST
@@ -410,27 +428,56 @@ def _write_fill(
         book=book,
         signal_date=header.signal_date,
         phase=BookPhase.FILL,
-        trade_date=header.trade_date,
+        trade_date=trade,
         status=BookStatus.TRADED if day.scored.any() else BookStatus.IDLE,
+        run_id=header.run_id,
         value=result.cash + float(result.values.sum()),
         cash=result.cash,
         paid=result.paid,
         traded=result.traded,
         held=int(result.held.sum()),
         universe_return=float(mean_returns(inputs.marks[at : t + 1], np.vstack([universe] * 2))[0]),
-        index_return=float(inputs.index[t]),
-        backfilled=now >= _opening(inputs.calendar.shift(header.trade_date, 1)),
+        index_return=_index_return(inputs.levels, market.days[at], trade),
+        backfilled=now >= _opening(inputs.calendar.shift(trade, 1)),
         recorded_at=now,
     )
     HoldingBookDay.objects.bulk_create([filled])
-    HoldingBookAction.objects.bulk_create(_fill_rows(header, held, result, market, t, now))
+    HoldingBookAction.objects.bulk_create(_fill_rows(filled, held, result, market, t))
     kept = {market.stocks[k]: float(result.values[k]) for k in np.flatnonzero(result.held)}
-    note = _rewritten(book, header, lines, inputs)
-    return Ledger(result.cash, kept), [] if note is None else [note]
+    notes = [_rewritten(book, header, lines, inputs), _moved(header, trade)]
+    notes.append(_unindexed(header, inputs.levels, market.days[at], trade))
+    return Ledger(result.cash, kept), [note for note in notes if note is not None]
+
+
+def _index_return(levels: Mapping[date, float], before: date, after: date) -> float | None:
+    """TAIEX_TR close to close; NULL when either close is missing, never a carried zero."""
+    if before not in levels or after not in levels:
+        return None
+    return levels[after] / levels[before] - 1
+
+
+def _unindexed(
+    header: HoldingBookDay, levels: Mapping[date, float], before: date, after: date
+) -> dict[str, Any] | None:
+    missing = [day.isoformat() for day in (before, after) if day not in levels]
+    if not missing:
+        return None
+    signal = header.signal_date.isoformat()
+    return {"book": header.book, "signal_date": signal, "no_taiex_tr": missing}
+
+
+def _moved(header: HoldingBookDay, trade: date) -> dict[str, Any] | None:
+    if trade == header.trade_date:
+        return None
+    return {
+        "book": header.book,
+        "signal_date": header.signal_date.isoformat(),
+        "trade_date_moved": {"listed": header.trade_date.isoformat(), "filled": trade.isoformat()},
+    }
 
 
 def _fill_rows(
-    header: HoldingBookDay, held: Mask, result: Stepped, market: Market, t: int, now: datetime
+    filled: HoldingBookDay, held: Mask, result: Stepped, market: Market, t: int
 ) -> list[HoldingBookAction]:
     moves = result.moves
     kept = held & result.held & ~moves.stuck
@@ -443,17 +490,18 @@ def _fill_rows(
     ]
     return [
         HoldingBookAction(
-            book=header.book,
-            signal_date=header.signal_date,
-            trade_date=header.trade_date,
+            book=filled.book,
+            signal_date=filled.signal_date,
+            trade_date=filled.trade_date,
             stock_id=market.stocks[k],
             phase=BookPhase.FILL,
             action=action,
+            run_id=filled.run_id,
             amount=None if amounts is None else float(amounts[k]),
             value=float(result.values[k]),
             cost=None if amounts is None else float(amounts[k]) * rate,
             limit_down_open=bool(market.limit_down_open[t, k]) if action == SELL else None,
-            recorded_at=now,
+            recorded_at=filled.recorded_at,
         )
         for action, chosen, amounts, rate in found
         for k in np.flatnonzero(chosen)
