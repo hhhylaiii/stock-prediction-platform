@@ -300,13 +300,13 @@ def runs(db: None) -> Runs:
     return seeded
 
 
-def fastest[Result](call: Callable[[], Result], runs: int = TIMED_RUNS) -> tuple[Result, float]:
-    """The last call's result and the shortest wall time in seconds of `runs` calls.
+def fastest[Result](call: Callable[[], Result]) -> tuple[Result, float]:
+    """The last call's result and the shortest wall time in seconds of `TIMED_RUNS` calls.
 
     A loaded runner only adds time to a call, so the shortest one is the code's own cost.
     """
     results, spent = [], []
-    for _ in range(runs):
+    for _ in range(TIMED_RUNS):
         started = time.perf_counter()
         results.append(call())
         spent.append(time.perf_counter() - started)
