@@ -650,3 +650,91 @@ class HoldingBookAction(models.Model):
 
     def __str__(self) -> str:
         return f"{self.book} {self.signal_date} {self.stock_id} {self.phase} {self.action}"
+
+
+class ShadowCandidate(models.TextChoices):
+    C1 = "C1", "Ridge 與 C0 的排名平均"
+    C2 = "C2", "5 日相對大盤報酬"
+
+
+SHA256 = r"^[0-9a-f]{64}$"
+
+
+class ShadowArtifact(models.Model):
+    """A candidate's frozen model file: its hash, fold and the serving run it follows; never edited.
+
+    A lost or replaced file gets the next generation; earlier rows and their scores stay.
+    """
+
+    pk = models.CompositePrimaryKey("candidate", "serving_run_id", "generation")
+    candidate = models.CharField(max_length=4, choices=ShadowCandidate.choices)
+    serving_run = models.ForeignKey(
+        ModelRun, on_delete=models.PROTECT, db_index=False, related_name="shadow_artifacts"
+    )
+    generation = models.PositiveSmallIntegerField()
+    as_of = models.DateField()
+    train_start = models.DateField()
+    train_end = models.DateField()
+    fold = models.JSONField()
+    path = models.CharField(max_length=255)
+    sha256 = models.CharField(max_length=64)
+    recipe = models.JSONField()
+    first_signal = models.DateField()
+    frozen_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        db_table = "shadow_artifact"
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(generation__gte=1), name="shadow_artifact_generation"
+            ),
+            models.CheckConstraint(
+                condition=models.Q(sha256__regex=SHA256), name="shadow_artifact_sha256"
+            ),
+            models.CheckConstraint(
+                condition=models.Q(train_start__lt=models.F("train_end")),
+                name="shadow_artifact_window",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(first_signal__gt=models.F("as_of")),
+                name="shadow_artifact_scores_after_as_of",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.candidate} {self.serving_run_id} g{self.generation}"
+
+
+class ShadowScore(models.Model):
+    """One stock's candidate score on a signal day, from the artifact named; never rewritten."""
+
+    pk = models.CompositePrimaryKey("candidate", "date", "stock_id")
+    candidate = models.CharField(max_length=4, choices=ShadowCandidate.choices)
+    date = models.DateField()
+    stock_id = models.CharField(max_length=10)
+    serving_run = models.ForeignKey(
+        ModelRun, on_delete=models.PROTECT, db_index=False, related_name="shadow_scores"
+    )
+    generation = models.PositiveSmallIntegerField()
+    score = models.FloatField(null=True, blank=True)
+    raw = models.FloatField(null=True, blank=True)
+    pct = models.FloatField(null=True, blank=True)
+    in_universe = models.BooleanField()
+    recorded_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        db_table = "shadow_score"
+        constraints = [
+            models.CheckConstraint(
+                condition=finite("score", "raw", "pct"), name="shadow_score_finite"
+            ),
+            models.CheckConstraint(condition=unit_interval("pct"), name="shadow_score_pct_unit"),
+            models.CheckConstraint(
+                condition=models.Q(pct__isnull=True)
+                | models.Q(in_universe=True, score__isnull=False),
+                name="shadow_score_pct_in_universe",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.candidate} {self.date} {self.stock_id}"
