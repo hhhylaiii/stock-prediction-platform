@@ -610,7 +610,7 @@ def test_models_query_count(
         Prediction.objects.filter(run=run, date=OCT_30).delete()
         add_predictions(run, OCT_29, horizon, {"2330": row})
 
-    with django_assert_max_num_queries(10):
+    with django_assert_max_num_queries(11):
         body = envelope_of(client.get("/api/models"))
 
     assert len(body["data"]) == 6

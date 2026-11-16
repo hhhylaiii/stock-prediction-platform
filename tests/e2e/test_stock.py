@@ -808,7 +808,7 @@ def test_the_stock_page_opens_on_the_horizon_that_has_a_prediction(
 
     expect(page.locator("#stock-seg [data-sh='5']")).to_have_attribute("aria-pressed", "true")
     expect(page.locator("#stock-seg [data-sh='20']")).to_be_disabled()
-    expect(page.locator("#stock-seg-hint")).to_have_text("20 日預測尚未產出")
+    expect(page.locator("#stock-seg-hint")).to_have_text("20 日排名目前沒有上線中的模型")
     expect(page.locator(".stockhead .kpi")).to_contain_text("5 日預測排名")
     expect(page.locator(".stockhead .kpi .v")).to_have_text("第 2 名 / 25")
     expect(page.locator("#chart-title")).to_have_text("過去 60 個交易日，與未來 5 日的預測")
@@ -830,10 +830,10 @@ def test_a_horizon_picked_on_today_is_kept_on_the_stock_page(
 
     page.goto(f"{live_server.url}/#stock-2330")
 
-    expect(page.locator("#stock-seg-hint")).to_have_text("20 日預測尚未產出")
+    expect(page.locator("#stock-seg-hint")).to_have_text("20 日排名目前沒有上線中的模型")
     expect(page.locator("#stock-seg [data-sh='20']")).to_have_attribute("aria-pressed", "true")
     expect(page.locator(".stockhead .kpi")).to_contain_text("20 日預測排名")
-    expect(page.locator(".stockhead .kpi .v")).to_contain_text("尚未產出")
+    expect(page.locator(".stockhead .kpi .v")).to_have_text("— 排名未上線")
 
 
 def test_each_horizon_s_ranking_model_is_named_when_they_are_not_one_build(

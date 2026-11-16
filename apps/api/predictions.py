@@ -26,6 +26,7 @@ from apps.api.serving import (
     roles_for,
     runs_on,
 )
+from apps.api.unreleased import unreleased
 from apps.api.views import ReadOnlyView
 from apps.market.calendar import CalendarError, TradingDays
 from apps.market.models import DailyPrice, StockMaster
@@ -383,6 +384,7 @@ class PredictionListView(ReadOnlyView):
             "monitor": self.monitor(day, roles, runs),
             "ordering": "rank" if key is None else query["ordering"],
             "orderable": columns,
+            "unreleased": unreleased(),
             **paginator.meta(),
         }
         return envelope(merged_rows(day, horizon, roles, runs, page, previous), meta)

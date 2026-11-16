@@ -34,6 +34,7 @@ from apps.api.serving import (
     runs_on_days,
     served_monitor,
 )
+from apps.api.unreleased import unreleased
 from apps.api.views import ReadOnlyView
 from apps.etl.models import DataQualityLog
 from apps.research.eval_report import RANK_METRICS
@@ -320,7 +321,8 @@ class ModelListView(ReadOnlyView):
                     **research,
                 }
             )
-        return envelope(data, {"not_live": not_live(run for run, _ in models)})
+        meta = {"not_live": not_live(run for run, _ in models), "unreleased": unreleased()}
+        return envelope(data, meta)
 
 
 def chart_slot(asked: int | None) -> tuple[int, date | None]:
