@@ -527,3 +527,21 @@ def test_a_quiet_rerun_keeps_the_day_s_first_row_and_its_notes(
     row = DataQualityLog.objects.get(date=FIRST, check_name=SHADOW_CHECK)
     assert row.severity == "warning"
     assert row.detail["notes"][0]["first"] == ["1001"]
+
+
+def test_a_universe_stock_whose_predictions_are_all_gone_still_counts_in_the_fill(
+    market: list[date], clock: dict[str, datetime]
+) -> None:
+    both = {"T": Spec(RULE, FIRST), "R": Spec(RULE, FIRST)}
+    mornings(market[:3], clock, both)
+    acted = set(HoldingBookAction.objects.values_list("stock_id", flat=True))
+    universe = HoldingBookDay.objects.get(book="T", signal_date=market[2], phase=BookPhase.LIST)
+    quiet = sorted(set(universe.universe) - acted)[0]
+    clock["at"] = at(market[3] + timedelta(days=1), time(6, 30))
+    record_books(market[3], {"R": both["R"]})
+    Prediction.objects.filter(stock_id=quiet).delete()
+
+    outcome = record_books(market[3], {"T": both["T"]})
+
+    assert outcome.detail["books"]["T"]["filled"] == ["2026-11-18"]
+    assert fills("T")[2].universe_return == fills("R")[2].universe_return
