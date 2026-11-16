@@ -51,6 +51,7 @@
     model_holdout_release: 'holdout 放行後建模',
     research_evening: '研究晚間排程',
     research_morning: '研究早盤排程',
+    research_shadow: '持有規則影子帳本',
     research_retrain: '每月重訓',
     research_promote: '自動換模',
     research_rebuild: '研究資料重建'
@@ -1279,6 +1280,48 @@
     }
   }
 
+  const shadowDay = iso => typeof iso === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(iso) ? md(iso) : '—';
+  const shadowDays = list => Array.isArray(list) && list.length ? list.map(shadowDay).join('、') : '—';
+  const shadowSeconds = d => typeof d.seconds === 'number' ? '，' + d.seconds.toFixed(1) + ' 秒' : '';
+  const asObject = v => v && typeof v === 'object' && !Array.isArray(v) ? v : null;
+  const SHADOW_NOTES = {
+    predictions_rewritten: v => '預測被改寫過：universe 新增 ' + fmtInt((asObject(v) || {}).universe_added || 0) + ' 檔、移除 ' +
+      fmtInt((asObject(v) || {}).universe_removed || 0) + ' 檔，分數變動 ' + fmtInt((asObject(v) || {}).scores_changed || 0) + ' 檔',
+    in_universe_without_score: v => fmtInt(Number(v) || 0) + ' 檔在 universe 內卻沒有分數',
+    trade_date_moved: v => '成交日有變動：名單 ' + shadowDay((asObject(v) || {}).listed) + '、成交 ' + shadowDay((asObject(v) || {}).filled),
+    no_taiex_tr: v => '缺加權報酬指數 ' + shadowDays(v)
+  };
+  const NOTE_FIELDS = ['book', 'signal_date', 'first'];
+
+  function shadowBookLine(name, book) {
+    const b = asObject(book) || {};
+    const listed = Array.isArray(b.listed) && b.listed.length ? '寫入 ' + shadowDays(b.listed) + ' 名單' : '沒有新名單';
+    const filled = Array.isArray(b.filled) && b.filled.length ? shadowDays(b.filled) + ' 成交' : '沒有新成交';
+    return name + '：' + listed + '、' + filled;
+  }
+
+  function shadowNoteLine(note) {
+    const n = asObject(note) || {};
+    const where = [n.book, n.signal_date ? shadowDay(n.signal_date) : null].filter(Boolean).join(' ');
+    const keys = Object.keys(n).filter(key => !NOTE_FIELDS.includes(key));
+    const known = keys.find(key => SHADOW_NOTES[key]);
+    const text = known ? SHADOW_NOTES[known](n[known]) : '其他備註 ' + (keys.join('、') || '—');
+    return (where ? where + '：' : '') + text;
+  }
+
+  function shadowLines(d) {
+    if (has(d.error)) {
+      const where = d.book ? d.book + ' 卡在 ' + shadowDay(d.signal_date) : '帳本之外失敗';
+      return [where + '：' + String(d.error), '這次沒有寫入，下一個早上從同一天重來' + shadowSeconds(d)];
+    }
+    const books = asObject(d.books);
+    if (!books) return null;
+    const names = Object.keys(books).sort();
+    const lines = names.length ? names.map(name => shadowBookLine(name, books[name])) : ['沒有帳本要寫'];
+    const timed = [...lines.slice(0, -1), lines[lines.length - 1] + shadowSeconds(d)];
+    return [...timed, ...(Array.isArray(d.notes) ? d.notes.map(shadowNoteLine) : [])];
+  }
+
   function modelCheckState(check, alertShare, date) {
     const d = check.detail || {};
     const stocks = fmtInt(d.flagged || 0) + '／' + fmtInt(d.n_stocks || 0) + ' 檔';
@@ -1296,6 +1339,7 @@
       case 'research_retrain': return [check.severity === 'info' ? '' : 'warn', ['建 ' + keyCount(d.built) + '、拒 ' + keyCount(d.refused) + '、失敗 ' + keyCount(d.failed), ...scopeReasons(d.refused, '拒建'), ...scopeReasons(d.failed, '失敗')]];
       case 'research_rebuild': return [check.severity === 'info' ? '' : 'warn', [rebuildText(d), ...(leftDetail(d) ? [handNote] : [])]];
       case 'research_promote': return ['warn', ['失敗 ' + keyCount(d.failed) + '、完成 ' + sizeOf(d.done), ...Object.entries(d.failed || {}).map(([key, error]) => key + '：' + error)]];
+      case 'research_shadow': return [check.severity === 'info' ? '' : 'warn', shadowLines(d) || [(SEVERITY[check.severity] || [check.severity])[0]]];
       default: return [check.severity === 'info' ? '' : 'warn', [(SEVERITY[check.severity] || [check.severity])[0]]];
     }
   }
@@ -1315,7 +1359,7 @@
   const isResearch = check => check.check_name.startsWith('research_');
   const isDaily = check => !isPromotion(check) && !isRelease(check) && !isResearch(check);
   const scopeOf = check => (check.detail || {}).scope || (check.detail || {}).run_key;
-  const RESEARCH_ORDER = ['research_retrain', 'research_promote', 'research_rebuild', 'research_evening', 'research_morning'];
+  const RESEARCH_ORDER = ['research_retrain', 'research_promote', 'research_rebuild', 'research_evening', 'research_morning', 'research_shadow'];
   const researchRank = check => {
     const rank = RESEARCH_ORDER.indexOf(check.check_name);
     return rank < 0 ? RESEARCH_ORDER.length : rank;

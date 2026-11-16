@@ -699,6 +699,7 @@ def test_the_monthly_retrain_stays_pinned_beside_the_day_s_checks(
 def test_research_checks_keep_a_fixed_order_whatever_ran_last(
     page: Page, live_server: LiveServer, seeded: Seed, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    log(seeded, "research_shadow", "info", {}, back=3)
     log(seeded, "research_evening", "info", {}, back=2)
     log(seeded, "research_morning", "warning", {})
     rebuild_step(seeded, monkeypatch, error="boom")
@@ -708,13 +709,14 @@ def test_research_checks_keep_a_fixed_order_whatever_ran_last(
     page.goto(f"{live_server.url}/#models")
 
     checks = page.locator("#model-checks .check")
-    expect(checks).to_have_count(5)
+    expect(checks).to_have_count(6)
     expected = (
         ("每月重訓", 1),
         ("自動換模", 1),
         ("研究資料重建", 1),
         ("研究晚間排程", 2),
         ("研究早盤排程", 1),
+        ("持有規則影子帳本", 3),
     )
     for n, (name, back) in enumerate(expected):
         expect(checks.nth(n)).to_contain_text(name)
