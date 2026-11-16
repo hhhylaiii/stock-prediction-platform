@@ -106,6 +106,20 @@ def test_the_list_shows_the_last_day_keeps_and_entries(fed: dict[str, Any]) -> N
     assert [line.split()[:2] for line in listed[1:]] == [["1000", "keep"], ["1001", "keep"]]
 
 
+def test_a_last_day_without_predictions_says_so_instead_of_listing(
+    fed: dict[str, Any], monkeypatch: pytest.MonkeyPatch, calendar_rows: list[date]
+) -> None:
+    score = np.tile(np.arange(1.0, 11.0), (20, 1))
+    score[19] = NAN
+    unscored = book_market(calendar_rows, score)
+    monkeypatch.setattr(holding_sim, "load_market", lambda frame, end, calendar: unscored)
+
+    text = run(*RESEARCH, "--end", "2016-01-29", "--list")
+
+    assert "no prediction on 2016-01-29; the book holds still" in text
+    assert "list of" not in text
+
+
 def test_stored_predictions_default_to_the_latest_price_day(fed: dict[str, Any]) -> None:
     text = run("--source", "prediction", "--start", "2016-01-04", "--settle", "known")
 

@@ -177,5 +177,9 @@ class Command(BaseCommand):
         if options["by_year"]:
             self.stdout.write(by_year(book.daily, days, universe, index).round(2).to_string())
         if options["list"]:
-            self.stdout.write(f"list of {days[-1]}:")
-            self.stdout.write(last_list(market, book, rule).to_string(index=False))
+            listed = last_list(market, book, rule)
+            if listed.empty:
+                self.stdout.write(f"no prediction on {days[-1]}; the book holds still")
+            else:
+                self.stdout.write(f"list of {days[-1]}:")
+                self.stdout.write(listed.to_string(index=False))
