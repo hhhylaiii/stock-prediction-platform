@@ -20,7 +20,7 @@
 - 環境：本機 macOS、Docker 的 PostgreSQL 16。twp 那一輪是在 2026-11-05 15:54 量的，正好在 ETL 時段內。
 - 表一在 #72 的 commit「fix: keep negative monthly ic bars inside the chart」上量測，當時已含 #64、#65。截圖在加深 seed 之後截，當時已含 #68。表二在 #104 的分支上用 `phase5_report` 重量，分支以 develop 977c31b 為底，已含 #76。
 
-twp 那一輪用唯讀交易連線，任何寫入都會被資料庫拒絕。throttle 每個 process 各自計數，預設 300/min；表一量的時候 `--repeat 20` 共 273 次（11 個端點時是 231 次），用不到調高；現在量 26 條路徑，共 546 次，超過預設，所以下面的指令把 `API_THROTTLE_RATE` 調高。指令會記下每一次呼叫的狀態碼，只要有一次不同，狀態欄就會寫成像 `200/429×3` 的樣子：
+twp 那一輪用唯讀交易連線，任何寫入都會被資料庫拒絕。throttle 每個 process 各自計數，預設 300/min；表一量 11 個端點時，`--repeat 20` 共 231 次（13 個端點時是 273 次），用不到調高；現在量 26 條路徑，共 546 次，超過預設，所以下面的指令把 `API_THROTTLE_RATE` 調高。期間沒有上線中的排名模型時，報告的耗時表下面會註明哪些路徑回的是空表。指令會記下每一次呼叫的狀態碼，只要有一次不同，狀態欄就會寫成像 `200/429×3` 的樣子：
 
 ```bash
 DATABASE_URL=<twp 的連線字串> PGOPTIONS='-c default_transaction_read_only=on' \
