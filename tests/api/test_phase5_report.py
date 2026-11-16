@@ -147,9 +147,9 @@ def test_every_check_passes_when_each_field_is_served(complete: Runs, tmp_path: 
     assert summary_of(text) == "通過 14 項、未通過 0 項、未上線 0 項。"
     assert checks["最新交易日有預測"][1] == "price_date 2026-10-30，prediction_date 2026-10-30"
     assert checks["20 日排名"][1] == "缺 0 檔；date 2026-10-30，3 檔，universe 3"
-    assert checks["20 日價格區間"][1] == "缺 0 檔；來源 quantile 3"
+    assert checks["20 日價格區間"][1] == "缺 0 檔；來源 報酬區間模型 3 檔"
     assert checks["5 日排名"][1] == "缺 0 檔；date 2026-10-30，3 檔，universe 3"
-    assert checks["5 日價格區間"][1] == "缺 0 檔；來源 volatility 3"
+    assert checks["5 日價格區間"][1] == "缺 0 檔；來源 波動率模型 3 檔"
     assert checks["2330 個股頁 20 日"][1] == "齊全"
     assert checks["2330 個股頁 5 日"][1] == "齊全"
     assert checks["2330 的 20 日特徵"][1] == "date 2026-10-30，1 項貢獻，1 項有原始值"
@@ -201,7 +201,7 @@ def test_a_twenty_day_row_without_a_band_fails_only_the_bands(
     _, text = failing(tmp_path)
 
     assert failed(text) == {"20 日價格區間", "5 日價格區間"}
-    assert checks_of(text)["20 日價格區間"][1] == "缺 1 檔；來源 None 1、quantile 2"
+    assert checks_of(text)["20 日價格區間"][1] == "缺 1 檔；來源 沒有區間 1 檔、報酬區間模型 2 檔"
 
 
 def test_a_ranked_stock_without_a_rank_fails_the_ranking(complete: Runs, tmp_path: Path) -> None:
@@ -457,8 +457,25 @@ def test_a_band_without_a_return_model_still_comes_from_volatility(
 
     text = target.read_text()
     assert not_live(text) == {"20 日預測價格"}
-    assert checks_of(text)["20 日價格區間"] == ("通過", "缺 0 檔；來源 volatility 3")
+    assert checks_of(text)["20 日價格區間"] == ("通過", "缺 0 檔；來源 波動率模型 3 檔")
     assert checks_of(text)["2330 個股頁 20 日"] == ("通過", "齊全；未上線的欄位 預測價格")
+
+
+def test_a_band_from_recent_volatility_says_it_is_not_a_model(
+    complete: Runs, tmp_path: Path
+) -> None:
+    ModelRun.objects.filter(pk=complete.vol.pk).update(status="candidate")
+    for stock in ("2330", "2317", "6488", "8299"):
+        FeatureDaily.objects.update_or_create(
+            stock_id=stock, date=OCT_30, defaults={"in_universe": True, "tech_vol_20d": 0.02}
+        )
+
+    target, _ = report(tmp_path)
+
+    assert checks_of(target.read_text())["5 日價格區間"] == (
+        "通過",
+        "缺 0 檔；來源 近 20 日波動估計（不是模型的預測） 3 檔",
+    )
 
 
 def test_an_unreadable_model_list_judges_every_horizon_as_serving(

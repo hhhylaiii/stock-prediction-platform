@@ -61,6 +61,12 @@ GATE_NAMES = {
     "data_quality": "訓練窗內的資料品質",
 }
 SAMPLE_UNITS = {"stocks": " 檔", "features": " 個特徵", "days": " 天"}
+BAND_SOURCES = {
+    "quantile": "報酬區間模型",
+    "volatility": "波動率模型",
+    "tech_vol_20d": "近 20 日波動估計（不是模型的預測）",
+    "None": "沒有區間",
+}
 HORIZONS = sorted(OUTPUT_HORIZONS, reverse=True)
 
 Row = dict[str, Any]
@@ -209,8 +215,12 @@ def served(client: Client, horizon: int, day: str | None) -> Table:
 
 
 def sources_of(table: Table) -> str:
+    """Where each row's band comes from, named as the pages name it, with its stock count."""
     sources = Counter(str(row.get("interval_source")) for row in table.rows)
-    return "、".join(f"{name} {n}" for name, n in sorted(sources.items())) or "無"
+    return (
+        "、".join(f"{BAND_SOURCES.get(name, name)} {n:,} 檔" for name, n in sorted(sources.items()))
+        or "無"
+    )
 
 
 def table_checks(client: Client, day: str | None, live: Live) -> list[Check]:
