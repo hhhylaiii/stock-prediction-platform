@@ -26,7 +26,6 @@ from apps.research.models import (
     FeatureDaily,
     LabelDaily,
     ModelMonitor,
-    ModelObjective,
     ModelRun,
     Prediction,
     PredictionContrib,
@@ -48,6 +47,20 @@ VIEWS = (
 )
 
 PASSED, FAILED, NOT_LIVE = "通過", "未通過", "未上線"
+OBJECTIVE_NAMES = {
+    "rank": "排名",
+    "regression": "絕對報酬",
+    "quantile": "報酬區間",
+    "volatility": "波動率",
+    "classification": "跑贏大盤機率",
+}
+GATE_NAMES = {
+    "agreement": "與現役模型的預測相關",
+    "gain_overlap": "與現役模型的重要特徵重疊",
+    "shadow_oos": "影子模型最近 6 個月 OOS",
+    "data_quality": "訓練窗內的資料品質",
+}
+SAMPLE_UNITS = {"stocks": " 檔", "features": " 個特徵", "days": " 天"}
 HORIZONS = sorted(OUTPUT_HORIZONS, reverse=True)
 
 Row = dict[str, Any]
@@ -101,12 +114,20 @@ FIELDS: tuple[tuple[str, tuple[str, ...], Callable[[Row], bool]], ...] = (
 
 
 def gate_text(gate: dict[str, Any]) -> str:
-    value = gate.get("value")
-    shown = f"{value:.4f}" if isinstance(value, int | float) else "—"
-    return (
-        f"{gate.get('name')}：{gate.get('reason')}，實際 {shown}，門檻 {gate.get('threshold')}，"
-        f"樣本 {gate.get('sample')} {gate.get('sample_unit')}"
-    )
+    """A failed gate worded as the models page words it."""
+    value, sample, threshold = gate.get("value"), gate.get("sample"), gate.get("threshold")
+    parts = [
+        str(gate["reason"]) if gate.get("reason") else "",
+        f"實際 {value:,}" if isinstance(value, int) else "",
+        f"實際 {value:.3f}" if isinstance(value, float) else "",
+        f"門檻 {threshold}" if threshold not in (None, "") else "",
+        f"樣本 {sample:,}{SAMPLE_UNITS.get(str(gate.get('sample_unit')), '')}"
+        if isinstance(sample, int)
+        else "",
+    ]
+    shown = [part for part in parts if part]
+    name = str(gate.get("name"))
+    return GATE_NAMES.get(name, name) + (f"（{'，'.join(shown)}）" if shown else "")
 
 
 @dataclass(frozen=True)
@@ -121,12 +142,17 @@ class Live:
         return [] if self.serving is None else [s for s in wanted if s not in self.serving]
 
     def why(self, slot: Slot) -> str:
-        name = f"{ModelObjective(slot.objective).label} {slot.horizon} 日沒有上線中的模型"
+        objective = str(slot.objective)
+        name = f"{OBJECTIVE_NAMES.get(objective, objective)} {slot.horizon} 日沒有上線中的模型"
         entry = self.held.get(slot)
         if entry is None:
             return name + "，也沒有換模紀錄"
         gates = "、".join(gate_text(gate) for gate in entry.get("gates") or [])
-        return f"{name}：{entry.get('run_key')} 沒過換模門檻（{gates}）"
+        if not gates:
+            return (
+                f"{name}：{entry.get('run_key')} 沒有換上；它自己的門檻都過了，是同一組有模型沒過"
+            )
+        return f"{name}：{entry.get('run_key')} 沒過換模門檻：{gates}"
 
     def not_live(self, name: str, missing: list[Slot]) -> Check:
         return Check(name, NOT_LIVE, "未上線：" + "；".join(self.why(slot) for slot in missing))
@@ -324,7 +350,20 @@ def volume(stock: str) -> list[str]:
     ]
 
 
-def report_text(stock: str, checks: list[Check], timings: list[Timing]) -> str:
+def empty_notes(live: Live) -> list[str]:
+    """Which timed paths read an empty table, because their horizon has no ranking model."""
+    notes = []
+    for horizon in HORIZONS:
+        if live.missing([roles_for(horizon)["rank"]]):
+            unset = "，以及不帶期間的預測表、特徵與歷史" if horizon == DEFAULT_HORIZON else ""
+            notes.append(
+                f"- {horizon} 日沒有上線中的排名模型：帶 `horizon={horizon}` 的路徑{unset}"
+                "回的是空表，耗時只代表沒有資料時的速度。"
+            )
+    return notes
+
+
+def report_text(stock: str, checks: list[Check], timings: list[Timing], live: Live) -> str:
     lines = [
         "# S5 重量測",
         "",
@@ -351,6 +390,7 @@ def report_text(stock: str, checks: list[Check], timings: list[Timing]) -> str:
         "",
         *HEADER,
         *(timing.line() for timing in timings),
+        *(["", *empty_notes(live)] if empty_notes(live) else []),
     ]
     return "\n".join(lines) + "\n"
 
@@ -423,7 +463,7 @@ class Command(BaseCommand):
         timings = measure(client, stock, options["repeat"])
         live = live_models(client)
         checks = acceptance_checks(client, stock, timings, live)
-        text = report_text(stock, checks, timings)
+        text = report_text(stock, checks, timings, live)
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(text)
         self.stdout.write(text, ending="")

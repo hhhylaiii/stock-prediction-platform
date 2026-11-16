@@ -55,8 +55,8 @@ SHADOW_GATE = {
     "sample_unit": "days",
 }
 HELD_RANK = (
-    "未上線：排名 20 日沒有上線中的模型：rank-2026-11 沒過換模門檻"
-    "（shadow_oos：未達門檻，實際 -0.0130，門檻 rank IC > 0，樣本 105 days）"
+    "未上線：排名 20 日沒有上線中的模型：rank-2026-11 沒過換模門檻："
+    "影子模型最近 6 個月 OOS（未達門檻，實際 -0.013，門檻 rank IC > 0，樣本 105 天）"
 )
 URL = "http://127.0.0.1:8000"
 NOV_2 = date(2026, 11, 2)
@@ -88,10 +88,10 @@ def complete(runs: Runs, calendar_in_db: list[date]) -> Runs:
     return runs
 
 
-def hold_back_rank_twenty(runs: Runs) -> None:
+def hold_back_rank_twenty(runs: Runs, gates: list[dict[str, Any]] | None = None) -> None:
     """The 20-day rank run stays a candidate and its scope's newest promotion row says why."""
     ModelRun.objects.filter(pk=runs.rank20.pk).update(status="candidate")
-    gates = [SHADOW_GATE]
+    gates = [SHADOW_GATE] if gates is None else gates
     held = {"objective": "rank", "horizon": 20, "run_id": "rank-2026-11.h20", "gates": gates}
     detail = {"scope": "rank", "run_key": "rank-2026-11", "held_slots": [held]}
     DataQualityLog.objects.create(
@@ -155,6 +155,7 @@ def test_every_check_passes_when_each_field_is_served(complete: Runs, tmp_path: 
     assert checks["2330 的 20 日特徵"][1] == "date 2026-10-30，1 項貢獻，1 項有原始值"
     assert checks["2330 的 5 日特徵"][1] == "date 2026-10-30，1 項貢獻，1 項有原始值"
     assert sum(line.startswith("| `/api/") for line in text.splitlines()) == len(PATHS)
+    assert "回的是空表" not in text
 
 
 def test_the_volume_counts_each_table_and_the_stock(complete: Runs, tmp_path: Path) -> None:
@@ -329,8 +330,9 @@ def test_prices_without_predictions_fail_freshness_and_leave_the_rest_not_live(
     )
     assert checks_of(text)["20 日預測價格"][1] == (
         "未上線：排名 20 日沒有上線中的模型，也沒有換模紀錄；"
-        "分位數 20 日沒有上線中的模型，也沒有換模紀錄"
+        "報酬區間 20 日沒有上線中的模型，也沒有換模紀錄"
     )
+    assert "- 5 日沒有上線中的排名模型：帶 `horizon=5` 的路徑回的是空表" in text
     assert str(error) == "未通過：最新交易日有預測"
 
 
@@ -397,6 +399,23 @@ def test_a_horizon_without_a_serving_rank_model_is_not_live_and_the_report_passe
         "通過",
         "price_date 2026-10-30，prediction_date 2026-10-30，未上線的期間 20 日",
     )
+    assert text.endswith(
+        "\n\n- 20 日沒有上線中的排名模型：帶 `horizon=20` 的路徑，以及不帶期間的預測表、特徵與歷史"
+        "回的是空表，耗時只代表沒有資料時的速度。\n"
+    )
+
+
+def test_a_held_slot_whose_own_gates_passed_says_its_group_failed(
+    complete: Runs, tmp_path: Path
+) -> None:
+    hold_back_rank_twenty(complete, gates=[])
+
+    target, _ = report(tmp_path)
+
+    assert checks_of(target.read_text())["20 日排名"][1] == (
+        "未上線：排名 20 日沒有上線中的模型：rank-2026-11 沒有換上；"
+        "它自己的門檻都過了，是同一組有模型沒過"
+    )
 
 
 def test_a_live_horizon_missing_a_rank_fails_beside_one_not_live(
@@ -424,7 +443,7 @@ def test_a_field_without_its_model_is_not_live_on_a_live_horizon(
     assert failed(text) == set()
     assert not_live(text) == {"20 日跑贏大盤機率"}
     assert checks_of(text)["20 日跑贏大盤機率"][1] == (
-        "未上線：上漲機率 20 日沒有上線中的模型，也沒有換模紀錄"
+        "未上線：跑贏大盤機率 20 日沒有上線中的模型，也沒有換模紀錄"
     )
     assert checks_of(text)["2330 個股頁 20 日"] == ("通過", "齊全；未上線的欄位 跑贏大盤機率")
 
