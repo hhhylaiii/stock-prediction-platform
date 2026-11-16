@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 from django.core.cache import cache
+from django.db import connection, models
 
 from apps.market.models import DailyPrice, Market, StockMaster, TradingCalendar
 from apps.research.gates import Gate, SlotGates
@@ -311,3 +312,10 @@ def fastest[Result](call: Callable[[], Result]) -> tuple[Result, float]:
         results.append(call())
         spent.append(time.perf_counter() - started)
     return results[-1], min(spent)
+
+
+def analyze(*tables: type[models.Model]) -> None:
+    """Planner statistics for the rows this test inserted, as autovacuum keeps on live tables."""
+    with connection.cursor() as cursor:
+        for table in tables:
+            cursor.execute(f"ANALYZE {connection.ops.quote_name(table._meta.db_table)}")

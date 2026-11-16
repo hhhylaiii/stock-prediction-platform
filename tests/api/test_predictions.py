@@ -10,7 +10,7 @@ from django.test.utils import CaptureQueriesContext
 from pytest_django import DjangoAssertNumQueries
 
 from apps.api.serving import HOLDOUT_RELEASE, warn_unreadable
-from apps.market.models import TradingCalendar
+from apps.market.models import DailyPrice, StockMaster, TradingCalendar
 from apps.research.holdout import DEGRADED, FAILED, PASSED, PRODUCTION
 from apps.research.models import FeatureDaily, ModelMonitor, ModelRun, Prediction
 from apps.research.promotion import PROMOTION
@@ -29,6 +29,7 @@ from tests.api.conftest import (
     add_model_run,
     add_predictions,
     add_stock,
+    analyze,
     envelope_of,
     fastest,
     forced_params,
@@ -625,6 +626,7 @@ def test_two_thousand_stocks_answer_within_half_a_second(client: Client, db: Non
         20,
         {code: {"q10": -0.1, "q50": 0.0, "q90": 0.1, "ret_pred": 0.0} for code in codes},
     )
+    analyze(StockMaster, DailyPrice, ModelRun, Prediction)
     client.get("/api/predictions")
 
     response, elapsed = fastest(partial(client.get, "/api/predictions", {"q": "股9"}))
