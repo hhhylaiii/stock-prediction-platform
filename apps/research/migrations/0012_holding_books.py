@@ -118,7 +118,7 @@ class Migration(migrations.Migration):
                         choices=[
                             ("listed", "有名單"),
                             ("no_prediction", "當天無預測"),
-                            ("traded", "有成交"),
+                            ("traded", "照名單結算"),
                             ("idle", "只估值"),
                         ],
                         max_length=16,

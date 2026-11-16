@@ -532,7 +532,7 @@ class BookPhase(models.TextChoices):
 class BookStatus(models.TextChoices):
     LISTED = "listed", "有名單"
     NO_PREDICTION = "no_prediction", "當天無預測"
-    TRADED = "traded", "有成交"
+    TRADED = "traded", "照名單結算"
     IDLE = "idle", "只估值"
 
 
