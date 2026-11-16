@@ -37,7 +37,7 @@ from apps.research.production import DESIGNS, build_run, shadow_key
 from apps.research.promotion import PROMOTION_CHECK, Promoted, first_day, promote
 from apps.research.resources import free_percent, peak_rss_mb
 from apps.research.runs import PRODUCTION
-from apps.research.shadow import SHADOW_CHECK, Outcome, record_books
+from apps.research.shadow import SHADOW_CHECK, Outcome, busy, record_books
 
 logger = logging.getLogger(__name__)
 EVENING_CHECK = "research_evening"
@@ -182,6 +182,16 @@ def _shadow(day: date) -> str:
         logger.error("research shadow %s failed to record: %s", day, error)
         return f"failed to record ({type(error).__name__}), see the worker log"
     return outcome.summary
+
+
+def _skip_shadow(day: date, error: ResearchBusyError) -> str:
+    """A busy lock skips the shadow books at once, so the finish and a retrain never wait."""
+    outcome = busy(error)
+    try:
+        _record(day, SHADOW_CHECK, outcome.severity, outcome.detail)
+    except Exception as failure:
+        logger.error("research shadow %s failed to record: %s", day, failure)
+    return f"skipped, the research lock is busy; {outcome.summary}"
 
 
 def _kept(day: date, outcome: Outcome) -> bool:
@@ -368,12 +378,17 @@ def _start(check: str, day: date, names: tuple[str, ...], extra: dict[str, str])
 
 @shared_task(bind=True, max_retries=None, name="research.step")
 def step(self: Task[Any, Any], done: list[Done], name: str, check: str, day: str) -> list[Done]:
-    """One chain step under the research lock; a busy lock retries, a failure stops the chain."""
+    """One chain step under the research lock; a busy lock retries, a failure stops the chain.
+
+    The shadow step never waits: a busy lock skips it.
+    """
     session = date.fromisoformat(day)
     try:
         with research_lock(f"{name} {day}"):
             summary = STEPS[name](session)
     except ResearchBusyError as error:
+        if name == "shadow":
+            return [*done, {"step": name, "result": _skip_shadow(session, error)}]
         if self.request.retries < settings.RESEARCH_LOCK_RETRIES:
             raise self.retry(exc=error, countdown=settings.RESEARCH_LOCK_COUNTDOWN) from error
         _failed(check, session, name, error, done)

@@ -22,6 +22,7 @@ from tests.research.test_tasks import (
     TAIPEI,
     WEDNESDAY,
     Severity,
+    busy_lock,
     calendar_rows,
     fast,
     gate,
@@ -422,6 +423,23 @@ def test_a_morning_among_the_first_sessions_of_its_month_queues_its_retrain(
     assert steps(ran) == ["features", "coverage", "predict", "monitor", "shadow"]
     assert queued == [session.isoformat()]
     assert not DataQualityLog.objects.filter(check_name=tasks.RETRAIN_CHECK).exists()
+
+
+def test_a_busy_lock_at_the_shadow_step_still_queues_the_month_s_retrain(
+    now: Callable[[date, time], None],
+    gate: list[bool],
+    ran: list[tuple[str, date, bool]],
+    queued: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    morning_of(FIRST, now)
+    monkeypatch.setattr(tasks, "research_lock", busy_lock(1, only="shadow"))
+
+    tasks.morning.apply().get()
+
+    assert steps(ran) == ["features", "coverage", "predict", "monitor"]
+    assert marker(FIRST, tasks.SHADOW_CHECK).severity == Severity.WARNING
+    assert queued == [FIRST.isoformat()]
 
 
 def test_a_morning_done_after_the_cutoff_leaves_the_retrain_to_the_next_one(

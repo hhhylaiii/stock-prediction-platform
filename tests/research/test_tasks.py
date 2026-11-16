@@ -551,6 +551,32 @@ def test_a_step_that_finds_the_lock_busy_retries_until_it_is_free(
     assert marker(WEDNESDAY, tasks.MORNING_CHECK).severity == Severity.INFO
 
 
+def test_a_busy_lock_skips_the_shadow_books_at_once_and_the_morning_still_finishes(
+    now: Callable[[date, time], None],
+    gate: list[bool],
+    ran: list[tuple[str, date, bool]],
+    monkeypatch: pytest.MonkeyPatch,
+    sent: list[tuple[date, str, str]],
+) -> None:
+    record(WEDNESDAY, tasks.EVENING_CHECK)
+    record(WEDNESDAY, US_CLOSE_CHECK)
+    now(WEDNESDAY + timedelta(days=1), time(6, 0))
+    monkeypatch.setattr(tasks, "research_lock", busy_lock(1, only="shadow"))
+
+    tasks.morning.apply().get()
+
+    assert steps(ran) == ["features", "coverage", "predict", "monitor"]
+    done = marker(WEDNESDAY, tasks.MORNING_CHECK)
+    assert done.severity == Severity.INFO
+    skipped = done.detail["steps"][-1]
+    assert skipped["step"] == "shadow"
+    assert skipped["result"].startswith("skipped, the research lock is busy; failed, see")
+    shadow = marker(WEDNESDAY, tasks.SHADOW_CHECK)
+    assert shadow.severity == Severity.WARNING
+    assert shadow.detail["error"].startswith("ResearchBusyError: the research lock is held by")
+    assert (WEDNESDAY, tasks.SHADOW_CHECK, Severity.WARNING) in sent
+
+
 def test_a_later_step_that_waits_for_the_lock_keeps_the_steps_done_before_it(
     now: Callable[[date, time], None],
     gate: list[bool],

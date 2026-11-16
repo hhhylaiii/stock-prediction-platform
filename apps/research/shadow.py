@@ -215,6 +215,11 @@ def record_books(session: date, books: Mapping[str, Spec] = BOOKS) -> Outcome:
     return Outcome(severity, detail, f"{shown or 'no book due'}{warned}; {seconds} s", wrote)
 
 
+def busy(error: BaseException) -> Outcome:
+    """A morning that never got the research lock: nothing written, one warning."""
+    return _failed(monotonic(), error)
+
+
 def _failed(
     began: float, error: BaseException, book: str | None = None, signal: date | None = None
 ) -> Outcome:
