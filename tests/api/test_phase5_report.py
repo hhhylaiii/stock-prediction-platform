@@ -314,7 +314,7 @@ def test_one_horizon_keeping_up_is_not_every_horizon(complete: Runs, tmp_path: P
     )
 
 
-def test_prices_without_predictions_fail_every_prediction_check(
+def test_prices_without_predictions_fail_freshness_and_leave_the_rest_not_live(
     calendar_in_db: list[date], tmp_path: Path
 ) -> None:
     seed_market()
@@ -522,22 +522,55 @@ def test_views_open_one_browser_beside_the_report_and_close_it(
 ) -> None:
     seen = []
 
-    def capture(page: str, base_url: str, stock: str, out_dir: Path) -> list[Path]:
-        seen.append((page, base_url, stock, out_dir))
+    def capture(page: str, base_url: str, stock: str, out_dir: Path, fan: bool) -> list[Path]:
+        seen.append((page, base_url, stock, out_dir, fan))
         return [out_dir / "today.png"]
 
     monkeypatch.setattr(phase5_report, "capture_views", capture)
 
     target, _ = report(tmp_path, "--views", URL, "--stock", "2330")
 
-    assert seen == [("page", URL, "2330", target.parent)]
+    assert seen == [("page", URL, "2330", target.parent, True)]
     assert browser.closed
+
+
+@pytest.mark.parametrize(
+    ("offline", "fan"),
+    [
+        (["quantile"], False),
+        (["rank20"], True),
+        (["rank20", "reg5"], False),
+        (["reg5"], True),
+    ],
+)
+def test_views_wait_for_the_median_line_only_where_the_stock_page_draws_one(
+    complete: Runs,
+    tmp_path: Path,
+    browser: FakeBrowser,
+    monkeypatch: pytest.MonkeyPatch,
+    offline: list[str],
+    fan: bool,
+) -> None:
+    ModelRun.objects.filter(pk__in=[getattr(complete, name).pk for name in offline]).update(
+        status="candidate"
+    )
+    seen = []
+
+    def capture(page: str, base_url: str, stock: str, out_dir: Path, fan: bool) -> list[Path]:
+        seen.append(fan)
+        return []
+
+    monkeypatch.setattr(phase5_report, "capture_views", capture)
+
+    report(tmp_path, "--views", URL)
+
+    assert seen == [fan]
 
 
 def test_a_view_that_never_draws_still_closes_the_browser(
     complete: Runs, tmp_path: Path, browser: FakeBrowser, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def capture(*args: Any) -> list[Path]:
+    def capture(*args: Any, **kwargs: Any) -> list[Path]:
         raise CommandError("today.png：等不到 #rows .trow")
 
     monkeypatch.setattr(phase5_report, "capture_views", capture)
@@ -548,7 +581,7 @@ def test_a_view_that_never_draws_still_closes_the_browser(
     assert browser.closed
 
 
-def test_views_wait_until_every_check_passes(
+def test_views_wait_until_no_check_fails(
     runs: Runs, calendar_in_db: list[date], tmp_path: Path, browser: FakeBrowser
 ) -> None:
     error, _ = failing(tmp_path, "--views", URL)

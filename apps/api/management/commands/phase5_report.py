@@ -17,7 +17,7 @@ from django.test import Client
 from django.utils import timezone
 
 from apps.api.management.commands.measure_api import ENDPOINTS, HEADER, PATHS, Timing, measure
-from apps.api.serving import Slot, roles_for
+from apps.api.serving import DEFAULT_HORIZON, Slot, roles_for
 from apps.etl.models import DataQualityLog, EtlRun
 from apps.market.models import DailyPrice, StockMaster
 from apps.research.models import (
@@ -40,9 +40,10 @@ THROTTLED = 429
 VIEW_TIMEOUT_MS = 15_000
 LOADING = "載入中"
 SHOWN_VIEW = "section.view:not([hidden])"
+FAN = "#price-chart path.fan-median"
 VIEWS = (
     ("today.png", "#today", ("#rows .trow",)),
-    ("stock.png", "#stock-{stock}", ("#price-chart rect.candle", "#price-chart path.fan-median")),
+    ("stock.png", "#stock-{stock}", ("#price-chart rect.candle", FAN)),
     ("models.png", "#models", ("#model-table .trow",)),
 )
 
@@ -280,9 +281,16 @@ def fresh_check(status: dict[str, Any], live: Live) -> Check:
     )
 
 
-def acceptance_checks(client: Client, stock: str, timings: list[Timing]) -> list[Check]:
+def fan_drawn(live: Live) -> bool:
+    """Whether the stock page draws a median line on the horizon it opens on."""
+    ranked = [h for h in OUTPUT_HORIZONS if not live.missing([roles_for(h)["rank"]])]
+    shown = DEFAULT_HORIZON if not ranked or DEFAULT_HORIZON in ranked else max(ranked)
+    return not live.missing([roles_for(shown)["return"]])
+
+
+def acceptance_checks(client: Client, stock: str, timings: list[Timing], live: Live) -> list[Check]:
     status = fetch(client, "/api/status").get("data") or {}
-    day, live = status.get("price_date"), live_models(client)
+    day = status.get("price_date")
     return [
         fresh_check(status, live),
         *table_checks(client, day, live),
@@ -364,20 +372,25 @@ def wait_for(page: "Page", name: str, ready: tuple[str, ...], timeout_ms: float)
 
 
 def capture_views(
-    page: "Page", base_url: str, stock: str, out_dir: Path, timeout_ms: float = VIEW_TIMEOUT_MS
+    page: "Page",
+    base_url: str,
+    stock: str,
+    out_dir: Path,
+    timeout_ms: float = VIEW_TIMEOUT_MS,
+    fan: bool = True,
 ) -> list[Path]:
     """Screenshot every view once drawn; out_dir gets all three or none of them."""
     page.set_viewport_size({"width": 1440, "height": 900})
     with tempfile.TemporaryDirectory() as scratch:
         for name, anchor, ready in VIEWS:
             page.goto(f"{base_url.rstrip('/')}/{anchor.format(stock=stock)}")
-            wait_for(page, name, ready, timeout_ms)
+            wait_for(page, name, tuple(s for s in ready if fan or s != FAN), timeout_ms)
             page.screenshot(path=Path(scratch) / name, full_page=True)
         out_dir.mkdir(parents=True, exist_ok=True)
         return [Path(shutil.move(Path(scratch) / name, out_dir / name)) for name, _, _ in VIEWS]
 
 
-def browse(base_url: str, stock: str, out_dir: Path) -> list[Path]:
+def browse(base_url: str, stock: str, out_dir: Path, fan: bool = True) -> list[Path]:
     """Capture the views in a headless Chromium; only the dev install has Playwright."""
     try:
         from playwright.sync_api import sync_playwright
@@ -388,7 +401,7 @@ def browse(base_url: str, stock: str, out_dir: Path) -> list[Path]:
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
         try:
-            return capture_views(browser.new_page(), base_url, stock, out_dir)
+            return capture_views(browser.new_page(), base_url, stock, out_dir, fan=fan)
         finally:
             browser.close()
 
@@ -408,7 +421,8 @@ class Command(BaseCommand):
         out, stock = options["out"], options["stock"]
         client = Client(HTTP_HOST="localhost", raise_request_exception=False)
         timings = measure(client, stock, options["repeat"])
-        checks = acceptance_checks(client, stock, timings)
+        live = live_models(client)
+        checks = acceptance_checks(client, stock, timings, live)
         text = report_text(stock, checks, timings)
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(text)
@@ -417,4 +431,4 @@ class Command(BaseCommand):
         if failed:
             raise CommandError("未通過：" + "、".join(failed))
         if options["views"]:
-            browse(options["views"], stock, out.parent)
+            browse(options["views"], stock, out.parent, fan=fan_drawn(live))

@@ -7,7 +7,7 @@ from playwright.sync_api import Page
 from pytest_django.live_server_helper import LiveServer
 
 from apps.api.management.commands.phase5_report import capture_views
-from apps.research.models import Prediction
+from apps.research.models import ModelRun, ModelStatus, Prediction
 from tests.e2e.conftest import Seed
 
 pytestmark = pytest.mark.e2e
@@ -40,6 +40,18 @@ def test_a_stock_without_a_forecast_is_not_captured(
         capture_views(page, live_server.url, "1101", tmp_path, timeout_ms=1_000)
 
     assert list(tmp_path.iterdir()) == []
+
+
+def test_without_a_return_model_the_stock_view_waits_only_for_the_candles(
+    page: Page, live_server: LiveServer, predicted: Seed, tmp_path: Path
+) -> None:
+    ModelRun.objects.filter(pk="quantile-h20").update(status=ModelStatus.CANDIDATE)
+
+    with pytest.raises(CommandError, match=r"^stock\.png：等不到 #price-chart path\.fan-median$"):
+        capture_views(page, live_server.url, "2330", tmp_path, timeout_ms=1_000)
+    shots = capture_views(page, live_server.url, "2330", tmp_path, timeout_ms=5_000, fan=False)
+
+    assert [shot.name for shot in shots] == ["today.png", "stock.png", "models.png"]
 
 
 SLOW_SECTIONS = """
