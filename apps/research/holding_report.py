@@ -1,4 +1,4 @@
-"""Summaries of holding books against the costless equal-weight universe and TAIEX_TR (H0 §5)."""
+"""Holding book summaries against the costless equal-weight universe and TAIEX_TR."""
 
 from datetime import date
 

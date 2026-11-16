@@ -91,6 +91,21 @@ def test_summaries_scale_daily_means_to_months_and_compound_over_years() -> None
     assert row["days"] == 21
 
 
+def test_each_book_return_meets_the_universe_and_index_return_of_the_same_day() -> None:
+    first = 30
+    days = DAYS[first : first + 5]
+    universe = np.arange(len(DAYS), dtype=np.float64) * 1e-4
+    index = np.arange(len(DAYS), dtype=np.float64) * 2e-4
+    daily = growing(days, rate=0.0)
+
+    row = summarise(daily, DAYS, universe, index)
+
+    expected = universe[first + 1 : first + 5].mean() * 2100
+    assert row["ew_mo"] == pytest.approx(expected)
+    assert row["excess_mo"] == pytest.approx(-expected)
+    assert row["index_mo"] == pytest.approx(index[first + 1 : first + 5].mean() * 2100)
+
+
 def test_drawdown_is_the_worst_fall_from_a_running_peak() -> None:
     days = DAYS[:4]
     daily = growing(days).assign(value=[1.0, 1.2, 0.9, 1.1])
