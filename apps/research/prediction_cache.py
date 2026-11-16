@@ -206,6 +206,11 @@ def _holds_holdout(path: Path) -> bool:
     return bool(stored.get("holdout")) or str(stored.get("test_end", "")) >= str(SPEC_HOLDOUT_START)
 
 
+def holds_holdout(run_key: str, model: str, index: int) -> bool:
+    """Whether a model's cached fold was written as a holdout fold."""
+    return _holds_holdout(fold_path(run_key, model, index))
+
+
 def _stored_record(path: Path) -> dict[str, object] | None:
     if not path.exists():
         return None
