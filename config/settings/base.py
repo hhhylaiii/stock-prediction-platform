@@ -149,6 +149,7 @@ if RESEARCH_SHADOW_TRAIN_SOFT_SECONDS >= RESEARCH_SHADOW_TRAIN_HARD_SECONDS:
     raise ImproperlyConfigured(
         "RESEARCH_SHADOW_TRAIN_SOFT_SECONDS must be under RESEARCH_SHADOW_TRAIN_HARD_SECONDS"
     )
+RESEARCH_SHADOW_TRAIN_MIN_FREE = env.int("RESEARCH_SHADOW_TRAIN_MIN_FREE", default=70)
 if time.fromisoformat(RESEARCH_AT["EVENING"]) <= time.fromisoformat(ETL_AT["CHECK_QUALITY"]):
     raise ImproperlyConfigured("RESEARCH_AT_EVENING must come after ETL_AT_CHECK_QUALITY")
 if time.fromisoformat(RESEARCH_AT["MORNING"]) <= time.fromisoformat(ETL_AT["US_CLOSE"]):

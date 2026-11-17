@@ -114,7 +114,7 @@ def test_the_fit_freezes_each_candidate_and_records_one_info_row(
     ("hour", "free", "workers", "reason"),
     [
         (time(9, 0), 80.0, 1, "outside the 06:00 to 09:00 hours a fit may start in"),
-        (time(6, 45), 20.0, 1, "20% of memory free, under 50%"),
+        (time(6, 45), 65.0, 1, "65% of memory free, under 70%"),
         (time(6, 45), 80.0, 2, "worker concurrency 2, not 1"),
     ],
 )
@@ -137,6 +137,21 @@ def test_a_fit_that_may_not_start_only_warns(
 
     assert freezes["called"] == []
     assert (trained().severity, trained().detail) == (Severity.WARNING, {"refused": reason})
+    assert sent == [(DAY, tasks.SHADOW_TRAIN_CHECK, Severity.WARNING)]
+
+
+@override_settings(RESEARCH_SHADOW_TRAIN_MIN_FREE=60, RESEARCH_RETRAIN_MIN_FREE=90)
+def test_the_fit_reads_its_own_memory_floor_not_the_retrain_s(
+    memory: list[float | None], freezes: dict[str, Any], sent: list[tuple[date, str, str]]
+) -> None:
+    memory[0] = 75.0
+    assert train() == Severity.INFO
+    assert freezes["called"] == ["C1", "C2"]
+
+    memory[0] = 55.0
+    DataQualityLog.objects.all().delete()
+    assert train() == "refused"
+    assert trained().detail == {"refused": "55% of memory free, under 60%"}
     assert sent == [(DAY, tasks.SHADOW_TRAIN_CHECK, Severity.WARNING)]
 
 

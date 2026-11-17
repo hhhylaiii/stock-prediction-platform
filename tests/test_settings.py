@@ -90,6 +90,15 @@ def test_the_candidate_fit_stops_softly_at_half_an_hour_and_hard_five_minutes_la
 
 
 @pytest.mark.usefixtures("isolated_env")
+def test_the_candidate_fit_needs_seventy_percent_of_memory_free_unless_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert _fresh_import("config.settings.dev").RESEARCH_SHADOW_TRAIN_MIN_FREE == 70
+    monkeypatch.setenv("RESEARCH_SHADOW_TRAIN_MIN_FREE", "80")
+    assert _fresh_import("config.settings.dev").RESEARCH_SHADOW_TRAIN_MIN_FREE == 80
+
+
+@pytest.mark.usefixtures("isolated_env")
 def test_the_candidate_fit_limits_come_from_the_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

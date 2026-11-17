@@ -431,7 +431,7 @@ def _shadow_train_after(day: date) -> None:
 
 
 def _train_refusal(task: Task[Any, Any]) -> str | None:
-    """Why a candidate fit may not start now, the retrain's hours, worker and memory rules."""
+    """Why a candidate fit may not start now: the retrain's hours and worker, its memory floor."""
     if not _retrain_hours():
         hours = f"{settings.RESEARCH_AT['MORNING']} to {settings.RESEARCH_RETRAIN_BEFORE}"
         return f"outside the {hours} hours a fit may start in"
@@ -439,8 +439,8 @@ def _train_refusal(task: Task[Any, Any]) -> str | None:
     if concurrency != 1:
         return f"worker concurrency {concurrency}, not 1"
     free = free_percent()
-    if free is not None and free < settings.RESEARCH_RETRAIN_MIN_FREE:
-        return f"{free:.0f}% of memory free, under {settings.RESEARCH_RETRAIN_MIN_FREE}%"
+    if free is not None and free < settings.RESEARCH_SHADOW_TRAIN_MIN_FREE:
+        return f"{free:.0f}% of memory free, under {settings.RESEARCH_SHADOW_TRAIN_MIN_FREE}%"
     return None
 
 
