@@ -1289,9 +1289,14 @@
       fmtInt((asObject(v) || {}).universe_removed || 0) + ' 檔，分數變動 ' + fmtInt((asObject(v) || {}).scores_changed || 0) + ' 檔',
     in_universe_without_score: v => fmtInt(Number(v) || 0) + ' 檔在 universe 內卻沒有分數',
     trade_date_moved: v => '成交日改期：名單記 ' + shadowDay((asObject(v) || {}).listed) + '，實際 ' + shadowDay((asObject(v) || {}).filled) + '（交易日曆更正）',
-    no_taiex_tr: v => '寫入時還沒有加權報酬指數 ' + shadowDays(v) + ' 的收盤，大盤報酬留空'
+    no_taiex_tr: v => '寫入時還沒有加權報酬指數 ' + shadowDays(v) + ' 的收盤，大盤報酬留空',
+    book_failed: v => '帳本這次沒寫入：' + String(v),
+    scores_failed: v => '打分沒完成：' + String(v),
+    artifact_invalid: v => '模型檔不見或 sha256 對不上，那天不打分：' + String(v)
   };
-  const NOTE_FIELDS = ['book', 'signal_date', 'first'];
+  const NOTE_FIELDS = ['book', 'role', 'signal_date', 'first'];
+  const SHADOW_ROLES = { main: '主紀錄', paired: '對照帳本', candidate: '候選' };
+  const generationOf = label => { const m = /\sg(\d+)$/.exec(String(label)); return m ? '第 ' + m[1] + ' 代' : null; };
 
   function shadowBookLine(name, book) {
     const b = asObject(book) || {};
@@ -1302,11 +1307,21 @@
 
   function shadowNoteLine(note) {
     const n = asObject(note) || {};
-    const where = [n.book, n.signal_date ? shadowDay(n.signal_date) : null].filter(Boolean).join(' ');
+    const role = SHADOW_ROLES[n.role];
+    const book = n.book ? n.book + (role ? '（' + role + '）' : '') : null;
+    const where = [book, n.signal_date ? shadowDay(n.signal_date) : null].filter(Boolean).join(role ? '' : ' ');
     const keys = Object.keys(n).filter(key => !NOTE_FIELDS.includes(key));
     const known = keys.find(key => SHADOW_NOTES[key]);
-    const text = known ? SHADOW_NOTES[known](n[known]) : '其他備註 ' + (keys.join('、') || '—');
-    return (where ? where + '：' : '') + text;
+    const said = known ? SHADOW_NOTES[known](n[known]) : '其他備註 ' + (keys.join('、') || '—');
+    const text = (where ? where + '：' : '') + said;
+    return n.role === 'main' ? { text, warn: true } : text;
+  }
+
+  function shadowScoreLine(name, entry) {
+    const s = asObject(entry) || {};
+    const days = Array.isArray(s.scored) && s.scored.length ? '打分 ' + shadowDays(s.scored) : '這次沒打分';
+    const generations = (Array.isArray(s.artifacts) ? s.artifacts : []).map(generationOf).filter(Boolean);
+    return '候選 ' + name + '：' + days + (generations.length ? '（' + generations.join('、') + '）' : '');
   }
 
   function shadowLines(d) {
@@ -1316,10 +1331,14 @@
     }
     const books = asObject(d.books);
     if (!books) return null;
+    const notes = Array.isArray(d.notes) ? d.notes : [];
     const names = Object.keys(books).sort();
-    const lines = names.length ? names.map(name => shadowBookLine(name, books[name])) : ['沒有帳本要寫'];
-    const timed = [...lines.slice(0, -1), lines[lines.length - 1] + shadowSeconds(d)];
-    return [...timed, ...(Array.isArray(d.notes) ? d.notes.map(shadowNoteLine) : [])];
+    const bookFailed = notes.some(note => has((asObject(note) || {}).book_failed));
+    const bookLines = names.length || bookFailed ? names.map(name => shadowBookLine(name, books[name])) : ['沒有帳本要寫'];
+    const scores = asObject(d.scores) || {};
+    const scoreLines = Object.keys(scores).sort().map(name => shadowScoreLine(name, scores[name]));
+    const seconds = typeof d.seconds === 'number' ? ['整步 ' + d.seconds.toFixed(1) + ' 秒'] : [];
+    return [...bookLines, ...scoreLines, ...notes.map(shadowNoteLine), ...seconds];
   }
 
   function modelCheckState(check, alertShare, date) {
@@ -1344,14 +1363,16 @@
     }
   }
 
+  const lineText = line => asObject(line) ? String(line.text) : String(line);
+
   function modelCheckHtml(check, alertShare, date, note) {
     const [state, lines] = modelCheckState(check, alertShare, date);
     const failed = check.severity === 'error';
     const cls = failed ? 'warn' : state;
-    const shown = failed ? ['錯誤，' + (lines[0] || ''), ...lines.slice(1)] : lines;
+    const shown = failed ? ['錯誤，' + lineText(lines[0] || ''), ...lines.slice(1)] : lines;
     const runClass = ['model_alert', 'model_promotion', 'model_holdout_release', 'monitor_feature_coverage'].includes(check.check_name) ? ' run' : '';
     return '<div class="check"><i class="' + cls + '"></i><div><div>' + esc(CHECKS[check.check_name] || check.check_name) + (note ? '　<span class="faint small pinned">' + esc(note) + '</span>' : '') + '</div>' +
-      shown.map(line => '<div class="muted small' + runClass + '">' + esc(line) + '</div>').join('') + '</div></div>';
+      shown.map(line => '<div class="muted small' + runClass + (asObject(line) && line.warn ? ' warn-line' : '') + '">' + esc(lineText(line)) + '</div>').join('') + '</div></div>';
   }
 
   const isPromotion = check => check.check_name === 'model_promotion';
