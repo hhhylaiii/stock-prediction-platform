@@ -10,6 +10,7 @@ from time import monotonic
 from typing import Any
 
 from celery import Task, chain, shared_task
+from celery.exceptions import SoftTimeLimitExceeded
 from django.conf import settings
 from django.core.management import call_command
 from django.db import transaction
@@ -21,6 +22,7 @@ from apps.etl.models import DataQualityLog
 from apps.etl.tasks import US_CLOSE_CHECK, ready_for_research
 from apps.market.adjust import ADJ_CHECK
 from apps.market.calendar import OutsideCalendarError, TradingDays
+from apps.research.candidates import freeze, unfollowed
 from apps.research.feature_coverage import CHECK as COVERAGE_CHECK
 from apps.research.feature_coverage import (
     FLAGGED,
@@ -45,6 +47,9 @@ MORNING_CHECK = "research_morning"
 RETRAIN_CHECK = "research_retrain"
 PROMOTE_CHECK = "research_promote"
 REBUILD_CHECK = "research_rebuild"
+SHADOW_TRAIN_CHECK = "research_shadow_train"
+SHADOW_TRAIN_SOFT_SECONDS = 3600
+SHADOW_TRAIN_HARD_SECONDS = 3900
 RECENT_SESSIONS = 60
 COVERED = f"covered by the chain's {RECENT_SESSIONS}-session features and labels"
 NOTE_WINDOW = 90
@@ -407,6 +412,72 @@ def finish(done: list[Done], check: str, day: str, extra: dict[str, str]) -> str
     _record(session, check, severity, {"steps": done, **extra})
     if check == MORNING_CHECK:
         _retrain_after(session)
+        if severity == Severity.INFO:
+            _shadow_train_after(session)
+    return str(severity)
+
+
+def _shadow_train_after(day: date) -> None:
+    """After a morning with every step done, queue one fit of the candidates left behind."""
+    try:
+        due = unfollowed()
+    except Exception as error:
+        logger.error("research shadow_train %s not queued: %s", day, error)
+        return
+    if due:
+        shadow_train.delay(day.isoformat())
+
+
+def _train_refusal(task: Task[Any, Any]) -> str | None:
+    """Why a candidate fit may not start now, the retrain's hours, worker and memory rules."""
+    if not _retrain_hours():
+        hours = f"{settings.RESEARCH_AT['MORNING']} to {settings.RESEARCH_RETRAIN_BEFORE}"
+        return f"outside the {hours} hours a fit may start in"
+    concurrency = _concurrency(task)
+    if concurrency != 1:
+        return f"worker concurrency {concurrency}, not 1"
+    free = free_percent()
+    if free is not None and free < settings.RESEARCH_RETRAIN_MIN_FREE:
+        return f"{free:.0f}% of memory free, under {settings.RESEARCH_RETRAIN_MIN_FREE}%"
+    return None
+
+
+@shared_task(
+    bind=True,
+    name="research.shadow_train",
+    soft_time_limit=SHADOW_TRAIN_SOFT_SECONDS,
+    time_limit=SHADOW_TRAIN_HARD_SECONDS,
+)
+def shadow_train(self: Task[Any, Any], day: str) -> str:
+    """Freeze each candidate on its slot's new serving run; a refusal or failure only warns."""
+    if not settings.RESEARCH_SCHEDULE_ENABLED:
+        return "disabled"
+    session = date.fromisoformat(day)
+    refused = _train_refusal(self)
+    if refused is not None:
+        _record(session, SHADOW_TRAIN_CHECK, Severity.WARNING, {"refused": refused})
+        return "refused"
+    frozen: dict[str, dict[str, Any]] = {}
+    failed: dict[str, str] = {}
+    for name in unfollowed():
+        try:
+            row = freeze(name, settings.FEATURE_PARQUET_DIR)
+        except SoftTimeLimitExceeded:
+            failed[name] = f"stopped at the {SHADOW_TRAIN_SOFT_SECONDS} s limit"
+            break
+        except Exception as error:
+            logger.error("research shadow_train %s %s failed: %s", day, name, error)
+            failed[name] = f"{type(error).__name__}: {error}"
+            continue
+        frozen[name] = {
+            "serving_run": row.serving_run_id,
+            "generation": row.generation,
+            "first_signal": row.first_signal.isoformat(),
+            "seconds": row.recipe["seconds"],
+            "peak_mb": row.recipe["peak_mb"],
+        }
+    severity = Severity.WARNING if failed else Severity.INFO
+    _record(session, SHADOW_TRAIN_CHECK, severity, {"frozen": frozen, "failed": failed})
     return str(severity)
 
 

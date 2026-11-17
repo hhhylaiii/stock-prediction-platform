@@ -28,6 +28,7 @@ from apps.research.candidates import (
     load_artifact,
     measure,
     relative_labels,
+    unfollowed,
 )
 from apps.research.features.store import columns_for, read_partitions
 from apps.research.gbdt import bag_seeds
@@ -543,3 +544,13 @@ def test_a_changed_file_scores_nothing_until_a_next_generation_replaces_it(
 
     assert (replaced.scored, replaced.notes) == (["2016-12-05"], [])
     assert set(ShadowScore.objects.values_list("date", "generation")) == {(later, 2)}
+
+
+def test_a_frozen_candidate_falls_behind_once_its_slot_serves_another_run(served: Path) -> None:
+    assert unfollowed() == []
+    freeze("C1", served)
+    assert unfollowed() == []
+    ModelRun.objects.filter(run_id=RANK_RUN).update(status=ModelStatus.RETIRED)
+    _serving("rank-2016-12", ModelObjective.RANK, ["tech_ret_1d"])
+
+    assert unfollowed() == ["C1"]
