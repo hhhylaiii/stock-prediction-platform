@@ -134,28 +134,33 @@ class Serving:
 
 
 def settle(page: Page, serving: Serving, seconds: float = SETTLE_SECONDS) -> None:
-    """Stop the page's new requests, then wait until the server has been idle for a moment.
+    """Abort the page's new requests, then wait until the server has been idle for a moment.
 
-    The database flush after a test would otherwise race a request still running on the server.
+    The page route goes ahead of a test's own routes, which may forward requests to the server.
     """
     page.context.route("**/*", lambda route: route.abort())
+    page.route("**/*", lambda route: route.abort())
     deadline = monotonic() + seconds
     quiet_since: float | None = None
-    while monotonic() < deadline:
-        now = monotonic()
-        if serving.count:
-            quiet_since = None
+    running = 0
+    while monotonic() < deadline or quiet_since is not None:
+        now, count = monotonic(), serving.count
+        if count:
+            quiet_since, running = None, count
         elif quiet_since is None:
             quiet_since = now
         elif now - quiet_since >= QUIET_SECONDS:
             return
         page.wait_for_timeout(20)
-    raise AssertionError(f"requests still running after {seconds} s: {serving.count}")
+    raise AssertionError(f"requests still running after {seconds} s: {running}")
 
 
 @pytest.fixture
 def page(page: Page, transactional_db: None) -> Iterator[Page]:
-    """Playwright's page; after the test no request is left running when the database is flushed."""
+    """Playwright's page; after the test it waits for the server's requests before the flush.
+
+    Past the wait the teardown fails with the count, and pytest-django flushes all the same.
+    """
     serving = Serving()
     request_started.connect(serving.started, weak=False, dispatch_uid="e2e-serving-started")
     request_finished.connect(serving.finished, weak=False, dispatch_uid="e2e-serving-finished")

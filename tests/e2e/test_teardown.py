@@ -32,6 +32,13 @@ def slow_status(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 
 
 @pytest.fixture
+def seen_at_flush(slow_status: list[str]) -> Iterator[None]:
+    """Torn down after `page` and just before the flush, so the slow request must be done."""
+    yield
+    assert slow_status == ["slow"]
+
+
+@pytest.fixture
 def serving() -> Iterator[Serving]:
     watched = Serving()
     request_started.connect(watched.started, weak=False, dispatch_uid="test-serving-started")
@@ -74,7 +81,7 @@ def test_after_settle_the_page_reaches_the_server_no_more(
     assert starts == []
 
 
-def test_a_request_outlasting_the_wait_fails_the_test_instead_of_racing_the_flush(
+def test_a_request_outlasting_the_wait_fails_with_how_many_are_left(
     page: Page,
     live_server: LiveServer,
     seeded: Seed,
@@ -87,3 +94,10 @@ def test_a_request_outlasting_the_wait_fails_the_test_instead_of_racing_the_flus
 
     with pytest.raises(AssertionError, match=r"requests still running after 0\.2 s: 1"):
         settle(page, serving, seconds=0.2)
+
+
+def test_the_page_fixture_lets_a_request_finish_before_the_flush(
+    seen_at_flush: None, page: Page, live_server: LiveServer, seeded: Seed
+) -> None:
+    page.goto(f"{live_server.url}/api/status")
+    page.evaluate(SLOW_FETCH)
