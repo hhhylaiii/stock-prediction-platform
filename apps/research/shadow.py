@@ -76,11 +76,19 @@ Severity = DataQualityLog.Severity
 
 @dataclass(frozen=True)
 class Spec:
-    """A book's rule, first signal day, and the candidate whose scores it follows (None for C0)."""
+    """A book's rule, first signal day, and the candidate whose scores it follows (None for C0).
+
+    A paired book is a C0 book started with a candidate, kept only to compare against it.
+    """
 
     rule: Rule
     start: date
     source: str | None = None
+    paired: bool = False
+
+    @property
+    def role(self) -> str:
+        return "candidate" if self.source else "paired" if self.paired else "main"
 
 
 RULE = Rule.parse("H70", 30)
@@ -233,7 +241,7 @@ def all_books() -> dict[str, Spec]:
     for name in CANDIDATES:
         start = candidate_start(name)
         if start is not None:
-            found.setdefault(f"{PREFIX}C0-{start:%Y%m%d}", Spec(RULE, start))
+            found.setdefault(f"{PREFIX}C0-{start:%Y%m%d}", Spec(RULE, start, paired=True))
             found[f"{PREFIX}{name}"] = Spec(RULE, start, name)
     return found
 
@@ -299,10 +307,16 @@ def _said_failed(note: dict[str, Any]) -> str:
     return f"{note['book']}: failed{at}"
 
 
-def _book_failed(book: str, signal: date | None, error: BaseException | str) -> dict[str, Any]:
+def _book_failed(
+    book: str, spec: Spec, signal: date | None, error: BaseException | str
+) -> dict[str, Any]:
     said = error if isinstance(error, str) else f"{type(error).__name__}: {error}"
     shown = None if signal is None else signal.isoformat()
-    return {"book": book, "signal_date": shown, "book_failed": said}
+    return {"book": book, "role": spec.role, "signal_date": shown, "book_failed": said}
+
+
+def _scores_failed(name: str, said: str) -> dict[str, Any]:
+    return {"book": name, "role": "candidate", "scores_failed": said}
 
 
 def _book(
@@ -310,17 +324,17 @@ def _book(
 ) -> None:
     """One book in its own transaction; a failure rolls back that book alone and notes it."""
     if left() <= 0:
-        done.notes.append(_book_failed(name, None, "skipped: the shadow budget ran out"))
+        done.notes.append(_book_failed(name, spec, None, "skipped: the shadow budget ran out"))
         return
     try:
         with transaction.atomic():
             view = inputs if spec.source is None else inputs.scored_by(spec.source)
             progress = _advance(name, spec, session, view)
     except ShadowStuckError as stuck:
-        done.notes.append(_book_failed(name, stuck.signal, stuck.__cause__ or stuck))
+        done.notes.append(_book_failed(name, spec, stuck.signal, stuck.__cause__ or stuck))
         return
     except Exception as error:
-        done.notes.append(_book_failed(name, None, error))
+        done.notes.append(_book_failed(name, spec, None, error))
         return
     done.books[name] = progress
     done.notes.extend(progress.notes)
@@ -331,13 +345,13 @@ def _scores(
 ) -> bool:
     """One candidate's due scores in their own transaction; False when none could be written."""
     if left() <= 0:
-        done.notes.append({"book": name, "scores_failed": "skipped: the shadow budget ran out"})
+        done.notes.append(_scores_failed(name, "skipped: the shadow budget ran out"))
         return False
     try:
         with transaction.atomic():
             scored = score_candidate(name, session, calendar)
     except Exception as error:
-        done.notes.append({"book": name, "scores_failed": f"{type(error).__name__}: {error}"})
+        done.notes.append(_scores_failed(name, f"{type(error).__name__}: {error}"))
         return False
     done.scores[name] = scored
     done.notes.extend(scored.notes)
@@ -366,7 +380,7 @@ def _morning(session: date, books: Mapping[str, Spec], left: Callable[[], float]
             _book(done, name, spec, session, inputs, left)
         else:
             reason = f"skipped: {spec.source} has no scores this morning"
-            done.notes.append(_book_failed(name, None, reason))
+            done.notes.append(_book_failed(name, spec, None, reason))
     return done
 
 

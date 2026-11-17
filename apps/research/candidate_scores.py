@@ -170,6 +170,7 @@ def score_candidate(name: str, session: date, calendar: TradingDays) -> Scored:
                 if key == newest:
                     note = {
                         "book": name,
+                        "role": "candidate",
                         "signal_date": day.isoformat(),
                         "artifact_invalid": str(error),
                     }

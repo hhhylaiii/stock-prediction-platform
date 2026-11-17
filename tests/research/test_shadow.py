@@ -367,7 +367,12 @@ def test_a_failing_book_keeps_nothing_of_the_morning_and_is_noted_by_book_and_da
     assert outcome.severity == "warning"
     assert outcome.detail["books"] == {}
     assert outcome.detail["notes"] == [
-        {"book": "T", "signal_date": "2026-11-17", "book_failed": "ArithmeticError: bad day"}
+        {
+            "book": "T",
+            "role": "main",
+            "signal_date": "2026-11-17",
+            "book_failed": "ArithmeticError: bad day",
+        }
     ]
     assert outcome.summary.startswith("T: failed at 2026-11-17, 1 notes, see research_shadow;")
     assert not HoldingBookDay.objects.exists()
@@ -624,12 +629,58 @@ def test_all_books_adds_each_frozen_candidate_and_one_c0_book_from_its_first_day
     found = all_books()
 
     assert list(found) == ["H70N30-C0", "H70N30-C0-20261118", "H70N30-C1", "H70N30-C2"]
-    assert [(spec.start, spec.source) for spec in found.values()] == [
-        (FIRST, None),
-        (market[2], None),
-        (market[2], "C1"),
-        (market[2], "C2"),
+    assert [(spec.start, spec.source, spec.role) for spec in found.values()] == [
+        (FIRST, None, "main"),
+        (market[2], None, "paired"),
+        (market[2], "C1", "candidate"),
+        (market[2], "C2", "candidate"),
     ]
+
+
+def test_a_failing_c0_book_turns_the_morning_into_a_warning_and_sends_the_alert(
+    market: list[date], clock: dict[str, datetime], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        tasks, "dispatch", lambda rows: sent.extend((r.check_name, r.severity) for r in rows)
+    )
+    frozen("C1", market[0], tmp_path)
+    scored_against_c0("C1")
+    monkeypatch.setattr(shadow, "score_candidate", lambda name, session, days: Scored())
+    real = shadow.order_list
+
+    def breaks(held: Any, score: Any, *args: Any) -> Any:
+        if np.nanmax(score) > 0:
+            raise ArithmeticError("bad C0 day")
+        return real(held, score, *args)
+
+    monkeypatch.setattr(shadow, "order_list", breaks)
+    Prediction.objects.filter(score__lt=0).update(score=F("score") * -1)
+    ShadowScore.objects.filter(score__gt=0).update(score=F("score") * -1)
+    clock["at"] = at(FIRST + timedelta(days=1), time(6, 30))
+
+    said = tasks.STEPS["shadow"](FIRST)
+
+    row = DataQualityLog.objects.get(date=FIRST, check_name=SHADOW_CHECK)
+    assert row.severity == "warning"
+    assert sent == [(SHADOW_CHECK, "warning")]
+    failed = [note for note in row.detail["notes"] if "book_failed" in note]
+    assert failed == [
+        {
+            "book": "H70N30-C0",
+            "role": "main",
+            "signal_date": "2026-11-16",
+            "book_failed": "ArithmeticError: bad C0 day",
+        },
+        {
+            "book": "H70N30-C0-20261116",
+            "role": "paired",
+            "signal_date": "2026-11-16",
+            "book_failed": "ArithmeticError: bad C0 day",
+        },
+    ]
+    assert list(row.detail["books"]) == ["H70N30-C1"]
+    assert said.startswith("H70N30-C1: listed 2026-11-16; H70N30-C0: failed at 2026-11-16;")
 
 
 def test_a_candidate_book_follows_its_own_scores_and_c0_s_rows_stay_as_they_were(
@@ -673,9 +724,10 @@ def test_a_candidate_whose_scores_fail_leaves_c0_alone_and_skips_its_own_book(
     assert not HoldingBookDay.objects.filter(book="T-C1").exists()
     assert outcome.severity == "warning"
     assert outcome.detail["notes"] == [
-        {"book": "C1", "scores_failed": "ArithmeticError: no features"},
+        {"book": "C1", "role": "candidate", "scores_failed": "ArithmeticError: no features"},
         {
             "book": "T-C1",
+            "role": "candidate",
             "signal_date": None,
             "book_failed": "skipped: C1 has no scores this morning",
         },
@@ -707,6 +759,7 @@ def test_a_failing_candidate_book_rolls_back_alone(
     assert outcome.detail["notes"] == [
         {
             "book": "T-C1",
+            "role": "candidate",
             "signal_date": "2026-11-18",
             "book_failed": "ArithmeticError: bad candidate day",
         }
@@ -740,6 +793,7 @@ def test_a_spent_budget_skips_the_candidate_book_and_the_next_morning_backfills_
     assert skipped.detail["notes"] == [
         {
             "book": "T-C1",
+            "role": "candidate",
             "signal_date": None,
             "book_failed": "skipped: the shadow budget ran out",
         }
