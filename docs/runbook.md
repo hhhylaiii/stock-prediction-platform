@@ -151,6 +151,29 @@ docker compose logs -f worker
 - 已記的列有錯時不改、不刪：把 `BOOKS` 裡舊的代號換成新的代號（例如 `H70N30-C0` 換成 `H70N30-C0.2`），部署後由下一個早上從起點重新補記，除了當天寫的最新名單與最新成交，其餘都標 `backfilled`。舊帳本的列留在表裡，不再推進；不要讓兩個代號同時留在 `BOOKS`，否則卡住的舊帳本會讓新帳本也寫不進去。日曆把兩個已結算日子之間的某天改成開市時，帳本會停在那天並告警（`the calendar opened a day under the book`），同樣照這條處理。
 - `shadow` 排在完成紀錄之前，所以算進重訓「06:00 到 09:00 之間跑完」的時間；最壞情況會多約 65 秒（60 秒預算加上計算，不等研究鎖）。
 
+### 影子候選模型的凍結
+
+候選 C1（Ridge 與 C0 的排名平均）、C2（5 日相對 `TAIEX_TR` 報酬）的定義見 `docs/reports/phase4/holding-shadow-prereg.md` 第 7 節；配方在 `apps/research/candidates.py`。
+
+- `shadow_train --candidate C1`（或 `C2`）在所屬 slot 上線中的 run（C1 跟排名 5 日、C2 跟報酬 5 日）記下的 production 摺上訓練，模型檔寫到 `MODEL_DIR/shadow/<c1|c2>/<run_key>/g<代數>.pkl`，再寫一列 `shadow_artifact`（模型檔 sha256、訓練窗、配方、`first_signal`）。寫進這一列就算凍結。
+- `first_signal` 取兩者較晚的一天：凍結當下還沒有那個 slot 預測的第一個交易日（而且晚於 run 的 `as_of`），以及凍結當天或之後的第一個交易日。所以凍結一定早於它第一次打分的預測寫入；研究鏈之前漏跑、事後才補寫預測的那幾天，在凍結日之前的不打分。凍結當天本身是交易日、當天的預測又還沒寫（例如晚上凍結，隔天 06:00 才寫）時，`first_signal` 就是凍結當天。
+- 整段持研究鎖（和 chain 的每一步、`predict`、`build_features`、`build_labels` 同一把），鎖被佔住時立刻報錯、不寫任何東西。每月重訓不取研究鎖（見「研究排程」），擋不住它：手動凍結不要和重訓同時跑，當月 `research_retrain` 那列寫進來之前都當作重訓還在跑。是寫 twp 的重工作，時段和 holdout 一樣避開 15:30 的價格批次、23:00 起的研究 chain（等 `research_evening` 那列寫進來）、06:00 到 08:00 的早上 chain。
+- 手動凍結前的兩個唯讀檢查，兩個都過才跑：
+  1. 當月的重訓已經寫完，或今天不會有重訓：下面查得到當月的 `research_retrain` 列；查不到的話，今天要在當月前 5 個交易日之外，或已經過了 09:00（重訓只在 06:00 到 09:00 之間開始）。
+  2. worker 沒有進行中、已領取、排定時間（重試倒數中）的工作，佇列也是空的：前三行都印 `empty`，最後一行是 `0`（broker 不是 redis 的 db 0 時改 `-n`）。
+
+  ```bash
+  docker compose exec db psql -U twp -d twp -c \
+    "select date, severity from data_quality_log where check_name = 'research_retrain' and date >= date_trunc('month', current_date) order by id desc limit 1"
+  docker compose exec -T worker celery -A config inspect active
+  docker compose exec -T worker celery -A config inspect reserved
+  docker compose exec -T worker celery -A config inspect scheduled
+  docker compose exec -T redis redis-cli -n 0 llen celery
+  ```
+- 同一個上線 run 已經凍結過時拒跑。`--replace` 只在最新一代的模型檔不見或 sha256 對不上時才寫下一代；檔案完好時照樣拒跑，凍結之後不能換一個重訓的版本。舊的列和模型檔留著，已記的分數不改。`drop_run shadow` 會被拒絕，不會刪到這個資料夾。
+- `--output <資料夾>` 只訓練、把模型檔寫成那個資料夾裡的 `c1.pkl`／`c2.pkl`，並印出秒數、峰值記憶體與 sha256，不取鎖、不寫資料庫，可以在主機上用唯讀連線量測。不取鎖，所以時段照研究鎖那一條避開：讀到一半特徵或 label 被重寫時會報「changed while reading」或「labels changed while fitting」，量到的秒數與記憶體也會被同時跑的工作干擾。
+- 模型檔不在每日資料庫備份裡。同樣的資料重訓會得到同一個 sha256，但每晚重算最近 60 個交易日的特徵、還原因子重建都會改到訓練窗裡的資料，所以檔案遺失後重訓通常得不到原來的 sha256，只能用 `--replace` 寫下一代。
+
 ### 線上特徵覆蓋率檢查
 
 06:00 的 chain 在重算特徵之後、`predict` 之前，檢查凍結設計讀的每個特徵在 D 的 universe 裡有值的比例，和前 5 年同月份比（定義與門檻見 SPEC 第 5 節「資料品質檢查」的「結果寫入」那一條）。結果是 `data_quality_log` 的 `monitor_feature_coverage`，每天一列；頁面「模型輸出檢查」的「線上特徵覆蓋率」顯示最近一天的這一列，崩落的特徵排在偏低的前面。

@@ -36,6 +36,7 @@ LIBRARIES = ("django", "numpy", "pandas", "pyarrow", "scikit-learn", "lightgbm")
 MODEL_SUFFIX = ".pkl"
 CHUNK = 1 << 20
 SCREENING_MODEL = "screening"
+SHADOW_MODELS = "shadow"
 
 
 class RunError(RuntimeError):
@@ -122,7 +123,7 @@ def load_model(run_key: str, run_id: str) -> Any:
         return pickle.load(handle)  # noqa: S301
 
 
-def _pickled(path: Path, model: Any) -> str:
+def pickle_beside(path: Path, model: Any) -> str:
     """Temporary file beside path holding the pickled model."""
     path.parent.mkdir(parents=True, exist_ok=True)
     handle, temporary = tempfile.mkstemp(dir=path.parent, prefix=f".{path.stem}-", suffix=".tmp")
@@ -173,7 +174,7 @@ def record_run(
         authorize_production(run.run_key, production, fold)
     elif fold is not None:
         _writable(run.run_key, fold, ticket)
-    temporary = None if model is None else _pickled(path, model)
+    temporary = None if model is None else pickle_beside(path, model)
     try:
         with transaction.atomic(durable=True):
             _replaceable(run)
@@ -210,6 +211,10 @@ def drop_run(run_key: str) -> int:
 
     Holdout runs stay, and so does the feature screening once any holdout run exists.
     """
+    if run_key == SHADOW_MODELS:
+        raise RunError(
+            f"{run_key} under MODEL_DIR holds the frozen shadow candidates, kept for good"
+        )
     models, cache = run_dir(run_key), Path(settings.RESEARCH_CACHE_DIR) / run_key
     with transaction.atomic(durable=True):
         if HoldoutRun.objects.filter(run_key=run_key).exists():
