@@ -1,4 +1,7 @@
+import hashlib
+import pickle
 from datetime import date, datetime, time, timedelta
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -10,7 +13,8 @@ from django.utils import timezone
 from apps.etl.models import DataQualityLog
 from apps.market.calendar import TradingDays
 from apps.market.models import DailyPrice, IndexDaily, StockMaster, TradingCalendar
-from apps.research import shadow, tasks
+from apps.research import candidate_scores, shadow, tasks
+from apps.research.candidate_scores import Scored
 from apps.research.holding import Rule, simulate
 from apps.research.holding_inputs import index_levels, load_market, stored_scores
 from apps.research.holding_report import index_returns, universe_returns
@@ -22,8 +26,10 @@ from apps.research.models import (
     LabelDaily,
     ModelRun,
     Prediction,
+    ShadowArtifact,
+    ShadowScore,
 )
-from apps.research.shadow import SHADOW_CHECK, Outcome, Spec, budget, record_books
+from apps.research.shadow import SHADOW_CHECK, Outcome, Spec, all_books, budget, record_books
 
 pytestmark = pytest.mark.django_db
 FIRST = date(2026, 11, 16)
@@ -343,7 +349,7 @@ def test_a_universe_stock_without_a_score_is_noted_and_the_list_still_written(
     assert "1001" in HoldingBookDay.objects.get(book="T", phase=BookPhase.LIST).universe
 
 
-def test_any_failure_keeps_nothing_and_names_the_book_and_day(
+def test_a_failing_book_keeps_nothing_of_the_morning_and_is_noted_by_book_and_day(
     market: list[date], clock: dict[str, datetime], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     real, calls = shadow.step, []
@@ -359,10 +365,16 @@ def test_any_failure_keeps_nothing_and_names_the_book_and_day(
     outcome = record_books(market[3], BOOK)
 
     assert outcome.severity == "warning"
-    assert outcome.detail["book"] == "T"
-    assert outcome.detail["signal_date"] == "2026-11-17"
-    assert outcome.detail["error"] == "ArithmeticError: bad day"
-    assert outcome.summary.startswith("failed at T 2026-11-17, see research_shadow;")
+    assert outcome.detail["books"] == {}
+    assert outcome.detail["notes"] == [
+        {
+            "book": "T",
+            "role": "main",
+            "signal_date": "2026-11-17",
+            "book_failed": "ArithmeticError: bad day",
+        }
+    ]
+    assert outcome.summary.startswith("T: failed at 2026-11-17, 1 notes, see research_shadow;")
     assert not HoldingBookDay.objects.exists()
     assert not HoldingBookAction.objects.exists()
 
@@ -495,8 +507,9 @@ def test_a_day_opened_under_the_book_stops_it_and_names_the_day(
 
     outcome = record_books(market[4], BOOK)
 
-    assert outcome.detail["signal_date"] == "2026-11-18"
-    assert "already listed 2026-11-20: the calendar opened a day" in outcome.detail["error"]
+    (note,) = outcome.detail["notes"]
+    assert (note["book"], note["signal_date"]) == ("T", "2026-11-18")
+    assert "already listed 2026-11-20: the calendar opened a day" in note["book_failed"]
     assert (HoldingBookDay.objects.count(), HoldingBookAction.objects.count()) == counts
 
 
@@ -545,3 +558,382 @@ def test_a_universe_stock_whose_predictions_are_all_gone_still_counts_in_the_fil
 
     assert outcome.detail["books"]["T"]["filled"] == ["2026-11-18"]
     assert fills("T")[2].universe_return == fills("R")[2].universe_return
+
+
+def frozen(name: str, start: date, folder: Path, stored: bool = True) -> ShadowArtifact:
+    """A frozen artifact row of the candidate from start; its file is kept only when stored."""
+    path = f"shadow/{name.lower()}/prod/g1.pkl"
+    data = pickle.dumps({"candidate": name})
+    if stored:
+        (folder / path).parent.mkdir(parents=True, exist_ok=True)
+        (folder / path).write_bytes(data)
+    return ShadowArtifact.objects.create(
+        candidate=name,
+        serving_run=ModelRun.objects.get(run_id="rank.h5"),
+        generation=1,
+        as_of=FIRST - timedelta(days=3),
+        train_start=date(2021, 10, 14),
+        train_end=date(2026, 10, 13),
+        fold={},
+        path=path,
+        sha256=hashlib.sha256(data).hexdigest(),
+        recipe={},
+        first_signal=start,
+    )
+
+
+def scored_against_c0(name: str) -> None:
+    """Candidate scores that reverse C0's, on the same universe."""
+    ShadowScore.objects.bulk_create(
+        ShadowScore(
+            candidate=name,
+            date=row.date,
+            stock_id=row.stock_id,
+            serving_run_id=row.run_id,
+            generation=1,
+            score=None if row.score is None else -row.score,
+            raw=None if row.score is None else -row.score,
+            in_universe=row.in_universe,
+        )
+        for row in Prediction.objects.all()
+    )
+
+
+def written(book: str) -> list[tuple[Any, ...]]:
+    """Every column of the book's day and action rows, in key order."""
+    days = HoldingBookDay.objects.filter(book=book).order_by("signal_date", "phase")
+    acts = HoldingBookAction.objects.filter(book=book).order_by("signal_date", "phase", "stock_id")
+    day_fields = [field.name for field in HoldingBookDay._meta.concrete_fields]
+    act_fields = [field.name for field in HoldingBookAction._meta.concrete_fields]
+    return [*days.values_list(*day_fields), *acts.values_list(*act_fields)]
+
+
+CANDIDATE_BOOKS = {"T": Spec(RULE, FIRST), "T-C1": Spec(RULE, date(2026, 11, 18), "C1")}
+
+
+def alone_then_cleared(market: list[date], clock: dict[str, datetime], last: int) -> list[Any]:
+    mornings(market[:last], clock)
+    kept = written("T")
+    HoldingBookAction.objects.all().delete()
+    HoldingBookDay.objects.all().delete()
+    return kept
+
+
+def test_all_books_adds_each_frozen_candidate_and_one_c0_book_from_its_first_day(
+    market: list[date], tmp_path: Path
+) -> None:
+    assert list(all_books()) == ["H70N30-C0"]
+    frozen("C1", market[2], tmp_path)
+    frozen("C2", market[2], tmp_path)
+
+    found = all_books()
+
+    assert list(found) == ["H70N30-C0", "H70N30-C0-20261118", "H70N30-C1", "H70N30-C2"]
+    assert [(spec.start, spec.source, spec.role) for spec in found.values()] == [
+        (FIRST, None, "main"),
+        (market[2], None, "paired"),
+        (market[2], "C1", "candidate"),
+        (market[2], "C2", "candidate"),
+    ]
+
+
+def test_a_failing_c0_book_turns_the_morning_into_a_warning_and_sends_the_alert(
+    market: list[date], clock: dict[str, datetime], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        tasks, "dispatch", lambda rows: sent.extend((r.check_name, r.severity) for r in rows)
+    )
+    frozen("C1", market[0], tmp_path)
+    scored_against_c0("C1")
+    monkeypatch.setattr(shadow, "score_candidate", lambda *args: Scored())
+    real = shadow.order_list
+
+    def breaks(held: Any, score: Any, *args: Any) -> Any:
+        if np.nanmax(score) > 0:
+            raise ArithmeticError("bad C0 day")
+        return real(held, score, *args)
+
+    monkeypatch.setattr(shadow, "order_list", breaks)
+    Prediction.objects.filter(score__lt=0).update(score=F("score") * -1)
+    ShadowScore.objects.filter(score__gt=0).update(score=F("score") * -1)
+    clock["at"] = at(FIRST + timedelta(days=1), time(6, 30))
+
+    said = tasks.STEPS["shadow"](FIRST)
+
+    row = DataQualityLog.objects.get(date=FIRST, check_name=SHADOW_CHECK)
+    assert row.severity == "warning"
+    assert sent == [(SHADOW_CHECK, "warning")]
+    failed = [note for note in row.detail["notes"] if "book_failed" in note]
+    assert failed == [
+        {
+            "book": "H70N30-C0",
+            "role": "main",
+            "signal_date": "2026-11-16",
+            "book_failed": "ArithmeticError: bad C0 day",
+        },
+        {
+            "book": "H70N30-C0-20261116",
+            "role": "paired",
+            "signal_date": "2026-11-16",
+            "book_failed": "ArithmeticError: bad C0 day",
+        },
+    ]
+    assert list(row.detail["books"]) == ["H70N30-C1"]
+    assert said.startswith("H70N30-C1: listed 2026-11-16; H70N30-C0: failed at 2026-11-16;")
+
+
+def test_a_candidate_book_follows_its_own_scores_and_c0_s_rows_stay_as_they_were(
+    market: list[date], clock: dict[str, datetime], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    alone = alone_then_cleared(market, clock, 6)
+    frozen("C1", market[2], tmp_path)
+    scored_against_c0("C1")
+    monkeypatch.setattr(
+        shadow, "score_candidate", lambda name, session, *args: Scored([session.isoformat()])
+    )
+
+    outcomes = mornings(market[:6], clock, CANDIDATE_BOOKS)
+
+    assert written("T") == alone
+    head = HoldingBookDay.objects.filter(book="T-C1", phase=BookPhase.LIST).order_by("signal_date")
+    assert head[0].signal_date == market[2]
+    assert {row.run_id for row in head} == {"C1:rank.h5:g1"}
+    served = Prediction.objects.filter(date=market[2]).exclude(score=None)
+    reversed_scores = {row.stock_id: -(row.score or 0.0) for row in served}
+    for stock, _, _, score, *_ in lines("T-C1", market[2], BookPhase.LIST):
+        assert score == reversed_scores[stock]
+    assert outcomes[3].detail["scores"] == {"C1": {"scored": ["2026-11-19"], "artifacts": []}}
+    assert outcomes[3].severity == "info"
+
+
+def test_a_candidate_whose_scores_fail_leaves_c0_alone_and_skips_its_own_book(
+    market: list[date], clock: dict[str, datetime], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    alone = alone_then_cleared(market, clock, 4)
+    frozen("C1", market[2], tmp_path)
+
+    def broken(*args: Any) -> Scored:
+        raise ArithmeticError("no features")
+
+    monkeypatch.setattr(shadow, "score_candidate", broken)
+
+    outcome = mornings(market[:4], clock, CANDIDATE_BOOKS)[-1]
+
+    assert written("T") == alone
+    assert not HoldingBookDay.objects.filter(book="T-C1").exists()
+    assert outcome.severity == "warning"
+    assert outcome.detail["notes"] == [
+        {"book": "C1", "role": "candidate", "scores_failed": "ArithmeticError: no features"},
+        {
+            "book": "T-C1",
+            "role": "candidate",
+            "signal_date": None,
+            "book_failed": "skipped: C1 has no scores this morning",
+        },
+    ]
+    assert "T-C1" not in outcome.detail["books"]
+
+
+def test_a_failing_candidate_book_rolls_back_its_earlier_day_of_the_same_morning(
+    market: list[date], clock: dict[str, datetime], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    mornings(market[:3], clock)
+    frozen("C1", market[2], tmp_path)
+    scored_against_c0("C1")
+    monkeypatch.setattr(shadow, "score_candidate", lambda *args: Scored())
+    real = shadow.order_list
+    lists: list[int] = []
+
+    def breaks(held: Any, score: Any, *args: Any) -> Any:
+        if np.nanmax(score) < 0:
+            lists.append(1)
+            if len(lists) == 2:
+                raise ArithmeticError("bad candidate day")
+        return real(held, score, *args)
+
+    monkeypatch.setattr(shadow, "order_list", breaks)
+    Prediction.objects.filter(score__lt=0).update(score=F("score") * -1)
+    ShadowScore.objects.filter(score__gt=0).update(score=F("score") * -1)
+    clock["at"] = at(market[3] + timedelta(days=1), time(6, 30))
+
+    outcome = record_books(market[3], CANDIDATE_BOOKS)
+
+    assert len(lists) == 2
+    assert not HoldingBookDay.objects.filter(book="T-C1").exists()
+    assert not HoldingBookAction.objects.filter(book="T-C1").exists()
+    assert outcome.detail["notes"] == [
+        {
+            "book": "T-C1",
+            "role": "candidate",
+            "signal_date": "2026-11-19",
+            "book_failed": "ArithmeticError: bad candidate day",
+        }
+    ]
+    assert outcome.detail["books"]["T"]["listed"] == ["2026-11-19"]
+
+
+@pytest.mark.django_db(transaction=True)
+def test_one_candidate_spending_the_budget_leaves_the_other_s_book_written(
+    market: list[date], clock: dict[str, datetime], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    frozen("C1", market[2], tmp_path)
+    frozen("C2", market[2], tmp_path)
+    scored_against_c0("C1")
+    scored_against_c0("C2")
+    books = {**CANDIDATE_BOOKS, "T-C2": Spec(RULE, market[2], "C2")}
+    ticks = {"now": 0.0}
+    monkeypatch.setattr(shadow, "monotonic", lambda: ticks["now"])
+
+    def scores(name: str, *args: Any) -> Scored:
+        if name == "C2":
+            ticks["now"] += shadow.BUDGET_SECONDS + 1
+        return Scored()
+
+    monkeypatch.setattr(shadow, "score_candidate", scores)
+    clock["at"] = at(market[3], time(6, 30))
+
+    outcome = record_books(market[2], books)
+
+    assert list(outcome.detail["books"]) == ["T", "T-C1"]
+    assert outcome.detail["notes"] == [
+        {
+            "book": "T-C2",
+            "role": "candidate",
+            "signal_date": None,
+            "book_failed": "skipped: the shadow budget ran out",
+        }
+    ]
+
+
+@pytest.mark.django_db(transaction=True)
+def test_a_spent_budget_skips_the_candidate_book_and_the_next_morning_backfills_it(
+    market: list[date], clock: dict[str, datetime], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    frozen("C1", market[2], tmp_path)
+    scored_against_c0("C1")
+    mornings(market[:2], clock, CANDIDATE_BOOKS)
+    ticks = {"now": 0.0}
+    monkeypatch.setattr(shadow, "monotonic", lambda: ticks["now"])
+
+    def slow(*args: Any) -> Scored:
+        ticks["now"] += shadow.BUDGET_SECONDS + 1
+        return Scored()
+
+    monkeypatch.setattr(shadow, "score_candidate", slow)
+    clock["at"] = at(market[3], time(6, 30))
+    skipped = record_books(market[2], CANDIDATE_BOOKS)
+    monkeypatch.setattr(shadow, "score_candidate", lambda *args: Scored())
+    clock["at"] = at(market[4], time(6, 30))
+    later = record_books(market[3], CANDIDATE_BOOKS)
+
+    assert skipped.detail["books"]["T"]["listed"] == ["2026-11-18"]
+    assert skipped.detail["notes"] == [
+        {
+            "book": "T-C1",
+            "role": "candidate",
+            "signal_date": None,
+            "book_failed": "skipped: the shadow budget ran out",
+        }
+    ]
+    assert later.detail["books"]["T-C1"]["listed"] == ["2026-11-18", "2026-11-19"]
+    candidate = HoldingBookDay.objects.filter(book="T-C1", phase=BookPhase.LIST)
+    assert dict(candidate.values_list("signal_date", "backfilled")) == {
+        market[2]: True,
+        market[3]: False,
+    }
+
+
+def test_a_missing_artifact_file_scores_nothing_and_its_book_lists_no_prediction(
+    market: list[date],
+    clock: dict[str, datetime],
+    monkeypatch: pytest.MonkeyPatch,
+    settings: Any,
+    tmp_path: Path,
+) -> None:
+    settings.MODEL_DIR = tmp_path
+    monkeypatch.setattr(tasks, "dispatch", lambda rows: None)
+    alone = alone_then_cleared(market, clock, 4)
+    frozen("C1", market[2], tmp_path, stored=False)
+    for session in market[:3]:
+        clock["at"] = at(session + timedelta(days=1), time(6, 30))
+        record_books(session, CANDIDATE_BOOKS)
+    clock["at"] = at(market[3] + timedelta(days=1), time(6, 30))
+    monkeypatch.setattr(shadow, "all_books", lambda: CANDIDATE_BOOKS)
+
+    said = tasks.STEPS["shadow"](market[3])
+
+    assert written("T") == alone
+    assert not ShadowScore.objects.exists()
+    candidate = HoldingBookDay.objects.filter(book="T-C1", phase=BookPhase.LIST)
+    assert set(candidate.values_list("status", flat=True)) == {BookStatus.NO_PREDICTION}
+    row = DataQualityLog.objects.get(date=market[3], check_name=SHADOW_CHECK)
+    assert row.severity == "warning"
+    (note,) = row.detail["notes"]
+    assert (note["book"], note["signal_date"]) == ("C1", "2026-11-19")
+    assert "has no file at shadow/c1/prod/g1.pkl" in note["artifact_invalid"]
+    assert "1 notes" in said
+
+
+def test_a_file_found_again_scores_only_the_days_its_book_has_not_listed(
+    market: list[date],
+    clock: dict[str, datetime],
+    monkeypatch: pytest.MonkeyPatch,
+    settings: Any,
+    tmp_path: Path,
+) -> None:
+    settings.MODEL_DIR = tmp_path
+    monkeypatch.setitem(
+        candidate_scores.SCORERS,
+        "C1",
+        lambda model, row, day, base: base.assign(raw=-base["base"], score=-base["base"]),
+    )
+    row = frozen("C1", market[2], tmp_path, stored=False)
+    mornings(market[:4], clock, CANDIDATE_BOOKS)
+    (tmp_path / row.path).parent.mkdir(parents=True)
+    (tmp_path / row.path).write_bytes(pickle.dumps({"candidate": "C1"}))
+    clock["at"] = at(market[4] + timedelta(days=1), time(6, 30))
+
+    outcome = record_books(market[4], CANDIDATE_BOOKS)
+
+    assert set(ShadowScore.objects.values_list("date", flat=True)) == {market[4]}
+    lists = HoldingBookDay.objects.filter(book="T-C1", phase=BookPhase.LIST).order_by("signal_date")
+    assert [(day.signal_date, day.status) for day in lists] == [
+        (market[2], BookStatus.NO_PREDICTION),
+        (market[3], BookStatus.NO_PREDICTION),
+        (market[4], BookStatus.LISTED),
+    ]
+    assert outcome.detail["scores"] == {
+        "C1": {"scored": ["2026-11-20"], "artifacts": ["rank.h5 g1"]}
+    }
+    assert outcome.severity == "info"
+
+
+def test_scores_the_budget_cut_short_skip_the_candidate_book_until_they_are_complete(
+    market: list[date], clock: dict[str, datetime], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    frozen("C1", market[2], tmp_path)
+    stopped = {
+        "book": "C1",
+        "role": "candidate",
+        "signal_date": "2026-11-19",
+        "scores_failed": "stopped: the shadow budget ran out after 1 days",
+    }
+    monkeypatch.setattr(
+        shadow,
+        "score_candidate",
+        lambda *args: Scored(["2026-11-18"], notes=[stopped], complete=False),
+    )
+
+    outcome = mornings(market[:3], clock, CANDIDATE_BOOKS)[-1]
+
+    assert "T-C1" not in outcome.detail["books"]
+    assert outcome.detail["notes"] == [
+        stopped,
+        {
+            "book": "T-C1",
+            "role": "candidate",
+            "signal_date": None,
+            "book_failed": "skipped: C1 has no scores this morning",
+        },
+    ]

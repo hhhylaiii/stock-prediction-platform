@@ -187,6 +187,19 @@ def serving(chosen: Candidate) -> Serving:
     return Serving(run, fold, date.fromisoformat(note["as_of"]))
 
 
+def unfollowed() -> list[str]:
+    """Candidates frozen before whose slot now serves a run they have no artifact on."""
+    names = []
+    for name, chosen in CANDIDATES.items():
+        found = ShadowArtifact.objects.filter(candidate=name)
+        if not found.exists():
+            continue
+        run = serving_run(chosen.slot)
+        if run is not None and not found.filter(serving_run=run).exists():
+            names.append(name)
+    return names
+
+
 def file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -243,6 +256,7 @@ def freeze(name: str, directory: Path, replace: bool = False) -> ShadowArtifact:
         seconds, peak = round(monotonic() - began, 1), round(peak_rss_mb(), 1)
         relative = artifact_path(name, found.run.run_key, generation)
         path = Path(settings.MODEL_DIR) / relative
+        _clear_partial(path.parent)
         temporary = Path(pickle_beside(path, fitted.model))
         try:
             with transaction.atomic(durable=True):
@@ -266,6 +280,12 @@ def freeze(name: str, directory: Path, replace: bool = False) -> ShadowArtifact:
         finally:
             temporary.unlink(missing_ok=True)
     return row
+
+
+def _clear_partial(folder: Path) -> None:
+    """Remove the temporary files a fit killed before its rename left; held under the lock."""
+    for partial in folder.glob(".g*-*.tmp"):
+        partial.unlink(missing_ok=True)
 
 
 def _verified(row: ShadowArtifact) -> bytes:

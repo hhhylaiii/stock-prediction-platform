@@ -16,9 +16,10 @@ from django.core.management.base import CommandError
 from django.db import IntegrityError, transaction
 
 from apps.market.models import IndexDaily
-from apps.research import candidates, lgbm_runs
+from apps.research import candidate_scores, candidates, lgbm_runs
 from apps.research.baseline_runs import RANK_LABEL, fold_inputs
 from apps.research.baselines import fit_ridge
+from apps.research.candidate_scores import score_candidate
 from apps.research.candidates import (
     RELATIVE,
     file_sha256,
@@ -27,11 +28,15 @@ from apps.research.candidates import (
     load_artifact,
     measure,
     relative_labels,
+    unfollowed,
 )
+from apps.research.features.store import columns_for, read_partitions
 from apps.research.gbdt import bag_seeds
 from apps.research.holdout import HoldoutError
+from apps.research.inference import day_rows, model_inputs
 from apps.research.lock import ResearchBusyError
 from apps.research.models import (
+    FeatureDaily,
     ModelObjective,
     ModelRun,
     ModelStatus,
@@ -44,7 +49,7 @@ from apps.research.prediction_cache import fold_record
 from apps.research.production import DESIGNS, Design, production_fold
 from apps.research.runs import RunError, drop_run
 from apps.research.target_models import RETURN_LABEL, TargetVariant
-from apps.research.training import load_labels
+from apps.research.training import linear_inputs, load_labels
 from apps.research.walkforward import Fold
 from tests.research.run_panels import (
     CONFIG,
@@ -329,6 +334,33 @@ def test_a_failed_insert_leaves_no_model_file(
     assert list(folder.iterdir()) == []
 
 
+def test_a_fit_killed_before_its_commit_leaves_no_row_and_the_next_one_writes_generation_1(
+    served: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = Path(settings.MODEL_DIR) / "shadow" / "c1" / "rank-2016-11"
+    folder.mkdir(parents=True)
+    (folder / ".g1-killed.tmp").write_bytes(b"half a pickle")
+    real = candidates.os.replace
+
+    def killed(source: Any, target: Any) -> None:
+        real(source, target)
+        raise SystemExit("killed after the rename")
+
+    monkeypatch.setattr(candidates.os, "replace", killed)
+    with pytest.raises(SystemExit):
+        freeze("C1", served)
+    assert not ShadowArtifact.objects.exists()
+    assert [path.name for path in folder.iterdir()] == ["g1.pkl"]
+    monkeypatch.setattr(candidates.os, "replace", real)
+    (folder / ".g1-killed.tmp").write_bytes(b"half a pickle")
+
+    row = freeze("C1", served)
+
+    assert row.generation == 1
+    assert [path.name for path in folder.iterdir()] == ["g1.pkl"]
+    assert load_artifact(row) is not None
+
+
 def test_a_missing_or_changed_file_is_refused(served: Path) -> None:
     row = freeze("C1", served)
     path = Path(settings.MODEL_DIR) / row.path
@@ -416,3 +448,201 @@ def test_the_command_freezes_or_only_measures(served: Path, tmp_path: Path) -> N
         call_command("shadow_train", "--candidate", "C1", stdout=StringIO())
     with pytest.raises(CommandError, match="--replace freezes"):
         call_command("shadow_train", "--candidate", "C1", "--replace", "--output", str(tmp_path))
+
+
+def _predicted(days: list[date]) -> None:
+    """C0's rank 5-day rows of the days: the panel's universe, scored by tech_ret_1d."""
+    Prediction.objects.bulk_create(
+        Prediction(
+            run_id=RANK_RUN,
+            stock_id=row.stock_id,
+            date=row.date,
+            horizon=5,
+            score=row.tech_ret_1d,
+            in_universe=row.in_universe,
+        )
+        for row in FeatureDaily.objects.filter(date__in=days)
+    )
+
+
+def _scores(name: str, day: date) -> pd.DataFrame:
+    rows = ShadowScore.objects.filter(candidate=name, date=day).order_by("stock_id")
+    fields = ["stock_id", "score", "raw", "pct", "in_universe", "serving_run_id", "generation"]
+    return pd.DataFrame(list(rows.values_list(*fields)), columns=fields).set_index("stock_id")
+
+
+SCORED = [date(2016, 12, 1), date(2016, 12, 2)]
+
+
+def plenty() -> float:
+    return 60.0
+
+
+def test_c1_averages_its_ridge_rank_and_c0_s_rank_in_the_universe(served: Path) -> None:
+    row = freeze("C1", served)
+    _predicted(SCORED)
+
+    got = score_candidate("C1", SCORED[-1], panel_calendar(), plenty)
+
+    assert got.scored == ["2016-12-01", "2016-12-02"]
+    assert got.artifacts == [f"{RANK_RUN} g1"]
+    day = SCORED[0]
+    read = read_partitions(day, day, served, columns_for(SCREENED))
+    inputs = linear_inputs(read)
+    ridge = pd.Series(load_artifact(row).predict(inputs), index=inputs["stock_id"].to_numpy())
+    c0 = pd.Series({p.stock_id: p.score for p in Prediction.objects.filter(date=day)})
+    inside = pd.Series({p.stock_id: p.in_universe for p in Prediction.objects.filter(date=day)})
+    ranks = [series.where(inside).rank(pct=True) for series in (ridge, c0)]
+    expected = (ranks[0] + ranks[1]) / 2
+    stored = _scores("C1", day)
+    np.testing.assert_allclose(stored["raw"], ridge.reindex(stored.index))
+    universe = stored[stored["in_universe"]]
+    np.testing.assert_allclose(universe["score"], expected.reindex(universe.index))
+    np.testing.assert_allclose(universe["pct"], universe["score"].rank(pct=True))
+    outside = ShadowScore.objects.get(candidate="C1", date=day, stock_id="1139")
+    assert (outside.in_universe, outside.score, outside.pct) == (False, None, None)
+    assert set(stored["serving_run_id"]) == {RANK_RUN}
+    assert set(stored["generation"]) == {1}
+
+
+def test_c2_scores_the_relative_return_its_booster_predicts(served: Path) -> None:
+    row = freeze("C2", served)
+    _predicted(SCORED)
+
+    score_candidate("C2", SCORED[-1], panel_calendar(), plenty)
+
+    model = load_artifact(row)
+    rows = day_rows(SCORED[1], served, row.recipe["features"])
+    shadow = ModelRun(
+        run_id="c2",
+        model_type="lightgbm",
+        objective="regression",
+        feature_list=row.recipe["features"],
+    )
+    direct = model["booster"].predict(model_inputs(shadow, model, rows))
+    expected = pd.Series(np.asarray(direct), index=rows["stock_id"].to_numpy())
+    stored = _scores("C2", SCORED[1])
+    np.testing.assert_allclose(stored["raw"], expected.reindex(stored.index))
+    np.testing.assert_allclose(stored["score"], stored["raw"])
+    universe = stored[stored["in_universe"]]
+    np.testing.assert_allclose(universe["pct"], universe["score"].rank(pct=True))
+    assert ShadowScore.objects.get(candidate="C2", date=SCORED[1], stock_id="1139").pct is None
+    assert set(stored["serving_run_id"]) == {"return-2016-11.lightgbm.h5.f000"}
+
+
+def test_scoring_again_writes_no_second_row(served: Path) -> None:
+    freeze("C1", served)
+    _predicted(SCORED)
+    score_candidate("C1", SCORED[-1], panel_calendar(), plenty)
+    count = ShadowScore.objects.count()
+
+    again = score_candidate("C1", SCORED[-1], panel_calendar(), plenty)
+
+    assert again.scored == []
+    assert ShadowScore.objects.count() == count
+
+
+def test_without_an_artifact_nothing_is_scored(served: Path) -> None:
+    _predicted(SCORED)
+
+    got = score_candidate("C1", SCORED[-1], panel_calendar(), plenty)
+
+    assert (got.scored, got.notes) == ([], [])
+    assert not ShadowScore.objects.exists()
+
+
+def test_a_changed_file_scores_nothing_until_a_next_generation_replaces_it(
+    served: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    row = freeze("C1", served)
+    _predicted(SCORED)
+    path = Path(settings.MODEL_DIR) / row.path
+    path.write_bytes(path.read_bytes() + b"x")
+
+    broken = score_candidate("C1", SCORED[-1], panel_calendar(), plenty)
+
+    assert not ShadowScore.objects.exists()
+    (note,) = broken.notes
+    assert (note["book"], note["signal_date"]) == ("C1", "2016-12-01")
+    assert "no longer matches its frozen sha256" in note["artifact_invalid"]
+    later = date(2016, 12, 5)
+    monkeypatch.setattr(candidates.timezone, "localdate", lambda: later)
+    second = freeze("C1", served, replace=True)
+    assert second.first_signal == later
+    _predicted([later])
+
+    replaced = score_candidate("C1", later, panel_calendar(), plenty)
+
+    assert (replaced.scored, replaced.notes) == (["2016-12-05"], [])
+    assert set(ShadowScore.objects.values_list("date", "generation")) == {(later, 2)}
+
+
+def test_a_frozen_candidate_falls_behind_once_its_slot_serves_another_run(served: Path) -> None:
+    assert unfollowed() == []
+    freeze("C1", served)
+    assert unfollowed() == []
+    ModelRun.objects.filter(run_id=RANK_RUN).update(status=ModelStatus.RETIRED)
+    _serving("rank-2016-12", ModelObjective.RANK, ["tech_ret_1d"])
+
+    assert unfollowed() == ["C1"]
+
+
+def test_a_spent_budget_keeps_the_days_scored_and_the_next_morning_scores_the_rest(
+    served: Path,
+) -> None:
+    freeze("C1", served)
+    _predicted(SCORED)
+    budget = iter([1.0, 0.0])
+
+    cut = score_candidate("C1", SCORED[-1], panel_calendar(), lambda: next(budget))
+
+    assert (cut.scored, cut.complete) == (["2016-12-01"], False)
+    assert cut.notes == [
+        {
+            "book": "C1",
+            "role": "candidate",
+            "signal_date": "2016-12-02",
+            "scores_failed": "stopped: the shadow budget ran out after 1 days",
+        }
+    ]
+    assert set(ShadowScore.objects.values_list("date", flat=True)) == {SCORED[0]}
+    rest = score_candidate("C1", SCORED[-1], panel_calendar(), plenty)
+    assert (rest.scored, rest.complete) == (["2016-12-02"], True)
+
+
+def test_a_day_its_books_already_listed_is_never_scored(served: Path) -> None:
+    freeze("C1", served)
+    _predicted(SCORED)
+
+    got = score_candidate("C1", SCORED[-1], panel_calendar(), plenty, listed={SCORED[0]})
+
+    assert got.scored == ["2016-12-02"]
+    assert set(ShadowScore.objects.values_list("date", flat=True)) == {SCORED[1]}
+
+
+def test_a_failing_day_keeps_the_days_scored_before_it_and_says_which_day(
+    served: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    freeze("C1", served)
+    _predicted(SCORED)
+    real = candidate_scores.SCORERS["C1"]
+
+    def scorer(model: Any, row: ShadowArtifact, day: date, base: pd.DataFrame) -> pd.DataFrame:
+        if day == SCORED[1]:
+            raise ArithmeticError("no features")
+        return real(model, row, day, base)
+
+    monkeypatch.setitem(candidate_scores.SCORERS, "C1", scorer)
+
+    got = score_candidate("C1", SCORED[-1], panel_calendar(), plenty)
+
+    assert (got.scored, got.complete) == (["2016-12-01"], False)
+    assert got.notes == [
+        {
+            "book": "C1",
+            "role": "candidate",
+            "signal_date": "2016-12-02",
+            "scores_failed": "ArithmeticError: no features",
+        }
+    ]
+    assert set(ShadowScore.objects.values_list("date", flat=True)) == {SCORED[0]}

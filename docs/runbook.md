@@ -138,18 +138,20 @@ docker compose logs -f worker
 
 這是研究紀錄，不是投資建議；規則見 `docs/reports/phase4/holding-shadow-prereg.md`。頁面與 API 都不讀這兩張表。
 
-- 06:00 的 chain 最後跑 `shadow`，排在換模之後、還原因子重建之前。每本帳依序先結算前一個訊號日的成交（`holding_book_day`、`holding_book_action` 的 `fill`），再寫 D 的名單（`list`）。帳本列在 `apps/research/shadow.py` 的 `BOOKS`，目前只有 `H70N30-C0`，從 2026-11-16 起。成交要等成交日的價格到齊、訊號日的 5 日 `untradable_t1` 也都結算；等不到就停在那天，下一天的名單也不寫，由下一個早上接著補。
+- 06:00 的 chain 最後跑 `shadow`，排在換模之後、還原因子重建之前。每本帳依序先結算前一個訊號日的成交（`holding_book_day`、`holding_book_action` 的 `fill`），再寫 D 的名單（`list`）。固定的帳本列在 `apps/research/shadow.py` 的 `BOOKS`，目前只有 `H70N30-C0`，從 2026-11-16 起；候選凍結之後，另外自動多兩本：`H70N30-C1`（或 `-C2`）讀那個候選的分數，`H70N30-C0-YYYYMMDD` 讀 C0 的分數、和候選同一天從零開始，給 H0 §8.3 成對比較用（兩個候選同一天開始時共用一本）。兩本的起點都是候選第一個 artifact 的 `first_signal`。成交要等成交日的價格到齊、訊號日的 5 日 `untradable_t1` 也都結算；等不到就停在那天，下一天的名單也不寫，由下一個早上接著補。
 - 兩張表只新增：同一天重跑不會多寫，也不會改已記的列。名單在成交日 09:00 之後才寫的、成交在成交日的下一個交易日 09:00 之後才寫的，都標 `backfilled`；所以一次補好幾天時，09:00 前跑完的早上寫的最新一份名單和最新一筆成交不標。fill 的 `status` 是 `traded` 代表照名單結算（當天有分數），不代表一定有買賣；有沒有成交看 `paid`、`traded` 兩欄。
-- 每天寫一列 `research_shadow`（`date` 是 D）。成功是 info，`detail.books` 列出各帳本這次寫了哪些名單、哪些成交、停在哪天。遇到下列情況時記在 `detail.notes`，那天改記 warning 並告警：
+- 每天寫一列 `research_shadow`（`date` 是 D）。成功是 info，`detail.books` 列出各帳本這次寫了哪些名單、哪些成交、停在哪天；有候選時多一個 `detail.scores`，列出每個候選這次打了哪些訊號日、用了哪個 artifact（`<serving_run> g<代數>`）。遇到下列情況時記在 `detail.notes`，那天改記 warning 並告警：
   - `predictions_rewritten`：名單寫好之後、成交之前，那天的預測被改過；成交照原名單算。成交之後才改的（例如手動 `predict --date` 或從較早日期 `promote`）不會記，用 `holding_sim --source prediction` 對帳時以名單列為準。
   - `in_universe_without_score`：universe 裡有股票沒有分數（正常不會發生）；名單照寫。
   - `trade_date_moved`：名單寫好之後，原本的成交日被日曆改成休市；成交記在日曆上實際的下一個交易日。
   - `no_taiex_tr`：成交日或前一天的 `TAIEX_TR` 收盤還沒進來，那天的 `index_return` 記成 NULL。整理報表時，大盤報酬直接從 `index_daily` 重算，帳本列不回頭補。
-- 失敗時（任何錯誤，或整步超過 60 秒）整段回滾，這次一列都不寫，記一列 `research_shadow` warning 並告警，`detail` 帶出 `book`、卡住的 `signal_date` 與 `error`。chain 照常收尾，當天的預測與重訓不受影響。下一個早上從同一天重試，直到修好；問題沒解決前，每天告警一次。
+  - `book_failed`：那本帳這次出錯或沒輪到（`skipped: ...`），這次一列都不寫，也不列在 `detail.books`；`signal_date` 是卡住的訊號日，`role` 是 `main`（`BOOKS` 裡的主紀錄，目前是 `H70N30-C0`）、`paired`（和候選同一天開始的 C0 帳本）或 `candidate`。一筆只記一件事。
+  - `scores_failed`：那個候選這次打分出錯，或 60 秒預算在打完之前用完（`stopped: ...`）；`signal_date` 是停下的那天。打分一天一個 transaction，已打完的日子留著，出錯的那天回滾；只要有一天沒打完，它的帳本這次就跳過（另記一筆 `book_failed`），不會拿缺分數的日子往前寫。下一個早上接著打，名單補寫時標 `backfilled`；積了很多天時，每個早上都會往前推進幾天，直到補齊。
+  - `artifact_invalid`：候選最新一代的模型檔不見或 sha256 對不上。那些訊號日不打分、一列分數都不寫，候選帳本那幾天記「當天無預測」（不賣不買），C0 的帳本照常。帳本已經記過的訊號日以後永遠不打分，所以分數和名單不會對不上。處理：照「影子候選模型的凍結」用 `--replace` 寫下一代；換代之後，舊檔那幾天不再打分、也不再告警。原檔找回來（例如 compose 從別的目錄起、`artifacts/models` 暫時掛錯）也可以，sha256 對得上就從帳本還沒記的那天接著打，記過的那幾天維持「當天無預測」。
+- 每本帳、每個候選的打分各自一個 transaction：先跑讀 C0 分數的帳本（`H70N30-C0` 最先、最先提交），再一個候選接一個候選：先打它的分數，接著寫它的帳本，所以一個候選把預算用完，不會拖住已經跑過的另一個候選。某一本出錯只回滾那一本（記 `book_failed`），其他照寫。整步共用 60 秒預算：用完之後還沒跑的都跳過，已提交的留著；跳過的那本由下一個早上補寫，名單與成交照上面那條標 `backfilled`。chain 照常收尾，當天的預測與重訓不受影響。帳本之外的錯誤（例如讀不到交易日曆，或一開始預算就用完）才整步一列都不寫，`detail` 帶出 `error`。下一個早上從同一天重試，直到修好；問題沒解決前，每天告警一次。
 - 研究鎖被別的指令佔住時，`shadow` 不等也不重試：直接跳過，記一列 `research_shadow` warning（`ResearchBusyError`），chain 照常收尾。跳過那天的名單由下一個早上補寫，會標 `backfilled`。
-- 所有帳本在同一個 transaction 裡推進：任何一本卡住，其他本這次也一列都不寫。
-- 已記的列有錯時不改、不刪：把 `BOOKS` 裡舊的代號換成新的代號（例如 `H70N30-C0` 換成 `H70N30-C0.2`），部署後由下一個早上從起點重新補記，除了當天寫的最新名單與最新成交，其餘都標 `backfilled`。舊帳本的列留在表裡，不再推進；不要讓兩個代號同時留在 `BOOKS`，否則卡住的舊帳本會讓新帳本也寫不進去。日曆把兩個已結算日子之間的某天改成開市時，帳本會停在那天並告警（`the calendar opened a day under the book`），同樣照這條處理。
-- `shadow` 排在完成紀錄之前，所以算進重訓「06:00 到 09:00 之間跑完」的時間；最壞情況會多約 65 秒（60 秒預算加上計算，不等研究鎖）。
+- 已記的列有錯時不改、不刪：把 `BOOKS` 裡舊的代號換成新的代號（例如 `H70N30-C0` 換成 `H70N30-C0.2`），部署後由下一個早上從起點重新補記，除了當天寫的最新名單與最新成交，其餘都標 `backfilled`。舊帳本的列留在表裡，不再推進；不要讓兩個代號同時留在 `BOOKS`：卡住的舊帳本每天都會告警。候選帳本（`H70N30-C1`、`-C2`）與對照帳本（`H70N30-C0-YYYYMMDD`）的名字由 `all_books()` 推出，不在 `BOOKS` 裡：它們卡住或寫錯時，要在 `all_books()` 的名字後面加代號（例如 `H70N30-C1.2`）改程式再部署，從同一個起點重新補記；這等於重開那個候選的樣本，先問使用者。日曆把兩個已結算日子之間的某天改成開市時，帳本會停在那天並告警（`the calendar opened a day under the book`），同樣照這條處理。
+- `shadow` 排在完成紀錄之前，所以算進重訓「06:00 到 09:00 之間跑完」的時間；最壞情況會多約 65 秒（60 秒預算加上最後一筆計算，不等研究鎖；候選打分每天開始前看一次預算）。
 
 ### 影子候選模型的凍結
 
@@ -172,6 +174,7 @@ docker compose logs -f worker
   ```
 - 同一個上線 run 已經凍結過時拒跑。`--replace` 只在最新一代的模型檔不見或 sha256 對不上時才寫下一代；檔案完好時照樣拒跑，凍結之後不能換一個重訓的版本。舊的列和模型檔留著，已記的分數不改。`drop_run shadow` 會被拒絕，不會刪到這個資料夾。
 - `--output <資料夾>` 只訓練、把模型檔寫成那個資料夾裡的 `c1.pkl`／`c2.pkl`，並印出秒數、峰值記憶體與 sha256，不取鎖、不寫資料庫，可以在主機上用唯讀連線量測。不取鎖，所以時段照研究鎖那一條避開：讀到一半特徵或 label 被重寫時會報「changed while reading」或「labels changed while fitting」，量到的秒數與記憶體也會被同時跑的工作干擾。
+- 每月跟著換：06:00 的 chain 每一步都完成（`research_morning` 是 info）之後，如果某個已凍結過的候選，所屬 slot 現在上線的 run 還沒有它的 artifact（例如當月重訓換模之後），就排一個 `research.shadow_train`，在同一個 worker 上依序凍結這些候選，各寫第 1 代。開始前檢查三項：06:00 到 `RESEARCH_RETRAIN_BEFORE`（09:00）之間才開始、worker 只有一個，這兩項和重訓相同；可用記憶體不低於 `RESEARCH_SHADOW_TRAIN_MIN_FREE`（預設 70%），這項不沿用重訓的 50%：凍結的峰值約 7.3 GiB，是 11.67 GiB 的 63%。檢查沒過時不像重訓那樣隔 30 分鐘重試，直接記 warning；下一個 `research_morning` 是 info 的早上會再排，不用手動補跑。軟上限 `RESEARCH_SHADOW_TRAIN_SOFT_SECONDS`（預設 1,800 秒）、硬上限 `RESEARCH_SHADOW_TRAIN_HARD_SECONDS`（預設 2,100 秒）；2026-11-17 在主機上用唯讀連線各量兩次，C1 約 40 秒、C2 約 135 秒，峰值記憶體最高約 7.3 GiB，同樣的資料兩次得到同一個 sha256，預設約是兩個合計的 10 倍，容器裡沒量過，軟上限要小於硬上限，否則設定載入時就報錯；排進佇列時帶的是當時的設定值。到軟上限時正在凍結的那個候選丟例外、什麼都不留；到硬上限時 worker 直接殺掉子行程，還沒提交的 `shadow_artifact` 列跟著連線回滾。模型檔先寫成同目錄的暫存檔、fsync、算 sha256，列寫進去之後才改名到正式路徑，最後才提交：被殺時最多留下沒有列的暫存檔或正式路徑上的檔案，下一次凍結會清掉暫存檔、覆寫那個檔案，代數仍是同一代。`shadow_artifact.recipe` 與 `detail` 裡的 `peak_mb` 是 worker 行程到那時為止的最高 RSS，會含早上 chain、重訓與前一個候選，和重訓的 `peak_rss_mb` 一樣跨工作累積；手動 `shadow_train` 是新行程，量到的只有那次訓練。結果寫一列 `research_shadow_train`：全部凍結是 info；不能開始（含列不出落後的候選）、出錯、到軟上限都是 warning 並告警，不影響 `research_morning`。到硬上限時子行程直接被殺，不會寫 `research_shadow_train`，改由 Celery 的 `task_failure` 記一列 `task_failure` 並告警（`apps/etl/task_alerts.py`）。凍結之前，舊的 artifact 照常打分；沒凍結成功的，下一個早上再排一次。重訓當天，重訓排在前面，`shadow_train` 等它跑完時通常已過 09:00，會記一筆 warning，隔天早上再試。
 - 模型檔不在每日資料庫備份裡。同樣的資料重訓會得到同一個 sha256，但每晚重算最近 60 個交易日的特徵、還原因子重建都會改到訓練窗裡的資料，所以檔案遺失後重訓通常得不到原來的 sha256，只能用 `--replace` 寫下一代。
 
 ### 線上特徵覆蓋率檢查

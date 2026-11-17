@@ -11,7 +11,7 @@ import pyarrow.parquet as pq
 
 from apps.market.calendar import TradingDays
 from apps.market.models import IndexDaily, IndexId, StockMaster
-from apps.research.holding import Market, Mask, Rule
+from apps.research.holding import Market, Mask, Matrix, Rule
 from apps.research.holdout import SPEC_HOLDOUT_START
 from apps.research.lgbm_runs import MODEL
 from apps.research.models import LabelDaily, ModelObjective, Prediction
@@ -126,6 +126,12 @@ def _prices(calendar: TradingDays, days: list[date], stocks: list[str]) -> pd.Da
     return panel.assign(limit_down_open=opened_down)
 
 
+def score_grids(scores: pd.DataFrame, days: list[date], stocks: list[str]) -> tuple[Matrix, Mask]:
+    """The score and in_universe grids of score rows on the days and stocks given."""
+    score = _wide(scores, "score", days, stocks).to_numpy(dtype=np.float64)
+    return score, _flags(scores, "in_universe", days, stocks)
+
+
 def load_market(
     scores: pd.DataFrame,
     end: date,
@@ -139,13 +145,14 @@ def load_market(
     days = list(calendar.between(start or scores["date"].min(), end))
     stocks = sorted(set(scores["stock_id"]) | set(extra))
     prices = _prices(calendar, days, stocks)
+    score, in_universe = score_grids(scores, days, stocks)
     return Market(
         days=days,
         stocks=stocks,
         opens=_wide(prices, "adj_open", days, stocks).to_numpy(dtype=np.float64),
         closes=_wide(prices, "adj_close", days, stocks).to_numpy(dtype=np.float64),
-        score=_wide(scores, "score", days, stocks).to_numpy(dtype=np.float64),
-        in_universe=_flags(scores, "in_universe", days, stocks),
+        score=score,
+        in_universe=in_universe,
         blocked=_blocked(days, stocks),
         delisted=_delisted(days, stocks),
         limit_down_open=_flags(prices, "limit_down_open", days, stocks),
