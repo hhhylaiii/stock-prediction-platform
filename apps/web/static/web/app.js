@@ -52,6 +52,7 @@
     research_evening: '研究晚間排程',
     research_morning: '研究早盤排程',
     research_shadow: '持有規則影子帳本',
+    research_shadow_train: '影子候選模型凍結',
     research_retrain: '每月重訓',
     research_promote: '自動換模',
     research_rebuild: '研究資料重建'
@@ -1380,7 +1381,7 @@
   const isResearch = check => check.check_name.startsWith('research_');
   const isDaily = check => !isPromotion(check) && !isRelease(check) && !isResearch(check);
   const scopeOf = check => (check.detail || {}).scope || (check.detail || {}).run_key;
-  const RESEARCH_ORDER = ['research_retrain', 'research_promote', 'research_rebuild', 'research_evening', 'research_morning', 'research_shadow'];
+  const RESEARCH_ORDER = ['research_retrain', 'research_promote', 'research_rebuild', 'research_evening', 'research_morning', 'research_shadow', 'research_shadow_train'];
   const researchRank = check => {
     const rank = RESEARCH_ORDER.indexOf(check.check_name);
     return rank < 0 ? RESEARCH_ORDER.length : rank;
