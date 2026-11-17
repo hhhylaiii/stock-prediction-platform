@@ -41,6 +41,7 @@ from apps.research.runs import (
     CHUNK,
     MODEL_SUFFIX,
     PRODUCTION,
+    SHADOW_MODELS,
     RunError,
     label_hash,
     lib_versions,
@@ -52,8 +53,9 @@ from apps.research.walkforward import Fold
 
 HORIZON = 5
 SEED = 0
-CANDIDATE_DIR = "shadow"
+CANDIDATE_DIR = SHADOW_MODELS
 RELATIVE = f"{RETURN_LABEL} - TAIEX_TR close {HORIZON}d"
+HUBER = {"objective": "huber", "metric": "huber"}
 
 
 @dataclass(frozen=True)
@@ -146,7 +148,7 @@ def _relative(serving: Serving, directory: Path) -> Fitted:
         "model": "lightgbm",
         "label": RELATIVE,
         "features": features,
-        "lightgbm": {**BASE_PARAMS, **seeded(SEED)},
+        "lightgbm": {**BASE_PARAMS, **HUBER, "alpha": fitted.delta, **seeded(SEED)},
         "bags": BAGS,
         "bag_seeds": bag_seeds(SEED, BAGS),
         "max_rounds": rounds,
@@ -232,11 +234,10 @@ def freeze(name: str, directory: Path, replace: bool = False) -> ShadowArtifact:
     with research_lock(f"shadow_train {name}"):
         found = serving(chosen)
         kept = ShadowArtifact.objects.filter(candidate=name, serving_run=found.run)
-        generation = (kept.aggregate(last=Max("generation"))["last"] or 0) + 1
-        if generation > 1 and not replace:
-            raise RunError(
-                f"{name} is frozen on {found.run.run_id}; replace writes generation {generation}"
-            )
+        latest = kept.order_by("-generation").first()
+        if latest is not None:
+            _replaceable(latest, replace)
+        generation = 1 if latest is None else latest.generation + 1
         began = monotonic()
         fitted = chosen.fit(found, directory)
         seconds, peak = round(monotonic() - began, 1), round(peak_rss_mb(), 1)
@@ -267,13 +268,30 @@ def freeze(name: str, directory: Path, replace: bool = False) -> ShadowArtifact:
     return row
 
 
-def load_artifact(row: ShadowArtifact) -> Any:
-    """The frozen model, refused when its file is missing or no longer matches its hash."""
+def _verified(row: ShadowArtifact) -> bytes:
     path = Path(settings.MODEL_DIR) / row.path
     if not path.exists():
         raise RunError(f"{row} has no file at {row.path}")
-    with path.open("rb") as handle:
-        data = handle.read()
+    data = path.read_bytes()
     if hashlib.sha256(data).hexdigest() != row.sha256:
         raise RunError(f"{row}'s file no longer matches its frozen sha256")
-    return pickle.loads(data)  # noqa: S301
+    return data
+
+
+def _replaceable(latest: ShadowArtifact, replace: bool) -> None:
+    """A next generation only replaces a latest file that is lost or no longer matches."""
+    following = latest.generation + 1
+    if not replace:
+        raise RunError(
+            f"{latest} is frozen; replace writes generation {following} if its file is lost"
+        )
+    try:
+        _verified(latest)
+    except RunError:
+        return
+    raise RunError(f"{latest}'s file is intact; replace only rebuilds a lost or changed file")
+
+
+def load_artifact(row: ShadowArtifact) -> Any:
+    """The frozen model, refused when its file is missing or no longer matches its hash."""
+    return pickle.loads(_verified(row))  # noqa: S301

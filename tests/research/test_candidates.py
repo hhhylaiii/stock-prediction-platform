@@ -42,7 +42,7 @@ from apps.research.models import (
 from apps.research.predict import Slot
 from apps.research.prediction_cache import fold_record
 from apps.research.production import DESIGNS, Design, production_fold
-from apps.research.runs import RunError
+from apps.research.runs import RunError, drop_run
 from apps.research.target_models import RETURN_LABEL, TargetVariant
 from apps.research.training import load_labels
 from apps.research.walkforward import Fold
@@ -197,6 +197,12 @@ def test_c2_fits_the_return_design_on_the_relative_label(
         _return_features(),
     )
     assert (row.recipe["lightgbm"]["seed"], row.recipe["bag_seeds"]) == (0, bag_seeds(0, 2))
+    params = row.recipe["lightgbm"]
+    assert (params["objective"], params["metric"], params["alpha"]) == (
+        "huber",
+        "huber",
+        row.recipe["delta"],
+    )
     assert row.path == "shadow/c2/return-2016-11/g1.pkl"
 
 
@@ -215,15 +221,30 @@ def test_measuring_writes_no_row_and_the_same_data_refits_to_the_same_file(
     assert not (Path(settings.MODEL_DIR) / "shadow").exists()
 
 
-def test_a_second_freeze_on_the_same_run_needs_replace_and_keeps_the_first(served: Path) -> None:
+def test_only_a_lost_or_changed_file_is_replaced_and_the_first_generation_stays(
+    served: Path,
+) -> None:
     first = freeze("C1", served)
-    with pytest.raises(RunError, match="replace writes generation 2"):
+    with pytest.raises(RunError, match="replace writes generation 2 if its file is lost"):
         freeze("C1", served)
+    with pytest.raises(RunError, match="file is intact; replace only rebuilds"):
+        freeze("C1", served, replace=True)
+    path = Path(settings.MODEL_DIR) / first.path
+    changed = path.read_bytes() + b"x"
+    path.write_bytes(changed)
     second = freeze("C1", served, replace=True)
     assert (second.generation, second.path) == (2, "shadow/c1/rank-2016-11/g2.pkl")
     kept = ShadowArtifact.objects.get(candidate="C1", generation=1)
     assert (kept.sha256, kept.path) == (first.sha256, first.path)
-    assert (Path(settings.MODEL_DIR) / first.path).exists()
+    assert path.read_bytes() == changed
+    assert load_artifact(second).penalty == first.recipe["penalty"]
+
+
+def test_drop_run_keeps_the_frozen_candidates(served: Path) -> None:
+    row = freeze("C1", served)
+    with pytest.raises(RunError, match="holds the frozen shadow candidates"):
+        drop_run("shadow")
+    assert (Path(settings.MODEL_DIR) / row.path).exists()
 
 
 def test_the_first_signal_follows_the_latest_written_prediction(served: Path) -> None:

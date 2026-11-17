@@ -36,6 +36,7 @@ LIBRARIES = ("django", "numpy", "pandas", "pyarrow", "scikit-learn", "lightgbm")
 MODEL_SUFFIX = ".pkl"
 CHUNK = 1 << 20
 SCREENING_MODEL = "screening"
+SHADOW_MODELS = "shadow"
 
 
 class RunError(RuntimeError):
@@ -210,6 +211,10 @@ def drop_run(run_key: str) -> int:
 
     Holdout runs stay, and so does the feature screening once any holdout run exists.
     """
+    if run_key == SHADOW_MODELS:
+        raise RunError(
+            f"{run_key} under MODEL_DIR holds the frozen shadow candidates, kept for good"
+        )
     models, cache = run_dir(run_key), Path(settings.RESEARCH_CACHE_DIR) / run_key
     with transaction.atomic(durable=True):
         if HoldoutRun.objects.filter(run_key=run_key).exists():
