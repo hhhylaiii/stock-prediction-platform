@@ -334,6 +334,33 @@ def test_a_failed_insert_leaves_no_model_file(
     assert list(folder.iterdir()) == []
 
 
+def test_a_fit_killed_before_its_commit_leaves_no_row_and_the_next_one_writes_generation_1(
+    served: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = Path(settings.MODEL_DIR) / "shadow" / "c1" / "rank-2016-11"
+    folder.mkdir(parents=True)
+    (folder / ".g1-killed.tmp").write_bytes(b"half a pickle")
+    real = candidates.os.replace
+
+    def killed(source: Any, target: Any) -> None:
+        real(source, target)
+        raise SystemExit("killed after the rename")
+
+    monkeypatch.setattr(candidates.os, "replace", killed)
+    with pytest.raises(SystemExit):
+        freeze("C1", served)
+    assert not ShadowArtifact.objects.exists()
+    assert [path.name for path in folder.iterdir()] == ["g1.pkl"]
+    monkeypatch.setattr(candidates.os, "replace", real)
+    (folder / ".g1-killed.tmp").write_bytes(b"half a pickle")
+
+    row = freeze("C1", served)
+
+    assert row.generation == 1
+    assert [path.name for path in folder.iterdir()] == ["g1.pkl"]
+    assert load_artifact(row) is not None
+
+
 def test_a_missing_or_changed_file_is_refused(served: Path) -> None:
     row = freeze("C1", served)
     path = Path(settings.MODEL_DIR) / row.path

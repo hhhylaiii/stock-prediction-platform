@@ -256,6 +256,7 @@ def freeze(name: str, directory: Path, replace: bool = False) -> ShadowArtifact:
         seconds, peak = round(monotonic() - began, 1), round(peak_rss_mb(), 1)
         relative = artifact_path(name, found.run.run_key, generation)
         path = Path(settings.MODEL_DIR) / relative
+        _clear_partial(path.parent)
         temporary = Path(pickle_beside(path, fitted.model))
         try:
             with transaction.atomic(durable=True):
@@ -279,6 +280,12 @@ def freeze(name: str, directory: Path, replace: bool = False) -> ShadowArtifact:
         finally:
             temporary.unlink(missing_ok=True)
     return row
+
+
+def _clear_partial(folder: Path) -> None:
+    """Remove the temporary files a fit killed before its rename left; held under the lock."""
+    for partial in folder.glob(".g*-*.tmp"):
+        partial.unlink(missing_ok=True)
 
 
 def _verified(row: ShadowArtifact) -> bytes:
