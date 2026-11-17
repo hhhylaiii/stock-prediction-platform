@@ -287,19 +287,16 @@ def busy(error: BaseException) -> Outcome:
     return _failed(monotonic(), error)
 
 
-def _failed(
-    began: float, error: BaseException, book: str | None = None, signal: date | None = None
-) -> Outcome:
+def _failed(began: float, error: BaseException) -> Outcome:
     seconds = round(monotonic() - began, 2)
     detail = {
-        "book": book,
-        "signal_date": None if signal is None else signal.isoformat(),
+        "book": None,
+        "signal_date": None,
         "error": f"{type(error).__name__}: {error}",
         "written": "nothing; the next morning starts again from the same day",
         "seconds": seconds,
     }
-    where = f" at {book} {signal}" if book else ""
-    return Outcome(Severity.WARNING, detail, f"failed{where}, see {SHADOW_CHECK}; {seconds} s")
+    return Outcome(Severity.WARNING, detail, f"failed, see {SHADOW_CHECK}; {seconds} s")
 
 
 def _said_failed(note: dict[str, Any]) -> str:
@@ -341,21 +338,34 @@ def _book(
 
 
 def _scores(
-    done: Morning, name: str, session: date, calendar: TradingDays, left: Callable[[], float]
+    done: Morning,
+    name: str,
+    books: list[str],
+    session: date,
+    calendar: TradingDays,
+    left: Callable[[], float],
 ) -> bool:
-    """One candidate's due scores in their own transaction; False when none could be written."""
+    """One candidate's due scores, a transaction a day; False unless every due day was scored.
+
+    Days its books listed already are never scored after, so a score and a list never disagree.
+    """
     if left() <= 0:
         done.notes.append(_scores_failed(name, "skipped: the shadow budget ran out"))
         return False
     try:
         with transaction.atomic():
-            scored = score_candidate(name, session, calendar)
+            lists = HoldingBookDay.objects.filter(book__in=books, phase=BookPhase.LIST)
+            listed = set(lists.values_list("signal_date", flat=True))
+        scored = score_candidate(name, session, calendar, left, listed)
     except Exception as error:
         done.notes.append(_scores_failed(name, f"{type(error).__name__}: {error}"))
         return False
     done.scores[name] = scored
     done.notes.extend(scored.notes)
-    return True
+    if not scored.complete:
+        said = f"stopped: the shadow budget ran out after {len(scored.scored)} days"
+        done.notes.append(_scores_failed(name, said))
+    return scored.complete
 
 
 def _morning(session: date, books: Mapping[str, Spec], left: Callable[[], float]) -> Morning:
@@ -372,7 +382,11 @@ def _morning(session: date, books: Mapping[str, Spec], left: Callable[[], float]
         if spec.source is None:
             _book(done, name, spec, session, inputs, left)
     sources = list(dict.fromkeys(spec.source for spec in due.values() if spec.source))
-    ready = {source for source in sources if _scores(done, source, session, calendar, left)}
+    ready = {
+        source
+        for source in sources
+        if _scores(done, source, _following(books, source), session, calendar, left)
+    }
     for name, spec in due.items():
         if spec.source is None:
             continue
@@ -382,6 +396,10 @@ def _morning(session: date, books: Mapping[str, Spec], left: Callable[[], float]
             reason = f"skipped: {spec.source} has no scores this morning"
             done.notes.append(_book_failed(name, spec, None, reason))
     return done
+
+
+def _following(books: Mapping[str, Spec], source: str) -> list[str]:
+    return [name for name, spec in books.items() if spec.source == source]
 
 
 def _stored_stocks(books: list[str]) -> set[str]:

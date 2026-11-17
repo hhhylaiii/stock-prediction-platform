@@ -474,11 +474,15 @@ def _scores(name: str, day: date) -> pd.DataFrame:
 SCORED = [date(2016, 12, 1), date(2016, 12, 2)]
 
 
+def plenty() -> float:
+    return 60.0
+
+
 def test_c1_averages_its_ridge_rank_and_c0_s_rank_in_the_universe(served: Path) -> None:
     row = freeze("C1", served)
     _predicted(SCORED)
 
-    got = score_candidate("C1", SCORED[-1], panel_calendar())
+    got = score_candidate("C1", SCORED[-1], panel_calendar(), plenty)
 
     assert got.scored == ["2016-12-01", "2016-12-02"]
     assert got.artifacts == [f"{RANK_RUN} g1"]
@@ -505,7 +509,7 @@ def test_c2_scores_the_relative_return_its_booster_predicts(served: Path) -> Non
     row = freeze("C2", served)
     _predicted(SCORED)
 
-    score_candidate("C2", SCORED[-1], panel_calendar())
+    score_candidate("C2", SCORED[-1], panel_calendar(), plenty)
 
     model = load_artifact(row)
     rows = day_rows(SCORED[1], served, row.recipe["features"])
@@ -529,10 +533,10 @@ def test_c2_scores_the_relative_return_its_booster_predicts(served: Path) -> Non
 def test_scoring_again_writes_no_second_row(served: Path) -> None:
     freeze("C1", served)
     _predicted(SCORED)
-    score_candidate("C1", SCORED[-1], panel_calendar())
+    score_candidate("C1", SCORED[-1], panel_calendar(), plenty)
     count = ShadowScore.objects.count()
 
-    again = score_candidate("C1", SCORED[-1], panel_calendar())
+    again = score_candidate("C1", SCORED[-1], panel_calendar(), plenty)
 
     assert again.scored == []
     assert ShadowScore.objects.count() == count
@@ -541,7 +545,7 @@ def test_scoring_again_writes_no_second_row(served: Path) -> None:
 def test_without_an_artifact_nothing_is_scored(served: Path) -> None:
     _predicted(SCORED)
 
-    got = score_candidate("C1", SCORED[-1], panel_calendar())
+    got = score_candidate("C1", SCORED[-1], panel_calendar(), plenty)
 
     assert (got.scored, got.notes) == ([], [])
     assert not ShadowScore.objects.exists()
@@ -555,7 +559,7 @@ def test_a_changed_file_scores_nothing_until_a_next_generation_replaces_it(
     path = Path(settings.MODEL_DIR) / row.path
     path.write_bytes(path.read_bytes() + b"x")
 
-    broken = score_candidate("C1", SCORED[-1], panel_calendar())
+    broken = score_candidate("C1", SCORED[-1], panel_calendar(), plenty)
 
     assert not ShadowScore.objects.exists()
     (note,) = broken.notes
@@ -567,7 +571,7 @@ def test_a_changed_file_scores_nothing_until_a_next_generation_replaces_it(
     assert second.first_signal == later
     _predicted([later])
 
-    replaced = score_candidate("C1", later, panel_calendar())
+    replaced = score_candidate("C1", later, panel_calendar(), plenty)
 
     assert (replaced.scored, replaced.notes) == (["2016-12-05"], [])
     assert set(ShadowScore.objects.values_list("date", "generation")) == {(later, 2)}
@@ -581,3 +585,28 @@ def test_a_frozen_candidate_falls_behind_once_its_slot_serves_another_run(served
     _serving("rank-2016-12", ModelObjective.RANK, ["tech_ret_1d"])
 
     assert unfollowed() == ["C1"]
+
+
+def test_a_spent_budget_keeps_the_days_scored_and_the_next_morning_scores_the_rest(
+    served: Path,
+) -> None:
+    freeze("C1", served)
+    _predicted(SCORED)
+    budget = iter([1.0, 0.0])
+
+    cut = score_candidate("C1", SCORED[-1], panel_calendar(), lambda: next(budget))
+
+    assert (cut.scored, cut.complete) == (["2016-12-01"], False)
+    assert set(ShadowScore.objects.values_list("date", flat=True)) == {SCORED[0]}
+    rest = score_candidate("C1", SCORED[-1], panel_calendar(), plenty)
+    assert (rest.scored, rest.complete) == (["2016-12-02"], True)
+
+
+def test_a_day_its_books_already_listed_is_never_scored(served: Path) -> None:
+    freeze("C1", served)
+    _predicted(SCORED)
+
+    got = score_candidate("C1", SCORED[-1], panel_calendar(), plenty, listed={SCORED[0]})
+
+    assert got.scored == ["2016-12-02"]
+    assert set(ShadowScore.objects.values_list("date", flat=True)) == {SCORED[1]}

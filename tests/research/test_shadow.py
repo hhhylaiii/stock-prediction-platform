@@ -13,7 +13,7 @@ from django.utils import timezone
 from apps.etl.models import DataQualityLog
 from apps.market.calendar import TradingDays
 from apps.market.models import DailyPrice, IndexDaily, StockMaster, TradingCalendar
-from apps.research import shadow, tasks
+from apps.research import candidate_scores, shadow, tasks
 from apps.research.candidate_scores import Scored
 from apps.research.holding import Rule, simulate
 from apps.research.holding_inputs import index_levels, load_market, stored_scores
@@ -646,7 +646,7 @@ def test_a_failing_c0_book_turns_the_morning_into_a_warning_and_sends_the_alert(
     )
     frozen("C1", market[0], tmp_path)
     scored_against_c0("C1")
-    monkeypatch.setattr(shadow, "score_candidate", lambda name, session, days: Scored())
+    monkeypatch.setattr(shadow, "score_candidate", lambda *args: Scored())
     real = shadow.order_list
 
     def breaks(held: Any, score: Any, *args: Any) -> Any:
@@ -690,7 +690,7 @@ def test_a_candidate_book_follows_its_own_scores_and_c0_s_rows_stay_as_they_were
     frozen("C1", market[2], tmp_path)
     scored_against_c0("C1")
     monkeypatch.setattr(
-        shadow, "score_candidate", lambda name, session, days: Scored([session.isoformat()])
+        shadow, "score_candidate", lambda name, session, *args: Scored([session.isoformat()])
     )
 
     outcomes = mornings(market[:6], clock, CANDIDATE_BOOKS)
@@ -713,7 +713,7 @@ def test_a_candidate_whose_scores_fail_leaves_c0_alone_and_skips_its_own_book(
     alone = alone_then_cleared(market, clock, 4)
     frozen("C1", market[2], tmp_path)
 
-    def broken(name: str, session: date, days: TradingDays) -> Scored:
+    def broken(*args: Any) -> Scored:
         raise ArithmeticError("no features")
 
     monkeypatch.setattr(shadow, "score_candidate", broken)
@@ -741,7 +741,7 @@ def test_a_failing_candidate_book_rolls_back_alone(
     alone = alone_then_cleared(market, clock, 4)
     frozen("C1", market[2], tmp_path)
     scored_against_c0("C1")
-    monkeypatch.setattr(shadow, "score_candidate", lambda name, session, days: Scored())
+    monkeypatch.setattr(shadow, "score_candidate", lambda *args: Scored())
     real = shadow.order_list
 
     def breaks(held: Any, score: Any, *args: Any) -> Any:
@@ -778,14 +778,14 @@ def test_a_spent_budget_skips_the_candidate_book_and_the_next_morning_backfills_
     ticks = {"now": 0.0}
     monkeypatch.setattr(shadow, "monotonic", lambda: ticks["now"])
 
-    def slow(name: str, session: date, days: TradingDays) -> Scored:
+    def slow(*args: Any) -> Scored:
         ticks["now"] += shadow.BUDGET_SECONDS + 1
         return Scored()
 
     monkeypatch.setattr(shadow, "score_candidate", slow)
     clock["at"] = at(market[3], time(6, 30))
     skipped = record_books(market[2], CANDIDATE_BOOKS)
-    monkeypatch.setattr(shadow, "score_candidate", lambda name, session, days: Scored())
+    monkeypatch.setattr(shadow, "score_candidate", lambda *args: Scored())
     clock["at"] = at(market[4], time(6, 30))
     later = record_books(market[3], CANDIDATE_BOOKS)
 
@@ -832,6 +832,66 @@ def test_a_missing_artifact_file_scores_nothing_and_its_book_lists_no_prediction
     row = DataQualityLog.objects.get(date=market[3], check_name=SHADOW_CHECK)
     assert row.severity == "warning"
     (note,) = row.detail["notes"]
-    assert (note["book"], note["signal_date"]) == ("C1", "2026-11-18")
+    assert (note["book"], note["signal_date"]) == ("C1", "2026-11-19")
     assert "has no file at shadow/c1/prod/g1.pkl" in note["artifact_invalid"]
     assert "1 notes" in said
+
+
+def test_a_file_found_again_scores_only_the_days_its_book_has_not_listed(
+    market: list[date],
+    clock: dict[str, datetime],
+    monkeypatch: pytest.MonkeyPatch,
+    settings: Any,
+    tmp_path: Path,
+) -> None:
+    settings.MODEL_DIR = tmp_path
+    monkeypatch.setitem(
+        candidate_scores.SCORERS,
+        "C1",
+        lambda model, row, day, base: base.assign(raw=-base["base"], score=-base["base"]),
+    )
+    row = frozen("C1", market[2], tmp_path, stored=False)
+    mornings(market[:4], clock, CANDIDATE_BOOKS)
+    (tmp_path / row.path).parent.mkdir(parents=True)
+    (tmp_path / row.path).write_bytes(pickle.dumps({"candidate": "C1"}))
+    clock["at"] = at(market[4] + timedelta(days=1), time(6, 30))
+
+    outcome = record_books(market[4], CANDIDATE_BOOKS)
+
+    assert set(ShadowScore.objects.values_list("date", flat=True)) == {market[4]}
+    lists = HoldingBookDay.objects.filter(book="T-C1", phase=BookPhase.LIST).order_by("signal_date")
+    assert [(day.signal_date, day.status) for day in lists] == [
+        (market[2], BookStatus.NO_PREDICTION),
+        (market[3], BookStatus.NO_PREDICTION),
+        (market[4], BookStatus.LISTED),
+    ]
+    assert outcome.detail["scores"] == {
+        "C1": {"scored": ["2026-11-20"], "artifacts": ["rank.h5 g1"]}
+    }
+    assert outcome.severity == "info"
+
+
+def test_scores_the_budget_cut_short_skip_the_candidate_book_until_they_are_complete(
+    market: list[date], clock: dict[str, datetime], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    frozen("C1", market[2], tmp_path)
+    monkeypatch.setattr(
+        shadow, "score_candidate", lambda *args: Scored(["2026-11-18"], complete=False)
+    )
+
+    outcome = mornings(market[:3], clock, CANDIDATE_BOOKS)[-1]
+
+    assert "T-C1" not in outcome.detail["books"]
+    assert outcome.detail["notes"] == [
+        {
+            "book": "C1",
+            "role": "candidate",
+            "scores_failed": "stopped: the shadow budget ran out after 1 days",
+        },
+        {
+            "book": "T-C1",
+            "role": "candidate",
+            "signal_date": None,
+            "book_failed": "skipped: C1 has no scores this morning",
+        },
+    ]

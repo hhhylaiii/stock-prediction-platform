@@ -1,6 +1,6 @@
 """Each morning's shadow candidate scores (holding-shadow-prereg.md §7), kept out of prediction."""
 
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -9,6 +9,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from django.conf import settings
+from django.db import transaction
 from django.utils import timezone
 
 from apps.market.calendar import TradingDays
@@ -37,6 +38,7 @@ class Scored:
     scored: list[str] = field(default_factory=list)
     artifacts: list[str] = field(default_factory=list)
     notes: list[dict[str, Any]] = field(default_factory=list)
+    complete: bool = True
 
 
 def label(row: ShadowArtifact) -> str:
@@ -145,22 +147,34 @@ def _chosen(found: list[ShadowArtifact], day: date) -> ShadowArtifact | None:
     return usable[-1] if usable else None
 
 
-def score_candidate(name: str, session: date, calendar: TradingDays) -> Scored:
-    """Score each unscored signal day from the candidate's first signal day through session.
+def score_candidate(
+    name: str,
+    session: date,
+    calendar: TradingDays,
+    left: Callable[[], float],
+    listed: Collection[date] = (),
+) -> Scored:
+    """Score each unscored signal day its books have not listed yet, one transaction a day.
 
     Days under a missing or changed file get no rows; the newest artifact's gets one note a day.
+    A spent budget stops before the next day, the days already scored kept.
     """
-    found = artifacts(name)
     result = Scored()
-    if not found or found[0].first_signal > session:
-        return result
+    with transaction.atomic():
+        found = artifacts(name)
+        if not found or found[0].first_signal > session:
+            return result
+        due = _unscored(name, found[0].first_signal, session, calendar)
     newest = (found[-1].serving_run_id, found[-1].generation)
     loaded: dict[tuple[str, int], Any] = {}
     invalid: dict[tuple[str, int], str] = {}
-    for day in _unscored(name, found[0].first_signal, session, calendar):
+    for day in (day for day in due if day not in listed):
         row = _chosen(found, day)
         if row is None:
             continue
+        if left() <= 0:
+            result.complete = False
+            break
         key = (row.serving_run_id, row.generation)
         if key not in loaded and key not in invalid:
             try:
@@ -168,18 +182,22 @@ def score_candidate(name: str, session: date, calendar: TradingDays) -> Scored:
             except RunError as error:
                 invalid[key] = str(error)
                 if key == newest:
-                    note = {
-                        "book": name,
-                        "role": "candidate",
-                        "signal_date": day.isoformat(),
-                        "artifact_invalid": str(error),
-                    }
-                    result.notes.append(note)
+                    result.notes.append(_invalid(name, day, error))
         if key in invalid:
             continue
-        frame = SCORERS[name](loaded[key], row, day, _serving_rows(day))
-        ShadowScore.objects.bulk_create(_rows(name, row, day, frame))
+        with transaction.atomic():
+            frame = SCORERS[name](loaded[key], row, day, _serving_rows(day))
+            ShadowScore.objects.bulk_create(_rows(name, row, day, frame))
         result.scored.append(day.isoformat())
         if label(row) not in result.artifacts:
             result.artifacts.append(label(row))
     return result
+
+
+def _invalid(name: str, day: date, error: RunError) -> dict[str, Any]:
+    return {
+        "book": name,
+        "role": "candidate",
+        "signal_date": day.isoformat(),
+        "artifact_invalid": str(error),
+    }
