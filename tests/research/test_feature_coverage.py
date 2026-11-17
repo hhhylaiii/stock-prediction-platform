@@ -16,6 +16,8 @@ from django.core.management import call_command
 from django.core.management.base import CommandError
 
 from apps.api.ops import MODEL_CHECK_PREFIXES
+from apps.etl.adapters.corporate_actions import DIVIDEND_EVENT
+from apps.etl.adapters.exchange_notices import DIVIDEND_NOTICE
 from apps.etl.models import DataQualityLog
 from apps.etl.quality import CHECKS, should_run_prediction
 from apps.etl.tasks import GATE_DATASETS
@@ -209,12 +211,19 @@ def test_only_features_a_missed_day_empties_are_spared_the_error() -> None:
     assert sorted(GAPPED) == ["day_trade", "weekly_holding"]
     assert sorted(FILLED) == [
         "attention",
+        "dividend_notice",
         "financial_statement",
         "monthly_revenue",
         "shares_outstanding",
         "stock_master",
     ]
     assert stops_predictions("tech_attention_t")
+
+
+def test_the_ex_date_feature_lists_the_notice_table_and_still_stops_predictions() -> None:
+    assert SOURCES["fund_days_to_ex_date"] == (DIVIDEND_EVENT, DIVIDEND_NOTICE)
+    assert DIVIDEND_NOTICE in FILLED
+    assert stops_predictions("fund_days_to_ex_date")
 
 
 def test_designs_whose_features_cannot_be_read_are_refused() -> None:

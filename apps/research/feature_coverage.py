@@ -38,7 +38,8 @@ PRICE, INDEX, FLOWS, MARGIN, SBL = "daily_price", "index_daily", "institutional"
 HOLDING, VALUATION, EX_DATES = "foreign_holding", "daily_valuation", "dividend_event"
 SHARES, REVENUE, STATEMENTS = "shares_outstanding", "monthly_revenue", "financial_statement"
 MASTER, DAY_TRADE, WEEKLY, ATTENTION = "stock_master", "day_trade", "weekly_holding", "attention"
-FILLED = frozenset({SHARES, REVENUE, STATEMENTS, MASTER, ATTENTION})
+NOTICES = "dividend_notice"
+FILLED = frozenset({SHARES, REVENUE, STATEMENTS, MASTER, ATTENTION, NOTICES})
 GAPPED = frozenset({DAY_TRADE, WEEKLY})
 KINDS = GATE_DATASETS | FILLED | GAPPED
 Severity = DataQualityLog.Severity
@@ -78,7 +79,7 @@ SOURCES: Mapping[str, tuple[str, ...]] = MappingProxyType(
         **_reading("fund_days_since_fs", STATEMENTS),
         **_reading("fund_ep", STATEMENTS, PRICE),
         **_reading("fund_bp fund_dividend_yield", VALUATION),
-        **_reading("fund_days_to_ex_date", EX_DATES),
+        **_reading("fund_days_to_ex_date", EX_DATES, NOTICES),
         **_reading("risk_beta_250d risk_idio_vol_60d", PRICE, INDEX),
         **_reading("ind_sector_ret_20d ind_rel_ret_20d ind_mom_neutral", PRICE, MASTER),
         **_reading("ind_ep_neutral", STATEMENTS, PRICE, MASTER),
