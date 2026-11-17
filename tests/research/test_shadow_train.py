@@ -162,7 +162,7 @@ def test_the_soft_time_limit_stops_the_fit_with_a_warning(freezes: dict[str, Any
     assert freezes["called"] == ["C1"]
     assert trained().detail == {
         "frozen": {},
-        "failed": {"C1": "stopped at the 3600 s soft limit"},
+        "failed": {"C1": "stopped at the 1800 s soft limit"},
     }
 
 
