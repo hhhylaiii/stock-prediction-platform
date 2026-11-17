@@ -4,21 +4,26 @@ Rows are only added. A wrong book is never edited or deleted: a new book name is
 from its start, marked backfilled, and the old rows stay (holding-shadow-prereg.md §4).
 """
 
+import copy
 import math
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time
 from functools import cached_property
 from time import monotonic
 from typing import Any
 
 import numpy as np
+import pandas as pd
 from django.db import connection, transaction
 from django.utils import timezone
 
 from apps.etl.models import DataQualityLog
 from apps.market.calendar import TradingDays
+from apps.research.candidate_scores import Scored, score_candidate
+from apps.research.candidate_scores import first_signal as candidate_start
+from apps.research.candidates import CANDIDATES
 from apps.research.holding import (
     BACKUP,
     BUY,
@@ -45,6 +50,7 @@ from apps.research.holding_inputs import (
     index_levels,
     labels_settled,
     load_market,
+    score_grids,
     stored_scores,
 )
 from apps.research.holding_report import mean_returns
@@ -55,6 +61,7 @@ from apps.research.models import (
     HoldingBookDay,
     ModelObjective,
     Prediction,
+    ShadowScore,
 )
 
 SHADOW_CHECK = "research_shadow"
@@ -69,11 +76,17 @@ Severity = DataQualityLog.Severity
 
 @dataclass(frozen=True)
 class Spec:
+    """A book's rule, first signal day, and the candidate whose scores it follows (None for C0)."""
+
     rule: Rule
     start: date
+    source: str | None = None
 
 
-BOOKS: dict[str, Spec] = {"H70N30-C0": Spec(Rule.parse("H70", 30), SHADOW_START)}
+RULE = Rule.parse("H70", 30)
+PREFIX = "H70N30-"
+BOOKS: dict[str, Spec] = {f"{PREFIX}C0": Spec(RULE, SHADOW_START)}
+SCORE_KEYS = ["date", "stock_id", "in_universe", "score"]
 
 
 @dataclass(frozen=True)
@@ -110,7 +123,7 @@ class ShadowTimeoutError(RuntimeError):
 
 
 class ShadowStuckError(RuntimeError):
-    """A book could not write a signal day; nothing of the morning is kept."""
+    """A book could not write a signal day; that book keeps nothing of the morning."""
 
     def __init__(self, book: str, signal: date | None) -> None:
         super().__init__(f"{book} stuck on {signal or 'its start'}")
@@ -125,6 +138,22 @@ class Inputs:
         self, start: date, session: date, calendar: TradingDays, stored: Callable[[], set[str]]
     ) -> None:
         self.start, self.session, self.calendar, self.stored = start, session, calendar, stored
+        self.source: str | None = None
+
+    def scored_by(self, source: str) -> "Inputs":
+        """The same grids with a candidate's stored scores and universe in place of C0's."""
+        market = self.market
+        rows = ShadowScore.objects.filter(
+            candidate=source, date__range=(self.start, self.session)
+        ).values_list(*SCORE_KEYS)
+        frame = pd.DataFrame(list(rows), columns=SCORE_KEYS)
+        score, in_universe = score_grids(
+            frame.astype({"score": "float64", "in_universe": "bool"}), market.days, market.stocks
+        )
+        other = copy.copy(self)
+        other.source = source
+        other.__dict__["market"] = replace(market, score=score, in_universe=in_universe)
+        return other
 
     @cached_property
     def market(self) -> Market:
@@ -169,7 +198,7 @@ class Inputs:
 
 
 @contextmanager
-def budget(seconds: float) -> Iterator[None]:
+def budget(seconds: float) -> Iterator[Callable[[], float]]:
     """Inside a transaction, each statement may run only for what is left of the seconds."""
     deadline = monotonic() + seconds
     with connection.cursor() as cursor:
@@ -186,33 +215,63 @@ def budget(seconds: float) -> Iterator[None]:
         return execute(sql, params, many, context)
 
     with connection.execute_wrapper(bounded):
-        yield
+        yield lambda: deadline - monotonic()
     with connection.cursor() as cursor:
         cursor.execute(LIMIT_SQL, [before])
 
 
-def record_books(session: date, books: Mapping[str, Spec] = BOOKS) -> Outcome:
-    """Each book's due lists and fills in one transaction under the budget; never raises."""
+@dataclass
+class Morning:
+    books: dict[str, Progress] = field(default_factory=dict)
+    scores: dict[str, Scored] = field(default_factory=dict)
+    notes: list[dict[str, Any]] = field(default_factory=list)
+
+
+def all_books() -> dict[str, Spec]:
+    """The fixed books, then each frozen candidate's book and a C0 book from the same day."""
+    found = dict(BOOKS)
+    for name in CANDIDATES:
+        start = candidate_start(name)
+        if start is not None:
+            found.setdefault(f"{PREFIX}C0-{start:%Y%m%d}", Spec(RULE, start))
+            found[f"{PREFIX}{name}"] = Spec(RULE, start, name)
+    return found
+
+
+def record_books(session: date, books: Mapping[str, Spec] | None = None) -> Outcome:
+    """Each book and each candidate's scores in its own transaction under one budget; never raises.
+
+    Books on C0's scores go first and commit first, so a candidate never holds them back.
+    """
     began = monotonic()
     try:
-        with transaction.atomic(), budget(BUDGET_SECONDS):
-            done = _all_books(session, books)
-    except ShadowStuckError as stuck:
-        return _failed(began, stuck.__cause__ or stuck, stuck.book, stuck.signal)
+        chosen = all_books() if books is None else books
+        with budget(BUDGET_SECONDS) as left:
+            done = _morning(session, chosen, left)
     except Exception as error:
         return _failed(began, error)
     seconds = round(monotonic() - began, 2)
-    notes = [note for progress in done.values() for note in progress.notes]
     written = {
         name: {"listed": got.listed, "filled": got.filled, "waiting": got.waiting}
-        for name, got in done.items()
+        for name, got in done.books.items()
     }
-    detail = {"books": written, "notes": notes, "seconds": seconds}
-    shown = "; ".join(f"{name}: {progress.said()}" for name, progress in done.items())
-    warned = f", {len(notes)} notes, see {SHADOW_CHECK}" if notes else ""
-    severity = Severity.WARNING if notes else Severity.INFO
-    wrote = any(got.listed or got.filled for got in done.values())
-    return Outcome(severity, detail, f"{shown or 'no book due'}{warned}; {seconds} s", wrote)
+    scores = {
+        name: {"scored": got.scored, "artifacts": got.artifacts}
+        for name, got in done.scores.items()
+    }
+    detail = {"books": written, **({"scores": scores} if scores else {}), "notes": done.notes}
+    detail["seconds"] = seconds
+    shown = [f"{name}: {progress.said()}" for name, progress in done.books.items()]
+    shown += [_said_failed(note) for note in done.notes if "book_failed" in note]
+    shown += [
+        f"{name}: scored {', '.join(got.scored)}" for name, got in done.scores.items() if got.scored
+    ]
+    warned = f", {len(done.notes)} notes, see {SHADOW_CHECK}" if done.notes else ""
+    severity = Severity.WARNING if done.notes else Severity.INFO
+    wrote = any(got.listed or got.filled for got in done.books.values())
+    wrote = wrote or any(got.scored for got in done.scores.values())
+    summary = f"{'; '.join(shown) or 'no book due'}{warned}; {seconds} s"
+    return Outcome(severity, detail, summary, wrote)
 
 
 def busy(error: BaseException) -> Outcome:
@@ -235,22 +294,80 @@ def _failed(
     return Outcome(Severity.WARNING, detail, f"failed{where}, see {SHADOW_CHECK}; {seconds} s")
 
 
-def _all_books(session: date, books: Mapping[str, Spec]) -> dict[str, Progress]:
+def _said_failed(note: dict[str, Any]) -> str:
+    at = f" at {note['signal_date']}" if note["signal_date"] else ""
+    return f"{note['book']}: failed{at}"
+
+
+def _book_failed(book: str, signal: date | None, error: BaseException | str) -> dict[str, Any]:
+    said = error if isinstance(error, str) else f"{type(error).__name__}: {error}"
+    shown = None if signal is None else signal.isoformat()
+    return {"book": book, "signal_date": shown, "book_failed": said}
+
+
+def _book(
+    done: Morning, name: str, spec: Spec, session: date, inputs: Inputs, left: Callable[[], float]
+) -> None:
+    """One book in its own transaction; a failure rolls back that book alone and notes it."""
+    if left() <= 0:
+        done.notes.append(_book_failed(name, None, "skipped: the shadow budget ran out"))
+        return
+    try:
+        with transaction.atomic():
+            view = inputs if spec.source is None else inputs.scored_by(spec.source)
+            progress = _advance(name, spec, session, view)
+    except ShadowStuckError as stuck:
+        done.notes.append(_book_failed(name, stuck.signal, stuck.__cause__ or stuck))
+        return
+    except Exception as error:
+        done.notes.append(_book_failed(name, None, error))
+        return
+    done.books[name] = progress
+    done.notes.extend(progress.notes)
+
+
+def _scores(
+    done: Morning, name: str, session: date, calendar: TradingDays, left: Callable[[], float]
+) -> bool:
+    """One candidate's due scores in their own transaction; False when none could be written."""
+    if left() <= 0:
+        done.notes.append({"book": name, "scores_failed": "skipped: the shadow budget ran out"})
+        return False
+    try:
+        with transaction.atomic():
+            scored = score_candidate(name, session, calendar)
+    except Exception as error:
+        done.notes.append({"book": name, "scores_failed": f"{type(error).__name__}: {error}"})
+        return False
+    done.scores[name] = scored
+    done.notes.extend(scored.notes)
+    return True
+
+
+def _morning(session: date, books: Mapping[str, Spec], left: Callable[[], float]) -> Morning:
+    """C0's books, then each candidate's scores, then the candidates' books."""
+    done = Morning()
     due = {name: spec for name, spec in books.items() if spec.start <= session}
     if not due:
-        return {}
-    calendar = TradingDays.from_db()
+        return done
+    with transaction.atomic():
+        calendar = TradingDays.from_db()
     start = min(spec.start for spec in due.values())
     inputs = Inputs(start, session, calendar, lambda: _stored_stocks(list(due)))
-    progress = {}
     for name, spec in due.items():
-        try:
-            progress[name] = _advance(name, spec, session, inputs)
-        except ShadowStuckError:
-            raise
-        except Exception as error:
-            raise ShadowStuckError(name, None) from error
-    return progress
+        if spec.source is None:
+            _book(done, name, spec, session, inputs, left)
+    sources = list(dict.fromkeys(spec.source for spec in due.values() if spec.source))
+    ready = {source for source in sources if _scores(done, source, session, calendar, left)}
+    for name, spec in due.items():
+        if spec.source is None:
+            continue
+        if spec.source in ready:
+            _book(done, name, spec, session, inputs, left)
+        else:
+            reason = f"skipped: {spec.source} has no scores this morning"
+            done.notes.append(_book_failed(name, None, reason))
+    return done
 
 
 def _stored_stocks(books: list[str]) -> set[str]:
@@ -327,7 +444,12 @@ def _opening(day: date) -> datetime:
     return timezone.make_aware(datetime.combine(day, OPEN))
 
 
-def _run_id(signal: date) -> str:
+def _run_id(signal: date, source: str | None) -> str:
+    """The serving run's run_id, or the candidate artifacts' labels, behind the day's scores."""
+    if source is not None:
+        found = ShadowScore.objects.filter(candidate=source, date=signal).order_by()
+        pairs = set(found.values_list("serving_run_id", "generation"))
+        return ",".join(sorted(f"{source}:{run}:g{generation}" for run, generation in pairs))
     rows = Prediction.objects.filter(
         run__objective=ModelObjective.RANK, horizon=HORIZON, date=signal
     ).order_by()
@@ -348,7 +470,7 @@ def _write_list(
     order = order_list(held, score, inside, market.stocks, rule)
     scored = inside & np.isfinite(score)
     universe = [market.stocks[k] for k in np.flatnonzero(inside)]
-    run_id, now = _run_id(signal), timezone.now()
+    run_id, now = _run_id(signal, inputs.source), timezone.now()
     actions = order["action"]
     header = HoldingBookDay(
         book=book,
