@@ -161,3 +161,20 @@ def test_the_fit_carries_a_soft_and_a_hard_time_limit() -> None:
     assert tasks.shadow_train.soft_time_limit == tasks.SHADOW_TRAIN_SOFT_SECONDS
     assert tasks.shadow_train.time_limit == tasks.SHADOW_TRAIN_HARD_SECONDS
     assert tasks.SHADOW_TRAIN_SOFT_SECONDS < tasks.SHADOW_TRAIN_HARD_SECONDS
+
+
+def test_a_failing_list_of_candidates_only_warns(
+    monkeypatch: pytest.MonkeyPatch, freezes: dict[str, Any]
+) -> None:
+    def broken() -> list[str]:
+        raise ResearchBusyError("no database")
+
+    monkeypatch.setattr(tasks, "unfollowed", broken)
+
+    assert train() == "refused"
+
+    assert freezes["called"] == []
+    assert trained().detail == {
+        "refused": "listing the candidates failed: ResearchBusyError: no database"
+    }
+    assert trained().severity == Severity.WARNING

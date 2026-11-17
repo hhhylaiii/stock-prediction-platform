@@ -457,9 +457,16 @@ def shadow_train(self: Task[Any, Any], day: str) -> str:
     if refused is not None:
         _record(session, SHADOW_TRAIN_CHECK, Severity.WARNING, {"refused": refused})
         return "refused"
+    try:
+        due = unfollowed()
+    except Exception as error:
+        logger.error("research shadow_train %s could not list the candidates: %s", day, error)
+        detail = {"refused": f"listing the candidates failed: {type(error).__name__}: {error}"}
+        _record(session, SHADOW_TRAIN_CHECK, Severity.WARNING, detail)
+        return "refused"
     frozen: dict[str, dict[str, Any]] = {}
     failed: dict[str, str] = {}
-    for name in unfollowed():
+    for name in due:
         try:
             row = freeze(name, settings.FEATURE_PARQUET_DIR)
         except SoftTimeLimitExceeded:
