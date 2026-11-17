@@ -5,6 +5,8 @@ from typing import Any
 
 import pytest
 from celery.exceptions import SoftTimeLimitExceeded
+from django.conf import settings
+from django.test import override_settings
 
 from apps.etl.models import DataQualityLog
 from apps.research import tasks
@@ -67,18 +69,25 @@ def trained() -> DataQualityLog:
 def test_a_morning_with_every_step_done_queues_one_fit_of_the_candidates_left_behind(
     monkeypatch: pytest.MonkeyPatch, behind: list[str]
 ) -> None:
-    queued: list[str] = []
+    queued: list[tuple[Any, ...]] = []
+
+    def queue(args: tuple[str], soft_time_limit: int, time_limit: int) -> None:
+        queued.append((args, soft_time_limit, time_limit))
+
     monkeypatch.setattr(tasks, "_retrain_after", lambda day: None)
-    monkeypatch.setattr(tasks.shadow_train, "delay", queued.append)
+    monkeypatch.setattr(tasks.shadow_train, "apply_async", queue)
     monkeypatch.setattr(tasks, "dispatch", lambda rows: None)
 
-    tasks.finish([], tasks.MORNING_CHECK, DAY.isoformat(), {})
+    with override_settings(
+        RESEARCH_SHADOW_TRAIN_SOFT_SECONDS=1200, RESEARCH_SHADOW_TRAIN_HARD_SECONDS=1500
+    ):
+        tasks.finish([], tasks.MORNING_CHECK, DAY.isoformat(), {})
     tasks.finish([], tasks.MORNING_CHECK, DAY.isoformat(), {"us_close": "missing"})
     tasks.finish([], tasks.EVENING_CHECK, DAY.isoformat(), {})
     behind.clear()
     tasks.finish([], tasks.MORNING_CHECK, DAY.isoformat(), {})
 
-    assert queued == [DAY.isoformat()]
+    assert queued == [((DAY.isoformat(),), 1200, 1500)]
 
 
 def test_the_fit_freezes_each_candidate_and_records_one_info_row(
@@ -153,14 +162,13 @@ def test_the_soft_time_limit_stops_the_fit_with_a_warning(freezes: dict[str, Any
     assert freezes["called"] == ["C1"]
     assert trained().detail == {
         "frozen": {},
-        "failed": {"C1": f"stopped at the {tasks.SHADOW_TRAIN_SOFT_SECONDS} s limit"},
+        "failed": {"C1": "stopped at the 3600 s soft limit"},
     }
 
 
-def test_the_fit_carries_a_soft_and_a_hard_time_limit() -> None:
-    assert tasks.shadow_train.soft_time_limit == tasks.SHADOW_TRAIN_SOFT_SECONDS
-    assert tasks.shadow_train.time_limit == tasks.SHADOW_TRAIN_HARD_SECONDS
-    assert tasks.SHADOW_TRAIN_SOFT_SECONDS < tasks.SHADOW_TRAIN_HARD_SECONDS
+def test_the_fit_carries_the_soft_and_hard_time_limits_of_the_settings() -> None:
+    assert tasks.shadow_train.soft_time_limit == settings.RESEARCH_SHADOW_TRAIN_SOFT_SECONDS
+    assert tasks.shadow_train.time_limit == settings.RESEARCH_SHADOW_TRAIN_HARD_SECONDS
 
 
 def test_a_failing_list_of_candidates_only_warns(

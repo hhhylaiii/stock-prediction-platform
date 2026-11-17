@@ -48,8 +48,6 @@ RETRAIN_CHECK = "research_retrain"
 PROMOTE_CHECK = "research_promote"
 REBUILD_CHECK = "research_rebuild"
 SHADOW_TRAIN_CHECK = "research_shadow_train"
-SHADOW_TRAIN_SOFT_SECONDS = 3600
-SHADOW_TRAIN_HARD_SECONDS = 3900
 RECENT_SESSIONS = 60
 COVERED = f"covered by the chain's {RECENT_SESSIONS}-session features and labels"
 NOTE_WINDOW = 90
@@ -425,7 +423,11 @@ def _shadow_train_after(day: date) -> None:
         logger.error("research shadow_train %s not queued: %s", day, error)
         return
     if due:
-        shadow_train.delay(day.isoformat())
+        shadow_train.apply_async(
+            args=(day.isoformat(),),
+            soft_time_limit=settings.RESEARCH_SHADOW_TRAIN_SOFT_SECONDS,
+            time_limit=settings.RESEARCH_SHADOW_TRAIN_HARD_SECONDS,
+        )
 
 
 def _train_refusal(task: Task[Any, Any]) -> str | None:
@@ -445,8 +447,8 @@ def _train_refusal(task: Task[Any, Any]) -> str | None:
 @shared_task(
     bind=True,
     name="research.shadow_train",
-    soft_time_limit=SHADOW_TRAIN_SOFT_SECONDS,
-    time_limit=SHADOW_TRAIN_HARD_SECONDS,
+    soft_time_limit=settings.RESEARCH_SHADOW_TRAIN_SOFT_SECONDS,
+    time_limit=settings.RESEARCH_SHADOW_TRAIN_HARD_SECONDS,
 )
 def shadow_train(self: Task[Any, Any], day: str) -> str:
     """Freeze each candidate on its slot's new serving run; a refusal or failure only warns."""
@@ -470,7 +472,9 @@ def shadow_train(self: Task[Any, Any], day: str) -> str:
         try:
             row = freeze(name, settings.FEATURE_PARQUET_DIR)
         except SoftTimeLimitExceeded:
-            failed[name] = f"stopped at the {SHADOW_TRAIN_SOFT_SECONDS} s limit"
+            failed[name] = (
+                f"stopped at the {settings.RESEARCH_SHADOW_TRAIN_SOFT_SECONDS} s soft limit"
+            )
             break
         except Exception as error:
             logger.error("research shadow_train %s %s failed: %s", day, name, error)
