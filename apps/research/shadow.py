@@ -362,14 +362,11 @@ def _scores(
         return False
     done.scores[name] = scored
     done.notes.extend(scored.notes)
-    if not scored.complete:
-        said = f"stopped: the shadow budget ran out after {len(scored.scored)} days"
-        done.notes.append(_scores_failed(name, said))
     return scored.complete
 
 
 def _morning(session: date, books: Mapping[str, Spec], left: Callable[[], float]) -> Morning:
-    """C0's books, then each candidate's scores, then the candidates' books."""
+    """C0's books, then each candidate's scores and right after them its books."""
     done = Morning()
     due = {name: spec for name, spec in books.items() if spec.start <= session}
     if not due:
@@ -382,19 +379,16 @@ def _morning(session: date, books: Mapping[str, Spec], left: Callable[[], float]
         if spec.source is None:
             _book(done, name, spec, session, inputs, left)
     sources = list(dict.fromkeys(spec.source for spec in due.values() if spec.source))
-    ready = {
-        source
-        for source in sources
-        if _scores(done, source, _following(books, source), session, calendar, left)
-    }
-    for name, spec in due.items():
-        if spec.source is None:
-            continue
-        if spec.source in ready:
-            _book(done, name, spec, session, inputs, left)
-        else:
-            reason = f"skipped: {spec.source} has no scores this morning"
-            done.notes.append(_book_failed(name, spec, None, reason))
+    for source in sources:
+        ready = _scores(done, source, _following(books, source), session, calendar, left)
+        for name, spec in due.items():
+            if spec.source != source:
+                continue
+            if ready:
+                _book(done, name, spec, session, inputs, left)
+            else:
+                reason = f"skipped: {source} has no scores this morning"
+                done.notes.append(_book_failed(name, spec, None, reason))
     return done
 
 

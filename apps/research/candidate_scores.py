@@ -1,7 +1,7 @@
 """Each morning's shadow candidate scores (holding-shadow-prereg.md §7), kept out of prediction."""
 
 from collections.abc import Callable, Collection
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -157,7 +157,7 @@ def score_candidate(
     """Score each unscored signal day its books have not listed yet, one transaction a day.
 
     Days under a missing or changed file get no rows; the newest artifact's gets one note a day.
-    A spent budget stops before the next day, the days already scored kept.
+    A spent budget or a failing day stops it with a note, the days already scored kept.
     """
     result = Scored()
     with transaction.atomic():
@@ -173,8 +173,8 @@ def score_candidate(
         if row is None:
             continue
         if left() <= 0:
-            result.complete = False
-            break
+            stopped = f"stopped: the shadow budget ran out after {len(result.scored)} days"
+            return _stopped(result, name, day, stopped)
         key = (row.serving_run_id, row.generation)
         if key not in loaded and key not in invalid:
             try:
@@ -185,13 +185,26 @@ def score_candidate(
                     result.notes.append(_invalid(name, day, error))
         if key in invalid:
             continue
-        with transaction.atomic():
-            frame = SCORERS[name](loaded[key], row, day, _serving_rows(day))
-            ShadowScore.objects.bulk_create(_rows(name, row, day, frame))
+        try:
+            with transaction.atomic():
+                frame = SCORERS[name](loaded[key], row, day, _serving_rows(day))
+                ShadowScore.objects.bulk_create(_rows(name, row, day, frame))
+        except Exception as error:
+            return _stopped(result, name, day, f"{type(error).__name__}: {error}")
         result.scored.append(day.isoformat())
         if label(row) not in result.artifacts:
             result.artifacts.append(label(row))
     return result
+
+
+def _stopped(result: Scored, name: str, day: date, said: str) -> Scored:
+    note = {
+        "book": name,
+        "role": "candidate",
+        "signal_date": day.isoformat(),
+        "scores_failed": said,
+    }
+    return replace(result, complete=False, notes=[*result.notes, note])
 
 
 def _invalid(name: str, day: date, error: RunError) -> dict[str, Any]:

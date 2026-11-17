@@ -735,37 +735,75 @@ def test_a_candidate_whose_scores_fail_leaves_c0_alone_and_skips_its_own_book(
     assert "T-C1" not in outcome.detail["books"]
 
 
-def test_a_failing_candidate_book_rolls_back_alone(
+def test_a_failing_candidate_book_rolls_back_its_earlier_day_of_the_same_morning(
     market: list[date], clock: dict[str, datetime], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    alone = alone_then_cleared(market, clock, 4)
+    mornings(market[:3], clock)
     frozen("C1", market[2], tmp_path)
     scored_against_c0("C1")
     monkeypatch.setattr(shadow, "score_candidate", lambda *args: Scored())
     real = shadow.order_list
+    lists: list[int] = []
 
     def breaks(held: Any, score: Any, *args: Any) -> Any:
         if np.nanmax(score) < 0:
-            raise ArithmeticError("bad candidate day")
+            lists.append(1)
+            if len(lists) == 2:
+                raise ArithmeticError("bad candidate day")
         return real(held, score, *args)
 
     monkeypatch.setattr(shadow, "order_list", breaks)
     Prediction.objects.filter(score__lt=0).update(score=F("score") * -1)
     ShadowScore.objects.filter(score__gt=0).update(score=F("score") * -1)
+    clock["at"] = at(market[3] + timedelta(days=1), time(6, 30))
 
-    outcome = mornings(market[:4], clock, CANDIDATE_BOOKS)[-1]
+    outcome = record_books(market[3], CANDIDATE_BOOKS)
 
+    assert len(lists) == 2
     assert not HoldingBookDay.objects.filter(book="T-C1").exists()
+    assert not HoldingBookAction.objects.filter(book="T-C1").exists()
     assert outcome.detail["notes"] == [
         {
             "book": "T-C1",
             "role": "candidate",
-            "signal_date": "2026-11-18",
+            "signal_date": "2026-11-19",
             "book_failed": "ArithmeticError: bad candidate day",
         }
     ]
     assert outcome.detail["books"]["T"]["listed"] == ["2026-11-19"]
-    assert written("T") != alone
+
+
+@pytest.mark.django_db(transaction=True)
+def test_one_candidate_spending_the_budget_leaves_the_other_s_book_written(
+    market: list[date], clock: dict[str, datetime], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    frozen("C1", market[2], tmp_path)
+    frozen("C2", market[2], tmp_path)
+    scored_against_c0("C1")
+    scored_against_c0("C2")
+    books = {**CANDIDATE_BOOKS, "T-C2": Spec(RULE, market[2], "C2")}
+    ticks = {"now": 0.0}
+    monkeypatch.setattr(shadow, "monotonic", lambda: ticks["now"])
+
+    def scores(name: str, *args: Any) -> Scored:
+        if name == "C2":
+            ticks["now"] += shadow.BUDGET_SECONDS + 1
+        return Scored()
+
+    monkeypatch.setattr(shadow, "score_candidate", scores)
+    clock["at"] = at(market[3], time(6, 30))
+
+    outcome = record_books(market[2], books)
+
+    assert list(outcome.detail["books"]) == ["T", "T-C1"]
+    assert outcome.detail["notes"] == [
+        {
+            "book": "T-C2",
+            "role": "candidate",
+            "signal_date": None,
+            "book_failed": "skipped: the shadow budget ran out",
+        }
+    ]
 
 
 @pytest.mark.django_db(transaction=True)
@@ -875,19 +913,23 @@ def test_scores_the_budget_cut_short_skip_the_candidate_book_until_they_are_comp
     market: list[date], clock: dict[str, datetime], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     frozen("C1", market[2], tmp_path)
+    stopped = {
+        "book": "C1",
+        "role": "candidate",
+        "signal_date": "2026-11-19",
+        "scores_failed": "stopped: the shadow budget ran out after 1 days",
+    }
     monkeypatch.setattr(
-        shadow, "score_candidate", lambda *args: Scored(["2026-11-18"], complete=False)
+        shadow,
+        "score_candidate",
+        lambda *args: Scored(["2026-11-18"], notes=[stopped], complete=False),
     )
 
     outcome = mornings(market[:3], clock, CANDIDATE_BOOKS)[-1]
 
     assert "T-C1" not in outcome.detail["books"]
     assert outcome.detail["notes"] == [
-        {
-            "book": "C1",
-            "role": "candidate",
-            "scores_failed": "stopped: the shadow budget ran out after 1 days",
-        },
+        stopped,
         {
             "book": "T-C1",
             "role": "candidate",

@@ -16,7 +16,7 @@ from django.core.management.base import CommandError
 from django.db import IntegrityError, transaction
 
 from apps.market.models import IndexDaily
-from apps.research import candidates, lgbm_runs
+from apps.research import candidate_scores, candidates, lgbm_runs
 from apps.research.baseline_runs import RANK_LABEL, fold_inputs
 from apps.research.baselines import fit_ridge
 from apps.research.candidate_scores import score_candidate
@@ -597,6 +597,14 @@ def test_a_spent_budget_keeps_the_days_scored_and_the_next_morning_scores_the_re
     cut = score_candidate("C1", SCORED[-1], panel_calendar(), lambda: next(budget))
 
     assert (cut.scored, cut.complete) == (["2016-12-01"], False)
+    assert cut.notes == [
+        {
+            "book": "C1",
+            "role": "candidate",
+            "signal_date": "2016-12-02",
+            "scores_failed": "stopped: the shadow budget ran out after 1 days",
+        }
+    ]
     assert set(ShadowScore.objects.values_list("date", flat=True)) == {SCORED[0]}
     rest = score_candidate("C1", SCORED[-1], panel_calendar(), plenty)
     assert (rest.scored, rest.complete) == (["2016-12-02"], True)
@@ -610,3 +618,31 @@ def test_a_day_its_books_already_listed_is_never_scored(served: Path) -> None:
 
     assert got.scored == ["2016-12-02"]
     assert set(ShadowScore.objects.values_list("date", flat=True)) == {SCORED[1]}
+
+
+def test_a_failing_day_keeps_the_days_scored_before_it_and_says_which_day(
+    served: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    freeze("C1", served)
+    _predicted(SCORED)
+    real = candidate_scores.SCORERS["C1"]
+
+    def scorer(model: Any, row: ShadowArtifact, day: date, base: pd.DataFrame) -> pd.DataFrame:
+        if day == SCORED[1]:
+            raise ArithmeticError("no features")
+        return real(model, row, day, base)
+
+    monkeypatch.setitem(candidate_scores.SCORERS, "C1", scorer)
+
+    got = score_candidate("C1", SCORED[-1], panel_calendar(), plenty)
+
+    assert (got.scored, got.complete) == (["2016-12-01"], False)
+    assert got.notes == [
+        {
+            "book": "C1",
+            "role": "candidate",
+            "signal_date": "2016-12-02",
+            "scores_failed": "ArithmeticError: no features",
+        }
+    ]
+    assert set(ShadowScore.objects.values_list("date", flat=True)) == {SCORED[0]}
