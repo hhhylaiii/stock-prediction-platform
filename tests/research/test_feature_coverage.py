@@ -518,6 +518,63 @@ def test_a_rerun_replaces_the_day_s_row(
     assert sent == [(DAY, Severity.WARNING)]
 
 
+def rerun_at(
+    moment: datetime, directory: Path, calendar: TradingDays, shares: Shares
+) -> DataQualityLog:
+    live(directory, shares)
+    with time_machine.travel(moment, tick=False):
+        return run_coverage(DAY, calendar, directory)
+
+
+def test_a_rerun_that_changes_the_result_keeps_each_replaced_one_in_previous(
+    tmp_path: Path, calendar: TradingDays, sent: list[tuple[date, str]]
+) -> None:
+    taipei = ZoneInfo("Asia/Taipei")
+    history(tmp_path)
+    first = rerun_at(datetime(2026, 11, 7, 6, 1, tzinfo=taipei), tmp_path, calendar, {DENSE: 0.4})
+    second = rerun_at(datetime(2026, 11, 8, 6, 2, tzinfo=taipei), tmp_path, calendar, {SPARSE: 0})
+    third = rerun_at(datetime(2026, 11, 9, 6, 3, tzinfo=taipei), tmp_path, calendar, {})
+    again = rerun_at(datetime(2026, 11, 10, 6, 4, tzinfo=taipei), tmp_path, calendar, {})
+
+    assert [row.severity for row in (first, second, third, again)] == [
+        Severity.ERROR,
+        Severity.WARNING,
+        Severity.INFO,
+        Severity.INFO,
+    ]
+    assert "previous" not in first.detail
+    stored = DataQualityLog.objects.get(date=DAY, check_name=CHECK)
+    assert stored.detail["previous"] == [
+        {
+            "severity": Severity.ERROR,
+            "flagged": [DENSE],
+            "collapsed": [DENSE],
+            "replaced_at": "2026-11-08T06:02:00+08:00",
+        },
+        {
+            "severity": Severity.WARNING,
+            "flagged": [SPARSE],
+            "collapsed": [],
+            "replaced_at": "2026-11-09T06:03:00+08:00",
+        },
+    ]
+    assert third.detail["previous"] == stored.detail["previous"]
+
+
+def test_a_rerun_with_the_same_result_adds_no_previous(
+    tmp_path: Path, calendar: TradingDays, sent: list[tuple[date, str]]
+) -> None:
+    history(tmp_path)
+    live(tmp_path, {SPARSE: 0.0})
+    run_coverage(DAY, calendar, tmp_path)
+    live(tmp_path, {SPARSE: 0.01})
+
+    row = run_coverage(DAY, calendar, tmp_path)
+
+    assert row.severity == Severity.WARNING
+    assert "previous" not in DataQualityLog.objects.get(date=DAY, check_name=CHECK).detail
+
+
 def test_a_warning_is_sent_only_when_the_flagged_features_change(
     tmp_path: Path, calendar: TradingDays, sent: list[tuple[date, str]]
 ) -> None:

@@ -10,6 +10,7 @@ from typing import Any
 
 import pandas as pd
 from django.db import transaction
+from django.utils import timezone
 
 from apps.etl.alerts import dispatch
 from apps.etl.models import DataQualityLog
@@ -25,6 +26,7 @@ from apps.research.runs import RunError
 CHECK = "monitor_feature_coverage"
 UNIVERSE = "universe"
 FLAGGED = "flagged"
+PREVIOUS = "previous"
 LOW_QUANTILE = 0.05
 USUALLY_FILLED = 0.5
 HALF = 0.5
@@ -274,19 +276,44 @@ def coverage_summary(row: DataQualityLog) -> str:
     return f"{judged}, {shown}{stopped}"
 
 
+def _state(row: DataQualityLog) -> dict[str, Any]:
+    """What a rerun compares: the severity, then the flagged and the collapsed features."""
+    entries = row.detail.get(FLAGGED, [])
+    return {
+        "severity": str(row.severity),
+        "flagged": [entry["feature"] for entry in entries],
+        "collapsed": [entry["feature"] for entry in entries if entry.get("collapsed")],
+    }
+
+
+def _with_previous(row: DataQualityLog, earlier: DataQualityLog | None) -> DataQualityLog:
+    """The row with the earlier row's previous results, and the earlier one too if it differed."""
+    kept = [] if earlier is None else list(earlier.detail.get(PREVIOUS, []))
+    if earlier is not None and _state(earlier) != _state(row):
+        replaced_at = timezone.localtime().isoformat(timespec="seconds")
+        kept = [*kept, {**_state(earlier), "replaced_at": replaced_at}]
+    if not kept:
+        return row
+    detail = {**row.detail, PREVIOUS: kept}
+    return DataQualityLog(date=row.date, check_name=CHECK, severity=row.severity, detail=detail)
+
+
 @locked("coverage")
 def run_coverage(
     day: date, calendar: TradingDays, directory: Path, alert: bool = True
 ) -> DataQualityLog:
     """Write the day's row over its earlier one; an error always alerts, a warning on a new list.
 
-    An error row shuts the day's prediction gate, which reads data_quality_log.
+    An error row shuts the day's prediction gate, which reads data_quality_log. A rewrite that
+    changes the result keeps the replaced one in detail.previous.
     """
     if not calendar.is_trading_day(day):
         raise CoverageError(f"{day} is not a trading day")
-    row = coverage_row(day, directory)
+    fresh = coverage_row(day, directory)
     with transaction.atomic():
-        DataQualityLog.objects.filter(date=day, check_name=CHECK).delete()
+        rows = DataQualityLog.objects.filter(date=day, check_name=CHECK)
+        row = _with_previous(fresh, rows.order_by("-pk").first())
+        rows.delete()
         row.save()
     changed = _names(row) != _flagged_before(day, calendar)
     if alert and (row.severity == Severity.ERROR or (row.severity == Severity.WARNING and changed)):
