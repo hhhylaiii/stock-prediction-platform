@@ -61,6 +61,7 @@ SKIPPED = (
     f"no morning chain finished before the cutoff in the month's first {RETRAIN_WINDOW} sessions"
 )
 GATE_SHUT = "research gate shut"
+COVERAGE_SHUT = f"shut by a {COVERAGE_CHECK} error; the chain checks the day again"
 OUTSIDE_CALENDAR = "the trading calendar does not cover the day"
 US_CLOSE_MISSING = "missing"
 EVENING_STEPS = ("recent_features", "labels")
@@ -368,12 +369,18 @@ def _failed(check: str, day: date, name: str, error: Exception, done: list[Done]
     _record(day, check, Severity.WARNING, detail)
 
 
-def _start(check: str, day: date, names: tuple[str, ...], extra: dict[str, str]) -> None:
+def _start(
+    check: str,
+    day: date,
+    names: tuple[str, ...],
+    extra: dict[str, str],
+    opened: tuple[Done, ...] = (),
+) -> None:
     """Queue the steps as one chain; each starts only once the one before it succeeded."""
     iso = day.isoformat()
     first, *rest = names
     chain(
-        step.s([], first, check, iso),
+        step.s(list(opened), first, check, iso),
         *(step.s(name, check, iso) for name in rest),
         finish.s(check, iso, extra),
     ).delay()
@@ -599,6 +606,13 @@ def _build_all(day: date, free: float | None) -> dict[str, Any]:
     return _retrain_detail(refused, built, failed, free, runs)
 
 
+def _reopened(day: date) -> tuple[Done, ...]:
+    """A first entry when a coverage error had shut the day's gate; predict's gate decides anew."""
+    rows = DataQualityLog.objects.filter(date=day, check_name=COVERAGE_CHECK)
+    shut = rows.filter(severity=Severity.ERROR).exists()
+    return ({"step": "gate", "result": COVERAGE_SHUT},) if shut else ()
+
+
 def _flag_missed(calendar: TradingDays, day: date) -> None:
     """Warn when the session before day had no morning run though one of the few before it did."""
     try:
@@ -678,7 +692,7 @@ def morning(self: Task[Any, Any], day: str | None = None) -> str:
         detail = {"reason": CONCURRENT, "concurrency": concurrency}
         _record(session, MORNING_CHECK, Severity.WARNING, detail)
         return "concurrent"
-    if not ready_for_research(session):
+    if not ready_for_research(session, besides=(COVERAGE_CHECK,)):
         _record(session, MORNING_CHECK, Severity.WARNING, {"reason": GATE_SHUT})
         return "gate shut"
     landed = _us_close_landed(session)
@@ -690,5 +704,6 @@ def morning(self: Task[Any, Any], day: str | None = None) -> str:
     steps = MORNING_STEPS if _finished(session, EVENING_CHECK) else made_up
     last = ("promote",) if _pending(session) else ()
     names = _with_rebuild((*steps, *last, "shadow"))
-    _start(MORNING_CHECK, session, names, {} if landed else {"us_close": US_CLOSE_MISSING})
+    extra = {} if landed else {"us_close": US_CLOSE_MISSING}
+    _start(MORNING_CHECK, session, names, extra, _reopened(session))
     return "started"
