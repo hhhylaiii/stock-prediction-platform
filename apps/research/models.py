@@ -663,7 +663,7 @@ SHA256 = r"^[0-9a-f]{64}$"
 class ShadowArtifact(models.Model):
     """A candidate's frozen model file: its hash, fold and the serving run it follows; never edited.
 
-    A lost or replaced file gets the next generation; earlier rows and their scores stay.
+    A lost or changed file gets the next generation; earlier rows and their scores stay.
     """
 
     pk = models.CompositePrimaryKey("candidate", "serving_run_id", "generation")
