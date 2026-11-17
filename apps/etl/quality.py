@@ -1,6 +1,6 @@
 """Daily data-quality checks of SPEC §5, written to data_quality_log."""
 
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from datetime import date, timedelta
 from decimal import Decimal
 from typing import Any
@@ -89,15 +89,18 @@ def run_checks(day: date, calendar: TradingDays) -> list[DataQualityLog]:
         return DataQualityLog.objects.bulk_create(found)
 
 
-def should_run_prediction(day: date) -> bool:
-    """True once every check ran for the day and nothing that day is an error."""
+def should_run_prediction(day: date, besides: Collection[str] = ()) -> bool:
+    """True once every check ran for the day and nothing that day is an error, besides those named.
+
+    A check named in besides still has to have run; only its errors are left out.
+    """
     ran = set(
         DataQualityLog.objects.filter(date=day, check_name__in=CHECKS).values_list(
             "check_name", flat=True
         )
     )
-    errors = DataQualityLog.objects.filter(date=day, severity=Severity.ERROR).exists()
-    return ran == set(CHECKS) and not errors
+    errors = DataQualityLog.objects.filter(date=day, severity=Severity.ERROR)
+    return ran == set(CHECKS) and not errors.exclude(check_name__in=list(besides)).exists()
 
 
 def row_count_results(day: date, previous: date | None) -> list[DataQualityLog]:
