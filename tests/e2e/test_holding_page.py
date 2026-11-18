@@ -55,6 +55,14 @@ def three_fills(
     add_fill(s[-2], s[-1], 1.0197, universe=0.02, cash=0.004, held=3, stuck=("1101",))
 
 
+def tracks_match_cells(page: Page) -> bool:
+    """Whether the first row has one grid track per cell, so no cell wraps to a second line."""
+    tracks, cells = page.locator("#rows .trow").first.evaluate(
+        "e => [getComputedStyle(e).gridTemplateColumns.split(' ').length, e.children.length]"
+    )
+    return bool(tracks == cells)
+
+
 def five_day(page: Page, live_server: LiveServer) -> None:
     page.goto(f"{live_server.url}/#today")
     page.locator('[data-h="5"]').click()
@@ -378,7 +386,7 @@ def test_paging_keeps_the_block_and_reads_the_book_once(
     assert sum("/api/holding" in url for url in asked) == 1
 
 
-def test_the_sorted_five_day_table_fits_a_1440_wide_window(
+def test_the_five_day_table_fits_a_1440_wide_window_sorted_or_not(
     page: Page, live_server: LiveServer, predicted: Seed
 ) -> None:
     last = predicted.last_session
@@ -386,13 +394,19 @@ def test_the_sorted_five_day_table_fits_a_1440_wide_window(
     page.set_viewport_size({"width": 1440, "height": 900})
 
     five_day(page, live_server)
+    assert tracks_match_cells(page)
+    unsorted, room = page.locator("#view-today .scroll").evaluate(
+        "e => [e.scrollWidth, e.clientWidth]"
+    )
     page.locator('#view-today .thead [data-order="close"]').click()
 
     expect(page.locator("#first-head")).to_have_text("位置")
     width, visible = page.locator("#view-today .scroll").evaluate(
         "e => [e.scrollWidth, e.clientWidth]"
     )
+    assert unsorted <= room
     assert width <= visible
+    assert tracks_match_cells(page)
     expect(page.locator('#view-today .thead [data-order="price_pred"]')).to_be_in_viewport()
 
 
@@ -418,3 +432,36 @@ def test_a_book_cached_before_the_predictions_moved_is_read_again(
     expect(page.locator("#holding .lead-line")).to_be_visible()
     expect(page.locator("#holding .lagging")).to_have_count(0)
     assert len(asked) == 2
+
+
+def test_a_failed_prediction_table_keeps_the_list(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    last = predicted.last_session
+    add_list(last, after(last), LIST)
+
+    def fail(route: Route) -> None:
+        route.fulfill(status=500, content_type="application/json", body="{}")
+
+    page.goto(f"{live_server.url}/#today")
+    expect(page.locator("#rows .trow").first).to_be_visible()
+    page.route("**/api/predictions?horizon=5*", fail)
+    page.locator('[data-h="5"]').click()
+
+    expect(page.locator("#rows .error")).to_be_visible()
+    expect(page.locator("#holding .lead-line")).to_be_visible()
+
+
+def test_a_lagging_list_is_read_again_once_the_book_step_wrote(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    s, last = predicted.sessions, predicted.last_session
+    add_list(s[-2], last, LIST)
+
+    five_day(page, live_server)
+    expect(page.locator("#holding .lagging")).to_be_visible()
+    add_list(last, after(last), LIST)
+    page.locator("#next-page").click()
+
+    expect(page.locator("#holding .lagging")).to_have_count(0)
+    expect(page.locator("#holding .lead-line")).to_contain_text(f"{md(last)} 收盤後的規則名單")

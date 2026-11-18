@@ -24,14 +24,18 @@ def add_list(
     book: str = MAIN_BOOK,
     status: str = BookStatus.LISTED,
     backfilled: bool = False,
+    universe: list[str] | None = None,
 ) -> None:
+    """A list and its lines; its universe is the listed stocks, or empty without predictions."""
     lines = actions or {}
+    listed = sorted(lines) or ["2330"]
     HoldingBookDay.objects.create(
         book=book,
         signal_date=signal,
         phase=BookPhase.LIST,
         trade_date=trade,
         status=status,
+        universe=(listed if status == BookStatus.LISTED else []) if universe is None else universe,
         run_id="rank-2026-11.h5",
         held_before=sum(
             action in (BookAction.KEEP, BookAction.SELL) for action, _, _ in lines.values()

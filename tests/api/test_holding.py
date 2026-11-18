@@ -163,6 +163,17 @@ def test_a_day_without_predictions_has_no_actions_and_is_counted_after_the_first
     assert [point["universe"] for point in data["since"]["points"]] == [1.0, 1.0]
 
 
+def test_only_lists_with_an_empty_universe_are_counted(client: Client, stocks: None) -> None:
+    add_list(S0, D0, {"2330": (BookAction.BUY, 1, 0.95)})
+    add_fill(S0, D0, 0.99)
+    add_list(D0, D1, status=BookStatus.NO_PREDICTION, universe=["2330", "2454"])
+    add_fill(D0, D1, 1.0, universe=0.01, status=BookStatus.IDLE)
+    add_list(D1, D2, status=BookStatus.NO_PREDICTION)
+    add_fill(D1, D2, 1.0, universe=0.0, status=BookStatus.IDLE)
+
+    assert holding(client)["data"]["since"]["no_prediction_days"] == 1
+
+
 def test_a_first_list_without_predictions_is_not_counted(client: Client, stocks: None) -> None:
     add_list(S0, D0, status=BookStatus.NO_PREDICTION)
     add_fill(S0, D0, 1.0, status=BookStatus.IDLE)
