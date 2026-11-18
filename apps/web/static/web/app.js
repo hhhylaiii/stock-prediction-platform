@@ -129,9 +129,13 @@
     return { label: '通過', cls: 'in', text: '全部檢查通過。' };
   }
 
+  function fallbackOf(available, wanted) {
+    return !available.length || available.includes(wanted) ? wanted : Math.max(...available);
+  }
+
   function preferHorizon(available) {
     if (state.picked) return false;
-    const next = !available.length || available.includes(DEFAULT_HORIZON) ? DEFAULT_HORIZON : Math.max(...available);
+    const next = fallbackOf(available, DEFAULT_HORIZON);
     if (next === state.h) return false;
     state.h = next;
     state.page = 1;
@@ -857,13 +861,10 @@
       controls();
     });
     let forecasts = { status: 'pending' };
-    let shownH = state.h;
-    const stockHorizon = () => {
-      if (forecasts.status !== 'fulfilled') return state.h;
-      const ready = forecasts.value.data.horizons.filter(entry => entry.prediction).map(entry => entry.horizon);
-      return !ready.length || ready.includes(state.h) ? state.h : Math.max(...ready);
-    };
-    const entryOf = () => forecasts.status === 'fulfilled' ? forecasts.value.data.horizons.find(entry => entry.horizon === shownH) : null;
+    let stockH = state.h;
+    const readyHorizons = () => forecasts.status === 'fulfilled' ? forecasts.value.data.horizons.filter(entry => entry.prediction).map(entry => entry.horizon) : [];
+    const stockHorizon = () => forecasts.status === 'fulfilled' ? fallbackOf(readyHorizons(), state.h) : state.h;
+    const entryOf = () => forecasts.status === 'fulfilled' ? forecasts.value.data.horizons.find(entry => entry.horizon === stockH) : null;
     const drawChart = () => {
       const bars = prices.status === 'fulfilled' ? prices.value.data : [];
       const candidate = fanOf(entryOf());
@@ -884,9 +885,9 @@
     };
     const showSeg = () => {
       if (forecasts.status !== 'fulfilled') return;
-      const ready = new Set(forecasts.value.data.horizons.filter(entry => entry.prediction).map(entry => entry.horizon));
+      const ready = new Set(readyHorizons());
       const buttons = [...document.querySelectorAll('#stock-seg [data-sh]')];
-      buttons.forEach(b => { b.disabled = !ready.has(Number(b.dataset.sh)); });
+      buttons.forEach(b => { b.disabled = !ready.has(Number(b.dataset.sh)); if (b.disabled) b.setAttribute('aria-pressed', 'false'); });
       const missing = buttons.filter(b => b.disabled).map(b => Number(b.dataset.sh));
       const entryOfH = h => forecasts.value.data.horizons.find(entry => entry.horizon === h);
       const offline = missing.filter(h => !rankServed(entryOfH(h))).map(h => h + ' 日');
@@ -896,13 +897,13 @@
       document.getElementById('stock-seg-hint').textContent = !ready.size ? none : parts.join('；');
     };
     const drawHorizon = () => {
-      shownH = stockHorizon();
+      stockH = stockHorizon();
       controls();
-      document.querySelectorAll('#stock-seg [data-sh]').forEach(b => b.setAttribute('aria-pressed', String(Number(b.dataset.sh) === shownH)));
-      document.querySelector('#stock-rank .l').textContent = shownH + ' 日預測排名';
+      document.querySelectorAll('#stock-seg [data-sh]').forEach(b => b.setAttribute('aria-pressed', String(Number(b.dataset.sh) === stockH && !b.disabled)));
+      document.querySelector('#stock-rank .l').textContent = stockH + ' 日預測排名';
       showRank();
       drawChart();
-      loadFeatures(s.stock_id, token, shownH);
+      loadFeatures(s.stock_id, token, stockH);
     };
     document.querySelectorAll('#stock-seg [data-sh]').forEach(b => b.addEventListener('click', () => { state.h = Number(b.dataset.sh); state.picked = true; state.page = 1; drawHorizon(); }));
     document.querySelectorAll('#chart-seg [data-ct]').forEach(b => b.addEventListener('click', () => {
@@ -916,8 +917,7 @@
       forecasts = result;
       document.querySelector('#forecasts .body').innerHTML = result.status === 'rejected' ? errorBox(result.reason) : forecastsHtml(result.value.data, result.value.meta);
       showSeg();
-      const ready = result.status === 'fulfilled' ? result.value.data.horizons.filter(entry => entry.prediction).map(entry => entry.horizon) : [];
-      if (!stockEl.hidden && (preferHorizon(ready) || stockHorizon() !== shownH)) { drawHorizon(); return; }
+      if (!stockEl.hidden && (preferHorizon(readyHorizons()) || stockHorizon() !== stockH)) { drawHorizon(); return; }
       showRank();
       if (fanOf(entryOf())) drawChart();
     });
