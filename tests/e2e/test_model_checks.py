@@ -743,14 +743,14 @@ DEFERRED: dict[str, object] = {"free_percent": 68.4, "min_free": 70, "tries": 6}
 @pytest.mark.parametrize(
     ("detail", "lines"),
     [
-        (DEFERRED, ["可用記憶體 68.4%，低於門檻 70%，當天讀 6 次都不足"]),
+        (DEFERRED, ["可用記憶體 68.4%，低於門檻 70%，讀了 6 次都不足"]),
         (
             {"free_percent": 41, "min_free": 70.0, "tries": 1},
-            ["可用記憶體 41.0%，低於門檻 70%，當天讀 1 次都不足"],
+            ["可用記憶體 41.0%，低於門檻 70%，讀了 1 次都不足"],
         ),
         (
             {"free_percent": 69.97, "min_free": 70, "tries": 6},
-            ["可用記憶體 69.9%，低於門檻 70%，當天讀 6 次都不足"],
+            ["可用記憶體 69.9%，低於門檻 70%，讀了 6 次都不足"],
         ),
         ({"free_percent": 68.4, "min_free": 70}, ["警告"]),
         ({"free_percent": 68.4, "tries": 6}, ["警告"]),
@@ -768,6 +768,20 @@ def test_a_deferred_retrain_reads_the_memory_it_saw_against_the_floor(
     row = page.locator("#model-checks .check").filter(has_text="每月重訓延後")
     expect(row.locator(".muted.small")).to_have_text(lines)
     expect(row.locator("i")).to_have_class("warn")
+
+
+def test_a_deferred_retrain_dot_follows_its_severity(
+    page: Page, live_server: LiveServer, seeded: Seed
+) -> None:
+    log(seeded, "research_retrain_deferred", "info", DEFERRED)
+
+    page.goto(f"{live_server.url}/#models")
+
+    row = page.locator("#model-checks .check").filter(has_text="每月重訓延後")
+    expect(row.locator(".muted.small")).to_have_text(
+        ["可用記憶體 68.4%，低於門檻 70%，讀了 6 次都不足"]
+    )
+    expect(row.locator("i")).not_to_have_class("warn")
 
 
 def test_a_rebuild_shows_every_row_of_its_day_the_one_left_by_hand_first(

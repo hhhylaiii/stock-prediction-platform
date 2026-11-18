@@ -1267,7 +1267,7 @@
 
   function deferredLine(d) {
     const known = ['free_percent', 'min_free', 'tries'].every(key => typeof d[key] === 'number');
-    return known ? '可用記憶體 ' + (Math.floor(d.free_percent * 10) / 10).toFixed(1) + '%，低於門檻 ' + d.min_free + '%，當天讀 ' + fmtInt(d.tries) + ' 次都不足' : null;
+    return known ? '可用記憶體 ' + (Math.floor(d.free_percent * 10) / 10).toFixed(1) + '%，低於門檻 ' + d.min_free + '%，讀了 ' + fmtInt(d.tries) + ' 次都不足' : null;
   }
 
   const scopeReasons = (reasons, word) => Object.entries(reasons || {}).map(([scope, reason]) => (SCOPES[scope] || scope) + word + '：' + reason);
