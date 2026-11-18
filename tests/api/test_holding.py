@@ -7,105 +7,19 @@ from pytest_django import DjangoAssertNumQueries
 
 from apps.api.holding import BOOK_START, MAIN_BOOK, RULE_NAME
 from apps.market.models import IndexDaily
-from apps.research.models import (
-    BookAction,
-    BookPhase,
-    BookStatus,
-    HoldingBookAction,
-    HoldingBookDay,
-)
+from apps.research.models import BookAction, BookStatus
 from apps.research.shadow import BOOKS
 from tests.api.conftest import add_model_run, add_predictions, add_stock, envelope_of
+from tests.holding_books import add_closes as shared_closes
+from tests.holding_books import add_fill, add_list
 
 MAIN = MAIN_BOOK
 S0, D0, D1, D2, D3 = (date(2026, 11, day) for day in (16, 17, 18, 19, 20))
-FILL_FIELDS = {"value": 1.0, "cash": 1.0, "paid": 0.0, "traded": 0.0, "held": 0}
-
-
-def add_list(
-    signal: date,
-    trade: date,
-    actions: dict[str, tuple[str, int, float | None]] | None = None,
-    book: str = MAIN,
-    status: str = BookStatus.LISTED,
-    backfilled: bool = False,
-) -> None:
-    lines = actions or {}
-    HoldingBookDay.objects.create(
-        book=book,
-        signal_date=signal,
-        phase=BookPhase.LIST,
-        trade_date=trade,
-        status=status,
-        run_id="rank-2026-11.h5",
-        held_before=sum(
-            action in (BookAction.KEEP, BookAction.SELL) for action, _, _ in lines.values()
-        ),
-        sells=sum(action == BookAction.SELL for action, _, _ in lines.values()),
-        buys=sum(action == BookAction.BUY for action, _, _ in lines.values()),
-        backups=sum(action == BookAction.BACKUP for action, _, _ in lines.values()),
-        backfilled=backfilled,
-    )
-    HoldingBookAction.objects.bulk_create(
-        HoldingBookAction(
-            book=book,
-            signal_date=signal,
-            trade_date=trade,
-            stock_id=stock,
-            phase=BookPhase.LIST,
-            action=action,
-            priority=priority,
-            score=0.5,
-            pct=pct,
-            run_id="rank-2026-11.h5",
-        )
-        for stock, (action, priority, pct) in lines.items()
-    )
-
-
-def add_fill(
-    signal: date,
-    trade: date,
-    value: float,
-    universe: float | None = 0.0,
-    book: str = MAIN,
-    stuck: tuple[str, ...] = (),
-    **fields: Any,
-) -> None:
-    HoldingBookDay.objects.create(
-        book=book,
-        signal_date=signal,
-        phase=BookPhase.FILL,
-        trade_date=trade,
-        run_id="rank-2026-11.h5",
-        **{
-            "status": BookStatus.TRADED,
-            **FILL_FIELDS,
-            "value": value,
-            "universe_return": universe,
-            **fields,
-        },
-    )
-    HoldingBookAction.objects.bulk_create(
-        HoldingBookAction(
-            book=book,
-            signal_date=signal,
-            trade_date=trade,
-            stock_id=stock,
-            phase=BookPhase.FILL,
-            action=BookAction.STUCK,
-            value=0.03,
-        )
-        for stock in stuck
-    )
 
 
 def add_closes(**closes: float) -> None:
     days = {"d0": D0, "d1": D1, "d2": D2, "d3": D3}
-    IndexDaily.objects.bulk_create(
-        IndexDaily(index_id="TAIEX_TR", date=days[name], close=close)
-        for name, close in closes.items()
-    )
+    shared_closes({days[name]: close for name, close in closes.items()})
 
 
 def holding(client: Client) -> dict[str, Any]:
