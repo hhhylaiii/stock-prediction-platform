@@ -31,9 +31,7 @@ class Point:
 def cumulative(fills: Iterable[Fill]) -> list[Point]:
     """The book and index as ratios to the first day; the universe chained from the next day on.
 
-    The first day's universe return is close to close while the book bought at that open, so it is
-    left out; a missing universe return blanks the universe from that day on, a missing close
-    only its own day. Each fill must sign on the day the one before traded, so no day goes missing.
+    A missing universe return blanks the universe from that day on, a missing close only its day.
     """
     ordered = sorted(fills, key=lambda fill: fill.trade_date)
     if not ordered:
