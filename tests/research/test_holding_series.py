@@ -5,7 +5,7 @@ import pytest
 from apps.research.holding_series import Fill, Point, cumulative
 
 S0 = date(2026, 11, 16)
-D0, D1, D2, D3 = date(2026, 11, 17), date(2026, 11, 18), date(2026, 11, 19), date(2026, 11, 20)
+D0, D1, D2 = date(2026, 11, 17), date(2026, 11, 18), date(2026, 11, 19)
 D5 = date(2026, 11, 23)
 
 
@@ -22,8 +22,16 @@ def test_no_fills_is_no_series() -> None:
     assert cumulative([]) == []
 
 
-def test_the_first_fill_is_one_for_all_three_whatever_its_universe_return() -> None:
-    assert cumulative(run((D0, 0.99, 0.05, 25000.0))) == [Point(D0, 1.0, 1.0, 1.0)]
+@pytest.mark.parametrize("universe", [0.05, None])
+def test_the_first_fill_is_one_for_all_three_whatever_its_universe_return(
+    universe: float | None,
+) -> None:
+    fills = run((D0, 0.99, universe, 25000.0), (D1, 0.99, 0.01, 25000.0))
+
+    first, second = cumulative(fills)
+
+    assert first == Point(D0, 1.0, 1.0, 1.0)
+    assert second.universe == pytest.approx(1.01)
 
 
 def test_the_book_is_its_value_over_the_first_value() -> None:
@@ -101,8 +109,10 @@ def test_a_missing_fill_is_refused_instead_of_chaining_two_days_as_one() -> None
         ([Fill(S0, D0, float("nan"), 0.0, 1.0)], "not positive"),
         ([Fill(S0, D0, 1.0, float("inf"), 1.0)], "universe return inf"),
         ([Fill(S0, D0, 1.0, -1.0, 1.0)], "universe return -1.0"),
+        ([Fill(S0, D0, 1.0, float("nan"), 1.0)], "universe return nan"),
         ([Fill(S0, D0, 1.0, 0.0, 0.0)], "index close 0.0"),
         ([Fill(S0, D0, 1.0, 0.0, float("nan"))], "index close nan"),
+        ([Fill(S0, D0, 1.0, 0.0, float("inf"))], "index close inf"),
     ],
 )
 def test_a_fill_that_cannot_be_a_book_day_is_refused(fills: list[Fill], said: str) -> None:
