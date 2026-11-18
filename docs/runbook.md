@@ -136,7 +136,7 @@ docker compose logs -f worker
 
 ### 影子帳本
 
-這是研究紀錄，不是投資建議；規則見 `docs/reports/phase4/holding-shadow-prereg.md`。頁面與 API 只讀主紀錄 `H70N30-C0` 那一本（`/api/holding`，今日頁 5 日的名單區塊，見 `docs/api.md`）；候選與配對帳本不經頁面與 API（預先登錄 §7 第 3 條）。
+這是研究紀錄，不是投資建議；規則見 `docs/reports/phase4/holding-shadow-prereg.md`。頁面與 API 只讀主紀錄 `H70N30-C0` 那一本（`/api/holding`，今日頁 5 日的名單區塊，見 `docs/api.md`）；候選與配對帳本的內容（名單、分數、淨值）不經頁面與 API（預先登錄 §7 第 3 條）。
 
 - 06:00 的 chain 最後跑 `shadow`，排在換模之後、還原因子重建之前。每本帳依序先結算前一個訊號日的成交（`holding_book_day`、`holding_book_action` 的 `fill`），再寫 D 的名單（`list`）。固定的帳本列在 `apps/research/shadow.py` 的 `BOOKS`，目前只有 `H70N30-C0`，從 2026-11-16 起；候選凍結之後，另外自動多兩本：`H70N30-C1`（或 `-C2`）讀那個候選的分數，`H70N30-C0-YYYYMMDD` 讀 C0 的分數、和候選同一天從零開始，給 H0 §8.3 成對比較用（兩個候選同一天開始時共用一本）。兩本的起點都是候選第一個 artifact 的 `first_signal`。成交要等成交日的價格到齊、訊號日的 5 日 `untradable_t1` 也都結算；等不到就停在那天，下一天的名單也不寫，由下一個早上接著補。
 - 兩張表只新增：同一天重跑不會多寫，也不會改已記的列。名單在成交日 09:00 之後才寫的、成交在成交日的下一個交易日 09:00 之後才寫的，都標 `backfilled`；所以一次補好幾天時，09:00 前跑完的早上寫的最新一份名單和最新一筆成交不標。fill 的 `status` 是 `traded` 代表照名單結算（當天有分數），不代表一定有買賣；有沒有成交看 `paid`、`traded` 兩欄。
