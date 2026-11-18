@@ -54,6 +54,7 @@
     research_shadow: '持有規則影子帳本',
     research_shadow_train: '影子候選模型凍結',
     research_retrain: '每月重訓',
+    research_retrain_deferred: '每月重訓延後',
     research_promote: '自動換模',
     research_rebuild: '研究資料重建'
   };
@@ -106,7 +107,7 @@
     return out;
   }
 
-  const state = { h: DEFAULT_HORIZON, picked: false, ranked: [], mkt: 'all', q: '', ordering: 'rank', shownOrder: 'rank', orderable: null, watchOnly: false, intervalHeld: false, watch: new Set(), stock: '2330', chart: 'candle', stockToken: 0, featureToken: 0, todayToken: 0, routeToken: 0, statusToken: 0, page: 1, watchCache: null };
+  const state = { h: DEFAULT_HORIZON, picked: false, ranked: [], mkt: 'all', q: '', ordering: 'rank', shownOrder: 'rank', orderable: null, watchOnly: false, intervalHeld: false, watch: new Set(), stock: '2330', chart: 'candle', stockToken: 0, featureToken: 0, todayToken: 0, ruleOf: new Map(), shownH: null, holding: null, holdingShown: null, routeToken: 0, statusToken: 0, page: 1, watchCache: null };
   try { const c = localStorage.getItem('twp-chart'); if (c === 'line' || c === 'candle') state.chart = c; } catch (e) { state.chart = 'candle'; }
   try { const w = JSON.parse(localStorage.getItem('twp-watch') || '[]'); if (Array.isArray(w)) w.filter(c => STOCK_CODE.test(c)).forEach(c => state.watch.add(c)); } catch (e) { state.watch.clear(); }
   function saveWatch() { try { localStorage.setItem('twp-watch', JSON.stringify([...state.watch])); } catch (e) { return; } }
@@ -128,9 +129,13 @@
     return { label: '通過', cls: 'in', text: '全部檢查通過。' };
   }
 
+  function fallbackOf(available, wanted) {
+    return !available.length || available.includes(wanted) ? wanted : Math.max(...available);
+  }
+
   function preferHorizon(available) {
     if (state.picked) return false;
-    const next = !available.length || available.includes(DEFAULT_HORIZON) ? DEFAULT_HORIZON : Math.max(...available);
+    const next = fallbackOf(available, DEFAULT_HORIZON);
     if (next === state.h) return false;
     state.h = next;
     state.page = 1;
@@ -206,6 +211,107 @@
       (list ? '點表頭可以改依' + list + '排序。' : '');
   }
 
+  const holdingEl = document.getElementById('holding');
+  const holdingNoteEl = document.getElementById('holding-note');
+  const ruleHeadEl = document.getElementById('rule-head');
+  const RULE_HORIZON = 5;
+  const RULE_ACTIONS = { sell: '賣出', keep: '續抱', buy: '買進', backup: '備位', stuck: '賣不掉' };
+  const RULE_GROUPS = ['sell', 'keep', 'buy', 'backup'];
+  const RULE_SHOWN = 10;
+  const RULE_TEXT = '30 個等額位置，每個交易日檢查一次。續抱：百分位不低於 70%。賣出：低於 70%、不在訓練範圍或沒有分數。買進：沒持有、百分位不低於 90%，依分數由高到低補滿空位；備位依序遞補。模擬成交用次一交易日的還原開盤價，扣手續費 0.1425% 與賣出證交稅 0.3%。';
+  const FIRST_DAY_TEXT = '第一次成交那天，帳本是開盤買進到收盤、已扣買進手續費；等權 universe 與加權報酬指數是前一天收盤到當天收盤，兩者差一個隔夜，不能直接比，所以對照從那天的收盤起算，那天三者都是 1.0。';
+  const COMPARE_BASIS = '帳本在換手日含開盤成交與成本；等權 universe 與加權報酬指數不扣成本。';
+  const REVIEW_DAY = '2027-02-18';
+  const ruled = () => state.shownH === RULE_HORIZON;
+  const pctFloor = x => Math.floor(Math.round(x * 10000) / 100) + '%';
+  const sinceFirst = x => x === null || x === undefined ? '—' : sgn((x - 1) * 100, 2);
+
+  function ruleLabels(body) {
+    const labels = new Map(), d = (body && body.data) || {};
+    const add = (code, action) => labels.set(code, [...(labels.get(code) || []), RULE_ACTIONS[action] || action]);
+    ((d.list || {}).actions || []).forEach(line => add(line.stock_id, line.action));
+    ((d.fill || {}).stuck || []).forEach(line => add(line.stock_id, 'stuck'));
+    return labels;
+  }
+
+  const holdingLine = line => '<div class="hline"><span class="muted">' + esc(line.stock_id) + '</span> <span>' + esc(line.name || '—') + '</span> <span class="num faint">' + (line.pct === null ? '—' : pctFloor(line.pct)) + '</span></div>';
+
+  function groupHtml(action, lines) {
+    const head = '<h3>' + RULE_ACTIONS[action] + ' ' + fmtInt(lines.length) + ' 檔</h3>';
+    const folded = action === 'backup' ? lines : lines.slice(RULE_SHOWN);
+    const shown = action === 'backup' ? [] : lines.slice(0, RULE_SHOWN);
+    const summary = action === 'backup' ? '展開' : '其餘 ' + fmtInt(folded.length) + ' 檔';
+    return '<div class="group">' + head + shown.map(holdingLine).join('') +
+      (folded.length ? '<details><summary>' + summary + '</summary>' + folded.map(holdingLine).join('') + '</details>' : '') + '</div>';
+  }
+
+  function indexNote(points) {
+    const first = points[0], last = points[points.length - 1];
+    if (first.index === null) return '加權報酬指數在第一次成交那天（' + md(first.trade_date) + '）沒有收盤，這條對照先不顯示。';
+    return last.index === null ? '加權報酬指數 ' + md(last.trade_date) + ' 的收盤還沒進來，那天先不顯示。' : '';
+  }
+
+  function ledgerHtml(d) {
+    const fill = d.fill, since = d.since || {}, points = since.points || [];
+    if (!fill) return [];
+    const opened = points.length ? '，' + md(points[0].trade_date) + ' 開盤第一次模擬成交。' : '。';
+    const cash = fill.value > 0 ? (fill.cash / fill.value * 100).toFixed(1) + '%' : '—';
+    const out = ['<p class="ledger">帳本：' + md(d.start) + ' 收盤時是現金 1.0' + opened + '到 ' + md(fill.trade_date) + ' 收盤淨值 ' + fill.value.toFixed(4) + '（' + sgn((fill.value - 1) * 100, 2) + '），持有 ' + fmtInt(fill.held) + ' 檔，現金 ' + cash + '。</p>'];
+    if (since.error) return [...out, '<p class="note ledger-invalid">帳本資料有誤，對照暫不顯示；名單照常。</p>'];
+    if (!points.length) return out;
+    const last = points[points.length - 1], moved = points.length > 1;
+    const shown = x => moved ? sinceFirst(x) : '—';
+    out.push('<p class="compare">同期對照（從第一次成交那天的收盤起，那天三者都是 1.0）：帳本 ' + shown(last.book) + '、等權 universe ' + shown(last.universe) + '、加權報酬指數 ' + shown(last.index) + '。' + COMPARE_BASIS + '</p>');
+    const missing = moved ? indexNote(points) : '';
+    if (missing) out.push('<p class="note index-missing">' + missing + '</p>');
+    if (since.no_prediction_days > 0) out.push('<p class="note no-prediction-days">其中 ' + fmtInt(since.no_prediction_days) + ' 天前一天沒有預測，那幾天等權 universe 依預先登錄記 0，不是實際漲跌；那幾天之後的帳本對等權 universe 都含這段。</p>');
+    out.push('<p class="faint small first-day">' + FIRST_DAY_TEXT + '</p>');
+    out.push('<p class="faint small review">樣本 ' + fmtInt(points.length) + ' 個交易日；規則的評估在第 60 個訊號日（' + REVIEW_DAY + '）的 label 結算後整理，現在的數字不能下結論。</p>');
+    return out;
+  }
+
+  function holdingHtml(body) {
+    const d = body.data || {}, list = d.list, latest = (body.meta || {}).predictions_date;
+    const head = '<h2>持有規則名單（' + esc(d.rule || '') + '，研究紀錄）</h2>';
+    if (!list) return head + '<p class="muted">持有規則名單還沒有寫入。</p>';
+    const parts = [head, '<p class="lead-line">' + md(list.signal_date) + ' 收盤後的規則名單，照規則在 ' + md(list.trade_date) + ' 開盤模擬成交。這是研究平台依事先寫死的規則記下的紀錄，不是投資建議。</p>'];
+    parts.push('<details class="rule"><summary class="muted small">規則</summary><p class="muted small">' + RULE_TEXT + '</p></details>');
+    if (latest && list.signal_date < latest) parts.push('<p class="note lagging">名單是 ' + md(list.signal_date) + ' 的，比今日預測（' + md(latest) + '）早：今天早上的帳本還沒寫入，請看模型頁「持有規則影子帳本」那一列。</p>');
+    if (list.backfilled) parts.push('<p class="note backfilled">這份名單是補記的（成交日 09:00 之後才寫入），算法相同。</p>');
+    if (list.status === 'no_prediction') parts.push('<p class="note no-prediction">這一天沒有預測，規則不賣也不買，持股照常估值。</p>');
+    else parts.push('<div class="groups">' + RULE_GROUPS.map(action => groupHtml(action, (list.actions || []).filter(line => line.action === action))).join('') + '</div>');
+    return [...parts, ...ledgerHtml(d)].join('');
+  }
+
+  function holdingFor(stale) {
+    if (stale || !state.holding) {
+      const promise = api.get('holding').catch(err => ({ error: err }));
+      promise.then(book => { if (book.error && state.holding === promise) state.holding = null; });
+      state.holding = promise;
+    }
+    return state.holding;
+  }
+
+  async function currentHolding(date) {
+    const book = await holdingFor(false);
+    if (book.error || !date) return book;
+    const listed = ((book.data || {}).list || {}).signal_date;
+    const stale = (book.meta || {}).predictions_date !== date || (listed && listed < date);
+    return stale ? holdingFor(true) : book;
+  }
+
+  function showHolding(book) {
+    state.shownH = state.h;
+    ruleHeadEl.hidden = !ruled();
+    todayTableEl.classList.toggle('ruled', ruled());
+    holdingNoteEl.textContent = ruled() ? '' : '持有規則名單只用 ' + RULE_HORIZON + ' 日排名。';
+    holdingNoteEl.hidden = ruled();
+    holdingEl.hidden = !ruled() || !book;
+    if (holdingEl.hidden || state.holdingShown === book) return;
+    state.holdingShown = book;
+    holdingEl.innerHTML = book.error ? '<h2>持有規則名單</h2><p class="muted">持有規則名單暫時讀不到。</p>' : holdingHtml(book);
+  }
+
   function controls() {
     document.querySelectorAll('[data-h]').forEach(b => b.setAttribute('aria-pressed', String(Number(b.dataset.h) === state.h)));
     document.querySelectorAll('[data-mkt]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.mkt === state.mkt)));
@@ -248,15 +354,16 @@
     const rank = '<div class="num rank">' + (row.rank === null ? '—' : row.rank) + '</div>';
     return '<a class="trow rank-cols" href="#stock-' + encodeURIComponent(row.stock_id) + '">' +
       (sortedView() ? '<div class="num pos">' + position + '</div>' + rank : rank) +
+      (ruled() ? '<div class="rule small">' + esc((state.ruleOf.get(row.stock_id) || ['—']).join('、')) + '</div>' : '') +
       '<div class="stockcell"><span class="muted">' + esc(row.stock_id) + '</span><span class="name">' + esc(row.name || '—') + '</span>' +
       (row.in_universe ? '' : '<span class="faint small">訓練範圍外</span>') + '</div>' +
       '<div class="faint small market">' + esc(row.market_label || '—') + '</div>' +
       '<div class="right">' + priceOf(row.close) + '</div>' +
-      '<div class="right num" style="color:' + colorOf(row.ret_pred || 0) + '">' + pctOf(row.ret_pred, 1) + '</div>' +
-      '<div class="right">' + priceOf(row.price_pred) + '</div>' +
       bandHtml(row) +
       '<div class="right prob">' + (row.prob_up_5pct === null ? '—' : Math.round(row.prob_up_5pct * 100) + '%') + '</div>' +
-      '<div class="right faint small">' + (row.prev_rank === null ? '—' : '昨 ' + row.prev_rank) + '</div></a>';
+      '<div class="right faint small">' + (row.prev_rank === null ? '—' : '昨 ' + row.prev_rank) + '</div>' +
+      '<div class="right num secondary" style="color:' + colorOf(row.ret_pred || 0) + '">' + pctOf(row.ret_pred, 1) + '</div>' +
+      '<div class="right secondary">' + priceOf(row.price_pred) + '</div></a>';
   }
 
   const shownModels = (models, horizon) => (models || []).filter(model => horizon === 20 || ['rank', 'return'].includes(model.role));
@@ -428,17 +535,24 @@
     controls();
     loadGoto();
     prevBtn.disabled = nextBtn.disabled = true;
+    const wanted = state.h === RULE_HORIZON;
+    const holding = wanted ? holdingFor(false) : Promise.resolve(null);
     let result;
     try {
       result = await fetchToday();
     } catch (err) {
+      const book = await holding;
       if (token !== state.todayToken) return;
       rowsEl.innerHTML = errorBox(err);
       countEl.textContent = todayMetaEl.textContent = '';
       showNotes({}, []);
+      showHolding(book);
       return;
     }
+    const book = wanted ? await currentHolding(result.meta.date) : null;
     if (token !== state.todayToken) return;
+    state.ruleOf = book && !book.error ? ruleLabels(book) : new Map();
+    showHolding(book);
     const { rows, meta } = result;
     state.intervalHeld = intervalHeld(meta);
     state.shownOrder = meta.ordering || 'rank';
@@ -696,12 +810,12 @@
     });
   }
 
-  async function loadFeatures(code, token) {
+  async function loadFeatures(code, token, horizon) {
     const mine = ++state.featureToken;
     const body = document.querySelector('#features .body');
     body.innerHTML = loading;
     try {
-      const { data, meta } = await api.get('stocks/' + code + '/features', { horizon: state.h });
+      const { data, meta } = await api.get('stocks/' + code + '/features', { horizon: horizon });
       if (token === state.stockToken && mine === state.featureToken) body.innerHTML = featuresHtml(data, meta);
     } catch (err) {
       if (token === state.stockToken && mine === state.featureToken) body.innerHTML = errorBox(err);
@@ -747,7 +861,10 @@
       controls();
     });
     let forecasts = { status: 'pending' };
-    const entryOf = () => forecasts.status === 'fulfilled' ? forecasts.value.data.horizons.find(entry => entry.horizon === state.h) : null;
+    let stockH = state.h;
+    const readyHorizons = () => forecasts.status === 'fulfilled' ? forecasts.value.data.horizons.filter(entry => entry.prediction).map(entry => entry.horizon) : [];
+    const stockHorizon = () => forecasts.status === 'fulfilled' ? fallbackOf(readyHorizons(), state.h) : state.h;
+    const entryOf = () => forecasts.status === 'fulfilled' ? forecasts.value.data.horizons.find(entry => entry.horizon === stockH) : null;
     const drawChart = () => {
       const bars = prices.status === 'fulfilled' ? prices.value.data : [];
       const candidate = fanOf(entryOf());
@@ -768,9 +885,9 @@
     };
     const showSeg = () => {
       if (forecasts.status !== 'fulfilled') return;
-      const ready = new Set(forecasts.value.data.horizons.filter(entry => entry.prediction).map(entry => entry.horizon));
+      const ready = new Set(readyHorizons());
       const buttons = [...document.querySelectorAll('#stock-seg [data-sh]')];
-      buttons.forEach(b => { b.disabled = !ready.has(Number(b.dataset.sh)); });
+      buttons.forEach(b => { b.disabled = !ready.has(Number(b.dataset.sh)); if (b.disabled) b.setAttribute('aria-pressed', 'false'); });
       const missing = buttons.filter(b => b.disabled).map(b => Number(b.dataset.sh));
       const entryOfH = h => forecasts.value.data.horizons.find(entry => entry.horizon === h);
       const offline = missing.filter(h => !rankServed(entryOfH(h))).map(h => h + ' 日');
@@ -780,12 +897,13 @@
       document.getElementById('stock-seg-hint').textContent = !ready.size ? none : parts.join('；');
     };
     const drawHorizon = () => {
+      stockH = stockHorizon();
       controls();
-      document.querySelectorAll('#stock-seg [data-sh]').forEach(b => b.setAttribute('aria-pressed', String(Number(b.dataset.sh) === state.h)));
-      document.querySelector('#stock-rank .l').textContent = state.h + ' 日預測排名';
+      document.querySelectorAll('#stock-seg [data-sh]').forEach(b => b.setAttribute('aria-pressed', String(Number(b.dataset.sh) === stockH && !b.disabled)));
+      document.querySelector('#stock-rank .l').textContent = stockH + ' 日預測排名';
       showRank();
       drawChart();
-      loadFeatures(s.stock_id, token);
+      loadFeatures(s.stock_id, token, stockH);
     };
     document.querySelectorAll('#stock-seg [data-sh]').forEach(b => b.addEventListener('click', () => { state.h = Number(b.dataset.sh); state.picked = true; state.page = 1; drawHorizon(); }));
     document.querySelectorAll('#chart-seg [data-ct]').forEach(b => b.addEventListener('click', () => {
@@ -799,8 +917,7 @@
       forecasts = result;
       document.querySelector('#forecasts .body').innerHTML = result.status === 'rejected' ? errorBox(result.reason) : forecastsHtml(result.value.data, result.value.meta);
       showSeg();
-      const ready = result.status === 'fulfilled' ? result.value.data.horizons.filter(entry => entry.prediction).map(entry => entry.horizon) : [];
-      if (!stockEl.hidden && preferHorizon(ready)) { drawHorizon(); return; }
+      if (!stockEl.hidden && (preferHorizon(readyHorizons()) || stockHorizon() !== stockH)) { drawHorizon(); return; }
       showRank();
       if (fanOf(entryOf())) drawChart();
     });
@@ -1264,6 +1381,11 @@
     ].filter(Boolean);
   }
 
+  function deferredLine(d) {
+    const known = ['free_percent', 'min_free', 'tries'].every(key => typeof d[key] === 'number');
+    return known ? '可用記憶體 ' + (Math.floor(d.free_percent * 10) / 10).toFixed(1) + '%，低於門檻 ' + d.min_free + '%，讀了 ' + fmtInt(d.tries) + ' 次都不足' : null;
+  }
+
   const scopeReasons = (reasons, word) => Object.entries(reasons || {}).map(([scope, reason]) => (SCOPES[scope] || scope) + word + '：' + reason);
 
   const leftDetail = d => d.handled === 'by_hand' || has(d.limit);
@@ -1357,6 +1479,7 @@
       case 'model_promotion': return [check.severity === 'info' ? '' : 'warn', promotionLines(d)];
       case 'model_holdout_release': return ['warn', releaseLines(d)];
       case 'research_retrain': return [check.severity === 'info' ? '' : 'warn', ['建 ' + keyCount(d.built) + '、拒 ' + keyCount(d.refused) + '、失敗 ' + keyCount(d.failed), ...scopeReasons(d.refused, '拒建'), ...scopeReasons(d.failed, '失敗')]];
+      case 'research_retrain_deferred': return [check.severity === 'info' ? '' : 'warn', [deferredLine(d) || (SEVERITY[check.severity] || [check.severity])[0]]];
       case 'research_rebuild': return [check.severity === 'info' ? '' : 'warn', [rebuildText(d), ...(leftDetail(d) ? [handNote] : [])]];
       case 'research_promote': return ['warn', ['失敗 ' + keyCount(d.failed) + '、完成 ' + sizeOf(d.done), ...Object.entries(d.failed || {}).map(([key, error]) => key + '：' + error)]];
       case 'research_shadow': return [check.severity === 'info' ? '' : 'warn', shadowLines(d) || [(SEVERITY[check.severity] || [check.severity])[0]]];
@@ -1381,7 +1504,7 @@
   const isResearch = check => check.check_name.startsWith('research_');
   const isDaily = check => !isPromotion(check) && !isRelease(check) && !isResearch(check);
   const scopeOf = check => (check.detail || {}).scope || (check.detail || {}).run_key;
-  const RESEARCH_ORDER = ['research_retrain', 'research_promote', 'research_rebuild', 'research_evening', 'research_morning', 'research_shadow', 'research_shadow_train'];
+  const RESEARCH_ORDER = ['research_retrain', 'research_retrain_deferred', 'research_promote', 'research_rebuild', 'research_evening', 'research_morning', 'research_shadow', 'research_shadow_train'];
   const researchRank = check => {
     const rank = RESEARCH_ORDER.indexOf(check.check_name);
     return rank < 0 ? RESEARCH_ORDER.length : rank;

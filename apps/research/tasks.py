@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Callable
 from datetime import date, time, timedelta
 from io import StringIO
@@ -47,6 +48,7 @@ logger = logging.getLogger(__name__)
 EVENING_CHECK = "research_evening"
 MORNING_CHECK = "research_morning"
 RETRAIN_CHECK = "research_retrain"
+DEFERRED_CHECK = "research_retrain_deferred"
 PROMOTE_CHECK = "research_promote"
 REBUILD_CHECK = "research_rebuild"
 SHADOW_TRAIN_CHECK = "research_shadow_train"
@@ -456,7 +458,7 @@ def _train_refusal(task: Task[Any, Any]) -> str | None:
         return f"worker concurrency {concurrency}, not 1"
     free = free_percent()
     if free is not None and free < settings.RESEARCH_SHADOW_TRAIN_MIN_FREE:
-        return f"{free:.0f}% of memory free, under {settings.RESEARCH_SHADOW_TRAIN_MIN_FREE}%"
+        return _short_of_memory(free, settings.RESEARCH_SHADOW_TRAIN_MIN_FREE)
     return None
 
 
@@ -537,14 +539,30 @@ def _retrain_after(day: date) -> None:
         return
     opening = TradingDays.from_db().between(day.replace(day=1), day)
     if len(opening) > RETRAIN_WINDOW:
-        skipped = _retrain_detail(dict.fromkeys(HoldoutScope.values, SKIPPED))
+        skipped = _retrain_detail(dict.fromkeys(HoldoutScope.values, SKIPPED), free=_last_free(day))
         _record(day, RETRAIN_CHECK, Severity.WARNING, skipped)
     elif _retrain_hours():
         retrain.delay(day.isoformat())
 
 
+def _short_of_memory(free: float, floor: int) -> str:
+    """Why a job waits for memory; the reading is cut to one decimal so it never shows the floor."""
+    return f"{math.floor(free * 10) / 10:.1f}% of memory free, under {floor}%"
+
+
+def _redelivered(task: Task[Any, Any]) -> bool:
+    """A message the broker handed out again after a worker died holding it."""
+    return bool((task.request.delivery_info or {}).get("redelivered"))
+
+
+def _last_free(day: date) -> float | None:
+    """The free memory the month's latest retrain deferred until the cutoff read, if any."""
+    row = _month(DEFERRED_CHECK, day).filter(date__lte=day).order_by("-date", "-pk").first()
+    return None if row is None else row.detail.get("free_percent")
+
+
 @shared_task(bind=True, max_retries=None, name="research.retrain")
-def retrain(self: Task[Any, Any], day: str) -> str:
+def retrain(self: Task[Any, Any], day: str, last_free: float | None = None) -> str:
     """This month's N and N′ of every frozen scope as of day, once memory and labels allow."""
     if not settings.RESEARCH_SCHEDULE_ENABLED:
         return "disabled"
@@ -553,7 +571,15 @@ def retrain(self: Task[Any, Any], day: str) -> str:
         return "done"
     if not _retrain_hours():
         logger.warning("research retrain %s not started: outside its hours", day)
-        return "late"
+        if last_free is None or _redelivered(self):
+            return "late"
+        detail = {
+            "free_percent": last_free,
+            "min_free": settings.RESEARCH_RETRAIN_MIN_FREE,
+            "tries": self.request.retries,
+        }
+        _record(session, DEFERRED_CHECK, Severity.WARNING, detail)
+        return "deferred"
     concurrency = _concurrency(self)
     if concurrency != 1:
         refused = dict.fromkeys(HoldoutScope.values, f"worker concurrency {concurrency}, not 1")
@@ -561,10 +587,14 @@ def retrain(self: Task[Any, Any], day: str) -> str:
         return "concurrent"
     free = free_percent()
     if free is not None and free < settings.RESEARCH_RETRAIN_MIN_FREE:
+        short = _short_of_memory(free, settings.RESEARCH_RETRAIN_MIN_FREE)
         if self.request.retries < settings.RESEARCH_RETRAIN_RETRIES:
-            logger.warning("research retrain %s deferred: %.0f%% of memory free", day, free)
-            raise self.retry(args=(day,), countdown=settings.RESEARCH_RETRAIN_COUNTDOWN)
-        short = f"{free:.0f}% of memory free, under {settings.RESEARCH_RETRAIN_MIN_FREE}%"
+            logger.warning("research retrain %s deferred: %s", day, short)
+            raise self.retry(
+                args=(day,),
+                kwargs={"last_free": free},
+                countdown=settings.RESEARCH_RETRAIN_COUNTDOWN,
+            )
         detail = _retrain_detail(dict.fromkeys(HoldoutScope.values, short), free=free)
         _record(session, RETRAIN_CHECK, Severity.WARNING, detail)
         return "short of memory"

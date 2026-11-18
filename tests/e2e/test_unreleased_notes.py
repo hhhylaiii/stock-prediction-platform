@@ -1,3 +1,4 @@
+import re
 from datetime import date
 
 import pytest
@@ -163,9 +164,10 @@ def test_the_stock_page_names_a_horizon_without_a_ranking_model(
     expect(note.locator("a")).to_have_text("模型頁")
     expect(note.locator("a")).to_have_attribute("href", "#models")
     expect(page.locator("#forecasts .model-note")).to_have_count(0)
-    page.locator("#stock-seg [data-sh='20']").evaluate("b => b.disabled = false")
-    page.locator("#stock-seg [data-sh='20']").click()
-    expect(page.locator(".stockhead .kpi .v")).to_have_text("— 排名未上線")
+    expect(page.locator("#stock-seg [data-sh='20']")).to_be_disabled()
+    expect(page.locator("#stock-seg [data-sh='5']")).to_have_attribute("aria-pressed", "true")
+    expect(page.locator(".stockhead .kpi")).to_contain_text("5 日預測排名")
+    expect(page.locator(".stockhead .kpi .v")).to_have_text(re.compile(r"^第 \d+ 名 / \d+$"))
     settled(page)
 
 

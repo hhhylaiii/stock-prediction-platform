@@ -53,15 +53,17 @@
 <p class="note" id="fallback-note" hidden></p>
 <p class="note" id="basis-note" hidden></p>
 <p class="note" id="model-note" hidden></p>
+<div class="holding" id="holding" hidden></div>
+<p class="note" id="holding-note" hidden></p>
 
 <div class="scroll" style="margin-top:8px">
 <div class="table" id="today-table">
 <div class="thead rank-cols">
-<div id="first-head">排名</div><div hidden><button type="button" class="sort" data-order="rank" id="model-rank-head">模型名次</button></div>
+<div id="first-head">排名</div><div hidden><button type="button" class="sort" data-order="rank" id="model-rank-head">模型名次</button></div><div id="rule-head" hidden>規則</div>
 <div>股票</div><div>市場</div><div class="right"><button type="button" class="sort" data-order="close">收盤</button></div>
-<div class="right"><button type="button" class="sort" data-order="ret_pred" id="ret-head">20 日預測報酬</button></div><div class="right"><button type="button" class="sort" data-order="price_pred">預測價</button></div>
 <div style="grid-column:span 2" id="band-head">80% 預測區間（價格）</div>
 <div class="right"><button type="button" class="sort" data-order="prob_up_5pct" id="prob-head">跑贏大盤 5 個百分點機率</button></div><div class="right"><button type="button" class="sort" data-order="prev_rank">昨日排名</button></div>
+<div class="right secondary"><button type="button" class="sort" data-order="ret_pred" id="ret-head">20 日預測報酬</button></div><div class="right secondary"><button type="button" class="sort" data-order="price_pred">預測價</button></div>
 </div>
 <div id="today-goto" class="goto" hidden></div>
 <div id="rows"><div class="empty">載入中…</div></div>
