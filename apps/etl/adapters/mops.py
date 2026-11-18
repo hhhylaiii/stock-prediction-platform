@@ -59,7 +59,7 @@ from apps.etl.revenue_scan import (
     revenue_rows,
     without_generation_time,
 )
-from apps.etl.scan_start import REVENUE_SCAN, STATEMENT_SCAN, first_scanned_month
+from apps.etl.scan_start import REVENUE_SCAN, STATEMENT_SCAN, first_scanned, first_scanned_month
 from apps.etl.statement_scan import SCAN_COLUMNS, insert_new_statements, scan_session
 from apps.etl.statement_summary import (
     MARKETS,
@@ -360,8 +360,10 @@ class MopsAdapter(BaseAdapter):
         calendar: TradingDays,
         limiter: RateLimiter,
         session: requests.Session | None = None,
+        include_scan_periods: bool = False,
     ) -> None:
         super().__init__(calendar, limiter)
+        self.include_scan_periods = include_scan_periods
         self.client = MopsClient.build(limiter, session)
         self.summaries = MopsSummaryClient.build(limiter, session)
 
@@ -457,7 +459,9 @@ class MopsAdapter(BaseAdapter):
         if frame.empty:
             return 0
         cutoff = time.fromisoformat(settings.FILING_VISIBLE_BEFORE)
-        return apply_statement_filings(frame, self.calendar, cutoff)
+        return apply_statement_filings(
+            frame, self.calendar, cutoff, first_scanned(), self.include_scan_periods
+        )
 
     def _scan(self, day: date) -> pd.DataFrame:
         periods = open_periods(day, int(settings.STATEMENT_SCAN_DAYS_AFTER))

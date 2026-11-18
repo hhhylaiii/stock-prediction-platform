@@ -35,8 +35,10 @@ from apps.etl.dividend_dates import (
     moves,
 )
 from apps.etl.errors import SchemaChangedError, SourceError, SourceRequestError
+from apps.etl.filings import quarter_end
 from apps.etl.models import RawFinmind
 from apps.etl.ratelimit import RateLimiter, ThrottledError
+from apps.etl.scan_start import first_scanned, first_scanned_month
 from apps.etl.share_counts import drop_repeated_counts
 from apps.etl.upsert import insert_missing, upsert
 from apps.market.adjust import refresh_adj_factor, refresh_where_later_events
@@ -215,6 +217,20 @@ class FinmindAdapter(BaseAdapter):
         super().__init__(calendar, limiter)
         self.client = FinmindClient.build(limiter, session)
         self._whole_market: dict[tuple[str, date, date], list[dict[str, Any]]] = {}
+
+    def require_range(self, dataset: str, start: date, end: date) -> None:
+        """Statements and revenue stop before the first period the daily scan dates (SPEC §8.5)."""
+        if dataset == "financial_statement":
+            period = first_scanned()
+            bound = quarter_end(period) if period else None
+        elif dataset == "monthly_revenue":
+            period = first_scanned_month()
+            bound = _month_after(period) if period else None
+        else:
+            return
+        if bound is not None and end >= bound:
+            last = bound - timedelta(days=1)
+            raise ValueError(f"finmind/{dataset}: the daily scan dates {period} on; end by {last}")
 
     def fetch(
         self, dataset: str, start: date, end: date, stock_id: str | None = None
@@ -421,3 +437,9 @@ def reapply_announce_dates(
         compared.extend(found)
         filled += sum(moves(row, earlier) for row in found)
     return Reapplied(filled, len(by_stock), rejected, compared)
+
+
+def _month_after(period: str) -> date:
+    """FinMind publishes a month's revenue on the 1st of the next month at the earliest."""
+    year, month = int(period[:4]), int(period[5:])
+    return date(year + month // 12, month % 12 + 1, 1)
