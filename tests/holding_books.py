@@ -1,5 +1,6 @@
 """Main and other shadow book rows for API and page tests, with TAIEX_TR closes."""
 
+from collections.abc import Mapping
 from datetime import date
 from typing import Any
 
@@ -19,7 +20,7 @@ FILL_FIELDS = {"value": 1.0, "cash": 1.0, "paid": 0.0, "traded": 0.0, "held": 0}
 def add_list(
     signal: date,
     trade: date,
-    actions: dict[str, tuple[str, int, float | None]] | None = None,
+    actions: Mapping[str, tuple[str, int, float | None]] | None = None,
     book: str = MAIN_BOOK,
     status: str = BookStatus.LISTED,
     backfilled: bool = False,

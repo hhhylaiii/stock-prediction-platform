@@ -61,9 +61,21 @@ h2{margin:0;font-size:15px;font-weight:500}
 .trow{height:52px;border-bottom:1px solid var(--line-soft);color:var(--ink);text-decoration:none}
 .trow.short{height:44px}
 a.trow:hover{background:var(--hover);color:var(--ink)}
-.rank-cols{grid-template-columns:48px minmax(150px,1fr) 56px 92px 112px 92px 170px 140px 140px 72px}
+.rank-cols{grid-template-columns:48px minmax(150px,1fr) 56px 92px 170px 140px 140px 72px 112px 92px}
+.table.ruled{min-width:1270px}
+.table.ruled .rank-cols{grid-template-columns:48px 88px minmax(130px,1fr) 56px 92px 150px 130px 124px 72px 112px 92px}
 .table.sorted{min-width:1274px}
-.table.sorted .rank-cols{grid-template-columns:40px 64px minmax(150px,1fr) 56px 92px 112px 92px 150px 130px 140px 72px}
+.table.sorted .rank-cols{grid-template-columns:40px 64px minmax(150px,1fr) 56px 92px 150px 130px 140px 72px 112px 92px}
+.table.sorted.ruled{min-width:1342px}
+.table.sorted.ruled .rank-cols{grid-template-columns:40px 64px 88px minmax(130px,1fr) 56px 92px 150px 130px 124px 72px 112px 92px}
+.rank-cols .secondary{opacity:.55}
+.holding{margin:20px 0 4px;padding:16px 18px;border:1px solid var(--line);border-radius:8px}
+.holding h2{margin:0 0 6px}
+.holding .groups{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px;margin:14px 0}
+@media (max-width:900px){.holding .groups{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.holding h3{margin:0 0 6px;font-size:13px;color:var(--ink-2)}
+.holding .hline{font-size:13px;line-height:1.7}
+.holding p{margin:6px 0}
 .sort{padding:0;border:0;background:transparent;color:inherit;font-size:inherit;text-align:inherit}
 .sort:hover:not(:disabled){color:var(--ink)}
 .sort:disabled{cursor:default;color:var(--ink-4)}
