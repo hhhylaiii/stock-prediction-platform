@@ -37,7 +37,7 @@ Oct 29, 2026 · @Owen Lai
 
 ## 2. 系統架構與技術選型
 
-系統分三層：資料層（ETL 與 PostgreSQL）、研究層（特徵、訓練、回測，獨立於 Web 執行）、服務層（Django API 與頁面）。研究層只讀資料庫、只寫研究層自己的表（`feature_daily`、`label_daily`、`model_run`、`prediction`、`prediction_contrib`、`model_monitor`、`backtest_metric`、`holdout_run`、`holdout_release`），另把模型輸出檢查與告警寫進 `data_quality_log`（check 名稱以 `output_`、`monitor_`、`model_`、`research_` 開頭，severity 最高 warning）；Web 永遠不直接呼叫外部資料 API。
+系統分三層：資料層（ETL 與 PostgreSQL）、研究層（特徵、訓練、回測，獨立於 Web 執行）、服務層（Django API 與頁面）。研究層只讀資料庫、只寫研究層自己的表（`feature_daily`、`label_daily`、`model_run`、`prediction`、`prediction_contrib`、`model_monitor`、`backtest_metric`、`holdout_run`、`holdout_release`，影子紀錄的 `holding_book_day`、`holding_book_action`、`shadow_artifact`、`shadow_score`），另把模型輸出檢查與告警寫進 `data_quality_log`（check 名稱以 `output_`、`monitor_`、`model_`、`research_` 開頭，severity 最高 warning）；Web 永遠不直接呼叫外部資料 API。
 
 報酬換算成價格的工作放在服務層：每檔股票用自己當日的收盤價計算預測價與價格區間，模型層只輸出報酬、分位數、波動率與機率，不輸出價格。
 
@@ -172,8 +172,8 @@ Oct 29, 2026 · @Owen Lai
 | 22:50 | 資料品質檢查，並列出當日該跑卻沒有成功的工作 | — | 每交易日 |
 | 23:00 | 個股層級特徵重算最近 60 個交易日、label 重算最近 81 個交易日（第 6 節處理步驟 6）；還原因子改寫了歷史時，受影響日在這 60 個交易日內的由這兩步涵蓋，更早的告警、手動重建；這一步出錯只告警，不擋當天 | 研究層 | 每交易日，研究閘門通過後（見資料品質檢查） |
 | 05:30（t+1） | 美股、費半、TSM ADR 的美國 t 日收盤，匯率的倫敦 t−1 日收盤（倫敦 t 日的收盤在台北 t+1 07:00 後才收完）；抓不到不寫補值列，由特徵端 asof 沿用前一個收盤，並寫 data\_quality\_log | yfinance | 每交易日 |
-| 06:00（t+1） | 等 05:30 的美股收盤寫完，依序重算特徵（補上美股、匯率）、檢查線上特徵覆蓋率（規則見「資料品質檢查」）、產出預測、模型監控，前一步成功才跑下一步。23:00 沒跑成時補上它的兩步：先算 81 天 label，監控之後再算 60 天特徵，還原因子改寫照 23:00 處理；其他早上只算 D 的特徵，還沒處理的還原因子改寫，受影響日在最近 60 個交易日內的在最後從受影響日起重建，更早的告警。監控與換模之後記持有規則的影子帳本（規則見 `docs/reports/phase4/holding-shadow-prereg.md`），只記錄、不影響預測與服務，出錯或逾時只記警示。這一步出錯只告警，不擋當天 | 研究層 | 每交易日，開盤前 |
-| 每月重訓 | 每月前 5 個交易日裡，第一條在 06:00 到 09:00 之間跑完的早上 chain（含缺美股收盤而記 warning 的）之後，每個設計已凍結的類別（`production.DESIGNS` 的 `research_run_key` 有值）訓 N 與 N′（訓練到 D），可用記憶體不到一半就延後；下一個早上的 chain 在監控之後換模（第 7 節的門檻，沒過就告警）；前 5 個交易日都沒排成時，之後第一條跑完的早上告警 | 研究層 | 每月 |
+| 06:00（t+1） | 等 05:30 的美股收盤寫完，依序重算特徵（補上美股、匯率）、檢查線上特徵覆蓋率（規則見「資料品質檢查」）、產出預測、模型監控，前一步成功才跑下一步。23:00 沒跑成時補上它的兩步：先算 81 天 label，監控之後再算 60 天特徵，還原因子改寫照 23:00 處理；其他早上只算 D 的特徵，還沒處理的還原因子改寫，受影響日在最近 60 個交易日內的在最後從受影響日起重建，更早的告警。監控與換模之後記持有規則的影子帳本（規則與候選模型見 `docs/reports/phase4/holding-shadow-prereg.md`）：先記讀線上分數的帳本；候選模型凍結之後，再一個候選接一個候選，先打它的影子分數（寫 `shadow_score`，不寫 `prediction`）、再記它的帳本。只記錄、不影響預測與服務，出錯或逾時只記警示。這一步出錯只告警，不擋當天 | 研究層 | 每交易日，開盤前 |
+| 每月重訓 | 每月前 5 個交易日裡，第一條在 06:00 到 09:00 之間跑完的早上 chain（含缺美股收盤而記 warning 的）之後，每個設計已凍結的類別（`production.DESIGNS` 的 `research_run_key` 有值）訓 N 與 N′（訓練到 D），可用記憶體不到一半就延後；下一個早上的 chain 在監控之後換模（第 7 節的門檻，沒過就告警）；前 5 個交易日都沒排成時，之後第一條跑完的早上告警。影子候選模型手動第一次凍結之後，跟著所屬 slot 的上線 run：換模之後，每一步都完成的早上 chain 收尾時，用寫死的配方在新 run 的摺上重訓並凍結（和重訓一樣只在 06:00 到 09:00 之間開始、只用單一 worker；可用記憶體低於 70% 就記警示，等下一條這樣的早上） | 研究層 | 每月 |
 | 週六 10:00 | 股權分散表 | 集保 | 每週 |
 | 每月 15 日 10:00 | 景氣燈號；M 月的資料在 M+2 月 15 日寫入，以那天為 announce\_date（國發會約每月 27 日發布上月，年假會延後） | data.gov.tw | 每月 |
 | 每月 1 日 | 出口、匯率利率（尚未實作） | data.gov.tw | 每月 |
@@ -333,7 +333,7 @@ Oct 29, 2026 · @Owen Lai
 
 **模型管理與上線後監控**
 
-- 每次訓練寫一列 `model_run`，含參數、特徵清單、訓練區間、指標、seed、套件版本、特徵 Parquet 的 hash；模型檔以 `run_id` 命名存檔。`status` 取值 candidate、active、degraded、retired。
+- 每次訓練寫一列 `model_run`，含參數、特徵清單、訓練區間、指標、seed、套件版本、特徵 Parquet 的 hash；模型檔以 `run_id` 命名存檔。`status` 取值 candidate、active、degraded、retired。影子候選模型不寫 `model_run`：凍結時寫一列 `shadow_artifact`（模型檔 sha256、訓練窗、配方、第一個打分的訊號日），分數寫 `shadow_score`。
 - 每月重訓：新模型 N 以當下為訓練窗終點；同時訓一個設定相同的影子模型 N′，訓練窗截止在 6 個月加 20 個交易日之前，用來在最近 6 個月上做 OOS 檢查。上線門檻全部是對 N 的健全性檢查，不拿 N′ 跟舊模型比 IC（兩個同配方模型比 6 個月 IC 是噪音，且 N′ 看不到 N 新加入的最近 6 個月資料）：(1) N 與現役模型在最新交易日的預測 Spearman 相關 ≥ 0.7；(2) N 與現役模型 gain 前 10 名特徵重疊 ≥ 6 個；(3) N′ 最近 6 個月 OOS 達絕對門檻：排名 rank IC > 0、區間覆蓋率在 70% 到 90%、機率 Brier 不高於 logistic baseline、波動率 QLIKE 不高於 `tech_vol_20d` baseline、5 日 MAE 不高於零預測；(4) N 訓練窗起點到 as_of（N 最後幾列訓練資料的 label 讀到 as_of 的價格）之間，`data_quality_log` 無 severity = error 的紀錄。門檻按 horizon 分開判定：同一類目標裡，每個 horizon 的模型算一組（排名的 5 日與 20 日各一組；區間、波動率、機率同屬 20 日，是一組；絕對報酬只有 5 日一組）。一組四項都過就換模；任一不過，那一組舊模型續用（原本沒有服務中的版本就維持沒有）、告警並記錄原因，不影響同一次重訓裡通過的其他組。是否強制換模由人工決定：強制換模只能跳過這四項的不過（模型組沒建完整、holdout 尚未 claim 都不能跳過；這次要換上的 horizon 裡只要有一個，服務中的版本訓練窗終點比 N 晚，N 是較舊的建置，不論是否強制整次都不換上），必須寫原因，原因與沒過的門檻記進 N 的 `model_run.params` 並告警；通過的組先換上之後，仍可只對沒過的那一組強制換模。換模把該組的 N 改 active、該組原本服務中的版本改 retired，並記下上線日；同一類目標服務中的各 horizon 因此可以來自不同月份的重訓。
 - 線上預測只用 `model_run` 中 `status = active` 的版本，每個目標的每個 horizon 各一個。
 - 事後評估：每日對 horizon 已到期的預測，從 `prediction` 與 `label_daily` 算實際 rank IC、覆蓋率、區間寬度、Brier、AUC、MAE（報酬或波動率，依 run 的目標）、方向準確率（同樣不計 label 為 0 的列），只算 universe 內且 `untradable_t1 = 0` 的列，寫入 `model_monitor` 表；Brier 與 AUC 對該 run 訓練時的上漲 label（`model_run.params` 的 label），相對大盤版當場算，缺 `TAIEX_TR` 收盤時該 run 記成到期預測缺 label；服務層的「歷史預測準確度」讀這張表。

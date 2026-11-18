@@ -1,11 +1,15 @@
+import threading
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
+from time import monotonic
 from typing import Any
 
 import pytest
 from django.core.cache import cache
+from django.core.signals import request_finished, request_started
 from django.utils import timezone
+from playwright.sync_api import Page
 
 from apps.etl.models import DataQualityLog, EtlRun
 from apps.market.models import Market, TradingCalendar
@@ -99,6 +103,74 @@ def fresh_throttle_cache() -> Iterator[None]:
     cache.clear()
     yield
     cache.clear()
+
+
+SETTLE_SECONDS = 10.0
+QUIET_SECONDS = 0.1
+
+
+class Serving:
+    """The live server's threads inside a request, from Django's request signals.
+
+    Each request starts and finishes in its own thread, so a finish never seen starting is ignored.
+    """
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.threads: set[int] = set()
+
+    @property
+    def count(self) -> int:
+        with self.lock:
+            return len(self.threads)
+
+    def started(self, sender: object, **kwargs: Any) -> None:
+        with self.lock:
+            self.threads.add(threading.get_ident())
+
+    def finished(self, sender: object, **kwargs: Any) -> None:
+        with self.lock:
+            self.threads.discard(threading.get_ident())
+
+
+def settle(page: Page, serving: Serving, seconds: float = SETTLE_SECONDS) -> None:
+    """Abort the page's new requests, then wait until the server has been idle for a moment.
+
+    The page route goes ahead of a test's own routes, which may forward requests to the server.
+    """
+    page.context.route("**/*", lambda route: route.abort())
+    page.route("**/*", lambda route: route.abort())
+    deadline = monotonic() + seconds
+    quiet_since: float | None = None
+    running = 0
+    while monotonic() < deadline or quiet_since is not None:
+        now, count = monotonic(), serving.count
+        if count:
+            quiet_since, running = None, count
+        elif quiet_since is None:
+            quiet_since = now
+        elif now - quiet_since >= QUIET_SECONDS:
+            return
+        page.wait_for_timeout(20)
+    raise AssertionError(f"requests still running after {seconds} s: {running}")
+
+
+@pytest.fixture
+def page(page: Page, transactional_db: None) -> Iterator[Page]:
+    """Playwright's page; after the test it waits for the server's requests before the flush.
+
+    Past the wait the teardown fails with the count, and pytest-django flushes all the same.
+    """
+    serving = Serving()
+    request_started.connect(serving.started, weak=False, dispatch_uid="e2e-serving-started")
+    request_finished.connect(serving.finished, weak=False, dispatch_uid="e2e-serving-finished")
+    try:
+        yield page
+        if not page.is_closed():
+            settle(page, serving)
+    finally:
+        request_started.disconnect(dispatch_uid="e2e-serving-started")
+        request_finished.disconnect(dispatch_uid="e2e-serving-finished")
 
 
 def at(day: date, hour: int, minute: int) -> datetime:
