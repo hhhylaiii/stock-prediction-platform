@@ -236,8 +236,11 @@ def test_candidate_and_paired_books_never_show(client: Client, stocks: None) -> 
         add_list(D1, D2, {"2454": (BookAction.BUY, 1, 0.99)}, book=book)
         add_fill(D1, D2, 1.2, book=book, stuck=("1101",))
 
-    data = holding(client)["data"]
+    response = client.get("/api/holding")
+    data = envelope_of(response)["data"]
 
+    for other in ("H70N30-C1", "H70N30-C2", "H70N30-C0-20261118", "2454", "1101", "1.2"):
+        assert other not in response.content.decode()
     assert data["book"] == MAIN
     assert data["list"]["signal_date"] == "2026-11-16"
     assert [line["stock_id"] for line in data["list"]["actions"]] == ["2330"]

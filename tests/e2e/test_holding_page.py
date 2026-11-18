@@ -1,3 +1,4 @@
+import json
 from datetime import date, timedelta
 
 import pytest
@@ -37,12 +38,16 @@ def after(day: date) -> date:
     return following
 
 
-def three_fills(seed: Seed, skip_middle: bool = False, last_close: float | None = 20402.0) -> None:
+def three_fills(
+    seed: Seed,
+    skip_middle: bool = False,
+    last_close: float | None = 20402.0,
+    first_close: float | None = 20000.0,
+) -> None:
     """Fills on the last three sessions, each signed the one before; the last has a stuck sell."""
     s = seed.sessions
-    closes = {s[-3]: 20000.0, s[-2]: 20200.0}
-    if last_close is not None:
-        closes[s[-1]] = last_close
+    wanted = {s[-3]: first_close, s[-2]: 20200.0, s[-1]: last_close}
+    closes = {day: close for day, close in wanted.items() if close is not None}
     add_closes(closes)
     add_fill(s[-4], s[-3], 0.99, universe=0.5, cash=0.01, held=3)
     if not skip_middle:
@@ -324,3 +329,92 @@ def test_the_block_never_reads_as_advice(
     assert "不是投資建議" in text
     for word in ("建議", "推薦", "買點", "應該"):
         assert word not in text.replace("不是投資建議", "")
+
+
+def test_a_missing_first_close_blanks_the_whole_index(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    s, last = predicted.sessions, predicted.last_session
+    add_list(last, after(last), LIST)
+    three_fills(predicted, first_close=None)
+
+    five_day(page, live_server)
+
+    block = page.locator("#holding")
+    expect(block.locator(".compare")).to_contain_text("、加權報酬指數 —。")
+    expect(block.locator(".index-missing")).to_have_text(
+        f"加權報酬指數在第一次成交那天（{md(s[-3])}）沒有收盤，這條對照先不顯示。"
+    )
+
+
+def test_a_percentile_just_under_the_keep_line_reads_below_it(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    last = predicted.last_session
+    add_list(last, after(last), {"1101": (BookAction.SELL, 0, 0.6996)})
+
+    five_day(page, live_server)
+
+    expect(page.locator("#holding .group").nth(0).locator(".hline")).to_have_text(
+        ["1101 測試00 69%"]
+    )
+
+
+def test_paging_keeps_the_block_and_reads_the_book_once(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    last = predicted.last_session
+    add_list(last, after(last), LIST)
+    three_fills(predicted)
+    asked: list[str] = []
+    page.on("request", lambda request: asked.append(request.url))
+
+    five_day(page, live_server)
+    page.locator("#holding details.rule summary").click()
+    page.locator("#next-page").click()
+
+    expect(page.locator("#rows .trow")).to_have_count(5)
+    expect(page.locator("#holding details.rule")).to_have_attribute("open", "")
+    assert sum("/api/holding" in url for url in asked) == 1
+
+
+def test_the_sorted_five_day_table_fits_a_1440_wide_window(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    last = predicted.last_session
+    add_list(last, after(last), LIST)
+    page.set_viewport_size({"width": 1440, "height": 900})
+
+    five_day(page, live_server)
+    page.locator('#view-today .thead [data-order="close"]').click()
+
+    expect(page.locator("#first-head")).to_have_text("位置")
+    width, visible = page.locator("#view-today .scroll").evaluate(
+        "e => [e.scrollWidth, e.clientWidth]"
+    )
+    assert width <= visible
+    expect(page.locator('#view-today .thead [data-order="price_pred"]')).to_be_in_viewport()
+
+
+def test_a_book_cached_before_the_predictions_moved_is_read_again(
+    page: Page, live_server: LiveServer, predicted: Seed
+) -> None:
+    last = predicted.last_session
+    add_list(last, after(last), LIST)
+    asked: list[str] = []
+
+    def stale_once(route: Route) -> None:
+        asked.append(route.request.url)
+        response = route.fetch()
+        body = response.json()
+        if len(asked) == 1:
+            body["meta"]["predictions_date"] = "2000-01-03"
+        route.fulfill(response=response, body=json.dumps(body))
+
+    page.route("**/api/holding", stale_once)
+
+    five_day(page, live_server)
+
+    expect(page.locator("#holding .lead-line")).to_be_visible()
+    expect(page.locator("#holding .lagging")).to_have_count(0)
+    assert len(asked) == 2
