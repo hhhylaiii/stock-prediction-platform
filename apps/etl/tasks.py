@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from datetime import date, time, timedelta
 from typing import Any, NamedTuple
 
@@ -465,6 +465,6 @@ def etl_complete(day: date) -> bool:
     )
 
 
-def ready_for_research(day: date) -> bool:
+def ready_for_research(day: date, besides: Collection[str] = ()) -> bool:
     """The research jobs of a session run only after its ETL and quality gate both pass."""
-    return etl_complete(day) and should_run_prediction(day)
+    return etl_complete(day) and should_run_prediction(day, besides)

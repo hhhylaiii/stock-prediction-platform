@@ -1,5 +1,5 @@
 import logging
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Collection, Iterator
 from contextlib import contextmanager
 from datetime import date, datetime, time, timedelta
 from io import StringIO
@@ -89,7 +89,7 @@ def gate(monkeypatch: pytest.MonkeyPatch) -> list[bool]:
     """Answers of ready_for_research in turn; the last one repeats."""
     answers = [True]
 
-    def ready(day: date) -> bool:
+    def ready(day: date, besides: Collection[str] = ()) -> bool:
         return answers.pop(0) if len(answers) > 1 else answers[0]
 
     monkeypatch.setattr(tasks, "ready_for_research", ready)
@@ -774,6 +774,39 @@ def test_a_recheck_that_cannot_run_keeps_the_features_the_day_had_flagged(
     assert sent == [(WEDNESDAY, tasks.COVERAGE_CHECK, Severity.WARNING)]
 
 
+@pytest.mark.parametrize(("severity", "added"), [(Severity.WARNING, []), (Severity.INFO, ["info"])])
+def test_a_recheck_that_cannot_run_keeps_the_day_s_previous_results(
+    sent: list[tuple[date, str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+    severity: str,
+    added: list[str],
+) -> None:
+    shut = {
+        "severity": "error",
+        "flagged": ["tech_ret_5d"],
+        "collapsed": ["tech_ret_5d"],
+        "replaced_at": "2026-11-15T06:05:00+08:00",
+    }
+    entry = {"feature": "tech_ret_5d", "collapsed": False}
+    flagged = [entry] if severity == Severity.WARNING else []
+    detail = {"features": 1, "judged": 1, "flagged": flagged, "previous": [shut]}
+    DataQualityLog.objects.create(
+        date=WEDNESDAY, check_name=tasks.COVERAGE_CHECK, severity=severity, detail=detail
+    )
+
+    def fails(day: date, calendar: TradingDays, directory: Path) -> DataQualityLog:
+        raise RuntimeError("cannot read /srv/features/year=2023")
+
+    monkeypatch.setattr(tasks, "run_coverage", fails)
+
+    tasks.STEPS["coverage"](WEDNESDAY)
+
+    failed = marker(WEDNESDAY, tasks.COVERAGE_CHECK)
+    assert (failed.severity, failed.detail["error"]) == (Severity.WARNING, "RuntimeError")
+    assert failed.detail["previous"][0] == shut
+    assert [entry["severity"] for entry in failed.detail["previous"][1:]] == added
+
+
 def test_a_recheck_that_cannot_run_leaves_the_day_s_error_standing(
     sent: list[tuple[date, str, str]], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -791,22 +824,137 @@ def test_a_recheck_that_cannot_run_leaves_the_day_s_error_standing(
     assert sent == []
 
 
-def test_a_day_with_a_coverage_error_does_not_start_another_morning_chain(
+def friday_shut_by(
+    now: Callable[[date, time], None], monkeypatch: pytest.MonkeyPatch, *errors: str
+) -> None:
+    """Friday's ETL and checks done, its morning failed on these errors; now Sunday 06:00."""
+    for check in (tasks.EVENING_CHECK, US_CLOSE_CHECK, *QUALITY_CHECKS):
+        record(FRIDAY, check)
+    record(FRIDAY, tasks.MORNING_CHECK, Severity.WARNING)
+    for check in errors:
+        if check == tasks.COVERAGE_CHECK:
+            coverage(FRIDAY, Severity.ERROR, collapsed=True)
+        else:
+            DataQualityLog.objects.filter(date=FRIDAY, check_name=check).update(
+                severity=Severity.ERROR
+            )
+    now(FRIDAY + timedelta(days=2), time(6, 0))
+    monkeypatch.setattr("apps.etl.tasks.etl_complete", lambda day: True)
+
+
+def rechecked(severity: str, collapsed: bool) -> Callable[..., DataQualityLog]:
+    """A run_coverage that rewrites the day's row with this result."""
+
+    def run(day: date, calendar: TradingDays, directory: Path) -> DataQualityLog:
+        DataQualityLog.objects.filter(date=day, check_name=tasks.COVERAGE_CHECK).delete()
+        return coverage(day, severity, collapsed)
+
+    return run
+
+
+REOPENED = {"step": "gate", "result": tasks.COVERAGE_SHUT}
+
+
+def test_a_day_shut_only_by_a_coverage_error_runs_its_morning_chain_again(
     now: Callable[[date, time], None],
     ran: list[tuple[str, date, bool]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    for check in (tasks.EVENING_CHECK, US_CLOSE_CHECK, *QUALITY_CHECKS):
-        record(WEDNESDAY, check)
-    coverage(WEDNESDAY, Severity.ERROR, collapsed=True)
-    now(WEDNESDAY + timedelta(days=1), time(6, 0))
-    monkeypatch.setattr("apps.etl.tasks.etl_complete", lambda day: True)
+    friday_shut_by(now, monkeypatch, tasks.COVERAGE_CHECK)
+    monkeypatch.setattr(tasks, "run_coverage", rechecked(Severity.WARNING, collapsed=False))
+    monkeypatch.setitem(tasks.STEPS, "coverage", tasks._coverage)
+
+    assert tasks.morning.apply().get() == "started"
+
+    assert steps(ran) == ["features", "predict", "monitor", "shadow"]
+    done = marker(FRIDAY, tasks.MORNING_CHECK)
+    assert done.severity == Severity.INFO
+    assert done.detail["steps"][0] == REOPENED
+    assert [entry["step"] for entry in done.detail["steps"][1:3]] == ["features", "coverage"]
+    assert marker(FRIDAY, tasks.COVERAGE_CHECK).severity == Severity.WARNING
+
+
+@pytest.mark.parametrize(
+    ("severity", "collapsed", "stopped_by"),
+    [(Severity.ERROR, True, "PredictionGateError"), (Severity.INFO, False, "RunError")],
+)
+def test_the_predict_step_s_own_gate_decides_after_the_coverage_check_runs_again(
+    now: Callable[[date, time], None],
+    ran: list[tuple[str, date, bool]],
+    monkeypatch: pytest.MonkeyPatch,
+    severity: str,
+    collapsed: bool,
+    stopped_by: str,
+) -> None:
+    friday_shut_by(now, monkeypatch, tasks.COVERAGE_CHECK)
+    monkeypatch.setattr(tasks, "run_coverage", rechecked(severity, collapsed))
+    monkeypatch.setitem(tasks.STEPS, "coverage", tasks._coverage)
+    monkeypatch.setitem(tasks.STEPS, "predict", tasks._predict)
+
+    tasks.morning.apply()
+
+    assert steps(ran) == ["features"]
+    done = marker(FRIDAY, tasks.MORNING_CHECK)
+    assert (done.severity, done.detail["failed"]) == (Severity.WARNING, "predict")
+    assert done.detail["error"].startswith(f"{stopped_by}: ")
+    assert done.detail["steps"][0] == REOPENED
+
+
+@pytest.mark.parametrize("other", [QUALITY_CHECKS[0], "monitor_other"])
+def test_a_day_with_another_error_beside_the_coverage_one_stays_shut(
+    now: Callable[[date, time], None],
+    ran: list[tuple[str, date, bool]],
+    monkeypatch: pytest.MonkeyPatch,
+    other: str,
+) -> None:
+    friday_shut_by(now, monkeypatch, tasks.COVERAGE_CHECK)
+    if other in QUALITY_CHECKS:
+        DataQualityLog.objects.filter(date=FRIDAY, check_name=other).update(severity=Severity.ERROR)
+    else:
+        record(FRIDAY, other, Severity.ERROR)
 
     assert tasks.morning.apply().get() == "gate shut"
 
     assert steps(ran) == []
-    assert marker(WEDNESDAY, tasks.MORNING_CHECK).detail == {"reason": tasks.GATE_SHUT}
-    assert marker(WEDNESDAY, tasks.COVERAGE_CHECK).severity == Severity.ERROR
+    assert marker(FRIDAY, tasks.MORNING_CHECK).detail == {"reason": tasks.GATE_SHUT}
+    assert marker(FRIDAY, tasks.COVERAGE_CHECK).severity == Severity.ERROR
+
+
+def test_a_coverage_error_does_not_open_a_day_whose_etl_is_incomplete(
+    now: Callable[[date, time], None],
+    ran: list[tuple[str, date, bool]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    friday_shut_by(now, monkeypatch, tasks.COVERAGE_CHECK)
+    monkeypatch.setattr("apps.etl.tasks.etl_complete", lambda day: False)
+
+    assert tasks.morning.apply().get() == "gate shut"
+
+    assert steps(ran) == []
+
+
+@pytest.mark.parametrize("earlier", [None, Severity.INFO, Severity.WARNING])
+def test_an_open_gate_adds_no_gate_entry_to_the_morning(
+    now: Callable[[date, time], None],
+    ran: list[tuple[str, date, bool]],
+    monkeypatch: pytest.MonkeyPatch,
+    earlier: str | None,
+) -> None:
+    friday_shut_by(now, monkeypatch)
+    if earlier is not None:
+        coverage(FRIDAY, earlier, collapsed=False)
+
+    tasks.morning.apply().get()
+
+    done = marker(FRIDAY, tasks.MORNING_CHECK)
+    assert done.severity == Severity.INFO
+    assert [entry["step"] for entry in done.detail["steps"]] == [
+        "features",
+        "coverage",
+        "predict",
+        "monitor",
+        "shadow",
+    ]
 
 
 @pytest.mark.parametrize(

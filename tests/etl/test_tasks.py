@@ -916,6 +916,15 @@ def test_research_waits_for_the_gate_datasets_and_the_quality_gate() -> None:
     assert not tasks.ready_for_research(DAY)
 
 
+def test_research_hands_the_checks_to_leave_out_to_the_quality_gate() -> None:
+    landed(DAY, {job for job in DAILY_JOBS if job[1] in tasks.GATE_DATASETS})
+    checked(DAY, ("monitor_feature_coverage", "error"))
+
+    assert not tasks.ready_for_research(DAY)
+    assert tasks.ready_for_research(DAY, besides={"monitor_feature_coverage"})
+    assert not tasks.ready_for_research(DAY, besides={"monitor_other"})
+
+
 def test_the_calendar_is_kept_ahead_before_anything_reads_it(
     today: Callable[..., None],
     monkeypatch: pytest.MonkeyPatch,

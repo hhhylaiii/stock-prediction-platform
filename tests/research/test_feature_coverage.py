@@ -37,6 +37,7 @@ from apps.research.feature_coverage import (
     stops_predictions,
     universe_counts,
     watched,
+    with_previous,
 )
 from apps.research.features.store import partition_path
 from apps.research.features.transforms import STOCK_LEVEL
@@ -516,6 +517,94 @@ def test_a_rerun_replaces_the_day_s_row(
     stored = DataQualityLog.objects.get(date=DAY, check_name=CHECK)
     assert (stored.pk, stored.severity, stored.detail) == (row.pk, Severity.INFO, row.detail)
     assert sent == [(DAY, Severity.WARNING)]
+
+
+def rerun_at(
+    moment: datetime, directory: Path, calendar: TradingDays, shares: Shares
+) -> DataQualityLog:
+    live(directory, shares)
+    with time_machine.travel(moment, tick=False):
+        return run_coverage(DAY, calendar, directory)
+
+
+def test_a_rerun_that_changes_the_result_keeps_each_replaced_one_in_previous(
+    tmp_path: Path, calendar: TradingDays, sent: list[tuple[date, str]]
+) -> None:
+    taipei = ZoneInfo("Asia/Taipei")
+    history(tmp_path)
+    first = rerun_at(datetime(2026, 11, 7, 6, 1, tzinfo=taipei), tmp_path, calendar, {DENSE: 0.4})
+    second = rerun_at(datetime(2026, 11, 8, 6, 2, tzinfo=taipei), tmp_path, calendar, {SPARSE: 0})
+    third = rerun_at(datetime(2026, 11, 9, 6, 3, tzinfo=taipei), tmp_path, calendar, {})
+    again = rerun_at(datetime(2026, 11, 10, 6, 4, tzinfo=taipei), tmp_path, calendar, {})
+
+    assert [row.severity for row in (first, second, third, again)] == [
+        Severity.ERROR,
+        Severity.WARNING,
+        Severity.INFO,
+        Severity.INFO,
+    ]
+    assert "previous" not in first.detail
+    stored = DataQualityLog.objects.get(date=DAY, check_name=CHECK)
+    assert stored.detail["previous"] == [
+        {
+            "severity": Severity.ERROR,
+            "flagged": [DENSE],
+            "collapsed": [DENSE],
+            "replaced_at": "2026-11-08T06:02:00+08:00",
+        },
+        {
+            "severity": Severity.WARNING,
+            "flagged": [SPARSE],
+            "collapsed": [],
+            "replaced_at": "2026-11-09T06:03:00+08:00",
+        },
+    ]
+    assert third.detail["previous"] == stored.detail["previous"]
+
+
+def test_a_rerun_with_the_same_result_adds_no_previous(
+    tmp_path: Path, calendar: TradingDays, sent: list[tuple[date, str]]
+) -> None:
+    history(tmp_path)
+    live(tmp_path, {SPARSE: 0.0})
+    run_coverage(DAY, calendar, tmp_path)
+    live(tmp_path, {SPARSE: 0.01})
+
+    row = run_coverage(DAY, calendar, tmp_path)
+
+    assert row.severity == Severity.WARNING
+    assert "previous" not in DataQualityLog.objects.get(date=DAY, check_name=CHECK).detail
+
+
+def logged(severity: str, detail: dict[str, Any]) -> DataQualityLog:
+    """An unsaved coverage row of the day."""
+    return DataQualityLog(date=DAY, check_name=CHECK, severity=severity, detail=detail)
+
+
+def test_a_rerun_that_only_collapses_more_of_the_same_features_adds_no_previous() -> None:
+    dense = {"feature": DENSE, "collapsed": True}
+    earlier = logged(Severity.ERROR, {"flagged": [dense, {"feature": SPARSE, "collapsed": False}]})
+    row = logged(Severity.ERROR, {"flagged": [dense, {"feature": SPARSE, "collapsed": True}]})
+
+    assert "previous" not in with_previous(row, earlier).detail
+
+
+def test_a_check_that_could_not_run_is_kept_in_previous_with_its_error() -> None:
+    earlier = logged(Severity.WARNING, {"error": "RuntimeError"})
+    moment = datetime(2026, 11, 9, 6, 3, tzinfo=ZoneInfo("Asia/Taipei"))
+
+    with time_machine.travel(moment, tick=False):
+        row = with_previous(logged(Severity.INFO, {"flagged": []}), earlier)
+
+    assert row.detail["previous"] == [
+        {
+            "severity": Severity.WARNING,
+            "flagged": [],
+            "collapsed": [],
+            "error": "RuntimeError",
+            "replaced_at": "2026-11-09T06:03:00+08:00",
+        }
+    ]
 
 
 def test_a_warning_is_sent_only_when_the_flagged_features_change(

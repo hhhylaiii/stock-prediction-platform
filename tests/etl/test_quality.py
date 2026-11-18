@@ -28,6 +28,7 @@ DAY = date(2026, 10, 28)
 CODES = [f"{1100 + n}" for n in range(100)]
 EARLIER = date(2026, 10, 22)
 ERROR = DataQualityLog.Severity.ERROR
+COVERAGE = "monitor_feature_coverage"
 WARNING = DataQualityLog.Severity.WARNING
 INFO = DataQualityLog.Severity.INFO
 
@@ -130,6 +131,31 @@ def test_a_day_with_a_different_stock_count_is_flagged(
     assert row.severity == severity
     assert (row.detail["count"], row.detail["previous"]) == (kept, 100)
     assert should_run_prediction(DAY) is (severity != ERROR)
+
+
+@pytest.mark.django_db
+def test_the_gate_leaves_out_only_the_errors_of_the_checks_it_is_told_to(
+    calendar: TradingDays,
+) -> None:
+    _two_clean_days()
+    run_checks(DAY, calendar)
+    DataQualityLog.objects.create(date=DAY, check_name=COVERAGE, severity=ERROR, detail={})
+
+    assert not should_run_prediction(DAY)
+    assert should_run_prediction(DAY, besides={COVERAGE})
+    assert not should_run_prediction(DAY, besides={"monitor_other"})
+
+    DataQualityLog.objects.filter(date=DAY, check_name=CHECKS[0]).update(severity=ERROR)
+    assert not should_run_prediction(DAY, besides={COVERAGE})
+
+
+@pytest.mark.django_db
+def test_a_check_left_out_of_the_errors_must_still_have_run(calendar: TradingDays) -> None:
+    _two_clean_days()
+    run_checks(DAY, calendar)
+    DataQualityLog.objects.filter(date=DAY, check_name=CHECKS[0]).delete()
+
+    assert not should_run_prediction(DAY, besides={CHECKS[0]})
 
 
 @pytest.mark.django_db
