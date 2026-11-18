@@ -774,6 +774,39 @@ def test_a_recheck_that_cannot_run_keeps_the_features_the_day_had_flagged(
     assert sent == [(WEDNESDAY, tasks.COVERAGE_CHECK, Severity.WARNING)]
 
 
+@pytest.mark.parametrize(("severity", "added"), [(Severity.WARNING, []), (Severity.INFO, ["info"])])
+def test_a_recheck_that_cannot_run_keeps_the_day_s_previous_results(
+    sent: list[tuple[date, str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+    severity: str,
+    added: list[str],
+) -> None:
+    shut = {
+        "severity": "error",
+        "flagged": ["tech_ret_5d"],
+        "collapsed": ["tech_ret_5d"],
+        "replaced_at": "2026-11-15T06:05:00+08:00",
+    }
+    entry = {"feature": "tech_ret_5d", "collapsed": False}
+    flagged = [entry] if severity == Severity.WARNING else []
+    detail = {"features": 1, "judged": 1, "flagged": flagged, "previous": [shut]}
+    DataQualityLog.objects.create(
+        date=WEDNESDAY, check_name=tasks.COVERAGE_CHECK, severity=severity, detail=detail
+    )
+
+    def fails(day: date, calendar: TradingDays, directory: Path) -> DataQualityLog:
+        raise RuntimeError("cannot read /srv/features/year=2023")
+
+    monkeypatch.setattr(tasks, "run_coverage", fails)
+
+    tasks.STEPS["coverage"](WEDNESDAY)
+
+    failed = marker(WEDNESDAY, tasks.COVERAGE_CHECK)
+    assert (failed.severity, failed.detail["error"]) == (Severity.WARNING, "RuntimeError")
+    assert failed.detail["previous"][0] == shut
+    assert [entry["severity"] for entry in failed.detail["previous"][1:]] == added
+
+
 def test_a_recheck_that_cannot_run_leaves_the_day_s_error_standing(
     sent: list[tuple[date, str, str]], monkeypatch: pytest.MonkeyPatch
 ) -> None:

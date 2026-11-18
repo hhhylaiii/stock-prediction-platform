@@ -286,7 +286,7 @@ def _state(row: DataQualityLog) -> dict[str, Any]:
     }
 
 
-def _with_previous(row: DataQualityLog, earlier: DataQualityLog | None) -> DataQualityLog:
+def with_previous(row: DataQualityLog, earlier: DataQualityLog | None) -> DataQualityLog:
     """The row with the earlier row's previous results, and the earlier one too if it differed."""
     kept = [] if earlier is None else list(earlier.detail.get(PREVIOUS, []))
     if earlier is not None and _state(earlier) != _state(row):
@@ -312,7 +312,7 @@ def run_coverage(
     fresh = coverage_row(day, directory)
     with transaction.atomic():
         rows = DataQualityLog.objects.filter(date=day, check_name=CHECK)
-        row = _with_previous(fresh, rows.order_by("-pk").first())
+        row = with_previous(fresh, rows.order_by("-pk").first())
         rows.delete()
         row.save()
     changed = _names(row) != _flagged_before(day, calendar)

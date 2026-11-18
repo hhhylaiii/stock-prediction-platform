@@ -29,6 +29,7 @@ from apps.research.feature_coverage import (
     CoverageError,
     coverage_summary,
     run_coverage,
+    with_previous,
 )
 from apps.research.labels import HORIZONS
 from apps.research.lock import ResearchBusyError, research_lock
@@ -90,7 +91,10 @@ def _labels(day: date) -> str:
 
 
 def _coverage(day: date) -> str:
-    """The day's coverage row; a check that cannot run warns, keeping an earlier error or flags."""
+    """The day's coverage row; a check that cannot run warns, keeping an earlier error or flags.
+
+    The warning keeps the earlier row's previous results, as a rewrite by run_coverage does.
+    """
     try:
         row = run_coverage(day, TradingDays.from_db(), settings.FEATURE_PARQUET_DIR)
     except Exception as error:
@@ -102,7 +106,11 @@ def _coverage(day: date) -> str:
             return f"coverage check failed ({shown}); the day's earlier error stands"
         flagged = [] if earlier is None else earlier.detail.get(FLAGGED, [])
         kept = {FLAGGED: flagged} if flagged else {}
-        _record(day, COVERAGE_CHECK, Severity.WARNING, {"error": shown, **kept})
+        detail = {"error": shown, **kept}
+        failed = DataQualityLog(
+            date=day, check_name=COVERAGE_CHECK, severity=Severity.WARNING, detail=detail
+        )
+        _record(day, COVERAGE_CHECK, Severity.WARNING, with_previous(failed, earlier).detail)
         return f"coverage check failed, see {COVERAGE_CHECK}"
     return coverage_summary(row)
 
