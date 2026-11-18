@@ -355,7 +355,7 @@ docker compose exec db psql -U twp -d twp -c \
   "select check_name, count(*), sum(jsonb_array_length(detail->'filings')) from data_quality_log where check_name in ('statement_filed_late', 'statement_filed_later', 'statement_restated') group by 1"
 ```
 
-- `statement_filing` 和 `reapply_filings` 預設不改每日掃描接手的期別：掃描接手的期別（2026-Q3 起，和 K18 同一個判斷）照 SPEC §8.5 K17 那條，用掃描第一次看到的 session，`--to` 怎麼帶、帶不帶 `--stock` 都一樣跳過。
+- `statement_filing` 和 `reapply_filings` 預設不改每日掃描接手的期別：掃描接手的期別（第一次成功的財報掃描那天還在看的第一季起，也就是 2026-Q3 起；和 K17 補資料的界線是同一個判斷）照 SPEC §8.5 K17 那條，用掃描第一次看到的 session，`--to` 怎麼帶、帶不帶 `--stock` 都一樣跳過。
   - 掃描接手之前的期別照舊：對得到電子書上傳紀錄的列，不論是 FinMind 回補還是 K17 補進來的，公告日都改成上傳日。電子書一年一頁，所以補進 2026-Q1、Q2 之後直接跑就好，同一頁上的 2026-Q3 不會被改。
   - 真的要改掃描期別的日期，加 `--include-scan-periods`（`backfill` 只有 `--source mops --dataset statement_filing` 收這個旗標）。每檔改之前會印一行 warning，列出每個期別要改幾列。先在還原到一次性容器的副本上跑一次（見「還原到一次性容器（不碰正式的 db）」），把會改到的列匯出來交使用者決定；正式庫上用這個旗標一律是使用者的指令列。2026-Q3 已經發生的例外見下面「2026-Q3 的例外」。
 - 月營收沒有歷史申報日可查，維持 Phase 1 的保守值。
@@ -377,7 +377,7 @@ docker compose exec db psql -U twp -d twp -c \
   - 2026-11-18 晚上 2026-Q3 共 1,975 列，其中 138 列的公告日早於 2026-11-05。第一次掃描是 11-05，所以至少這 138 列的日期不是掃描看到的 session。
 - 重抓時，中途出現 doc.twse 的 502 或連線逾時是正常的（11-18 那次 6690 逾時一次，重試成功）。每個請求預設最多重試 4 次（`MOPS_MAX_RETRIES`）。4 次重試都失敗時整次 run 會失敗，不會記成拒收；這時用同一個指令（同樣的 `--from` 和 `--stock`）加 `--resume` 接著跑。
 - 特徵：23:00 的研究晚班會重算最近 60 個交易日。55 檔自己的財報特徵從新的公告日那天開始變，之前的日子不變。`ind_ep_neutral` 是 EP 減掉當天同產業 universe 股票的中位數（沒有產業、或那個產業當天沒有 universe 股票有值時，改減全 universe 的中位數），所以這 55 檔以外的股票也有小幅變動：2026-10-28～11-17 共 270 檔、1,155 列，只有這一欄。
-- 之後的季別要避免兩件事，現在都由程式擋：FinMind 財報回補的 `--to` 一律不晚於 2026-09-29（掃描接手的第一季 2026-Q3 季底的前一天），之後的季別不論還在不在申報期，都不用 FinMind 寫；`backfill --source finmind --dataset financial_statement` 的 `--to` 到了 2026-09-30 就拒絕，月營收同樣停在掃描接手的第一個月（2026-10）之前，也就是 `--to` 不晚於 2026-10-31。`statement_filing` 和 `reapply_filings` 預設不碰掃描期別（見本節上面 `reapply_filings` 之後那條）。
+- 之後的季別要避免兩件事，現在都由程式擋：FinMind 財報回補的 `--to` 一律不晚於 2026-09-29（掃描接手的第一季 2026-Q3 季底的前一天），之後的季別不論還在不在申報期，都不用 FinMind 寫；`backfill --source finmind --dataset financial_statement` 的 `--to` 到了 2026-09-30 就拒絕，月營收同樣停在掃描接手的第一個月（2026-10）之前，也就是 `--to` 不晚於 2026-10-31。`statement_filing` 和 `reapply_filings` 預設不碰掃描期別（見本節上面 `reapply_filings` 之後那條）。結束日超過界線的舊 FinMind run 不能再接著跑，`--resume` 和 `--retry-rejected` 都會被拒（`--retry-rejected` 不能另帶 `--to`）；要補的代號改用 `--stock … --from … --to <界線前一天>` 開一次新的回補。
 
 ## 除權息日的公告日
 
