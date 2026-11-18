@@ -20,7 +20,7 @@ class Fill:
 
 @dataclass(frozen=True)
 class Point:
-    """Cumulative values on a trade day, all 1.0 on the first; None where a figure is missing."""
+    """Cumulative values on a trade day; None where a figure is missing."""
 
     trade_date: date
     book: float
@@ -31,7 +31,8 @@ class Point:
 def cumulative(fills: Iterable[Fill]) -> list[Point]:
     """The book and index as ratios to the first day; the universe chained from the next day on.
 
-    A missing universe return blanks the universe from that day on, a missing close only its day.
+    A missing universe return blanks the universe from that day on, a missing close only its day,
+    or the whole index when it is the first day's.
     """
     ordered = sorted(fills, key=lambda fill: fill.trade_date)
     if not ordered:
