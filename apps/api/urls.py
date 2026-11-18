@@ -1,5 +1,6 @@
 from django.urls import path, re_path
 
+from apps.api.holding import HoldingView
 from apps.api.model_runs import ModelListView, MonthlyIcView
 from apps.api.ops import CorrectionsView, DataQualityView, EtlRunListView, NotFoundView
 from apps.api.predictions import PredictionListView
@@ -23,6 +24,7 @@ urlpatterns = [
     path("status", StatusView.as_view(), name="status"),
     path("predictions", PredictionListView.as_view(), name="predictions"),
     path("models", ModelListView.as_view(), name="models"),
+    path("holding", HoldingView.as_view(), name="holding"),
     path("models/ic-monthly", MonthlyIcView.as_view(), name="models-ic-monthly"),
     path("etl/runs", EtlRunListView.as_view(), name="etl-runs"),
     path("data-quality", DataQualityView.as_view(), name="data-quality"),
