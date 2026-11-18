@@ -16,7 +16,13 @@ from apps.etl.adapters.mops import STATEMENT_FILING, MopsAdapter
 from apps.etl.filings import FILING_COLUMNS, apply_statement_filings
 from apps.etl.models import EtlRun
 from apps.etl.ratelimit import RateLimit, RateLimiter
-from apps.etl.scan_start import REVENUE_SCAN, STATEMENT_SCAN, first_scanned, first_scanned_month
+from apps.etl.scan_start import (
+    REVENUE_SCAN,
+    STATEMENT_SCAN,
+    first_scanned,
+    first_scanned_month,
+    first_scanned_quarter,
+)
 from apps.market.calendar import TradingDays
 from apps.market.models import FinancialStatement, FinType, Market, StockMaster
 
@@ -84,7 +90,7 @@ STORED = (("2026-Q2", date(2026, 9, 1)), ("2026-Q3", date(2026, 11, 5)))
 
 @pytest.mark.django_db
 def test_no_scan_has_run_yet_so_no_period_is_the_scans() -> None:
-    assert (first_scanned(), first_scanned_month()) == (None, None)
+    assert (first_scanned(), first_scanned_quarter(), first_scanned_month()) == (None, None, None)
 
 
 @pytest.mark.django_db
@@ -92,7 +98,18 @@ def test_the_first_scans_date_the_quarter_and_month_still_being_filed() -> None:
     scanned(STATEMENT_SCAN, date(2026, 11, 5))
     scanned(REVENUE_SCAN, date(2026, 11, 5))
     scanned(REVENUE_SCAN, date(2026, 11, 6))
-    assert (first_scanned(), first_scanned_month()) == ("2026-Q3", "2026-10")
+    assert (first_scanned(), first_scanned_quarter(), first_scanned_month()) == (
+        "2026-Q3",
+        "2026-Q3",
+        "2026-10",
+    )
+
+
+@pytest.mark.django_db
+def test_a_failed_statement_scan_starts_only_the_k18_bound() -> None:
+    scanned(STATEMENT_SCAN, date(2026, 9, 1), status=EtlRun.Status.FAILED)
+    scanned(STATEMENT_SCAN, date(2026, 11, 5))
+    assert (first_scanned(), first_scanned_quarter()) == ("2026-Q2", "2026-Q3")
 
 
 @pytest.mark.django_db
@@ -131,6 +148,19 @@ def test_scan_periods_get_filing_dates_only_when_asked_and_are_named_first(
 
 
 @pytest.mark.django_db
+def test_the_scan_periods_are_named_before_any_date_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    statements(*STORED)
+    seen: list[dict[str, date]] = []
+    monkeypatch.setattr("apps.etl.filings.logger.warning", lambda *args: seen.append(dates()))
+    apply_statement_filings(
+        filings(Q2_UPLOAD, Q3_UPLOAD), CALENDAR, CUTOFF, "2026-Q3", include_scan_periods=True
+    )
+    assert seen == [dict(STORED)]
+
+
+@pytest.mark.django_db
 def test_before_any_scan_every_period_takes_its_filing_date() -> None:
     statements(*STORED)
     changed = apply_statement_filings(filings(Q2_UPLOAD, Q3_UPLOAD), CALENDAR, CUTOFF, None)
@@ -148,6 +178,17 @@ def test_the_mops_adapter_reads_the_scan_start_and_its_own_flag(
     adapter = MopsAdapter(CALENDAR, limiter, include_scan_periods=include)
     adapter.upsert(STATEMENT_FILING, filings(Q2_UPLOAD, Q3_UPLOAD))
     assert dates() == {"2026-Q2": date(2026, 8, 7), "2026-Q3": q3}
+
+
+@pytest.mark.django_db
+def test_k17_filled_quarters_before_the_first_successful_scan_still_take_filing_dates(
+    limiter: RateLimiter,
+) -> None:
+    scanned(STATEMENT_SCAN, date(2026, 9, 1), status=EtlRun.Status.FAILED)
+    scanned(STATEMENT_SCAN, date(2026, 11, 5))
+    statements(*STORED)
+    MopsAdapter(CALENDAR, limiter).upsert(STATEMENT_FILING, filings(Q2_UPLOAD, Q3_UPLOAD))
+    assert dates() == {"2026-Q2": date(2026, 8, 7), "2026-Q3": date(2026, 11, 5)}
 
 
 @pytest.fixture
@@ -242,6 +283,13 @@ def test_finmind_backfills_are_unbounded_until_a_scan_has_run(
     finmind: FinmindAdapter, dataset: str, scan: str, reaching: date, last: date, period: str
 ) -> None:
     run = finmind.backfill(dataset, [], date(2010, 1, 1), date(2026, 11, 17))
+    assert run.status == EtlRun.Status.SUCCESS
+
+
+def test_a_failed_statement_scan_does_not_move_the_finmind_bound(finmind: FinmindAdapter) -> None:
+    scanned(STATEMENT_SCAN, date(2026, 9, 1), status=EtlRun.Status.FAILED)
+    scanned(STATEMENT_SCAN, date(2026, 11, 5))
+    run = finmind.backfill("financial_statement", [], date(2010, 1, 1), date(2026, 9, 29))
     assert run.status == EtlRun.Status.SUCCESS
 
 

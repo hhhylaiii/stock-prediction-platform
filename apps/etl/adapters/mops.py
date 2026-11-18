@@ -59,7 +59,12 @@ from apps.etl.revenue_scan import (
     revenue_rows,
     without_generation_time,
 )
-from apps.etl.scan_start import REVENUE_SCAN, STATEMENT_SCAN, first_scanned, first_scanned_month
+from apps.etl.scan_start import (
+    REVENUE_SCAN,
+    STATEMENT_SCAN,
+    first_scanned_month,
+    first_scanned_quarter,
+)
 from apps.etl.statement_scan import SCAN_COLUMNS, insert_new_statements, scan_session
 from apps.etl.statement_summary import (
     MARKETS,
@@ -460,7 +465,7 @@ class MopsAdapter(BaseAdapter):
             return 0
         cutoff = time.fromisoformat(settings.FILING_VISIBLE_BEFORE)
         return apply_statement_filings(
-            frame, self.calendar, cutoff, first_scanned(), self.include_scan_periods
+            frame, self.calendar, cutoff, first_scanned_quarter(), self.include_scan_periods
         )
 
     def _scan(self, day: date) -> pd.DataFrame:
@@ -614,16 +619,7 @@ class MopsAdapter(BaseAdapter):
         A late filer the scan never saw within its window has no row, and its deadline-based date
         would come before its real filing.
         """
-        if dataset in REVENUES:
-            return first_scanned_month()
-        runs = EtlRun.objects.filter(
-            source=self.source, dataset=STATEMENT_SCAN, status=EtlRun.Status.SUCCESS
-        )
-        first = runs.order_by("start_date").values_list("start_date", flat=True).first()
-        if first is None:
-            return None
-        periods = open_periods(first, int(settings.STATEMENT_SCAN_DAYS_AFTER))
-        return periods[0] if periods else None
+        return first_scanned_month() if dataset in REVENUES else first_scanned_quarter()
 
     def _conservative(self, dataset: str) -> Callable[[str], date]:
         """The deadline-based date FinMind rows carry, for periods first seen long after."""

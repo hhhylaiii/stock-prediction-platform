@@ -20,6 +20,18 @@ def first_scanned() -> str | None:
     return min(periods) if periods else None
 
 
+def first_scanned_quarter() -> str | None:
+    """The first quarter a successful statement scan read as being filed; K17 fills before it."""
+    runs = EtlRun.objects.filter(
+        source="mops", dataset=STATEMENT_SCAN, status=EtlRun.Status.SUCCESS
+    ).order_by("start_date")
+    first = runs.values_list("start_date", flat=True).first()
+    if first is None:
+        return None
+    periods = open_periods(first, int(settings.STATEMENT_SCAN_DAYS_AFTER))
+    return periods[0] if periods else None
+
+
 def first_scanned_month() -> str | None:
     """The first month a successful revenue scan read as being filed."""
     runs = EtlRun.objects.filter(

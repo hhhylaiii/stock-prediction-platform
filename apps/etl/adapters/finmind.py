@@ -38,7 +38,7 @@ from apps.etl.errors import SchemaChangedError, SourceError, SourceRequestError
 from apps.etl.filings import quarter_end
 from apps.etl.models import RawFinmind
 from apps.etl.ratelimit import RateLimiter, ThrottledError
-from apps.etl.scan_start import first_scanned, first_scanned_month
+from apps.etl.scan_start import first_scanned_month, first_scanned_quarter
 from apps.etl.share_counts import drop_repeated_counts
 from apps.etl.upsert import insert_missing, upsert
 from apps.market.adjust import refresh_adj_factor, refresh_where_later_events
@@ -221,7 +221,7 @@ class FinmindAdapter(BaseAdapter):
     def require_range(self, dataset: str, start: date, end: date) -> None:
         """Statements and revenue stop before the first period the daily scan dates (SPEC §8.5)."""
         if dataset == "financial_statement":
-            period = first_scanned()
+            period = first_scanned_quarter()
             bound = quarter_end(period) if period else None
         elif dataset == "monthly_revenue":
             period = first_scanned_month()
