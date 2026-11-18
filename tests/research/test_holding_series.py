@@ -22,6 +22,10 @@ def test_no_fills_is_no_series() -> None:
     assert cumulative([]) == []
 
 
+def test_a_lone_first_fill_is_one_for_all_three() -> None:
+    assert cumulative(run((D0, 0.99, 0.05, 25000.0))) == [Point(D0, 1.0, 1.0, 1.0)]
+
+
 @pytest.mark.parametrize("universe", [0.05, None])
 def test_the_first_fill_is_one_for_all_three_whatever_its_universe_return(
     universe: float | None,
@@ -107,6 +111,8 @@ def test_a_missing_fill_is_refused_instead_of_chaining_two_days_as_one() -> None
         ([Fill(S0, D0, 1.0, 0.0, 1.0), Fill(S0, D0, 1.0, 0.0, 1.0)], "same trade day"),
         ([Fill(S0, D0, 0.0, 0.0, 1.0)], "not positive"),
         ([Fill(S0, D0, float("nan"), 0.0, 1.0)], "not positive"),
+        ([Fill(S0, D0, float("inf"), 0.0, 1.0)], "not positive"),
+        (run((D0, 1.0, 0.0, 1.0), (D1, float("nan"), 0.0, 1.0)), "fill 2026-11-18 has value nan"),
         ([Fill(S0, D0, 1.0, float("inf"), 1.0)], "universe return inf"),
         ([Fill(S0, D0, 1.0, -1.0, 1.0)], "universe return -1.0"),
         ([Fill(S0, D0, 1.0, float("nan"), 1.0)], "universe return nan"),
