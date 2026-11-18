@@ -59,6 +59,7 @@ from apps.etl.revenue_scan import (
     revenue_rows,
     without_generation_time,
 )
+from apps.etl.scan_start import REVENUE_SCAN, STATEMENT_SCAN, first_scanned_month
 from apps.etl.statement_scan import SCAN_COLUMNS, insert_new_statements, scan_session
 from apps.etl.statement_summary import (
     MARKETS,
@@ -77,8 +78,6 @@ from apps.market.models import FinancialStatement, FinType, StockMaster
 
 MOPS_MIN_INTERVAL = 5.0
 STATEMENT_FILING = "statement_filing"
-STATEMENT_SCAN = "statement_scan"
-REVENUE_SCAN = "revenue_scan"
 SCANS = frozenset({STATEMENT_SCAN, REVENUE_SCAN})
 REVENUE_PATH = "/nas/t21"
 SUMMARY_PATH = "/mops/web/ajax_"
@@ -611,17 +610,14 @@ class MopsAdapter(BaseAdapter):
         A late filer the scan never saw within its window has no row, and its deadline-based date
         would come before its real filing.
         """
-        revenue = dataset in REVENUES
+        if dataset in REVENUES:
+            return first_scanned_month()
         runs = EtlRun.objects.filter(
-            source=self.source,
-            dataset=REVENUE_SCAN if revenue else STATEMENT_SCAN,
-            status=EtlRun.Status.SUCCESS,
+            source=self.source, dataset=STATEMENT_SCAN, status=EtlRun.Status.SUCCESS
         )
         first = runs.order_by("start_date").values_list("start_date", flat=True).first()
         if first is None:
             return None
-        if revenue:
-            return open_months(first, int(settings.REVENUE_SCAN_DAYS_AFTER))[0]
         periods = open_periods(first, int(settings.STATEMENT_SCAN_DAYS_AFTER))
         return periods[0] if periods else None
 
