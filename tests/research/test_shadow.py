@@ -10,6 +10,7 @@ from django.db import OperationalError, connection, transaction
 from django.db.models import F
 from django.utils import timezone
 
+from apps.api.ops import STOCK_CODES
 from apps.etl.models import DataQualityLog
 from apps.market.calendar import TradingDays
 from apps.market.models import DailyPrice, IndexDaily, StockMaster, TradingCalendar
@@ -307,6 +308,7 @@ def test_a_fill_follows_its_list_after_the_predictions_are_rewritten(
     assert (warned.severity, note["signal_date"]) == ("warning", "2026-11-18")
     assert note["predictions_rewritten"]["scores_changed"] > 0
     assert note["predictions_rewritten"]["universe_removed"] == 1
+    assert note["predictions_rewritten"][STOCK_CODES][0] == "1007"
     for phase in (BookPhase.LIST, BookPhase.FILL):
         assert lines("T", market[2], phase) == lines("R", market[2], phase)
     rewrote, kept = fills("T")[2], fills("R")[2]
@@ -343,7 +345,7 @@ def test_a_universe_stock_without_a_score_is_noted_and_the_list_still_written(
             "book": "T",
             "signal_date": "2026-11-16",
             "in_universe_without_score": 1,
-            "first": ["1001"],
+            STOCK_CODES: ["1001"],
         }
     ]
     assert "1001" in HoldingBookDay.objects.get(book="T", phase=BookPhase.LIST).universe
@@ -539,7 +541,7 @@ def test_a_quiet_rerun_keeps_the_day_s_first_row_and_its_notes(
     assert again.endswith("; kept the day's earlier research_shadow row")
     row = DataQualityLog.objects.get(date=FIRST, check_name=SHADOW_CHECK)
     assert row.severity == "warning"
-    assert row.detail["notes"][0]["first"] == ["1001"]
+    assert row.detail["notes"][0][STOCK_CODES] == ["1001"]
 
 
 def test_a_universe_stock_whose_predictions_are_all_gone_still_counts_in_the_fill(
