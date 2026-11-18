@@ -18,6 +18,7 @@ from tests.api.conftest import FORCED_REASON, add_model_run, add_predictions, fo
 from tests.e2e.conftest import (
     BAND_NOTE,
     BASIS_STOCK,
+    EXTRA_STOCKS,
     FALLBACK_NOTE,
     ONLINE,
     PROB_HEAD,
@@ -454,6 +455,59 @@ def test_a_horizon_without_a_prediction_cannot_be_picked(
     expect(page.locator("#chart-title")).to_have_text("過去 60 個交易日，與未來 20 日的預測")
 
 
+def pick_twenty_days_on_today(page: Page, live_server: LiveServer) -> None:
+    page.goto(live_server.url)
+    expect(page.locator("#rows .trow")).to_have_count(20)
+    page.locator('#view-today [data-h="20"]').click()
+    expect(page.locator('#view-today [data-h="20"]')).to_have_attribute("aria-pressed", "true")
+
+
+def test_a_stock_lacking_the_picked_horizon_shows_the_one_it_has(
+    page: Page, live_server: LiveServer, explained: Seed
+) -> None:
+    add_contribs(explained, [("tech_rsi_14", 0.01)], (0.0, 76), horizon=5)
+    Prediction.objects.filter(stock_id="2330", horizon=20).delete()
+    asked: list[str] = []
+    page.on(
+        "request", lambda request: asked.append(request.url) if "/features" in request.url else None
+    )
+    pick_twenty_days_on_today(page, live_server)
+
+    page.goto(f"{live_server.url}/#stock-2330")
+
+    expect(page.locator("#stock-seg [data-sh='20']")).to_be_disabled()
+    expect(page.locator("#stock-seg [data-sh='20']")).to_have_attribute("aria-pressed", "false")
+    expect(page.locator("#stock-seg [data-sh='5']")).to_have_attribute("aria-pressed", "true")
+    expect(page.locator("#stock-seg-hint")).to_have_text("20 日預測尚未產出")
+    expect(page.locator("#stock-rank .l")).to_have_text("5 日預測排名")
+    expect(page.locator(".stockhead .kpi .v")).to_have_text("第 2 名 / 25")
+    expect(page.locator("#chart-title")).to_have_text("過去 60 個交易日，與未來 5 日的預測")
+    expect(page.locator("#features .feat")).to_contain_text("RSI（14）")
+    assert asked[-1].endswith("horizon=5")
+
+    page.locator("[data-nav=today]").click()
+
+    expect(page.locator('#view-today [data-h="20"]')).to_have_attribute("aria-pressed", "true")
+    expect(page.locator("#ret-head")).to_have_text("20 日預測報酬")
+
+
+def test_the_picked_horizon_returns_on_a_stock_that_has_it(
+    page: Page, live_server: LiveServer, explained: Seed
+) -> None:
+    lacking = EXTRA_STOCKS[0]
+    Prediction.objects.filter(stock_id=lacking, horizon=20).delete()
+    pick_twenty_days_on_today(page, live_server)
+    page.goto(f"{live_server.url}/#stock-{lacking}")
+    expect(page.locator("#stock-rank .l")).to_have_text("5 日預測排名")
+
+    page.goto(f"{live_server.url}/#stock-2330")
+
+    expect(page.locator("#stock-seg button:disabled")).to_have_count(0)
+    expect(page.locator("#stock-seg [data-sh='20']")).to_have_attribute("aria-pressed", "true")
+    expect(page.locator("#stock-rank .l")).to_have_text("20 日預測排名")
+    expect(page.locator("#chart-title")).to_have_text("過去 60 個交易日，與未來 20 日的預測")
+
+
 def test_a_failed_contribution_request_keeps_the_rest(
     page: Page, live_server: LiveServer, explained: Seed
 ) -> None:
@@ -819,7 +873,7 @@ def test_the_stock_page_opens_on_the_horizon_that_has_a_prediction(
     expect(pair).not_to_contain_text("20 日 LightGBM")
 
 
-def test_a_horizon_picked_on_today_is_kept_on_the_stock_page(
+def test_a_horizon_picked_on_today_without_a_ranking_shows_the_stock_s_other_one(
     page: Page, live_server: LiveServer, explained: Seed
 ) -> None:
     take_ranking_offline(20)
@@ -831,7 +885,27 @@ def test_a_horizon_picked_on_today_is_kept_on_the_stock_page(
     page.goto(f"{live_server.url}/#stock-2330")
 
     expect(page.locator("#stock-seg-hint")).to_have_text("20 日排名目前沒有上線中的模型")
-    expect(page.locator("#stock-seg [data-sh='20']")).to_have_attribute("aria-pressed", "true")
+    expect(page.locator("#stock-seg [data-sh='20']")).to_be_disabled()
+    expect(page.locator("#stock-seg [data-sh='20']")).to_have_attribute("aria-pressed", "false")
+    expect(page.locator("#stock-seg [data-sh='5']")).to_have_attribute("aria-pressed", "true")
+    expect(page.locator(".stockhead .kpi")).to_contain_text("5 日預測排名")
+    expect(page.locator(".stockhead .kpi .v")).to_have_text("第 2 名 / 25")
+
+    page.locator("[data-nav=today]").click()
+
+    expect(page.locator("#view-today [data-h='20']")).to_have_attribute("aria-pressed", "true")
+    expect(page.locator("#today-empty")).to_be_visible()
+
+
+def test_a_stock_without_any_prediction_names_the_unranked_horizon(
+    page: Page, live_server: LiveServer, explained: Seed
+) -> None:
+    take_ranking_offline(20)
+    Prediction.objects.filter(stock_id="2330", horizon=5).delete()
+
+    page.goto(f"{live_server.url}/#stock-2330")
+
+    expect(page.locator("#stock-seg button:disabled")).to_have_count(2)
     expect(page.locator(".stockhead .kpi")).to_contain_text("20 日預測排名")
     expect(page.locator(".stockhead .kpi .v")).to_have_text("— 排名未上線")
 
