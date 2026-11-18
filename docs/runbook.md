@@ -197,7 +197,7 @@ docker compose logs -f worker
 - warning：`flagged` 列出低於門檻的特徵（`share` 是線上比例、`count` 是有值的檔數、`median` 與 `low` 是參考的中位數與第 5 百分位、`bound` 是門檻）。預測照常產出。先查那個特徵的來源當天有沒有抓到（`etl_run`、來源表的當日列數）；補好來源後照下面「解除」的步驟做。告警只在被標的名單和前一個交易日不同時才發，所以同一個缺口持續時只有第一天有告警，列還是每天寫。
 - error：平常大多有值的特徵（`low` ≥ 0.5）掉到 `low` 的一半以下，那筆的 `collapsed` 是 true。當天的 `predict` 會被研究閘門擋下（`research_morning` 記 `failed: predict`、`PredictionGateError`），之後的 `monitor` 也不跑；每天都會告警。同一個 D 再有早上排程時（週末、連假的早上，或手動 `morning`），只要當天的 error 只有這個檢查寫的，chain 照樣啟動：重算 D 的特徵、重跑這個檢查，`predict` 依新結果放行或擋下；`research_morning` 的 `steps` 第一筆是 `gate`，寫明閘門原本被覆蓋率 error 關住。平日的 D 隔天早上就換成下一個交易日、不會再判；當天還有別的檢查的 error 時照舊記 `research gate shut`。這兩種不會自己解除，要照下面「解除」手動做。這一列留著的期間，訓練窗涵蓋 D 的正式 run 過不了每月重訓的上線門檻 (4)（訓練窗內 `data_quality_log` 無 error）。例外是讀當沖、集保的 3 個特徵（`chip_day_trade_ratio_5d`、`chip_big_holder_pct_chg_1w`、`chip_holder_count_chg_1w`）：這兩項來源研究閘門不擋，缺一天特徵就沒有值，所以崩落只給 warning（`collapsed` 是 false），預測照出。判準與每個特徵的來源見 SPEC 第 5 節與 `feature_coverage.SOURCES`。
 - 解除（warning 與 error 相同，error 另外要補預測）：
-  - 暫時規則（每月換模門檻 (4) 改成也看重訓當時的紀錄之前）：每月重訓跑完到隔天早上換模判定之間，不要手動解除覆蓋率 error 列；要解除，先告知協調，並在換模判定的紀錄裡寫明那一天。門檻 (4) 在換模時才讀 `data_quality_log`，這段時間改寫的列會讓用有缺資料訓的模型過關。
+  - 暫時規則（每月換模門檻 (4) 不再受重訓之後改寫的列影響之前）：每月重訓跑完到換模判定之間，不要手動解除覆蓋率 error 列，也不要對訓練窗內的舊日子手動跑 `morning`；要做，先告知協調，並在換模判定的紀錄裡寫明那一天。換模判定在下一個新的 D 的早上 chain 裡，平日重訓的通常是隔天早上，週六早上重訓的通常要到下週二早上。門檻 (4) 在換模時才讀 `data_quality_log`，這段時間改寫的列會讓用有缺資料訓的模型過關。
   1. 修好來源，補抓缺的那幾天。
   2. `build_features --date D`。
   3. 先確認特徵真的補回來了，再重跑檢查。把 `<feature>` 換成被標的欄位，`filled / universe` 要回到那一列 `bound` 以上：
