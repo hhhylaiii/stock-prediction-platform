@@ -81,7 +81,7 @@ docker compose logs -f worker
 
 ### 研究閘門
 
-研究層 23:00、06:00 的任務要先確認 `apps.etl.tasks.ready_for_research(day)`：`etl_complete(day)` 且 `should_run_prediction(day)`。
+研究層 23:00、06:00 的任務要先確認 `apps.etl.tasks.ready_for_research(day)`：`etl_complete(day)` 且 `should_run_prediction(day)`。06:00 的早上排程不把 `monitor_feature_coverage` 的 error 算進去（`besides`），chain 裡的 `predict` 重算特徵、重跑覆蓋率之後自己再判一次，見「線上特徵覆蓋率檢查」。
 
 - `etl_complete`：當日快照都有成功的 `etl_run`，也就是兩個交易所的日價量、指數、三大法人、融資融券、借券、外資持股、本益比與淨值比，加上除權息事件（`GATE_DATASETS`）。前面幾項缺一天，當天的特徵就是空的；除權息事件缺了，除權息日的還原價會錯。
 - 注意、處置、全額交割、股數變動、當沖、加權股價報酬指數不擋：前四個是事件或變動紀錄，漏一天只是晚一天反映，隔天 catchup 補；當沖是規格的第二批特徵，T+2 才定案；報酬指數只給第 7 節相對大盤的機率 label 用，停止更新時由指數新鮮度檢查告警（見下方「加權股價報酬指數」）。
@@ -207,7 +207,7 @@ docker compose logs -f worker
        "select count(*) as universe, count(<feature>) as filled from feature_daily where date = 'D' and in_universe"
      ```
 
-  4. `feature_coverage --date D`，這一列變回 info（或只剩別的特徵的 warning）才算解除。結果改變時，被取代的那次留在這一列的 `detail.previous`（severity、被標與崩落的特徵、改寫時間，舊的在前）；結果相同就不多記。
+  4. `feature_coverage --date D`，這一列變回 info（或只剩別的特徵的 warning）才算解除。severity 或被標的特徵改變時，被取代的那次留在這一列的 `detail.previous`（severity、被標與崩落的特徵、改寫時間，舊的在前；檢查沒跑成的那次另帶 `error`）；兩者都相同就不多記。
   5. 原本是 error 的日子再跑 `predict --date D`、`monitor --date D`。
 - 來源補不回來時：這一列不要刪、也不要手改，先回報，由使用者決定怎麼處理（例如確認是來源缺口後把那個月份列入 `MASKED_MONTHS` 並重建，之後那個特徵在那個月份就不判）。
 - 檢查自己跑不起來時（例如某一年的分區不在），這一列是 warning，`detail.error` 寫原因（不含主機路徑；沒有預期到的例外只寫例外類別，完整訊息在 worker 的 log），預測照常產出。排除原因後重跑 `feature_coverage --date D`，把這一列換成真正的結果。當天已經有 error 列時不會被這種失敗蓋掉；當天先前被標的名單也會留在這一列的 `flagged`。
