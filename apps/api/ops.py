@@ -31,6 +31,8 @@ CHECK_FIELDS = ("check_name", "severity", "detail")
 MODEL_CHECK_FIELDS = ("id", *CHECK_FIELDS)
 MODEL_CHECK_PREFIXES = ("output_", "monitor_", "model_", "research_")
 CORRECTIONS_CACHE_KEY = "api:data-quality:corrections"
+SHADOW_CHECK = "research_shadow"
+STOCK_CODES = "first"
 
 
 class EtlRunSerializer(serializers.ModelSerializer[EtlRun]):
@@ -48,6 +50,23 @@ class EtlRunSerializer(serializers.ModelSerializer[EtlRun]):
             "started_at",
             "finished_at",
         )
+
+
+def without_codes(value: Any) -> Any:
+    """The value rebuilt without its stock codes, the `first` key at any depth."""
+    if isinstance(value, dict):
+        return {key: without_codes(item) for key, item in value.items() if key != STOCK_CODES}
+    if isinstance(value, list):
+        return [without_codes(item) for item in value]
+    return value
+
+
+def model_check(entry: dict[str, Any]) -> dict[str, Any]:
+    """A model check as served; the shadow books' notes keep their stock codes in the table only."""
+    check = {field: entry[field] for field in MODEL_CHECK_FIELDS}
+    if check["check_name"] != SHADOW_CHECK:
+        return check
+    return {**check, "detail": without_codes(check["detail"])}
 
 
 def session_summary(day: date, logs: list[dict[str, Any]]) -> dict[str, Any]:
@@ -68,7 +87,7 @@ def session_summary(day: date, logs: list[dict[str, Any]]) -> dict[str, Any]:
         "worst": worst,
         "missing_checks": missing,
         "checks": [{field: entry[field] for field in CHECK_FIELDS} for entry in data],
-        "model_checks": [{field: entry[field] for field in MODEL_CHECK_FIELDS} for entry in model],
+        "model_checks": [model_check(entry) for entry in model],
     }
 
 
