@@ -47,7 +47,7 @@ Run `uv run python manage.py <command> -h` for the full options of any command.
 | Purpose | Command |
 | --- | --- |
 | Fetch one day or a date range | `fetch --source twse --dataset daily_price --date 2026-11-06` |
-| Backfill stock by stock (resumable) | `backfill --source finmind --dataset <dataset> --from 2010-01-01 --resume` |
+| Backfill stock by stock (resumable) | `backfill --source finmind --dataset <dataset> --from 2010-01-01 --resume` (for `financial_statement`, `--to` must be 2026-09-29 or earlier, see the runbook's 2026-Q3 exceptions; for `monthly_revenue`, stop before months the daily scan still reads) |
 | Catch up on missed trading days | `catchup --since 2026-11-01 --dry-run` |
 | Run one day's quality checks | `check_quality --date 2026-11-06` |
 | Rebuild labels and features | `build_labels --start 2010-01-01`, `build_features --start 2010-01-01` (without a range, the last 60 days are rebuilt) |
