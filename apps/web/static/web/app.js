@@ -290,8 +290,10 @@
 
   async function currentHolding(date) {
     const book = await holdingFor(false);
-    const behind = !book.error && date && (book.meta || {}).predictions_date !== date;
-    return behind ? holdingFor(true) : book;
+    if (book.error || !date) return book;
+    const listed = ((book.data || {}).list || {}).signal_date;
+    const stale = (book.meta || {}).predictions_date !== date || (listed && listed < date);
+    return stale ? holdingFor(true) : book;
   }
 
   function showHolding(book) {
