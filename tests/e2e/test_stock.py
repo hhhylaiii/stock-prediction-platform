@@ -906,8 +906,24 @@ def test_a_stock_without_any_prediction_names_the_unranked_horizon(
     page.goto(f"{live_server.url}/#stock-2330")
 
     expect(page.locator("#stock-seg button:disabled")).to_have_count(2)
+    expect(page.locator("#stock-seg [aria-pressed='true']")).to_have_count(0)
     expect(page.locator(".stockhead .kpi")).to_contain_text("20 日預測排名")
     expect(page.locator(".stockhead .kpi .v")).to_have_text("— 排名未上線")
+
+
+def test_a_redrawn_stock_without_any_prediction_presses_no_disabled_button(
+    page: Page, live_server: LiveServer, explained: Seed
+) -> None:
+    take_ranking_offline(20)
+    Prediction.objects.filter(stock_id="2330", horizon=5).delete()
+    page.goto(live_server.url)
+    expect(page.locator("#view-today [data-h='5']")).to_have_attribute("aria-pressed", "true")
+
+    page.goto(f"{live_server.url}/#stock-2330")
+
+    expect(page.locator(".stockhead .kpi")).to_contain_text("20 日預測排名")
+    expect(page.locator("#stock-seg button:disabled")).to_have_count(2)
+    expect(page.locator("#stock-seg [aria-pressed='true']")).to_have_count(0)
 
 
 def test_each_horizon_s_ranking_model_is_named_when_they_are_not_one_build(
