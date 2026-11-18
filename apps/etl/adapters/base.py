@@ -72,6 +72,10 @@ class BaseAdapter(ABC):
                 f"{self.source} has no dataset {dataset!r}; choose from {sorted(self.datasets)}"
             )
 
+    def require_range(self, dataset: str, start: date, end: date) -> None:
+        """Sources that must not fill some periods refuse the range here."""
+        return None
+
     def trading_days(self, start: date, end: date) -> tuple[date, ...]:
         """Trading days to process; a single requested date must itself be a trading day."""
         today = timezone.localdate()
@@ -117,6 +121,7 @@ class BaseAdapter(ABC):
     ) -> EtlRun:
         """Stock by stock; a stock with unusable source data is skipped and recorded."""
         self.require_dataset(dataset)
+        self.require_range(dataset, start, end)
         if not self.per_stock:
             raise ValueError(f"{self.source} cannot fetch one stock at a time")
         pending = [

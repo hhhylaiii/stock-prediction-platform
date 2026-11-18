@@ -59,6 +59,12 @@ from apps.etl.revenue_scan import (
     revenue_rows,
     without_generation_time,
 )
+from apps.etl.scan_start import (
+    REVENUE_SCAN,
+    STATEMENT_SCAN,
+    first_scanned_month,
+    first_scanned_quarter,
+)
 from apps.etl.statement_scan import SCAN_COLUMNS, insert_new_statements, scan_session
 from apps.etl.statement_summary import (
     MARKETS,
@@ -77,8 +83,6 @@ from apps.market.models import FinancialStatement, FinType, StockMaster
 
 MOPS_MIN_INTERVAL = 5.0
 STATEMENT_FILING = "statement_filing"
-STATEMENT_SCAN = "statement_scan"
-REVENUE_SCAN = "revenue_scan"
 SCANS = frozenset({STATEMENT_SCAN, REVENUE_SCAN})
 REVENUE_PATH = "/nas/t21"
 SUMMARY_PATH = "/mops/web/ajax_"
@@ -361,8 +365,10 @@ class MopsAdapter(BaseAdapter):
         calendar: TradingDays,
         limiter: RateLimiter,
         session: requests.Session | None = None,
+        include_scan_periods: bool = False,
     ) -> None:
         super().__init__(calendar, limiter)
+        self.include_scan_periods = include_scan_periods
         self.client = MopsClient.build(limiter, session)
         self.summaries = MopsSummaryClient.build(limiter, session)
 
@@ -458,7 +464,9 @@ class MopsAdapter(BaseAdapter):
         if frame.empty:
             return 0
         cutoff = time.fromisoformat(settings.FILING_VISIBLE_BEFORE)
-        return apply_statement_filings(frame, self.calendar, cutoff)
+        return apply_statement_filings(
+            frame, self.calendar, cutoff, first_scanned_quarter(), self.include_scan_periods
+        )
 
     def _scan(self, day: date) -> pd.DataFrame:
         periods = open_periods(day, int(settings.STATEMENT_SCAN_DAYS_AFTER))
@@ -611,19 +619,7 @@ class MopsAdapter(BaseAdapter):
         A late filer the scan never saw within its window has no row, and its deadline-based date
         would come before its real filing.
         """
-        revenue = dataset in REVENUES
-        runs = EtlRun.objects.filter(
-            source=self.source,
-            dataset=REVENUE_SCAN if revenue else STATEMENT_SCAN,
-            status=EtlRun.Status.SUCCESS,
-        )
-        first = runs.order_by("start_date").values_list("start_date", flat=True).first()
-        if first is None:
-            return None
-        if revenue:
-            return open_months(first, int(settings.REVENUE_SCAN_DAYS_AFTER))[0]
-        periods = open_periods(first, int(settings.STATEMENT_SCAN_DAYS_AFTER))
-        return periods[0] if periods else None
+        return first_scanned_month() if dataset in REVENUES else first_scanned_quarter()
 
     def _conservative(self, dataset: str) -> Callable[[str], date]:
         """The deadline-based date FinMind rows carry, for periods first seen long after."""

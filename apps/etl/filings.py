@@ -1,5 +1,7 @@
 """Actual filing times replace the conservative announce dates of Phase 1 (plan §8 K2, K14)."""
 
+import logging
+from collections import Counter
 from collections.abc import Iterable
 from datetime import date, datetime, time
 from typing import Any, NamedTuple
@@ -25,6 +27,8 @@ LOGS = {
 FILING_COLUMNS = ["stock_id", "period", "fin_type", "uploaded_at", "corrected", "restated"]
 QUARTER_LAST_DAY = {1: 31, 2: 30, 3: 30, 4: 31}
 
+logger = logging.getLogger(__name__)
+
 
 class Filing(NamedTuple):
     stock_id: str
@@ -44,9 +48,20 @@ def filing_session(uploaded_at: datetime, calendar: TradingDays, cutoff: time) -
     return calendar.shift(calendar.latest_on_or_before(day), 1)
 
 
-def apply_statement_filings(frame: pd.DataFrame, calendar: TradingDays, cutoff: time) -> int:
-    """Each filing's own upload sets the date, a corrected one too: its upload is the correction."""
+def apply_statement_filings(
+    frame: pd.DataFrame,
+    calendar: TradingDays,
+    cutoff: time,
+    scanned: str | None,
+    include_scan_periods: bool = False,
+) -> int:
+    """Each filing's own upload sets the date, a corrected one too: its upload is the correction.
+
+    Periods from `scanned` on keep the daily scan's session unless they are asked for (SPEC §8.5).
+    """
     filings = [Filing(*row) for row in frame[FILING_COLUMNS].itertuples(index=False)]
+    if scanned is not None and not include_scan_periods:
+        filings = [filing for filing in filings if filing.period < scanned]
     changed: list[tuple[FinancialStatement, date]] = []
     logs: dict[str, dict[str, list[dict[str, Any]]]] = {check: {} for check in LOGS}
     for row, filing, own in _matched(filings):
@@ -58,6 +73,8 @@ def apply_statement_filings(frame: pd.DataFrame, calendar: TradingDays, cutoff: 
             check = _check(filing)
             entry = _entry(row, deadline, session, own)
             logs[check].setdefault(row.stock_id, []).append(entry)
+    if scanned is not None:
+        _announce_scan_periods([row.period for row, _ in changed if row.period >= scanned])
     with transaction.atomic():
         for row, target in changed:
             FinancialStatement.objects.filter(
@@ -67,6 +84,12 @@ def apply_statement_filings(frame: pd.DataFrame, calendar: TradingDays, cutoff: 
         for check, entries in logs.items():
             _log(check, seen, entries)
     return len(changed)
+
+
+def _announce_scan_periods(periods: list[str]) -> None:
+    if periods:
+        counts = dict(sorted(Counter(periods).items()))
+        logger.warning("filing dates replace daily-scan sessions in %s rows per period", counts)
 
 
 def _session(row: FinancialStatement, filing: Filing, calendar: TradingDays, cutoff: time) -> date:

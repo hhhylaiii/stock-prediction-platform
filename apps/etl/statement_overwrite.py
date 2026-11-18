@@ -4,20 +4,18 @@ from collections.abc import Sequence
 from typing import Any
 
 import pandas as pd
-from django.conf import settings
 from django.db import transaction
 
-from apps.etl.adapters.mops import STATEMENT_SCAN
 from apps.etl.errors import SchemaChangedError
 from apps.etl.filings import quarter_end
-from apps.etl.models import DataQualityLog, EtlRun, RawMops
+from apps.etl.models import DataQualityLog, RawMops
 from apps.etl.mops_history import STATEMENT_HISTORY, STATEMENT_VIEWER
+from apps.etl.scan_start import first_scanned
 from apps.etl.statement_scan import SCAN_COLUMNS, figure_differences
 from apps.etl.statement_summary import (
     MARKETS,
     REPORTS,
     Summary,
-    open_periods,
     parse_summary,
     previous_period,
     statement_rows,
@@ -64,16 +62,6 @@ def overwrite_statements(frame: pd.DataFrame) -> int:
         for stock_id, entries in changes.items():
             _log(stock_id, entries)
     return len(updated)
-
-
-def first_scanned() -> str | None:
-    """The first quarter the daily scan read as being filed; from it on, the first sight stands."""
-    run = EtlRun.objects.filter(source="mops", dataset=STATEMENT_SCAN).order_by("start_date")
-    first = run.first()
-    if first is None:
-        return None
-    periods = open_periods(first.start_date, int(settings.STATEMENT_SCAN_DAYS_AFTER))
-    return min(periods) if periods else None
 
 
 def _taken(differences: dict[str, list[Any]]) -> dict[str, list[Any]]:

@@ -9,17 +9,19 @@ from django.core.management.base import BaseCommand, CommandError
 from django.db.models import Q
 from django.utils import timezone
 
-from apps.etl.adapters import build_adapter
-from apps.etl.adapters.base import stock_list_digest
+from apps.etl.adapters import build_adapter, limiter_for
+from apps.etl.adapters.base import BaseAdapter, stock_list_digest
+from apps.etl.adapters.mops import STATEMENT_FILING, MopsAdapter
 from apps.etl.errors import RejectedStocksError, SourceError
 from apps.etl.management.options import as_date, required_date
 from apps.etl.models import EtlRun
 from apps.etl.ratelimit import RetryableError
 from apps.etl.runs import failing_on_termination
-from apps.market.calendar import CalendarError
+from apps.market.calendar import CalendarError, TradingDays
 from apps.market.models import StockMaster
 
 RANGE_OPTIONS = ("start", "end", "stocks", "resume")
+SCAN_PERIODS_FLAG = "--include-scan-periods"
 
 
 def stocks_alive_in(start: date, chosen: list[str] | None) -> list[str]:
@@ -132,6 +134,15 @@ def range_plan(source: str, dataset: str, options: dict[str, Any]) -> Plan:
     return Plan(start, point.end, stocks, selection, point.after, point.rejected)
 
 
+def scan_period_adapter(source: str, dataset: str) -> BaseAdapter:
+    """Only mops filing dates may reach the daily scan's periods, and only when asked."""
+    if (source, dataset) != (MopsAdapter.source, STATEMENT_FILING):
+        raise CommandError(
+            f"{SCAN_PERIODS_FLAG} is only for --source mops --dataset statement_filing"
+        )
+    return MopsAdapter(TradingDays.from_db(), limiter_for(source), include_scan_periods=True)
+
+
 class Command(BaseCommand):
     help = "Backfill a dataset for every stock in stock_master, resumable after interruptions."
 
@@ -148,6 +159,11 @@ class Command(BaseCommand):
             metavar="RUN_ID",
             help="rerun only the stocks that run rejected, over its range",
         )
+        parser.add_argument(
+            SCAN_PERIODS_FLAG,
+            action="store_true",
+            help="let mops statement_filing re-date the periods the daily scan dated (SPEC §8.5)",
+        )
 
     def handle(self, *args: Any, **options: Any) -> None:
         source, dataset = options["source"], options["dataset"]
@@ -155,7 +171,11 @@ class Command(BaseCommand):
         if retry is not None and any(options[key] for key in RANGE_OPTIONS):
             raise CommandError("--retry-rejected takes its range and stocks from that run")
         try:
-            adapter = build_adapter(source)
+            adapter = (
+                scan_period_adapter(source, dataset)
+                if options["include_scan_periods"]
+                else build_adapter(source)
+            )
             adapter.require_dataset(dataset)
             plan = (
                 retry_plan(source, dataset, retry)
