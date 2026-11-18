@@ -21,7 +21,7 @@ Which notes the three views of the UI (see the view table in the [README](../REA
 ## Horizons
 
 - Each horizon's ranking is dated on its own, so a horizon can be without a live ranking model: `horizons` in `/api/status` dates each horizon's ranking (`prediction_date` is null when no ranking model of that horizon is live, `ready` says whether it has caught up with the latest prices), `prediction_date` is the latest of them and `predictions_ready` is true when any horizon is ready.
-- The today and stock pages open on 20 days and fall back to the horizon that has a ranking when 20 days has none, unless the reader has already picked a horizon; the empty horizon says that no ranking model is live for it, which horizon has one, and points to the models page; once any horizon has caught up, the status bar names each other horizon that is not live or whose predictions are behind (when none has, it only says the predictions are not out yet); and the stock page names each horizon's ranking model when the two are not one build.
+- The today and stock pages open on 20 days and fall back to the horizon that has a ranking when 20 days has none, unless the reader has already picked a horizon; a stock without a prediction for the picked horizon shows the one it has, while the today page keeps the pick; the empty horizon says that no ranking model is live for it, which horizon has one, and points to the models page; once any horizon has caught up, the status bar names each other horizon that is not live or whose predictions are behind (when none has, it only says the predictions are not out yet); and the stock page names each horizon's ranking model when the two are not one build.
 
 ## Sorting the today table
 
