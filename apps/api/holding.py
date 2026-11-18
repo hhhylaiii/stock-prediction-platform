@@ -18,7 +18,6 @@ from apps.research.models import (
     OUTPUT_HORIZONS,
     BookAction,
     BookPhase,
-    BookStatus,
     HoldingBookAction,
     HoldingBookDay,
 )
@@ -132,15 +131,13 @@ def point_part(point: Point) -> dict[str, Any]:
 
 
 def no_prediction_days(fills: list[Fill]) -> int:
-    """Fills after the first whose list had no predictions, so their universe return is 0."""
+    """Fills after the first whose list had an empty universe, whose universe return is so 0."""
     later = sorted(fills, key=lambda fill: fill.trade_date)[1:]
     if not later:
         return 0
     empty = set(
         main_days(BookPhase.LIST)
-        .filter(
-            status=BookStatus.NO_PREDICTION, signal_date__in=[fill.signal_date for fill in later]
-        )
+        .filter(universe=[], signal_date__in=[fill.signal_date for fill in later])
         .values_list("signal_date", flat=True)
     )
     return sum(fill.signal_date in empty for fill in later)
