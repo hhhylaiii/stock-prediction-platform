@@ -699,6 +699,13 @@ def test_the_monthly_retrain_stays_pinned_beside_the_day_s_checks(
 def test_research_checks_keep_a_fixed_order_whatever_ran_last(
     page: Page, live_server: LiveServer, seeded: Seed, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    log(
+        seeded,
+        "research_shadow_train",
+        "warning",
+        {"refused": "worker concurrency 2, not 1"},
+        back=4,
+    )
     log(seeded, "research_shadow", "info", {}, back=3)
     log(seeded, "research_evening", "info", {}, back=2)
     log(seeded, "research_morning", "warning", {})
@@ -709,7 +716,7 @@ def test_research_checks_keep_a_fixed_order_whatever_ran_last(
     page.goto(f"{live_server.url}/#models")
 
     checks = page.locator("#model-checks .check")
-    expect(checks).to_have_count(6)
+    expect(checks).to_have_count(7)
     expected = (
         ("每月重訓", 1),
         ("自動換模", 1),
@@ -717,10 +724,14 @@ def test_research_checks_keep_a_fixed_order_whatever_ran_last(
         ("研究晚間排程", 2),
         ("研究早盤排程", 1),
         ("持有規則影子帳本", 3),
+        ("影子候選模型凍結", 4),
     )
     for n, (name, back) in enumerate(expected):
         expect(checks.nth(n)).to_contain_text(name)
         expect(checks.nth(n).locator(".pinned")).to_have_text(seeded.sessions[-back].isoformat())
+    expect(checks.nth(6).locator(".muted.small")).to_have_text(["警告"])
+    expect(checks.nth(6).locator("i")).to_have_class("warn")
+    expect(page.locator("#model-checks")).not_to_contain_text("research_shadow_train")
 
 
 def test_a_rebuild_shows_every_row_of_its_day_the_one_left_by_hand_first(
