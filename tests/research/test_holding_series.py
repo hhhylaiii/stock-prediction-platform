@@ -23,15 +23,15 @@ def test_no_fills_is_no_series() -> None:
 
 
 def test_the_first_fill_is_one_for_all_three_whatever_its_universe_return() -> None:
-    assert cumulative(run((D0, 0.9987, 0.05, 25000.0))) == [Point(D0, 1.0, 1.0, 1.0)]
+    assert cumulative(run((D0, 0.99, 0.05, 25000.0))) == [Point(D0, 1.0, 1.0, 1.0)]
 
 
 def test_the_book_is_its_value_over_the_first_value() -> None:
-    fills = run((D0, 0.9987, 0.0, 100.0), (D1, 1.0187, 0.0, 100.0), (D2, 0.9887, 0.0, 100.0))
+    fills = run((D0, 0.99, 0.0, 100.0), (D1, 1.01, 0.0, 100.0), (D2, 0.97, 0.0, 100.0))
 
     books = [point.book for point in cumulative(fills)]
 
-    assert books == pytest.approx([1.0, 1.0187 / 0.9987, 0.9887 / 0.9987])
+    assert books == pytest.approx([1.0, 1.01 / 0.99, 0.97 / 0.99])
 
 
 def test_the_universe_chains_from_the_day_after_the_first() -> None:
