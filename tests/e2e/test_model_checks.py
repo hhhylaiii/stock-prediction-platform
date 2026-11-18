@@ -699,6 +699,7 @@ def test_the_monthly_retrain_stays_pinned_beside_the_day_s_checks(
 def test_research_checks_keep_a_fixed_order_whatever_ran_last(
     page: Page, live_server: LiveServer, seeded: Seed, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    log(seeded, "research_retrain_deferred", "warning", DEFERRED, back=5)
     log(
         seeded,
         "research_shadow_train",
@@ -716,9 +717,10 @@ def test_research_checks_keep_a_fixed_order_whatever_ran_last(
     page.goto(f"{live_server.url}/#models")
 
     checks = page.locator("#model-checks .check")
-    expect(checks).to_have_count(7)
+    expect(checks).to_have_count(8)
     expected = (
         ("每月重訓", 1),
+        ("每月重訓延後", 5),
         ("自動換模", 1),
         ("研究資料重建", 1),
         ("研究晚間排程", 2),
@@ -729,9 +731,38 @@ def test_research_checks_keep_a_fixed_order_whatever_ran_last(
     for n, (name, back) in enumerate(expected):
         expect(checks.nth(n)).to_contain_text(name)
         expect(checks.nth(n).locator(".pinned")).to_have_text(seeded.sessions[-back].isoformat())
-    expect(checks.nth(6).locator(".muted.small")).to_have_text(["警告"])
-    expect(checks.nth(6).locator("i")).to_have_class("warn")
+    expect(checks.nth(7).locator(".muted.small")).to_have_text(["警告"])
+    expect(checks.nth(7).locator("i")).to_have_class("warn")
     expect(page.locator("#model-checks")).not_to_contain_text("research_shadow_train")
+    expect(page.locator("#model-checks")).not_to_contain_text("research_retrain_deferred")
+
+
+DEFERRED: dict[str, object] = {"free_percent": 68.4, "min_free": 70, "tries": 6}
+
+
+@pytest.mark.parametrize(
+    ("detail", "lines"),
+    [
+        (DEFERRED, ["可用記憶體 68.4%，低於門檻 70%，當天讀 6 次都不足"]),
+        (
+            {"free_percent": 41, "min_free": 70.0, "tries": 1},
+            ["可用記憶體 41.0%，低於門檻 70%，當天讀 1 次都不足"],
+        ),
+        ({"free_percent": 68.4, "min_free": 70}, ["警告"]),
+        ({"free_percent": "68.4", "min_free": 70, "tries": 6}, ["警告"]),
+        ({}, ["警告"]),
+    ],
+)
+def test_a_deferred_retrain_reads_the_memory_it_saw_against_the_floor(
+    page: Page, live_server: LiveServer, seeded: Seed, detail: dict[str, object], lines: list[str]
+) -> None:
+    log(seeded, "research_retrain_deferred", "warning", detail)
+
+    page.goto(f"{live_server.url}/#models")
+
+    row = page.locator("#model-checks .check").filter(has_text="每月重訓延後")
+    expect(row.locator(".muted.small")).to_have_text(lines)
+    expect(row.locator("i")).to_have_class("warn")
 
 
 def test_a_rebuild_shows_every_row_of_its_day_the_one_left_by_hand_first(

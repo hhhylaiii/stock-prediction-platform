@@ -54,6 +54,7 @@
     research_shadow: '持有規則影子帳本',
     research_shadow_train: '影子候選模型凍結',
     research_retrain: '每月重訓',
+    research_retrain_deferred: '每月重訓延後',
     research_promote: '自動換模',
     research_rebuild: '研究資料重建'
   };
@@ -1264,6 +1265,11 @@
     ].filter(Boolean);
   }
 
+  function deferredLine(d) {
+    const known = ['free_percent', 'min_free', 'tries'].every(key => typeof d[key] === 'number');
+    return known ? '可用記憶體 ' + d.free_percent.toFixed(1) + '%，低於門檻 ' + d.min_free + '%，當天讀 ' + fmtInt(d.tries) + ' 次都不足' : null;
+  }
+
   const scopeReasons = (reasons, word) => Object.entries(reasons || {}).map(([scope, reason]) => (SCOPES[scope] || scope) + word + '：' + reason);
 
   const leftDetail = d => d.handled === 'by_hand' || has(d.limit);
@@ -1357,6 +1363,7 @@
       case 'model_promotion': return [check.severity === 'info' ? '' : 'warn', promotionLines(d)];
       case 'model_holdout_release': return ['warn', releaseLines(d)];
       case 'research_retrain': return [check.severity === 'info' ? '' : 'warn', ['建 ' + keyCount(d.built) + '、拒 ' + keyCount(d.refused) + '、失敗 ' + keyCount(d.failed), ...scopeReasons(d.refused, '拒建'), ...scopeReasons(d.failed, '失敗')]];
+      case 'research_retrain_deferred': return [check.severity === 'info' ? '' : 'warn', [deferredLine(d) || (SEVERITY[check.severity] || [check.severity])[0]]];
       case 'research_rebuild': return [check.severity === 'info' ? '' : 'warn', [rebuildText(d), ...(leftDetail(d) ? [handNote] : [])]];
       case 'research_promote': return ['warn', ['失敗 ' + keyCount(d.failed) + '、完成 ' + sizeOf(d.done), ...Object.entries(d.failed || {}).map(([key, error]) => key + '：' + error)]];
       case 'research_shadow': return [check.severity === 'info' ? '' : 'warn', shadowLines(d) || [(SEVERITY[check.severity] || [check.severity])[0]]];
@@ -1381,7 +1388,7 @@
   const isResearch = check => check.check_name.startsWith('research_');
   const isDaily = check => !isPromotion(check) && !isRelease(check) && !isResearch(check);
   const scopeOf = check => (check.detail || {}).scope || (check.detail || {}).run_key;
-  const RESEARCH_ORDER = ['research_retrain', 'research_promote', 'research_rebuild', 'research_evening', 'research_morning', 'research_shadow', 'research_shadow_train'];
+  const RESEARCH_ORDER = ['research_retrain', 'research_retrain_deferred', 'research_promote', 'research_rebuild', 'research_evening', 'research_morning', 'research_shadow', 'research_shadow_train'];
   const researchRank = check => {
     const rank = RESEARCH_ORDER.indexOf(check.check_name);
     return rank < 0 ? RESEARCH_ORDER.length : rank;
