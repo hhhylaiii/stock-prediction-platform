@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from celery.app.task import Context
 from django.conf import settings
 from django.test import override_settings
 
@@ -392,7 +393,7 @@ def test_a_retrain_still_short_of_memory_after_its_retries_refuses_every_scope(
 
     assert builds == []
     done = marker(FIRST, tasks.RETRAIN_CHECK)
-    short = "30% of memory free, under 50%"
+    short = "30.0% of memory free, under 50%"
     assert done.detail["refused"] == dict.fromkeys(HoldoutScope.values, short)
     assert done.detail["free_percent"] == 30.0
     assert sent == [(FIRST, tasks.RETRAIN_CHECK, Severity.WARNING)]
@@ -431,6 +432,57 @@ def test_a_retrain_short_of_memory_until_its_hours_end_warns_on_its_own_row(
     assert row.severity == Severity.WARNING
     assert row.detail == {"free_percent": 69.4, "min_free": 70, "tries": 6}
     assert sent == [(FIRST, tasks.DEFERRED_CHECK, Severity.WARNING)]
+
+
+@override_settings(RESEARCH_RETRAIN_MIN_FREE=70, RESEARCH_RETRAIN_RETRIES=6)
+def test_a_retrain_queued_late_counts_only_the_readings_it_made(
+    frozen: None,
+    builds: list[tuple[str, str, str, date, Path]],
+    memory: list[float | None],
+    clock: list[time],
+) -> None:
+    labelled(FIRST)
+    memory[:] = [61.0, 62.5, 63.25]
+    clock[:] = [time(7, 40), time(8, 10), time(8, 40), time(9, 10)]
+
+    retrain(FIRST)
+
+    row = marker(FIRST, tasks.DEFERRED_CHECK)
+    assert row.detail == {"free_percent": 63.25, "min_free": 70, "tries": 3}
+
+
+@pytest.mark.parametrize(("redelivered", "written"), [(True, False), (False, True)])
+def test_a_deferred_retrain_handed_out_again_after_a_lost_worker_writes_nothing(
+    frozen: None,
+    builds: list[tuple[str, str, str, date, Path]],
+    now: Callable[[date, time], None],
+    redelivered: bool,
+    written: bool,
+) -> None:
+    labelled(FIRST)
+    now(FIRST + timedelta(days=1), time(20, 42))
+    tasks.retrain.request_stack.push(Context(retries=2, delivery_info={"redelivered": redelivered}))
+    try:
+        result = tasks.retrain.run(FIRST.isoformat(), last_free=66.0)
+    finally:
+        tasks.retrain.request_stack.pop()
+
+    assert builds == []
+    assert result == ("deferred" if written else "late")
+    assert DataQualityLog.objects.filter(check_name=tasks.DEFERRED_CHECK).exists() == written
+
+
+@override_settings(RESEARCH_RETRAIN_MIN_FREE=70)
+def test_a_reading_just_under_the_floor_is_cut_not_rounded_up_to_it(
+    frozen: None, builds: list[tuple[str, str, str, date, Path]], memory: list[float | None]
+) -> None:
+    labelled(FIRST)
+    memory[:] = [69.96]
+
+    retrain(FIRST)
+
+    refused = marker(FIRST, tasks.RETRAIN_CHECK).detail["refused"]
+    assert refused == dict.fromkeys(HoldoutScope.values, "69.9% of memory free, under 70%")
 
 
 def test_a_retrain_deferred_for_memory_is_queued_again_the_next_morning(
