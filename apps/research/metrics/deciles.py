@@ -86,41 +86,70 @@ def _values(weights: Matrix, closes: Matrix, horizon: int) -> Matrix:
     return values
 
 
-def _trades(
-    members: Matrix, weights: Matrix, closes: Matrix, values: Matrix, horizon: int
+def _exits(opens: Matrix, closes: Matrix) -> Matrix:
+    """Each day's open where a name trades, else its last close: the price a roll sells it at."""
+    before = np.vstack([np.zeros((1, opens.shape[1])), closes[:-1]])
+    return np.where(np.isfinite(opens) & (opens > 0), opens, before)
+
+
+def _rolls(
+    weights: Matrix, exits: Matrix, values: Matrix, live: npt.NDArray[np.bool_], horizon: int
 ) -> tuple[Matrix, Matrix]:
-    """Buys and sells of each sleeve roll: the exiting tranche's drifted weights to the new ones."""
+    """The replaced tranche's holdings at each day's roll open, and its return over that night."""
+    days = len(weights)
+    rolled = np.zeros(days, dtype=bool)
+    rolled[horizon:] = live[horizon:] & live[:-horizon]
+    held = np.zeros_like(weights)
+    night = np.ones(days)
+    if horizon + 1 < days:
+        held[horizon:-1] = weights[: days - horizon - 1] * exits[horizon + 1 :]
+        with np.errstate(divide="ignore", invalid="ignore"):
+            night[horizon:-1] = held[horizon:-1].sum(axis=1) / values[: days - horizon - 1, horizon]
+    held[~rolled] = 0.0
+    night[~rolled] = 1.0
+    return held, night
+
+
+def _trades(
+    members: Matrix, held: Matrix, live: npt.NDArray[np.bool_], horizon: int
+) -> tuple[Matrix, Matrix]:
+    """Weight bought and sold per day: a roll at its open, a sleeve not rolled at its last close."""
     counts = members.sum(axis=1, keepdims=True)
     new = np.divide(members, counts, out=np.zeros_like(members), where=counts > 0)
-    old = np.zeros_like(members)
-    exit_value = values[:-horizon, horizon, None] if horizon < len(values) else np.empty((0, 1))
-    if len(exit_value):
-        held = weights[:-horizon] * closes[horizon:]
-        old[horizon:] = np.divide(held, exit_value, out=np.zeros_like(held), where=exit_value > 0)
+    total = held.sum(axis=1, keepdims=True)
+    old = np.divide(held, total, out=np.zeros_like(held), where=total > 0)
     change = new - old
-    return np.clip(change, 0, None).sum(axis=1), np.clip(-change, 0, None).sum(axis=1)
+    buys = np.clip(change, 0, None).sum(axis=1)
+    sells = np.clip(-change, 0, None).sum(axis=1)
+    ended = np.zeros(len(members))
+    ended[horizon:] = live[:-horizon] & ~live[horizon:]
+    bought = np.concatenate([[0.0], buys[:-1]])
+    sold = np.concatenate([[0.0], sells[:-1]]) + ended
+    return bought, sold
 
 
 def _portfolio(
-    members: Matrix, entry: Matrix, closes: Matrix, horizon: int
+    members: Matrix, entry: Matrix, exits: Matrix, closes: Matrix, horizon: int
 ) -> tuple[Matrix, Matrix, Matrix, npt.NDArray[np.int64]]:
-    """Gross return, cost, turnover and live sleeves per day of one set of daily tranches."""
+    """Gross return, cost, turnover and live sleeves per day of horizon sleeves held throughout."""
     counts = members.sum(axis=1, keepdims=True)
     weights = np.divide(members / entry, counts, out=np.zeros_like(members), where=counts > 0)
     values = _values(weights, closes, horizon)
     live = values[:, 0] > 0
+    held, night = _rolls(weights, exits, values, live, horizon)
     days = len(members)
     gross = np.zeros(days)
     sleeves = np.zeros(days, dtype=np.int64)
     for k in range(1, min(horizon, days - 1) + 1):
         with np.errstate(divide="ignore", invalid="ignore"):
-            step = values[: days - k, k] / values[: days - k, k - 1] - 1
-        gross[k:] += np.where(live[: days - k], step, 0.0)
+            step = values[: days - k, k] / values[: days - k, k - 1]
+        if k == 1:
+            step = step * night[: days - 1]
+        gross[k:] += np.where(live[: days - k], step - 1, 0.0)
         sleeves[k:] += live[: days - k]
-    buys, sells = _trades(members, weights, closes, values, horizon)
-    bought = np.concatenate([[0.0], buys[:-1]])
-    cost = (bought * BUY_COST + sells * SELL_COST) / horizon
-    return gross / horizon, cost, (bought + sells) / (2 * horizon), sleeves
+    bought, sold = _trades(members, held, live, horizon)
+    cost = (bought * BUY_COST + sold * SELL_COST) / horizon
+    return gross / horizon, cost, (bought + sold) / (2 * horizon), sleeves
 
 
 def tranche_returns(
@@ -130,9 +159,10 @@ def tranche_returns(
     horizon: int,
     groups: int = GROUPS,
 ) -> pd.DataFrame:
-    """Daily returns of each score group and the universe held as overlapping horizon-day tranches.
+    """Daily returns of each score group and the universe held in horizon sleeves rolled in turn.
 
     Rows must trade at the next open (untradable_t1 = 0); prices is the unfiltered price panel.
+    A roll keeps the names still chosen; a name without an open that day leaves at its last close.
     """
     rows = _signal_rows(signal, calendar, horizon)
     if rows.empty:
@@ -148,13 +178,14 @@ def tranche_returns(
     entry = np.ones_like(opens)
     entry[at, col] = _entries(opens, raw, at, col)
     closes = np.nan_to_num(pd.DataFrame(raw).ffill().to_numpy(), nan=0.0)
+    exits = _exits(opens, closes)
     labels = decile_groups(rows, groups)
     sets = {f"D{g}": (labels == g).to_numpy() for g in range(1, groups + 1)}
     parts = []
     for name, chosen in {**sets, UNIVERSE: np.ones(len(rows), dtype=bool)}.items():
         members = np.zeros_like(opens)
         members[at[chosen], col[chosen]] = 1.0
-        gross, cost, turnover, sleeves = _portfolio(members, entry, closes, horizon)
+        gross, cost, turnover, sleeves = _portfolio(members, entry, exits, closes, horizon)
         frame = pd.DataFrame(
             {
                 "date": days,
