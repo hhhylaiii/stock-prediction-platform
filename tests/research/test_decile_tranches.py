@@ -354,11 +354,14 @@ def test_a_roll_rebalances_the_weights_the_names_have_at_the_open() -> None:
     )
 
 
-def test_a_name_without_an_open_on_the_roll_leaves_at_its_last_close() -> None:
+@pytest.mark.parametrize("missing", [(NAN, NAN), (0.0, NAN)])
+def test_a_name_without_an_open_on_the_roll_leaves_at_its_last_close(
+    missing: tuple[float, float],
+) -> None:
     bars = prices(
         {
             "1101": [(10, 10), (10, 10), (11, 11), (11, 11)],
-            "2330": [(10, 10), (10, 10), (NAN, NAN), (13, 13)],
+            "2330": [(10, 10), (10, 10), missing, (13, 13)],
         }
     )
 
