@@ -152,6 +152,7 @@ footer .wrap{padding:24px 40px 40px;color:var(--ink-3);font-size:12px;border-top
 .dot.warn{background:var(--up)}
 .dot.idle{background:transparent;border:1.5px solid var(--ink-3)}
 .check i.warn{background:var(--up)}
+.check .warn-line{color:var(--up)}
 .check i.idle{background:transparent;border:1.5px solid var(--ink-3)}
 .res i.warn{background:var(--up)}
 .res i.idle{background:transparent;border:1.5px solid var(--ink-3)}
