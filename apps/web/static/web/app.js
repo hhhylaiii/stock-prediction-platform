@@ -806,12 +806,12 @@
     });
   }
 
-  async function loadFeatures(code, token) {
+  async function loadFeatures(code, token, horizon) {
     const mine = ++state.featureToken;
     const body = document.querySelector('#features .body');
     body.innerHTML = loading;
     try {
-      const { data, meta } = await api.get('stocks/' + code + '/features', { horizon: state.h });
+      const { data, meta } = await api.get('stocks/' + code + '/features', { horizon: horizon });
       if (token === state.stockToken && mine === state.featureToken) body.innerHTML = featuresHtml(data, meta);
     } catch (err) {
       if (token === state.stockToken && mine === state.featureToken) body.innerHTML = errorBox(err);
@@ -857,7 +857,13 @@
       controls();
     });
     let forecasts = { status: 'pending' };
-    const entryOf = () => forecasts.status === 'fulfilled' ? forecasts.value.data.horizons.find(entry => entry.horizon === state.h) : null;
+    let shownH = state.h;
+    const stockHorizon = () => {
+      if (forecasts.status !== 'fulfilled') return state.h;
+      const ready = forecasts.value.data.horizons.filter(entry => entry.prediction).map(entry => entry.horizon);
+      return !ready.length || ready.includes(state.h) ? state.h : Math.max(...ready);
+    };
+    const entryOf = () => forecasts.status === 'fulfilled' ? forecasts.value.data.horizons.find(entry => entry.horizon === shownH) : null;
     const drawChart = () => {
       const bars = prices.status === 'fulfilled' ? prices.value.data : [];
       const candidate = fanOf(entryOf());
@@ -890,12 +896,13 @@
       document.getElementById('stock-seg-hint').textContent = !ready.size ? none : parts.join('；');
     };
     const drawHorizon = () => {
+      shownH = stockHorizon();
       controls();
-      document.querySelectorAll('#stock-seg [data-sh]').forEach(b => b.setAttribute('aria-pressed', String(Number(b.dataset.sh) === state.h)));
-      document.querySelector('#stock-rank .l').textContent = state.h + ' 日預測排名';
+      document.querySelectorAll('#stock-seg [data-sh]').forEach(b => b.setAttribute('aria-pressed', String(Number(b.dataset.sh) === shownH)));
+      document.querySelector('#stock-rank .l').textContent = shownH + ' 日預測排名';
       showRank();
       drawChart();
-      loadFeatures(s.stock_id, token);
+      loadFeatures(s.stock_id, token, shownH);
     };
     document.querySelectorAll('#stock-seg [data-sh]').forEach(b => b.addEventListener('click', () => { state.h = Number(b.dataset.sh); state.picked = true; state.page = 1; drawHorizon(); }));
     document.querySelectorAll('#chart-seg [data-ct]').forEach(b => b.addEventListener('click', () => {
@@ -910,7 +917,7 @@
       document.querySelector('#forecasts .body').innerHTML = result.status === 'rejected' ? errorBox(result.reason) : forecastsHtml(result.value.data, result.value.meta);
       showSeg();
       const ready = result.status === 'fulfilled' ? result.value.data.horizons.filter(entry => entry.prediction).map(entry => entry.horizon) : [];
-      if (!stockEl.hidden && preferHorizon(ready)) { drawHorizon(); return; }
+      if (!stockEl.hidden && (preferHorizon(ready) || stockHorizon() !== shownH)) { drawHorizon(); return; }
       showRank();
       if (fanOf(entryOf())) drawChart();
     });
