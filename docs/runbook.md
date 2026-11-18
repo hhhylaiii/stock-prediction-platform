@@ -355,6 +355,7 @@ docker compose exec db psql -U twp -d twp -c \
   "select check_name, count(*), sum(jsonb_array_length(detail->'filings')) from data_quality_log where check_name in ('statement_filed_late', 'statement_filed_later', 'statement_restated') group by 1"
 ```
 
+- `statement_filing` 和 `reapply_filings` 不分期別：對得到電子書上傳紀錄的列，不論是 FinMind 回補、K17 補進來的還是每日掃描寫的，公告日都改成上傳日。每日掃描接手的期別（2026-Q3 起）照 SPEC §8.5 K17 那條，用掃描第一次看到的 session，所以不要對掃描期別整批跑這兩個指令。2026 年起的年度都含掃描期別，不帶 `--stock` 的整批重跑一定會碰到。真的要改，帶 `--stock`，先把會改到的列匯出來，交使用者決定。
 - 月營收沒有歷史申報日可查，維持 Phase 1 的保守值。
 
 ## 除權息日的公告日
