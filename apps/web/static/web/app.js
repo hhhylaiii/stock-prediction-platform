@@ -1293,11 +1293,11 @@
     no_taiex_tr: v => '寫入時還沒有加權報酬指數 ' + shadowDays(v) + ' 的收盤，大盤報酬留空',
     book_failed: v => '帳本這次沒寫入：' + String(v),
     scores_failed: v => '打分沒完成：' + String(v),
-    artifact_invalid: v => '模型檔不見或 sha256 對不上，那天不打分：' + String(v)
+    artifact_invalid: v => '模型檔不見或 sha256 對不上，從那天起這次都不打分：' + String(v)
   };
   const NOTE_FIELDS = ['book', 'role', 'signal_date', 'first'];
   const SHADOW_ROLES = { main: '主紀錄', paired: '對照帳本', candidate: '候選' };
-  const generationOf = label => { const m = /\sg(\d+)$/.exec(String(label)); return m ? '第 ' + m[1] + ' 代' : null; };
+  const artifactOf = label => { const m = /^([^.\s]+)\S*\sg(\d+)$/.exec(String(label)); return m ? m[1] + ' 第 ' + m[2] + ' 代' : null; };
 
   function shadowBookLine(name, book) {
     const b = asObject(book) || {};
@@ -1321,7 +1321,7 @@
   function shadowScoreLine(name, entry) {
     const s = asObject(entry) || {};
     const days = Array.isArray(s.scored) && s.scored.length ? '打分 ' + shadowDays(s.scored) : '這次沒打分';
-    const generations = (Array.isArray(s.artifacts) ? s.artifacts : []).map(generationOf).filter(Boolean);
+    const generations = [...new Set((Array.isArray(s.artifacts) ? s.artifacts : []).map(artifactOf).filter(Boolean))];
     return '候選 ' + name + '：' + days + (generations.length ? '（' + generations.join('、') + '）' : '');
   }
 

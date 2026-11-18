@@ -168,7 +168,7 @@ def test_a_shadow_detail_of_the_wrong_shape_still_shows_the_row(
 
 PAIRED = "H70N30-C0-20261201"
 CANDIDATE = "H70N30-C1"
-SHA_MISMATCH = "C1 g1 no longer matches its frozen sha256"
+SHA_MISMATCH = "C1 rank-2026-12.lightgbm.h5.f000 g1's file no longer matches its frozen sha256"
 STOPPED = "stopped: the shadow budget ran out after 1 days"
 SKIPPED = "skipped: the shadow budget ran out"
 
@@ -208,7 +208,7 @@ SKIPPED = "skipped: the shadow budget ran out"
                 "signal_date": "2026-12-02",
                 "artifact_invalid": SHA_MISMATCH,
             },
-            f"C1（候選）12/2：模型檔不見或 sha256 對不上，那天不打分：{SHA_MISMATCH}",
+            f"C1（候選）12/2：模型檔不見或 sha256 對不上，從那天起這次都不打分：{SHA_MISMATCH}",
             id="artifact-invalid",
         ),
     ],
@@ -243,27 +243,39 @@ def test_the_main_book_failing_alone_is_a_warning_line_not_nothing_to_write(
     expect(row.locator("i")).to_have_class("warn")
 
 
-def test_a_candidates_scores_say_which_days_and_generation_but_not_its_model_run(
-    page: Page, live_server: LiveServer, seeded: Seed
+@pytest.mark.parametrize(
+    ("artifacts", "shown"),
+    [
+        pytest.param(
+            ["rank-2026-11.lightgbm.h5.f000 g1", "rank-2026-12.lightgbm.h5.f000 g1"],
+            "rank-2026-11 第 1 代、rank-2026-12 第 1 代",
+            id="across-a-monthly-swap",
+        ),
+        pytest.param(
+            [
+                "rank-2026-12.lightgbm.h5.f000 g1",
+                "rank-2026-12.lightgbm.h5.f001 g1",
+                "rank-2026-12.lightgbm.h5.f000 g2",
+                "unreadable",
+            ],
+            "rank-2026-12 第 1 代、rank-2026-12 第 2 代",
+            id="repeats-merged-after-a-replace",
+        ),
+    ],
+)
+def test_a_candidates_scores_say_which_days_and_the_serving_run_key_and_generation(
+    page: Page, live_server: LiveServer, seeded: Seed, artifacts: list[str], shown: str
 ) -> None:
     scores = {
         "C2": {"scored": [], "artifacts": []},
-        "C1": {
-            "scored": ["2026-12-01", "2026-12-02"],
-            "artifacts": ["rank-2026-11.lightgbm.h5.f000 g1", "rank-2026-12.lightgbm.h5.f000 g2"],
-        },
+        "C1": {"scored": ["2026-12-01", "2026-12-02"], "artifacts": artifacts},
     }
     shadow(seeded, "info", {**written({BOOK: ONE_DAY}), "scores": scores})
 
     row = shadow_row(page, live_server)
 
     expect(row.locator(".muted.small")).to_have_text(
-        [
-            BOOK_LINE,
-            "候選 C1：打分 12/1、12/2（第 1 代、第 2 代）",
-            "候選 C2：這次沒打分",
-            SECONDS_LINE,
-        ]
+        [BOOK_LINE, f"候選 C1：打分 12/1、12/2（{shown}）", "候選 C2：這次沒打分", SECONDS_LINE]
     )
     expect(row).not_to_contain_text("lightgbm")
     expect(row.locator("i")).not_to_have_class("warn")
