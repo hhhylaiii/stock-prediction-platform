@@ -62,7 +62,7 @@ def without_codes(value: Any) -> Any:
 
 
 def model_check(entry: dict[str, Any]) -> dict[str, Any]:
-    """A model check as served; the shadow books' notes keep their stock codes in the table only."""
+    """A model check as served; the shadow books' notes go out without their stock codes."""
     check = {field: entry[field] for field in MODEL_CHECK_FIELDS}
     if check["check_name"] != SHADOW_CHECK:
         return check
