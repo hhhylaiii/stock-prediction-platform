@@ -469,7 +469,26 @@ def test_a_deferred_retrain_handed_out_again_after_a_lost_worker_writes_nothing(
 
     assert builds == []
     assert result == ("deferred" if written else "late")
-    assert DataQualityLog.objects.filter(check_name=tasks.DEFERRED_CHECK).exists() == written
+    rows = DataQualityLog.objects.filter(check_name=tasks.DEFERRED_CHECK)
+    assert [row.detail["free_percent"] for row in rows] == ([66.0] if written else [])
+
+
+def test_a_month_already_retrained_writes_no_deferred_row(
+    frozen: None,
+    builds: list[tuple[str, str, str, date, Path]],
+    now: Callable[[date, time], None],
+) -> None:
+    labelled(FIRST)
+    retrained(FIRST, {"rank": "rank-2026-11"})
+    now(FIRST + timedelta(days=1), time(9, 12))
+    tasks.retrain.request_stack.push(Context(retries=6, delivery_info={}))
+    try:
+        result = tasks.retrain.run(FIRST.isoformat(), last_free=66.0)
+    finally:
+        tasks.retrain.request_stack.pop()
+
+    assert result == "done"
+    assert not DataQualityLog.objects.filter(check_name=tasks.DEFERRED_CHECK).exists()
 
 
 @override_settings(RESEARCH_RETRAIN_MIN_FREE=70)
@@ -507,15 +526,15 @@ def test_a_skipped_month_carries_the_last_memory_reading_that_deferred_it(
     queued: list[str],
     sent: list[Any],
 ) -> None:
-    deferred(FIRST, 66.0)
-    deferred(FIFTH, 68.2)
+    deferred(FIRST, 68.2)
+    deferred(FIFTH, 66.0)
     morning_of(SIXTH, now)
 
     tasks.morning.apply().get()
 
     skipped = marker(SIXTH, tasks.RETRAIN_CHECK)
     assert skipped.detail["refused"] == dict.fromkeys(HoldoutScope.values, tasks.SKIPPED)
-    assert skipped.detail["free_percent"] == 68.2
+    assert skipped.detail["free_percent"] == 66.0
     assert alerts(sent, tasks.RETRAIN_CHECK) == [(SIXTH, tasks.RETRAIN_CHECK, Severity.WARNING)]
 
 
@@ -528,6 +547,7 @@ def test_a_morning_past_the_first_sessions_of_its_month_warns_the_retrain_was_sk
     sent: list[Any],
     session: date,
 ) -> None:
+    deferred(date(2026, 10, 30), 60.0)
     morning_of(session, now)
 
     tasks.morning.apply().get()
