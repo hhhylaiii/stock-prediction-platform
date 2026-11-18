@@ -25,6 +25,7 @@ from apps.market.calendar import OutsideCalendarError, TradingDays
 from apps.research.candidates import freeze, unfollowed
 from apps.research.feature_coverage import CHECK as COVERAGE_CHECK
 from apps.research.feature_coverage import (
+    FAILURE,
     FLAGGED,
     CoverageError,
     coverage_summary,
@@ -106,7 +107,7 @@ def _coverage(day: date) -> str:
             return f"coverage check failed ({shown}); the day's earlier error stands"
         flagged = [] if earlier is None else earlier.detail.get(FLAGGED, [])
         kept = {FLAGGED: flagged} if flagged else {}
-        detail = {"error": shown, **kept}
+        detail = {FAILURE: shown, **kept}
         failed = DataQualityLog(
             date=day, check_name=COVERAGE_CHECK, severity=Severity.WARNING, detail=detail
         )

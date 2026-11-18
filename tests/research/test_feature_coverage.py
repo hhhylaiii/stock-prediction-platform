@@ -37,6 +37,7 @@ from apps.research.feature_coverage import (
     stops_predictions,
     universe_counts,
     watched,
+    with_previous,
 )
 from apps.research.features.store import partition_path
 from apps.research.features.transforms import STOCK_LEVEL
@@ -573,6 +574,37 @@ def test_a_rerun_with_the_same_result_adds_no_previous(
 
     assert row.severity == Severity.WARNING
     assert "previous" not in DataQualityLog.objects.get(date=DAY, check_name=CHECK).detail
+
+
+def logged(severity: str, detail: dict[str, Any]) -> DataQualityLog:
+    """An unsaved coverage row of the day."""
+    return DataQualityLog(date=DAY, check_name=CHECK, severity=severity, detail=detail)
+
+
+def test_a_rerun_that_only_collapses_more_of_the_same_features_adds_no_previous() -> None:
+    dense = {"feature": DENSE, "collapsed": True}
+    earlier = logged(Severity.ERROR, {"flagged": [dense, {"feature": SPARSE, "collapsed": False}]})
+    row = logged(Severity.ERROR, {"flagged": [dense, {"feature": SPARSE, "collapsed": True}]})
+
+    assert "previous" not in with_previous(row, earlier).detail
+
+
+def test_a_check_that_could_not_run_is_kept_in_previous_with_its_error() -> None:
+    earlier = logged(Severity.WARNING, {"error": "RuntimeError"})
+    moment = datetime(2026, 11, 9, 6, 3, tzinfo=ZoneInfo("Asia/Taipei"))
+
+    with time_machine.travel(moment, tick=False):
+        row = with_previous(logged(Severity.INFO, {"flagged": []}), earlier)
+
+    assert row.detail["previous"] == [
+        {
+            "severity": Severity.WARNING,
+            "flagged": [],
+            "collapsed": [],
+            "error": "RuntimeError",
+            "replaced_at": "2026-11-09T06:03:00+08:00",
+        }
+    ]
 
 
 def test_a_warning_is_sent_only_when_the_flagged_features_change(

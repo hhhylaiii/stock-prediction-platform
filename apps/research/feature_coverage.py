@@ -27,6 +27,7 @@ CHECK = "monitor_feature_coverage"
 UNIVERSE = "universe"
 FLAGGED = "flagged"
 PREVIOUS = "previous"
+FAILURE = "error"
 LOW_QUANTILE = 0.05
 USUALLY_FILLED = 0.5
 HALF = 0.5
@@ -277,21 +278,27 @@ def coverage_summary(row: DataQualityLog) -> str:
 
 
 def _state(row: DataQualityLog) -> dict[str, Any]:
-    """What a rerun compares: the severity, then the flagged and the collapsed features."""
-    entries = row.detail.get(FLAGGED, [])
+    """What a rerun compares: the severity and the flagged features."""
     return {
         "severity": str(row.severity),
-        "flagged": [entry["feature"] for entry in entries],
-        "collapsed": [entry["feature"] for entry in entries if entry.get("collapsed")],
+        "flagged": [entry["feature"] for entry in row.detail.get(FLAGGED, [])],
     }
+
+
+def _replaced(row: DataQualityLog) -> dict[str, Any]:
+    """The replaced result as previous keeps it, with its collapsed features and any failure."""
+    entries = row.detail.get(FLAGGED, [])
+    collapsed = [entry["feature"] for entry in entries if entry.get("collapsed")]
+    failure = {FAILURE: row.detail[FAILURE]} if FAILURE in row.detail else {}
+    replaced_at = timezone.localtime().isoformat(timespec="seconds")
+    return {**_state(row), "collapsed": collapsed, **failure, "replaced_at": replaced_at}
 
 
 def with_previous(row: DataQualityLog, earlier: DataQualityLog | None) -> DataQualityLog:
     """The row with the earlier row's previous results, and the earlier one too if it differed."""
     kept = [] if earlier is None else list(earlier.detail.get(PREVIOUS, []))
     if earlier is not None and _state(earlier) != _state(row):
-        replaced_at = timezone.localtime().isoformat(timespec="seconds")
-        kept = [*kept, {**_state(earlier), "replaced_at": replaced_at}]
+        kept = [*kept, _replaced(earlier)]
     if not kept:
         return row
     detail = {**row.detail, PREVIOUS: kept}
