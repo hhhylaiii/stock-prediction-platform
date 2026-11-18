@@ -292,3 +292,31 @@ def test_an_unknown_note_lists_its_own_keys_but_not_the_book_role_or_day(
     expect(row.locator(".muted.small")).to_have_text(
         [BOOK_LINE, f"{CANDIDATE}（候選）12/2：其他備註 brand_new", SECONDS_LINE]
     )
+
+
+def test_a_candidates_scores_come_before_its_notes_and_the_time_comes_last(
+    page: Page, live_server: LiveServer, seeded: Seed
+) -> None:
+    invalid = {
+        "book": "C1",
+        "role": "candidate",
+        "signal_date": "2026-12-02",
+        "artifact_invalid": SHA_MISMATCH,
+    }
+    detail = {
+        **written({BOOK: ONE_DAY}),
+        "scores": {"C1": {"scored": [], "artifacts": []}},
+        "notes": [invalid],
+    }
+    shadow(seeded, "warning", detail)
+
+    row = shadow_row(page, live_server)
+
+    expect(row.locator(".muted.small")).to_have_text(
+        [
+            BOOK_LINE,
+            "候選 C1：這次沒打分",
+            f"C1（候選）12/2：模型檔不見或 sha256 對不上，從那天起這次都不打分：{SHA_MISMATCH}",
+            SECONDS_LINE,
+        ]
+    )

@@ -699,7 +699,13 @@ def test_the_monthly_retrain_stays_pinned_beside_the_day_s_checks(
 def test_research_checks_keep_a_fixed_order_whatever_ran_last(
     page: Page, live_server: LiveServer, seeded: Seed, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    log(seeded, "research_shadow_train", "warning", {"refused": ["C1"]}, back=4)
+    log(
+        seeded,
+        "research_shadow_train",
+        "warning",
+        {"refused": "worker concurrency 2, not 1"},
+        back=4,
+    )
     log(seeded, "research_shadow", "info", {}, back=3)
     log(seeded, "research_evening", "info", {}, back=2)
     log(seeded, "research_morning", "warning", {})
