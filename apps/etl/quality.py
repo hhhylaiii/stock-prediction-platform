@@ -92,7 +92,7 @@ def run_checks(day: date, calendar: TradingDays) -> list[DataQualityLog]:
 def should_run_prediction(day: date, besides: Collection[str] = ()) -> bool:
     """True once every check ran for the day and nothing that day is an error, besides those named.
 
-    A check named in besides still has to have run; only its errors are left out.
+    Only errors are left out: every check of CHECKS still has to have run.
     """
     ran = set(
         DataQualityLog.objects.filter(date=day, check_name__in=CHECKS).values_list(
