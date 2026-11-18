@@ -933,12 +933,16 @@ def test_a_coverage_error_does_not_open_a_day_whose_etl_is_incomplete(
     assert steps(ran) == []
 
 
+@pytest.mark.parametrize("earlier", [None, Severity.INFO, Severity.WARNING])
 def test_an_open_gate_adds_no_gate_entry_to_the_morning(
     now: Callable[[date, time], None],
     ran: list[tuple[str, date, bool]],
     monkeypatch: pytest.MonkeyPatch,
+    earlier: str | None,
 ) -> None:
     friday_shut_by(now, monkeypatch)
+    if earlier is not None:
+        coverage(FRIDAY, earlier, collapsed=False)
 
     tasks.morning.apply().get()
 
