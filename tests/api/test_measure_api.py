@@ -55,7 +55,7 @@ def test_every_endpoint_gets_its_median_p95_and_max(
 
 def test_the_paths_add_the_five_day_reads_and_each_served_ordering() -> None:
     assert measure_api.PATHS[: len(measure_api.ENDPOINTS)] == measure_api.ENDPOINTS
-    assert len(measure_api.ENDPOINTS) == 13
+    assert len(measure_api.ENDPOINTS) == 14
     assert measure_api.PATHS[len(measure_api.ENDPOINTS) :] == (
         "/api/predictions?horizon=5",
         "/api/stocks/{stock}/features?horizon=5",

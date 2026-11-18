@@ -107,7 +107,7 @@
     return out;
   }
 
-  const state = { h: DEFAULT_HORIZON, picked: false, ranked: [], mkt: 'all', q: '', ordering: 'rank', shownOrder: 'rank', orderable: null, watchOnly: false, intervalHeld: false, watch: new Set(), stock: '2330', chart: 'candle', stockToken: 0, featureToken: 0, todayToken: 0, routeToken: 0, statusToken: 0, page: 1, watchCache: null };
+  const state = { h: DEFAULT_HORIZON, picked: false, ranked: [], mkt: 'all', q: '', ordering: 'rank', shownOrder: 'rank', orderable: null, watchOnly: false, intervalHeld: false, watch: new Set(), stock: '2330', chart: 'candle', stockToken: 0, featureToken: 0, todayToken: 0, ruleOf: new Map(), shownH: null, holding: null, holdingShown: null, routeToken: 0, statusToken: 0, page: 1, watchCache: null };
   try { const c = localStorage.getItem('twp-chart'); if (c === 'line' || c === 'candle') state.chart = c; } catch (e) { state.chart = 'candle'; }
   try { const w = JSON.parse(localStorage.getItem('twp-watch') || '[]'); if (Array.isArray(w)) w.filter(c => STOCK_CODE.test(c)).forEach(c => state.watch.add(c)); } catch (e) { state.watch.clear(); }
   function saveWatch() { try { localStorage.setItem('twp-watch', JSON.stringify([...state.watch])); } catch (e) { return; } }
@@ -207,6 +207,107 @@
       (list ? '點表頭可以改依' + list + '排序。' : '');
   }
 
+  const holdingEl = document.getElementById('holding');
+  const holdingNoteEl = document.getElementById('holding-note');
+  const ruleHeadEl = document.getElementById('rule-head');
+  const RULE_HORIZON = 5;
+  const RULE_ACTIONS = { sell: '賣出', keep: '續抱', buy: '買進', backup: '備位', stuck: '賣不掉' };
+  const RULE_GROUPS = ['sell', 'keep', 'buy', 'backup'];
+  const RULE_SHOWN = 10;
+  const RULE_TEXT = '30 個等額位置，每個交易日檢查一次。續抱：百分位不低於 70%。賣出：低於 70%、不在訓練範圍或沒有分數。買進：沒持有、百分位不低於 90%，依分數由高到低補滿空位；備位依序遞補。模擬成交用次一交易日的還原開盤價，扣手續費 0.1425% 與賣出證交稅 0.3%。';
+  const FIRST_DAY_TEXT = '第一次成交那天，帳本是開盤買進到收盤、已扣買進手續費；等權 universe 與加權報酬指數是前一天收盤到當天收盤，兩者差一個隔夜，不能直接比，所以對照從那天的收盤起算，那天三者都是 1.0。';
+  const COMPARE_BASIS = '帳本在換手日含開盤成交與成本；等權 universe 與加權報酬指數不扣成本。';
+  const REVIEW_DAY = '2027-02-18';
+  const ruled = () => state.shownH === RULE_HORIZON;
+  const pctFloor = x => Math.floor(Math.round(x * 10000) / 100) + '%';
+  const sinceFirst = x => x === null || x === undefined ? '—' : sgn((x - 1) * 100, 2);
+
+  function ruleLabels(body) {
+    const labels = new Map(), d = (body && body.data) || {};
+    const add = (code, action) => labels.set(code, [...(labels.get(code) || []), RULE_ACTIONS[action] || action]);
+    ((d.list || {}).actions || []).forEach(line => add(line.stock_id, line.action));
+    ((d.fill || {}).stuck || []).forEach(line => add(line.stock_id, 'stuck'));
+    return labels;
+  }
+
+  const holdingLine = line => '<div class="hline"><span class="muted">' + esc(line.stock_id) + '</span> <span>' + esc(line.name || '—') + '</span> <span class="num faint">' + (line.pct === null ? '—' : pctFloor(line.pct)) + '</span></div>';
+
+  function groupHtml(action, lines) {
+    const head = '<h3>' + RULE_ACTIONS[action] + ' ' + fmtInt(lines.length) + ' 檔</h3>';
+    const folded = action === 'backup' ? lines : lines.slice(RULE_SHOWN);
+    const shown = action === 'backup' ? [] : lines.slice(0, RULE_SHOWN);
+    const summary = action === 'backup' ? '展開' : '其餘 ' + fmtInt(folded.length) + ' 檔';
+    return '<div class="group">' + head + shown.map(holdingLine).join('') +
+      (folded.length ? '<details><summary>' + summary + '</summary>' + folded.map(holdingLine).join('') + '</details>' : '') + '</div>';
+  }
+
+  function indexNote(points) {
+    const first = points[0], last = points[points.length - 1];
+    if (first.index === null) return '加權報酬指數在第一次成交那天（' + md(first.trade_date) + '）沒有收盤，這條對照先不顯示。';
+    return last.index === null ? '加權報酬指數 ' + md(last.trade_date) + ' 的收盤還沒進來，那天先不顯示。' : '';
+  }
+
+  function ledgerHtml(d) {
+    const fill = d.fill, since = d.since || {}, points = since.points || [];
+    if (!fill) return [];
+    const opened = points.length ? '，' + md(points[0].trade_date) + ' 開盤第一次模擬成交。' : '。';
+    const cash = fill.value > 0 ? (fill.cash / fill.value * 100).toFixed(1) + '%' : '—';
+    const out = ['<p class="ledger">帳本：' + md(d.start) + ' 收盤時是現金 1.0' + opened + '到 ' + md(fill.trade_date) + ' 收盤淨值 ' + fill.value.toFixed(4) + '（' + sgn((fill.value - 1) * 100, 2) + '），持有 ' + fmtInt(fill.held) + ' 檔，現金 ' + cash + '。</p>'];
+    if (since.error) return [...out, '<p class="note ledger-invalid">帳本資料有誤，對照暫不顯示；名單照常。</p>'];
+    if (!points.length) return out;
+    const last = points[points.length - 1], moved = points.length > 1;
+    const shown = x => moved ? sinceFirst(x) : '—';
+    out.push('<p class="compare">同期對照（從第一次成交那天的收盤起，那天三者都是 1.0）：帳本 ' + shown(last.book) + '、等權 universe ' + shown(last.universe) + '、加權報酬指數 ' + shown(last.index) + '。' + COMPARE_BASIS + '</p>');
+    const missing = moved ? indexNote(points) : '';
+    if (missing) out.push('<p class="note index-missing">' + missing + '</p>');
+    if (since.no_prediction_days > 0) out.push('<p class="note no-prediction-days">其中 ' + fmtInt(since.no_prediction_days) + ' 天前一天沒有預測，那幾天等權 universe 依預先登錄記 0，不是實際漲跌；那幾天之後的帳本對等權 universe 都含這段。</p>');
+    out.push('<p class="faint small first-day">' + FIRST_DAY_TEXT + '</p>');
+    out.push('<p class="faint small review">樣本 ' + fmtInt(points.length) + ' 個交易日；規則的評估在第 60 個訊號日（' + REVIEW_DAY + '）的 label 結算後整理，現在的數字不能下結論。</p>');
+    return out;
+  }
+
+  function holdingHtml(body) {
+    const d = body.data || {}, list = d.list, latest = (body.meta || {}).predictions_date;
+    const head = '<h2>持有規則名單（' + esc(d.rule || '') + '，研究紀錄）</h2>';
+    if (!list) return head + '<p class="muted">持有規則名單還沒有寫入。</p>';
+    const parts = [head, '<p class="lead-line">' + md(list.signal_date) + ' 收盤後的規則名單，照規則在 ' + md(list.trade_date) + ' 開盤模擬成交。這是研究平台依事先寫死的規則記下的紀錄，不是投資建議。</p>'];
+    parts.push('<details class="rule"><summary class="muted small">規則</summary><p class="muted small">' + RULE_TEXT + '</p></details>');
+    if (latest && list.signal_date < latest) parts.push('<p class="note lagging">名單是 ' + md(list.signal_date) + ' 的，比今日預測（' + md(latest) + '）早：今天早上的帳本還沒寫入，請看模型頁「持有規則影子帳本」那一列。</p>');
+    if (list.backfilled) parts.push('<p class="note backfilled">這份名單是補記的（成交日 09:00 之後才寫入），算法相同。</p>');
+    if (list.status === 'no_prediction') parts.push('<p class="note no-prediction">這一天沒有預測，規則不賣也不買，持股照常估值。</p>');
+    else parts.push('<div class="groups">' + RULE_GROUPS.map(action => groupHtml(action, (list.actions || []).filter(line => line.action === action))).join('') + '</div>');
+    return [...parts, ...ledgerHtml(d)].join('');
+  }
+
+  function holdingFor(stale) {
+    if (stale || !state.holding) {
+      const promise = api.get('holding').catch(err => ({ error: err }));
+      promise.then(book => { if (book.error && state.holding === promise) state.holding = null; });
+      state.holding = promise;
+    }
+    return state.holding;
+  }
+
+  async function currentHolding(date) {
+    const book = await holdingFor(false);
+    if (book.error || !date) return book;
+    const listed = ((book.data || {}).list || {}).signal_date;
+    const stale = (book.meta || {}).predictions_date !== date || (listed && listed < date);
+    return stale ? holdingFor(true) : book;
+  }
+
+  function showHolding(book) {
+    state.shownH = state.h;
+    ruleHeadEl.hidden = !ruled();
+    todayTableEl.classList.toggle('ruled', ruled());
+    holdingNoteEl.textContent = ruled() ? '' : '持有規則名單只用 ' + RULE_HORIZON + ' 日排名。';
+    holdingNoteEl.hidden = ruled();
+    holdingEl.hidden = !ruled() || !book;
+    if (holdingEl.hidden || state.holdingShown === book) return;
+    state.holdingShown = book;
+    holdingEl.innerHTML = book.error ? '<h2>持有規則名單</h2><p class="muted">持有規則名單暫時讀不到。</p>' : holdingHtml(book);
+  }
+
   function controls() {
     document.querySelectorAll('[data-h]').forEach(b => b.setAttribute('aria-pressed', String(Number(b.dataset.h) === state.h)));
     document.querySelectorAll('[data-mkt]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.mkt === state.mkt)));
@@ -249,15 +350,16 @@
     const rank = '<div class="num rank">' + (row.rank === null ? '—' : row.rank) + '</div>';
     return '<a class="trow rank-cols" href="#stock-' + encodeURIComponent(row.stock_id) + '">' +
       (sortedView() ? '<div class="num pos">' + position + '</div>' + rank : rank) +
+      (ruled() ? '<div class="rule small">' + esc((state.ruleOf.get(row.stock_id) || ['—']).join('、')) + '</div>' : '') +
       '<div class="stockcell"><span class="muted">' + esc(row.stock_id) + '</span><span class="name">' + esc(row.name || '—') + '</span>' +
       (row.in_universe ? '' : '<span class="faint small">訓練範圍外</span>') + '</div>' +
       '<div class="faint small market">' + esc(row.market_label || '—') + '</div>' +
       '<div class="right">' + priceOf(row.close) + '</div>' +
-      '<div class="right num" style="color:' + colorOf(row.ret_pred || 0) + '">' + pctOf(row.ret_pred, 1) + '</div>' +
-      '<div class="right">' + priceOf(row.price_pred) + '</div>' +
       bandHtml(row) +
       '<div class="right prob">' + (row.prob_up_5pct === null ? '—' : Math.round(row.prob_up_5pct * 100) + '%') + '</div>' +
-      '<div class="right faint small">' + (row.prev_rank === null ? '—' : '昨 ' + row.prev_rank) + '</div></a>';
+      '<div class="right faint small">' + (row.prev_rank === null ? '—' : '昨 ' + row.prev_rank) + '</div>' +
+      '<div class="right num secondary" style="color:' + colorOf(row.ret_pred || 0) + '">' + pctOf(row.ret_pred, 1) + '</div>' +
+      '<div class="right secondary">' + priceOf(row.price_pred) + '</div></a>';
   }
 
   const shownModels = (models, horizon) => (models || []).filter(model => horizon === 20 || ['rank', 'return'].includes(model.role));
@@ -429,17 +531,24 @@
     controls();
     loadGoto();
     prevBtn.disabled = nextBtn.disabled = true;
+    const wanted = state.h === RULE_HORIZON;
+    const holding = wanted ? holdingFor(false) : Promise.resolve(null);
     let result;
     try {
       result = await fetchToday();
     } catch (err) {
+      const book = await holding;
       if (token !== state.todayToken) return;
       rowsEl.innerHTML = errorBox(err);
       countEl.textContent = todayMetaEl.textContent = '';
       showNotes({}, []);
+      showHolding(book);
       return;
     }
+    const book = wanted ? await currentHolding(result.meta.date) : null;
     if (token !== state.todayToken) return;
+    state.ruleOf = book && !book.error ? ruleLabels(book) : new Map();
+    showHolding(book);
     const { rows, meta } = result;
     state.intervalHeld = intervalHeld(meta);
     state.shownOrder = meta.ordering || 'rank';

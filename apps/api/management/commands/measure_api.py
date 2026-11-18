@@ -29,6 +29,7 @@ ENDPOINTS = (
     "/api/predictions",
     "/api/models",
     "/api/models/ic-monthly",
+    "/api/holding",
     "/api/etl/runs",
     "/api/data-quality",
     "/api/data-quality/corrections",
