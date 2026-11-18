@@ -107,7 +107,7 @@
     return out;
   }
 
-  const state = { h: DEFAULT_HORIZON, picked: false, ranked: [], mkt: 'all', q: '', ordering: 'rank', shownOrder: 'rank', orderable: null, watchOnly: false, intervalHeld: false, watch: new Set(), stock: '2330', chart: 'candle', stockToken: 0, featureToken: 0, todayToken: 0, ruleOf: new Map(), routeToken: 0, statusToken: 0, page: 1, watchCache: null };
+  const state = { h: DEFAULT_HORIZON, picked: false, ranked: [], mkt: 'all', q: '', ordering: 'rank', shownOrder: 'rank', orderable: null, watchOnly: false, intervalHeld: false, watch: new Set(), stock: '2330', chart: 'candle', stockToken: 0, featureToken: 0, todayToken: 0, ruleOf: new Map(), shownH: null, holding: null, holdingShown: null, routeToken: 0, statusToken: 0, page: 1, watchCache: null };
   try { const c = localStorage.getItem('twp-chart'); if (c === 'line' || c === 'candle') state.chart = c; } catch (e) { state.chart = 'candle'; }
   try { const w = JSON.parse(localStorage.getItem('twp-watch') || '[]'); if (Array.isArray(w)) w.filter(c => STOCK_CODE.test(c)).forEach(c => state.watch.add(c)); } catch (e) { state.watch.clear(); }
   function saveWatch() { try { localStorage.setItem('twp-watch', JSON.stringify([...state.watch])); } catch (e) { return; } }
@@ -218,7 +218,7 @@
   const FIRST_DAY_TEXT = '第一次成交那天，帳本是開盤買進到收盤、已扣買進手續費；等權 universe 與加權報酬指數是前一天收盤到當天收盤，兩者差一個隔夜，不能直接比，所以對照從那天的收盤起算，那天三者都是 1.0。';
   const COMPARE_BASIS = '帳本在換手日含開盤成交與成本；等權 universe 與加權報酬指數不扣成本。';
   const REVIEW_DAY = '2027-02-18';
-  const ruled = () => state.h === RULE_HORIZON;
+  const ruled = () => state.shownH === RULE_HORIZON;
   const pctFloor = x => Math.floor(Math.round(x * 10000) / 100) + '%';
   const sinceFirst = x => x === null || x === undefined ? '—' : sgn((x - 1) * 100, 2);
 
@@ -279,11 +279,30 @@
     return [...parts, ...ledgerHtml(d)].join('');
   }
 
+  function holdingFor(stale) {
+    if (stale || !state.holding) {
+      const promise = api.get('holding').catch(err => ({ error: err }));
+      promise.then(book => { if (book.error && state.holding === promise) state.holding = null; });
+      state.holding = promise;
+    }
+    return state.holding;
+  }
+
+  async function currentHolding(date) {
+    const book = await holdingFor(false);
+    const behind = !book.error && date && (book.meta || {}).predictions_date !== date;
+    return behind ? holdingFor(true) : book;
+  }
+
   function showHolding(book) {
+    state.shownH = state.h;
+    ruleHeadEl.hidden = !ruled();
+    todayTableEl.classList.toggle('ruled', ruled());
     holdingNoteEl.textContent = ruled() ? '' : '持有規則名單只用 ' + RULE_HORIZON + ' 日排名。';
     holdingNoteEl.hidden = ruled();
     holdingEl.hidden = !ruled() || !book;
-    if (holdingEl.hidden) return;
+    if (holdingEl.hidden || state.holdingShown === book) return;
+    state.holdingShown = book;
     holdingEl.innerHTML = book.error ? '<h2>持有規則名單</h2><p class="muted">持有規則名單暫時讀不到。</p>' : holdingHtml(book);
   }
 
@@ -293,8 +312,6 @@
     document.getElementById('ret-head').textContent = state.h + ' 日預測報酬';
     document.getElementById('prob-head').textContent = PROB_HEAD + (state.h === 20 ? '' : '（僅 20 日）');
     document.getElementById('band-head').textContent = '80% 預測區間' + (state.h === 20 ? '（價格）' : '（僅 20 日）');
-    ruleHeadEl.hidden = !ruled();
-    todayTableEl.classList.toggle('ruled', ruled());
     watchOnlyBtn.hidden = state.watch.size === 0;
     watchOnlyBtn.textContent = '只看追蹤（' + state.watch.size + '）';
     watchOnlyBtn.setAttribute('aria-pressed', String(watchingOnly()));
@@ -512,19 +529,21 @@
     controls();
     loadGoto();
     prevBtn.disabled = nextBtn.disabled = true;
-    const holding = ruled() ? api.get('holding').catch(err => ({ error: err })) : Promise.resolve(null);
+    const wanted = state.h === RULE_HORIZON;
+    const holding = wanted ? holdingFor(false) : Promise.resolve(null);
     let result;
     try {
       result = await fetchToday();
     } catch (err) {
+      const book = await holding;
       if (token !== state.todayToken) return;
       rowsEl.innerHTML = errorBox(err);
       countEl.textContent = todayMetaEl.textContent = '';
       showNotes({}, []);
-      showHolding(null);
+      showHolding(book);
       return;
     }
-    const book = await holding;
+    const book = wanted ? await currentHolding(result.meta.date) : null;
     if (token !== state.todayToken) return;
     state.ruleOf = book && !book.error ? ruleLabels(book) : new Map();
     showHolding(book);

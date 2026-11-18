@@ -113,7 +113,7 @@ def since_part() -> dict[str, Any]:
     try:
         points = cumulative(fills)
     except ValueError as error:
-        logger.warning("holding book %s cannot be compared: %s", MAIN_BOOK, error)
+        logger.error("holding book %s cannot be compared: %s", MAIN_BOOK, error)
         return {"points": [], "no_prediction_days": 0, "error": LEDGER_INVALID}
     return {
         "points": [point_part(point) for point in points],
