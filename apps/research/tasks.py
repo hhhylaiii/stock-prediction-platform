@@ -45,6 +45,7 @@ logger = logging.getLogger(__name__)
 EVENING_CHECK = "research_evening"
 MORNING_CHECK = "research_morning"
 RETRAIN_CHECK = "research_retrain"
+DEFERRED_CHECK = "research_retrain_deferred"
 PROMOTE_CHECK = "research_promote"
 REBUILD_CHECK = "research_rebuild"
 SHADOW_TRAIN_CHECK = "research_shadow_train"
@@ -521,14 +522,20 @@ def _retrain_after(day: date) -> None:
         return
     opening = TradingDays.from_db().between(day.replace(day=1), day)
     if len(opening) > RETRAIN_WINDOW:
-        skipped = _retrain_detail(dict.fromkeys(HoldoutScope.values, SKIPPED))
+        skipped = _retrain_detail(dict.fromkeys(HoldoutScope.values, SKIPPED), free=_last_free(day))
         _record(day, RETRAIN_CHECK, Severity.WARNING, skipped)
     elif _retrain_hours():
         retrain.delay(day.isoformat())
 
 
+def _last_free(day: date) -> float | None:
+    """The free memory the month's latest retrain deferred until the cutoff read, if any."""
+    row = _month(DEFERRED_CHECK, day).filter(date__lte=day).order_by("-date", "-pk").first()
+    return None if row is None else row.detail.get("free_percent")
+
+
 @shared_task(bind=True, max_retries=None, name="research.retrain")
-def retrain(self: Task[Any, Any], day: str) -> str:
+def retrain(self: Task[Any, Any], day: str, last_free: float | None = None) -> str:
     """This month's N and N′ of every frozen scope as of day, once memory and labels allow."""
     if not settings.RESEARCH_SCHEDULE_ENABLED:
         return "disabled"
@@ -537,7 +544,15 @@ def retrain(self: Task[Any, Any], day: str) -> str:
         return "done"
     if not _retrain_hours():
         logger.warning("research retrain %s not started: outside its hours", day)
-        return "late"
+        if last_free is None:
+            return "late"
+        detail = {
+            "free_percent": last_free,
+            "min_free": settings.RESEARCH_RETRAIN_MIN_FREE,
+            "tries": self.request.retries,
+        }
+        _record(session, DEFERRED_CHECK, Severity.WARNING, detail)
+        return "deferred"
     concurrency = _concurrency(self)
     if concurrency != 1:
         refused = dict.fromkeys(HoldoutScope.values, f"worker concurrency {concurrency}, not 1")
@@ -547,7 +562,11 @@ def retrain(self: Task[Any, Any], day: str) -> str:
     if free is not None and free < settings.RESEARCH_RETRAIN_MIN_FREE:
         if self.request.retries < settings.RESEARCH_RETRAIN_RETRIES:
             logger.warning("research retrain %s deferred: %.0f%% of memory free", day, free)
-            raise self.retry(args=(day,), countdown=settings.RESEARCH_RETRAIN_COUNTDOWN)
+            raise self.retry(
+                args=(day,),
+                kwargs={"last_free": free},
+                countdown=settings.RESEARCH_RETRAIN_COUNTDOWN,
+            )
         short = f"{free:.0f}% of memory free, under {settings.RESEARCH_RETRAIN_MIN_FREE}%"
         detail = _retrain_detail(dict.fromkeys(HoldoutScope.values, short), free=free)
         _record(session, RETRAIN_CHECK, Severity.WARNING, detail)

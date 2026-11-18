@@ -38,6 +38,7 @@ from tests.research.test_tasks import (
 pytestmark = pytest.mark.django_db
 FIXTURES = (calendar_rows, fast, gate, now, ran, retries_run_in_place, sent)
 FIRST = date(2026, 11, 2)
+SECOND = date(2026, 11, 3)
 FIFTH = date(2026, 11, 6)
 SIXTH = date(2026, 11, 9)
 FROZEN = {"rank": "rank-wf1", "return": "return-wf1", "interval": None}
@@ -61,6 +62,19 @@ def memory(monkeypatch: pytest.MonkeyPatch) -> list[float | None]:
 def retrain_hours(now: Callable[[date, time], None]) -> None:
     """A clock inside the hours a retrain may start in, unless a test sets its own."""
     now(FIRST + timedelta(days=1), time(6, 30))
+
+
+@pytest.fixture
+def clock(monkeypatch: pytest.MonkeyPatch) -> list[time]:
+    """Times of day each retrain attempt reads on the morning after FIRST; the last one repeats."""
+    times = [time(6, 30)]
+
+    def localtime() -> datetime:
+        at = times.pop(0) if len(times) > 1 else times[0]
+        return datetime.combine(FIRST + timedelta(days=1), at, tzinfo=TAIPEI)
+
+    monkeypatch.setattr("apps.research.tasks.timezone.localtime", localtime)
+    return times
 
 
 @pytest.fixture
@@ -104,6 +118,15 @@ def retrained(day: date, built: dict[str, str], severity: str = Severity.INFO) -
         check_name=tasks.RETRAIN_CHECK,
         severity=severity,
         detail={"built": built, "refused": {}, "failed": {}},
+    )
+
+
+def deferred(day: date, free: float) -> None:
+    DataQualityLog.objects.create(
+        date=day,
+        check_name=tasks.DEFERRED_CHECK,
+        severity=Severity.WARNING,
+        detail={"free_percent": free, "min_free": 70, "tries": 6},
     )
 
 
@@ -387,6 +410,63 @@ def test_a_retrain_without_a_memory_reading_goes_ahead(
     assert marker(FIRST, tasks.RETRAIN_CHECK).detail["free_percent"] is None
 
 
+@override_settings(RESEARCH_RETRAIN_MIN_FREE=70, RESEARCH_RETRAIN_RETRIES=6)
+def test_a_retrain_short_of_memory_until_its_hours_end_warns_on_its_own_row(
+    frozen: None,
+    builds: list[tuple[str, str, str, date, Path]],
+    memory: list[float | None],
+    clock: list[time],
+    sent: list[Any],
+) -> None:
+    labelled(FIRST)
+    memory[:] = [68.0, 66.5, 69.9, 67.0, 68.8, 69.4]
+    clock[:] = [time(6, 12), time(6, 42), time(7, 12), time(7, 42), time(8, 12), time(8, 42)]
+    clock.append(time(9, 12))
+
+    retrain(FIRST)
+
+    assert builds == []
+    assert not DataQualityLog.objects.filter(check_name=tasks.RETRAIN_CHECK).exists()
+    row = marker(FIRST, tasks.DEFERRED_CHECK)
+    assert row.severity == Severity.WARNING
+    assert row.detail == {"free_percent": 69.4, "min_free": 70, "tries": 6}
+    assert sent == [(FIRST, tasks.DEFERRED_CHECK, Severity.WARNING)]
+
+
+def test_a_retrain_deferred_for_memory_is_queued_again_the_next_morning(
+    now: Callable[[date, time], None],
+    gate: list[bool],
+    ran: list[tuple[str, date, bool]],
+    queued: list[str],
+) -> None:
+    deferred(FIRST, 69.4)
+    morning_of(SECOND, now)
+
+    tasks.morning.apply().get()
+
+    assert queued == [SECOND.isoformat()]
+    assert not DataQualityLog.objects.filter(check_name=tasks.RETRAIN_CHECK).exists()
+
+
+def test_a_skipped_month_carries_the_last_memory_reading_that_deferred_it(
+    now: Callable[[date, time], None],
+    gate: list[bool],
+    ran: list[tuple[str, date, bool]],
+    queued: list[str],
+    sent: list[Any],
+) -> None:
+    deferred(FIRST, 66.0)
+    deferred(FIFTH, 68.2)
+    morning_of(SIXTH, now)
+
+    tasks.morning.apply().get()
+
+    skipped = marker(SIXTH, tasks.RETRAIN_CHECK)
+    assert skipped.detail["refused"] == dict.fromkeys(HoldoutScope.values, tasks.SKIPPED)
+    assert skipped.detail["free_percent"] == 68.2
+    assert alerts(sent, tasks.RETRAIN_CHECK) == [(SIXTH, tasks.RETRAIN_CHECK, Severity.WARNING)]
+
+
 @pytest.mark.parametrize("session", [WEDNESDAY, SIXTH])
 def test_a_morning_past_the_first_sessions_of_its_month_warns_the_retrain_was_skipped(
     now: Callable[[date, time], None],
@@ -405,6 +485,7 @@ def test_a_morning_past_the_first_sessions_of_its_month_warns_the_retrain_was_sk
     skipped = marker(session, tasks.RETRAIN_CHECK)
     assert skipped.severity == Severity.WARNING
     assert skipped.detail["refused"] == dict.fromkeys(HoldoutScope.values, tasks.SKIPPED)
+    assert skipped.detail["free_percent"] is None
     assert alerts(sent, tasks.RETRAIN_CHECK) == [(session, tasks.RETRAIN_CHECK, Severity.WARNING)]
 
 
