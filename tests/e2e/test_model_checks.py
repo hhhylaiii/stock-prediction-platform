@@ -748,7 +748,12 @@ DEFERRED: dict[str, object] = {"free_percent": 68.4, "min_free": 70, "tries": 6}
             {"free_percent": 41, "min_free": 70.0, "tries": 1},
             ["可用記憶體 41.0%，低於門檻 70%，當天讀 1 次都不足"],
         ),
+        (
+            {"free_percent": 69.97, "min_free": 70, "tries": 6},
+            ["可用記憶體 69.9%，低於門檻 70%，當天讀 6 次都不足"],
+        ),
         ({"free_percent": 68.4, "min_free": 70}, ["警告"]),
+        ({"free_percent": 68.4, "tries": 6}, ["警告"]),
         ({"free_percent": "68.4", "min_free": 70, "tries": 6}, ["警告"]),
         ({}, ["警告"]),
     ],
