@@ -299,13 +299,16 @@ def test_upsert_is_idempotent_and_leaves_other_series_alone(
 @responses.activate
 @pytest.mark.django_db
 def test_twd_answered_under_its_usdtwd_alias_writes_the_closed_sessions(
-    twse_limiter: RateLimiter, load_fixture: Callable[[str], Any]
+    twse_limiter: RateLimiter,
+    load_fixture: Callable[[str], Any],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     day = date(2026, 11, 20)
     weekdays = (date(2026, 11, n) for n in range(2, 31) if date(2026, 11, n).weekday() < 5)
     november = TradingDays(weekdays, date(2026, 11, 1), date(2026, 11, 30))
     payload = load_fixture(ALIAS_ANSWER)
     assert _result(payload)["meta"]["symbol"] == "USDTWD=X"
+    caplog.set_level(logging.INFO, logger="apps.etl.adapters.yahoo")
     with time_machine.travel(datetime(2026, 11, 20, 21, 30, 4, tzinfo=UTC), tick=False):
         frame = _closes(YahooAdapter(november, twse_limiter), payload, "usdtwd", day, day)
     assert _by_date(frame) == {
@@ -315,6 +318,20 @@ def test_twd_answered_under_its_usdtwd_alias_writes_the_closed_sessions(
         date(2026, 11, 19): Decimal("32.9299"),
     }
     assert RawYahoo.objects.get().request_params["symbol"] == "TWD=X"
+    assert "Yahoo answered TWD=X under its alias USDTWD=X" in caplog.messages
+
+
+@responses.activate
+@pytest.mark.django_db
+@pytest.mark.parametrize("answered", ["^SPX", "TWD", None])
+def test_twd_answered_under_any_other_symbol_is_a_schema_change(
+    adapter: YahooAdapter, load_fixture: Callable[[str], Any], answered: str | None
+) -> None:
+    payload = _payload(load_fixture, "usdtwd")
+    _result(payload)["meta"]["symbol"] = answered
+    with pytest.raises(SchemaChangedError, match="symbol"):
+        _closes(adapter, payload, "usdtwd")
+    assert RawYahoo.objects.count() == 1
 
 
 @responses.activate

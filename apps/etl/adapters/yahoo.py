@@ -182,6 +182,8 @@ def _result(payload: dict[str, Any], series: Series) -> dict[str, Any]:
     answered = meta.get("symbol") if isinstance(meta, dict) else None
     if answered not in (symbol, *series.aliases):
         raise SchemaChangedError(f"Yahoo answered {symbol} with symbol {answered!r}")
+    if answered != symbol:
+        logger.info("Yahoo answered %s under its alias %s", symbol, answered)
     return result
 
 
