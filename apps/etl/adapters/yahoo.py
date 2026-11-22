@@ -37,12 +37,13 @@ class Series(NamedTuple):
     symbol: str
     index_id: str
     keeps_volume: bool
+    aliases: tuple[str, ...] = ()
 
 
 SERIES = {
     "sox": Series("^SOX", IndexId.SOX.value, keeps_volume=False),
     "tsm_adr": Series("TSM", IndexId.TSM_ADR.value, keeps_volume=True),
-    "usdtwd": Series("TWD=X", IndexId.USDTWD.value, keeps_volume=False),
+    "usdtwd": Series("TWD=X", IndexId.USDTWD.value, keeps_volume=False, aliases=("USDTWD=X",)),
 }
 
 
@@ -129,7 +130,7 @@ def final_bars(
     payload: dict[str, Any], series: Series, window: tuple[date, date], now: float
 ) -> list[dict[str, Any]]:
     """Bars dated inside the window in the exchange's own zone, leaving out an open session."""
-    result = _result(payload, series.symbol)
+    result = _result(payload, series)
     meta = result["meta"]
     zone = _zone(meta)
     session_start, session_end = _session(meta)
@@ -168,7 +169,8 @@ def final_bars(
     return bars
 
 
-def _result(payload: dict[str, Any], symbol: str) -> dict[str, Any]:
+def _result(payload: dict[str, Any], series: Series) -> dict[str, Any]:
+    symbol = series.symbol
     chart = payload.get("chart")
     if not isinstance(chart, dict) or chart.get("error") is not None:
         raise SchemaChangedError(f"Yahoo {symbol} answered with error {payload!r:.200}")
@@ -178,8 +180,10 @@ def _result(payload: dict[str, Any], symbol: str) -> dict[str, Any]:
     result: dict[str, Any] = results[0]
     meta = result.get("meta")
     answered = meta.get("symbol") if isinstance(meta, dict) else None
-    if answered != symbol:
+    if answered not in (symbol, *series.aliases):
         raise SchemaChangedError(f"Yahoo answered {symbol} with symbol {answered!r}")
+    if answered != symbol:
+        logger.info("Yahoo answered %s under its alias %s", symbol, answered)
     return result
 
 

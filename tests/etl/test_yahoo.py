@@ -27,6 +27,7 @@ SERIES = {
     "usdtwd": (f"{BASE}/TWD%3DX", "yahoo/twd_x_202610.json", "USDTWD"),
 }
 DAY = date(2026, 10, 28)
+ALIAS_ANSWER = "yahoo/twd_x_answered_usdtwd_20261121.json"
 
 
 @pytest.fixture
@@ -234,6 +235,7 @@ def test_a_range_without_any_bar_is_an_empty_answer(
         (lambda p: p["chart"].__setitem__("error", {"code": "x"}), "error"),
         (lambda p: p["chart"].__setitem__("result", []), "result"),
         (lambda p: _result(p)["meta"].__setitem__("symbol", "^SPX"), "symbol"),
+        (lambda p: _result(p)["meta"].__setitem__("symbol", "USDTWD=X"), "symbol"),
         (lambda p: _result(p)["meta"].__setitem__("exchangeTimezoneName", "Mars/Base"), "zone"),
         (lambda p: _result(p)["meta"].pop("currentTradingPeriod"), "trading period"),
         (lambda p: _result(p)["meta"].__setitem__("priceHint", "2"), "price hint"),
@@ -246,6 +248,7 @@ def test_a_range_without_any_bar_is_an_empty_answer(
         "error",
         "no-result",
         "symbol",
+        "another-series-alias",
         "zone",
         "no-period",
         "hint",
@@ -291,6 +294,44 @@ def test_upsert_is_idempotent_and_leaves_other_series_alone(
         adapter.upsert("sox", frame)
     assert IndexDaily.objects.filter(index_id="SOX").count() == len(frame) == 7
     assert IndexDaily.objects.get(index_id="TAIEX").close == Decimal("28000")
+
+
+@responses.activate
+@pytest.mark.django_db
+def test_twd_answered_under_its_usdtwd_alias_writes_the_closed_sessions(
+    twse_limiter: RateLimiter,
+    load_fixture: Callable[[str], Any],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    day = date(2026, 11, 20)
+    weekdays = (date(2026, 11, n) for n in range(2, 31) if date(2026, 11, n).weekday() < 5)
+    november = TradingDays(weekdays, date(2026, 11, 1), date(2026, 11, 30))
+    payload = load_fixture(ALIAS_ANSWER)
+    assert _result(payload)["meta"]["symbol"] == "USDTWD=X"
+    caplog.set_level(logging.INFO, logger="apps.etl.adapters.yahoo")
+    with time_machine.travel(datetime(2026, 11, 20, 21, 30, 4, tzinfo=UTC), tick=False):
+        frame = _closes(YahooAdapter(november, twse_limiter), payload, "usdtwd", day, day)
+    assert _by_date(frame) == {
+        date(2026, 11, 16): Decimal("32.8764"),
+        date(2026, 11, 17): Decimal("32.9629"),
+        date(2026, 11, 18): Decimal("32.9108"),
+        date(2026, 11, 19): Decimal("32.9299"),
+    }
+    assert RawYahoo.objects.get().request_params["symbol"] == "TWD=X"
+    assert "Yahoo answered TWD=X under its alias USDTWD=X" in caplog.messages
+
+
+@responses.activate
+@pytest.mark.django_db
+@pytest.mark.parametrize("answered", ["^SPX", "TWD", None])
+def test_twd_answered_under_any_other_symbol_is_a_schema_change(
+    adapter: YahooAdapter, load_fixture: Callable[[str], Any], answered: str | None
+) -> None:
+    payload = _payload(load_fixture, "usdtwd")
+    _result(payload)["meta"]["symbol"] = answered
+    with pytest.raises(SchemaChangedError, match="symbol"):
+        _closes(adapter, payload, "usdtwd")
+    assert RawYahoo.objects.count() == 1
 
 
 @responses.activate
