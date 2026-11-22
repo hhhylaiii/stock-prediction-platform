@@ -1,0 +1,137 @@
+{
+ "chart": {
+  "error": null,
+  "result": [
+   {
+    "meta": {
+     "range": "",
+     "symbol": "USDTWD=X",
+     "currency": "TWD",
+     "longName": "USD/TWD",
+     "timezone": "GMT",
+     "gmtoffset": 0,
+     "priceHint": 4,
+     "shortName": "USD/TWD",
+     "validRanges": [
+      "1d",
+      "5d",
+      "1mo",
+      "3mo",
+      "6mo",
+      "1y",
+      "2y",
+      "5y",
+      "10y",
+      "ytd",
+      "max"
+     ],
+     "exchangeName": "CCY",
+     "fulldayPrice": 32.997,
+     "fulldayChange": 0.05,
+     "firstTradeDate": 1080086400,
+     "instrumentType": "CURRENCY",
+     "dataGranularity": "1d",
+     "fiftyTwoWeekLow": 30.652,
+     "fiftyTwoWeekHigh": 33.125,
+     "fullExchangeName": "CCY",
+     "regularMarketTime": 1795210200,
+     "chartPreviousClose": 32.939,
+     "regularMarketPrice": 32.997,
+     "regularMarketDayLow": 32.869,
+     "regularMarketVolume": 0,
+     "currentTradingPeriod": {
+      "pre": {
+       "end": 1795132800,
+       "start": 1795132800,
+       "timezone": "GMT",
+       "gmtoffset": 0
+      },
+      "post": {
+       "end": 1795219140,
+       "start": 1795219140,
+       "timezone": "GMT",
+       "gmtoffset": 0
+      },
+      "regular": {
+       "end": 1795219140,
+       "start": 1795132800,
+       "timezone": "GMT",
+       "gmtoffset": 0
+      }
+     },
+     "exchangeTimezoneName": "Europe/London",
+     "fulldayChangePercent": 0.1518,
+     "hasPrePostMarketData": false,
+     "regularMarketDayHigh": 33.043,
+     "regularMarketChangePercent": 0.1518
+    },
+    "timestamp": [
+     1794528000,
+     1794787200,
+     1794873600,
+     1794960000,
+     1795046400,
+     1795132800
+    ],
+    "indicators": {
+     "quote": [
+      {
+       "low": [
+        32.829498291015625,
+        32.864898681640625,
+        32.86819839477539,
+        32.8286018371582,
+        32.891998291015625,
+        32.86899948120117
+       ],
+       "high": [
+        32.95909881591797,
+        33.000999450683594,
+        33.01599884033203,
+        32.98699951171875,
+        33.04199981689453,
+        33.042999267578125
+       ],
+       "open": [
+        32.933998107910156,
+        32.87649917602539,
+        32.96289825439453,
+        32.907501220703125,
+        32.92959976196289,
+        32.944000244140625
+       ],
+       "close": [
+        32.93899917602539,
+        32.876399993896484,
+        32.96289825439453,
+        32.91080093383789,
+        32.929901123046875,
+        32.99700164794922
+       ],
+       "volume": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+       ]
+      }
+     ],
+     "adjclose": [
+      {
+       "adjclose": [
+        32.93899917602539,
+        32.876399993896484,
+        32.96289825439453,
+        32.91080093383789,
+        32.929901123046875,
+        32.99700164794922
+       ]
+      }
+     ]
+    }
+   }
+  ]
+ }
+}
