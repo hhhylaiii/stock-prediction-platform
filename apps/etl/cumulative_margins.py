@@ -11,9 +11,9 @@ from apps.etl.errors import SchemaChangedError
 from apps.etl.filings import quarter_end
 from apps.etl.models import DataQualityLog
 from apps.etl.mops_history import IFRS_FROM, STATEMENT_HISTORY, STATEMENT_VIEWER
+from apps.etl.scan_start import first_scanned
 from apps.etl.statement_overwrite import (
     NOT_KEPT,
-    first_scanned,
     kept_summaries,
     latest_pages,
     summary_period,

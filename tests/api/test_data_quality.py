@@ -18,6 +18,7 @@ from apps.research.gates import Gate, SlotGates
 from apps.research.predict import Slot
 from apps.research.promotion import _failed, _note
 from apps.research.runs import RunError
+from apps.research.shadow import SHADOW_CHECK
 from tests.api.conftest import envelope_of, sessions_until, taipei
 
 pytestmark = pytest.mark.usefixtures("calendar_in_db")
@@ -207,6 +208,41 @@ def test_model_output_checks_alone_leave_the_day_clean(client: Client) -> None:
     day = envelope_of(client.get("/api/data-quality", {"days": 1}))["data"][0]
 
     assert (day["passed"], day["worst"], len(day["model_checks"])) == (True, "info", 1)
+
+
+@time_machine.travel(FRIDAY_NIGHT, tick=False)
+def test_the_shadow_notes_reach_the_api_without_their_stock_codes(client: Client) -> None:
+    unscored = {"book": "H70N30-C1", "signal_date": "2026-10-29", "in_universe_without_score": 2}
+    rewritten = {"universe_added": 1, "universe_removed": 0, "scores_changed": 1}
+    paired = {"book": "H70N30-C0-20261029", "signal_date": "2026-10-29"}
+    log_all(OCT_30)
+    log(
+        OCT_30,
+        SHADOW_CHECK,
+        Severity.WARNING,
+        books={},
+        notes=[
+            {**unscored, "first": ["Z901", "Z902"]},
+            {**paired, "predictions_rewritten": {**rewritten, "first": ["Z903", "Z904"]}},
+        ],
+        seconds=1.2,
+    )
+
+    response = client.get("/api/data-quality", {"days": 1})
+
+    for code in ("Z901", "Z902", "Z903", "Z904"):
+        assert code not in response.content.decode()
+    [shadow] = envelope_of(response)["data"][0]["model_checks"]
+    assert shadow["detail"] == {
+        "books": {},
+        "notes": [unscored, {**paired, "predictions_rewritten": rewritten}],
+        "seconds": 1.2,
+    }
+    stored = DataQualityLog.objects.get(check_name=SHADOW_CHECK).detail["notes"]
+    assert [stored[0]["first"], stored[1]["predictions_rewritten"]["first"]] == [
+        ["Z901", "Z902"],
+        ["Z903", "Z904"],
+    ]
 
 
 @time_machine.travel(FRIDAY_NIGHT, tick=False)
